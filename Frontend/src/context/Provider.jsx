@@ -4,11 +4,11 @@ import favs from './reducers/favs';
 
 export const GlobalContext = createContext({});
 
-export const GlobalProvider = ({children}) => {
+export const GlobalProvider = ({ children }) => {
     const [favState, favDispatch] = useReducer(favs, favInitialState);
 
     return (
-        <GlobalContext.Provider value = {{favState, favDispatch}}>
+        <GlobalContext.Provider value={{ favState, favDispatch }}>
             {children}
         </GlobalContext.Provider>
     )

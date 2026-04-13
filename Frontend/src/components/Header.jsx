@@ -1,7 +1,26 @@
-import React from "react";
+import React, { useContext } from "react";
 import { AppBar, Toolbar, Tabs, Tab, Typography, Box } from "@mui/material";
+import { useNavigate } from "react-router-dom";
+import { GlobalContext } from "../context/Provider";
 
 export default function Header({ tabs, activeTab, setActiveTab }) {
+    const navigate = useNavigate();
+    const { favDispatch } = useContext(GlobalContext);
+
+    const handleGoToLanding = () => {
+        localStorage.removeItem("selectedTherapyArea");
+        localStorage.removeItem("activeTab");
+
+        favDispatch({
+            type: "SELECTED_THERAPY_AREA",
+            payload: "",
+        });
+
+        setActiveTab("Configurations");
+
+        navigate("/landingpage");
+    };
+
     return (
         <AppBar
             position="sticky"
@@ -21,12 +40,17 @@ export default function Header({ tabs, activeTab, setActiveTab }) {
                 }}
             >
                 <Typography
+                    onClick={handleGoToLanding}
                     sx={{
                         fontWeight: 700,
                         fontSize: "20px",
                         color: "white",
                         mr: 4,
                         whiteSpace: "nowrap",
+                        cursor: "pointer",
+                        "&:hover": {
+                            opacity: 0.9,
+                        }
                     }}
                 >
                     FORECAST<span style={{ color: "#6E7CFF" }}>PRO</span>
@@ -50,17 +74,16 @@ export default function Header({ tabs, activeTab, setActiveTab }) {
                                 textTransform: "none",
                                 fontSize: "14px",
                                 fontWeight: 500,
-                                // minHeight: "48px",
                                 borderRadius: "10px",
-                                minHeight: "36px",   //  reduce height
-                                padding: "4px 12px", // control top/bottom padding
+                                minHeight: "36px",
+                                padding: "4px 12px",
                                 whiteSpace: "nowrap",
                             },
                             "& .Mui-selected": {
                                 backgroundColor: "#4F46E5",
                                 color: "#fff !important",
                                 minHeight: "36px",
-                                padding: "4px 12px", // reduce vertical padding
+                                padding: "4px 12px",
                             },
                         }}
                     >

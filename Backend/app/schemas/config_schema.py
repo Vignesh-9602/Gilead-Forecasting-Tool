@@ -1,28 +1,39 @@
 from pydantic import BaseModel
-from typing import Literal
+from typing import List, Dict, Any
 
 
-class Config(BaseModel):
-    # ------------------------
-    # PAGE 1 (SCOPE)
-    # ------------------------
+# ------------------------
+# AVG VIAL
+# ------------------------
+
+
+class AvgVialUpdate(BaseModel):
+    brand: str
+    dose_per_month: int
+    vials_per_month: int
+
+
+# ------------------------
+# CONFIGURATION
+# ------------------------
+class Configuration(BaseModel):
+    # PAGE 1 (Scope)
     ta_name: str
-    entity_keys: list[str]
-
     train_start_date: str
     train_end_date: str
     model_granularity: str
     forecast_periods: int
 
-    # ------------------------
-    # SCENARIO (GLOBAL SHIFT)
-    # ------------------------
-    scenario_multiplier: float
+class SaveConfigRequest(BaseModel):
+    config: Configuration
 
-    # ------------------------
-    # TREND ADJUSTMENTS (FORECAST ONLY)
-    # ------------------------
-    trend_type: Literal["additive", "multiplicative", "none"]
-    level_alpha: float
-    trend_beta: float
-    damping_phi: float
+
+# ------------------------
+# UPDATE AVG VIALS ONLY
+# ------------------------
+
+class UpdateAvgVialsRequest(BaseModel):
+    ta_name: str
+    avg_vials: List[AvgVialUpdate]
+
+ 

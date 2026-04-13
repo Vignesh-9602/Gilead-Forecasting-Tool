@@ -1,184 +1,241 @@
-from fastapi import APIRouter, Query
-from app.schemas.config_schema import Config
-from app.services.forecast_service import process_forecast
-from app.db.connection import get_connection
-from app.repository.metrics_repo import get_oncology_metrics
-
+from fastapi import APIRouter, HTTPException
 from uuid import uuid4
+from datetime import date
 import json
+
+from app.db.connection import get_connection
+from app.schemas.config_schema import (
+    SaveConfigRequest,
+    UpdateAvgVialsRequest
+)
+# from app.repository.metrics_repo import get_oncology_metrics, extract_filter_values
 
 router = APIRouter(prefix="/api")
 
 
-# ------------------------------------------------------------------
-# Health
-# ------------------------------------------------------------------
+# ----------------------------------------------------
+# HEALTH
+# ----------------------------------------------------
 @router.get("/health")
 def health():
     return {"status": "ok"}
 
 
-# ------------------------------------------------------------------
-# GET: Basic Configuration (Configuration Page)
-# ------------------------------------------------------------------
-@router.get("/oncology/config-basic")
-def get_oncology_basic_config(
-    ta: str = Query(..., description="Therapeutic Area (e.g. Oncology)")
-):
-    """
-    Returns configuration inputs needed by the frontend:
-    - Forecast start date
-    - Granularity
-    - Avg vials per brand (derived from Dose_Master)
-    """
+# ----------------------------------------------------
+# GET: TA LIST
+# ----------------------------------------------------
+@router.get("/ta/list")
+def get_ta_list():
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        # 1. Earliest forecast start date
         cur.execute("""
-            SELECT MIN(make_date(year, month, 1))
-            FROM raw.Fact_Market_Share
-            WHERE LOWER(TA) = LOWER(%s)
-        """, (ta,))
-        min_date = cur.fetchone()[0]
-
-        # 2. Avg vials per brand
-        cur.execute("""
-            SELECT
-                Brand,
-                Dose_Per_Month,
-                Vials_Per_Dose,
-                Compliance
-            FROM raw.Dose_Master
-            ORDER BY Brand
+            SELECT DISTINCT TA
+            FROM raw.Indication_Master
+            ORDER BY TA
         """)
-
-        avg_vials = []
-        for brand, dose_pm, vials_pd, compliance in cur.fetchall():
-            value = dose_pm * vials_pd * compliance
-            avg_vials.append({
-                "brand": brand,
-                "avg_vials": round(float(value), 2)
-            })
-
-        return {
-            "ta": ta,
-            "forecast_start_date": (
-                min_date.strftime("%Y-%m-%d") if min_date else None
-            ),
-            "granularity": ["monthly"],
-            "avg_vials": avg_vials
-        }
+        return {"ta_list": [row[0] for row in cur.fetchall()]}
 
     finally:
         cur.close()
         conn.close()
 
 
-# ------------------------------------------------------------------
-# POST: Save Configuration (Persistence)
-# ------------------------------------------------------------------
-@router.post("/configurations")
-def save_configuration(payload: dict):
-    """
-    Saves the configuration sent by frontend.
-    Each save creates a new row (append-only).
-    """
-    config_id = str(uuid4())
-    ta = payload.get("ta")
-    config = payload.get("config")
+# ----------------------------------------------------
+# GET: AVG VIAL MASTER (DEFAULTS)
+# ----------------------------------------------------
+@router.get("/configurations/{ta_name}/avg-vials")
+def get_avg_vials_by_ta(ta_name: str):
+    conn = get_connection()
+    cur = conn.cursor()
 
+    try:
+        # --------------------------------------
+        # Get TA-specific avg_vials (if exists)
+        # --------------------------------------
+        cur.execute(
+            """
+            SELECT avg_vials
+            FROM raw.forecast_configurations
+            WHERE config->>'ta_name' = %s
+            """,
+            (ta_name,)
+        )
+        row = cur.fetchone()
+        avg_vials = row[0] if row and row[0] else {}
+
+        # --------------------------------------
+        # Get DEFAULT Dose_Master values
+        # --------------------------------------
+        cur.execute(
+            """
+            SELECT Brand, Dose_Per_Month, Vials_Per_Dose
+            FROM raw.Dose_Master
+            ORDER BY Brand
+            """
+        )
+
+        defaults = {
+            brand: {
+                "dose_per_month": dose,
+                "vials_per_month": vials
+            }
+            for brand, dose, vials in cur.fetchall()
+        }
+
+        # --------------------------------------
+        # Merge logic
+        # TA values override defaults
+        # --------------------------------------
+        merged = defaults | avg_vials
+
+        # --------------------------------------
+        # Return list for UI table
+        # --------------------------------------
+        return [
+            {
+                "brand": brand,
+                "dose_per_month": data["dose_per_month"],
+                "vials_per_month": data["vials_per_month"],
+            }
+            for brand, data in merged.items()
+        ]
+
+    finally:
+        cur.close()
+        conn.close()
+
+# ----------------------------------------------------
+# GET: LOAD FULL CONFIG BY TA
+# ----------------------------------------------------
+@router.get("/configurations/{ta_name}")
+def get_configuration_by_ta(ta_name: str):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
         cur.execute("""
-            INSERT INTO app.forecast_configurations
-            (config_id, ta, config)
-            VALUES (%s, %s, %s)
-        """, (config_id, ta, json.dumps(config)))
+            SELECT config
+            FROM raw.forecast_configurations
+            WHERE config->>'ta_name' = %s
+        """, (ta_name,))
+
+        row = cur.fetchone()
+        if not row:
+            return {"ta_name": ta_name, "exists": False, "config": None}
+
+        return {"ta_name": ta_name, "exists": True, "config": row[0]}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ----------------------------------------------------
+# POST: SAVE / UPDATE FORECAST CONFIG
+# ----------------------------------------------------
+@router.post("/configurations")
+def save_configuration(payload: SaveConfigRequest):
+    cfg = payload.config
+
+    start_date = date.fromisoformat(cfg.train_start_date)
+    end_date = date.fromisoformat(cfg.train_end_date)
+
+    if start_date > end_date:
+        raise HTTPException(400, "train_start_date cannot be after train_end_date")
+
+    if cfg.model_granularity.lower() != "monthly":
+        raise HTTPException(400, "Only 'monthly' granularity is supported")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        # ✅ UPSERT config (avg_vials untouched)
+        cur.execute(
+            """
+            INSERT INTO raw.forecast_configurations (config_id, config)
+            VALUES (%s, %s)
+            ON CONFLICT ((config->>'ta_name'))
+            DO UPDATE SET
+                config = EXCLUDED.config,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(uuid4()),
+                json.dumps(cfg.model_dump()),
+            )
+        )
+
+        conn.commit()
+        return {"ta_name": cfg.ta_name, "status": "config_saved"}
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ----------------------------------------------------
+# POST: SAVE / UPDATE AVG VIALS (UPSERT SAFE)
+# ----------------------------------------------------
+@router.post("/configurations/avg-vials")
+def update_avg_vials(payload: UpdateAvgVialsRequest):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        # ✅ Valid brands check
+        cur.execute("SELECT DISTINCT Brand FROM raw.Dose_Master")
+        valid_brands = {row[0] for row in cur.fetchall()}
+
+        avg_vials_map = {}
+
+        for v in payload.avg_vials:
+            if (
+                not v.brand
+                or v.brand.lower() == "string"
+                or v.brand.lower().startswith("additionalprop")
+                or v.brand not in valid_brands
+            ):
+                continue
+
+            avg_vials_map[v.brand] = {
+                "dose_per_month": v.dose_per_month,
+                "vials_per_month": v.vials_per_month
+            }
+
+        if not avg_vials_map:
+            raise HTTPException(400, "No valid avg_vials data provided")
+
+        # ✅ UPSERT avg_vials (insert row if config not present)
+        cur.execute(
+            """
+            INSERT INTO raw.forecast_configurations
+                (config_id, config, avg_vials)
+            VALUES
+                (%s, %s, %s)
+            ON CONFLICT ((config->>'ta_name'))
+            DO UPDATE SET
+                avg_vials = COALESCE(raw.forecast_configurations.avg_vials, '{}'::jsonb)
+                            || EXCLUDED.avg_vials,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(uuid4()),
+                json.dumps({"ta_name": payload.ta_name}),
+                json.dumps(avg_vials_map),
+            )
+        )
 
         conn.commit()
 
         return {
-            "config_id": config_id,
-            "status": "saved"
+            "ta_name": payload.ta_name,
+            "updated_brands": list(avg_vials_map.keys()),
+            "status": "avg_vials_saved"
         }
 
     finally:
         cur.close()
         conn.close()
-
-
-# ------------------------------------------------------------------
-# (Kept for future use) Forecast Selector helper
-# ------------------------------------------------------------------
-def resolve_entity_key(ui_key: str, metrics: dict) -> str | None:
-    parts = ui_key.split("-")
-
-    indication = parts[0]
-    lot = parts[2]
-    brand = "-".join(parts[3:])
-
-    for repo_key in metrics.keys():
-        repo_brand, repo_indication, repo_lot = repo_key.split("-")
-
-        if (
-            repo_brand == brand
-            and repo_indication == indication
-            and repo_lot == lot
-        ):
-            return repo_key
-
-    return None
-
-
-# ------------------------------------------------------------------
-# (Kept for future use) Forecast API
-# ------------------------------------------------------------------
-@router.post("/forecast")
-def forecast_endpoint(config: Config):
-    """
-    Runs forecast computation.
-    Kept intact for future pages.
-    """
-    print("===== PAYLOAD RECEIVED FROM FRONTEND =====")
-    print(config.model_dump())
-    print("=========================================")
-
-    ta = config.ta_name
-    metrics = get_oncology_metrics(
-        ta,
-        config.train_start_date,
-        config.train_end_date
-    )
-
-    results = []
-
-    for ui_key in config.entity_keys:
-        resolved_key = resolve_entity_key(ui_key, metrics)
-
-        if not resolved_key:
-            results.append({
-                "ui_entity": ui_key,
-                "error": "Entity not found"
-            })
-            continue
-
-        forecast_result = process_forecast(
-            metrics,
-            resolved_key,
-            config
-        )
-
-        results.append({
-            "ui_entity": ui_key,
-            "resolved_entity": resolved_key,
-            "result": forecast_result
-        })
-
-    return {
-        "ta": ta,
-        "forecast_results": results
-    }
