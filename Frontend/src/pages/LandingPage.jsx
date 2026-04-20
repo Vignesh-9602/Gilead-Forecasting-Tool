@@ -48,115 +48,157 @@ export default function LandingPage() {
     }
 
     return (
-        <Box
+        <Box data-testid="login-form"
             sx={{
                 minHeight: "100vh",
-                backgroundColor: "#f5f7fa",
                 display: "flex",
                 flexDirection: "column",
-                alignItems: "center",
-                px: 3,
-                py: 6,
+                backgroundColor: "#f5f7fa",
             }}
         >
-            {/* Greeting */}
-            <Typography
-                sx={{
-                    fontSize: "32px",
-                    fontWeight: 700,
-                    color: "#0A2342",
-                    mb: 1,
-                }}
-            >
-                Gilead Forecasting Tool
-            </Typography>
-
-            {/* Subtitle */}
-            <Typography
-                sx={{
-                    fontSize: "18px",
-                    color: "#5B708B",
-                    mb: 4,
-                    mt: 10
-                }}
-            >
-                Select Therapeutic Area to Proceed
-            </Typography>
-
-            {/* Image */}
-            {/* <Box
-                component="img"
-                src="https://images.unsplash.com/photo-1576091160550-2173dba999ef"
-                alt="ePharma"
-                sx={{
-                    width: "100%",
-                    maxWidth: "520px",
-                    height: "240px",
-                    objectFit: "cover",
-                    borderRadius: "20px",
-                    mb: 5,
-                    boxShadow: 3,
-                }}
-            /> */}
-
-            {/* Cards */}
+            {/* HEADER */}
             <Box
                 sx={{
+                    height: "65px",
                     display: "flex",
-                    gap: 4,
-                    flexWrap: "wrap",
+                    alignItems: "center",
                     justifyContent: "center",
+                    background: "linear-gradient(90deg, #0A2342, #1e3a5f)",
+                    color: "white",
+                    fontWeight: 700,
+                    fontSize: "22px",
+                    letterSpacing: 1,
                 }}
             >
-                {therapyAreas.map((item, index) => (
-                    <Card
-                        key={index}
-                        sx={{
-                            width: 220,
-                            height: 140,
-                            borderRadius: "16px",
-                            boxShadow: 3,
-                            transition: "0.3s",
-                            "&:hover": {
-                                transform: "translateY(-6px)",
-                                boxShadow: 6,
-                            },
-                        }}
-                    >
-                        <CardActionArea
-                            sx={{ height: "100%" }}
-                            onClick={() => {
-                                favDispatch({
-                                    type: "SELECTED_THERAPY_AREA",
-                                    payload: item,
-                                });
+                FORECAST<span style={{ color: "#7c8cff" }}>PRO</span>
+            </Box>
 
-                                localStorage.setItem("activeTab", "Configurations");
+            {/*  MAIN CONTENT */}
+            <Box
+                sx={{
+                    flex: 1,
+                    textAlign: "center",
+                    mt: 8,
+                    px: 3,
+                }}
+            >
+                {/* Title */}
+                <Typography
+                    sx={{
+                        fontSize: "36px",
+                        fontWeight: 800,
+                        color: "#0f172a",
+                    }}
+                >
+                    Select Therapeutic Area
+                </Typography>
 
-                                navigate("/app");
+                {/* Subtitle */}
+                <Typography
+                    sx={{
+                        fontSize: "18px",
+                        color: "#64748b",
+                        mt: 1,
+                        mb: 8,
+                    }}
+                >
+                    Choose a module to begin your market forecast analysis
+                </Typography>
+
+                {/* Cards */}
+                <Box
+                    sx={{
+                        display: "flex",
+                        gap: 4,
+                        flexWrap: "wrap",
+                        justifyContent: "center",
+                    }}
+                >
+                    {therapyAreas.map((item, index) => (
+                        <Card
+                            key={index}
+                            sx={{
+                                width: 260,
+                                height: 180,
+                                borderRadius: "16px",
+                                border: "1px solid #e2e8f0",
+                                boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
+                                transition: "0.3s",
+                                "&:hover": {
+                                    transform: "translateY(-6px)",
+                                    boxShadow: "0 8px 20px rgba(0,0,0,0.1)",
+                                },
                             }}
                         >
-                            <Box
-                                sx={{
-                                    height: "100%",
-                                    display: "flex",
-                                    justifyContent: "center",
-                                    alignItems: "center",
+                            <CardActionArea
+                                sx={{ height: "100%" }}
+                                onClick={() => {
+                                    favDispatch({
+                                        type: "SELECTED_THERAPY_AREA",
+                                        payload: item,
+                                    });
+
+                                    localStorage.setItem("activeTab", "Configurations");
+                                    navigate("/app");
                                 }}
                             >
-                                <Typography
+                                <Box
                                     sx={{
-                                        fontSize: "22px",
-                                        fontWeight: 700,
-                                        color: "#0A2342",
+                                        height: "100%",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        justifyContent: "center",
+                                        alignItems: "center",
+                                        gap: 2,
                                     }}
                                 >
-                                    {item}
-                                </Typography>
-                            </Box>
-                        </CardActionArea>
-                    </Card>
-                ))}
+                                    <Typography
+                                        sx={{
+                                            fontSize: "32px",
+                                            fontWeight: 700,
+                                            color: "#0A2342",
+                                        }}
+                                    >
+                                        {item}
+                                    </Typography>
+
+                                    {/* <Box
+                                        sx={{
+                                            px: 3,
+                                            py: 1,
+                                            borderRadius: "8px",
+                                            border: "1px solid #cbd5f5",
+                                            color: "#4f46e5",
+                                            fontSize: "14px",
+                                            fontWeight: 600,
+                                        }}
+                                    >
+                                        Enter Module
+                                    </Box> */}
+                                </Box>
+                            </CardActionArea>
+                        </Card>
+                    ))}
+                </Box>
+            </Box>
+
+            {/* FOOTER (always bottom) */}
+            <Box
+                sx={{
+                    textAlign: "center",
+                    py: 2,
+                    borderTop: "1px solid #e2e8f0",
+                    backgroundColor: "#f8fafc",
+                }}
+            >
+                <Typography
+                    sx={{
+                        fontSize: "13px",
+                        color: "#64748b",
+                    }}
+                >
+                    © 2026 Forecaster Pro Analytical Systems. All rights reserved.
+                </Typography>
             </Box>
         </Box>
     );

@@ -20,6 +20,31 @@ export const getAverageVials = (taName) => {
 export const saveAverageVials = (payload) => {
   return httpClient.post(`/api/configurations/avg-vials`, payload);
 };
+
+export const getMetricFilters = (taName) => {
+  return httpClient.get(`/api/metrics/filters/${taName}`);
+};
+
+export const applyMetricFilters = (payload) => {
+  return httpClient.post(`/api/metrics/apply`, payload);
+};
+
+
+export const recalculateMetrics = (payload) => {
+  return httpClient.post(`/api/metrics/recalculate`, payload);
+};
+
+export const normalizeMarketShare = async (payload) => {
+  return httpClient.post(
+    "/api/metrics/market-share/normalize",
+    payload
+  );
+};
+
+export const saveChanges = async (payload) => {
+  return httpClient.post("/api/metrics/save-changes", payload);
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

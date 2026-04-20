@@ -8,7 +8,7 @@ from app.schemas.config_schema import (
     SaveConfigRequest,
     UpdateAvgVialsRequest
 )
-# from app.repository.metrics_repo import get_oncology_metrics, extract_filter_values
+from app.repository.metrics_repo import build_metrics_filter_data, build_metrics_hierarchy, get_oncology_metrics
 
 router = APIRouter(prefix="/api")
 
@@ -239,3 +239,26 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
     finally:
         cur.close()
         conn.close()
+
+@router.get("/metrics/filters/{ta_name}")
+def get_metrics_filters(ta_name: str):
+
+    metrics = get_oncology_metrics(ta_name)
+
+    if not metrics:
+        return {
+            "ta_name": ta_name,
+            "data": {},
+            "metric_filters": []
+        }
+
+    data = build_metrics_filter_data(metrics)
+
+    return {
+        "ta_name": ta_name,
+        "data": data,
+        "metric_filters": [
+            { "label": "Market Share", "value": "market_share" },
+            { "label": "New Patient Start", "value": "nps" }
+        ]
+    }

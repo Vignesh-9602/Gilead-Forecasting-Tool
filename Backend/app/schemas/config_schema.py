@@ -36,4 +36,3 @@ class UpdateAvgVialsRequest(BaseModel):
     ta_name: str
     avg_vials: List[AvgVialUpdate]
 
- 
