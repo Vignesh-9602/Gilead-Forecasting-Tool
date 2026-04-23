@@ -1,8 +1,7 @@
 from datetime import datetime
 import json
-
-from fastapi import APIRouter, Body, HTTPException
-
+from fastapi import APIRouter, HTTPException
+from dateutil.relativedelta import relativedelta
 from app.db.connection import get_connection
 from app.repository.metrics_repo import get_oncology_metrics
 from app.schemas.metrics_selection_schema import (
@@ -12,61 +11,48 @@ from app.schemas.metrics_selection_schema import (
     SaveScenarioRequest,
 )
 from app.services.forecast_service import process_forecast
-from dateutil.relativedelta import relativedelta
 
 router = APIRouter(prefix="/api")
 
 
 # =====================================================
-# Helper: Build Factors (Single Source of Truth)
+# DATE HELPER
+# =====================================================
+def parse_month_date(date_str: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(date_str)
+    except ValueError:
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+    return dt.replace(day=1)
+
+
+# =====================================================
+# FACTORS BUILDER
 # =====================================================
 def build_factors(chart, trajectory_input=None):
-    """
-    Builds response factors in a consistent format.
-    Handles both dict and Pydantic inputs safely.
-    """
 
-    # -------- Forecast start → trajectory start --------
     forecast_start_index = chart["forecast_start_index"]
     forecast_months = chart["months"][forecast_start_index:]
     trajectory_start = forecast_months[0] if forecast_months else None
 
-    # -------- Normalize trajectory input (dict safe) --------
-    if trajectory_input is not None:
-        if hasattr(trajectory_input, "dict"):
-            trajectory_input = trajectory_input.dict()
+    if hasattr(trajectory_input, "dict"):
+        trajectory_input = trajectory_input.dict()
 
-    # -------- ETS --------
-    ets_block = {
-        "alpha": chart["factors"]["alpha"],
-        "beta": chart["factors"]["beta"],
-        "gamma": chart["factors"]["gamma"],
-        "trend_type": chart["factors"].get("trend_type", "additive"),
-        "seasonality": chart["factors"].get("seasonality", "none"),
-    }
-
-    # -------- Trajectory --------
-    trajectory_block = {
-        "growth_type": (
-            trajectory_input.get("growth_type")
-            if trajectory_input else "linear"
-        ),
-        "total_growth": (
-            trajectory_input.get("total_growth")
-            if trajectory_input else 0
-        ),
-        "duration": (
-            trajectory_input.get("duration")
-            if trajectory_input else 12
-        ),
-        "trajectory_start": trajectory_start,
-    }
-
-    # -------- Final --------
     return {
         "multiplier": chart["factors"].get("multiplier", 1.0),
-        "ets": ets_block,
-        "trajectory": trajectory_block
+        "ets": {
+            "alpha": chart["factors"]["alpha"],
+            "beta": chart["factors"]["beta"],
+            "gamma": chart["factors"]["gamma"],
+            "trend_type": chart["factors"].get("trend_type", "additive"),
+            "seasonality": chart["factors"].get("seasonality", "none"),
+        },
+        "trajectory": {
+            "growth_type": trajectory_input.get("growth_type") if trajectory_input else "linear",
+            "total_growth": trajectory_input.get("total_growth") if trajectory_input else 0,
+            "duration": trajectory_input.get("duration") if trajectory_input else 12,
+            "trajectory_start": trajectory_start,
+        }
     }
 
 
@@ -88,14 +74,11 @@ def apply_metrics(payload: MetricSelectionRequest):
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(
-            """
+        cur.execute("""
             SELECT config
             FROM raw.forecast_configurations
             WHERE config->>'ta_name' = %s
-            """,
-            (ta,)
-        )
+        """, (ta,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(400, "Forecast config not found")
@@ -106,24 +89,18 @@ def apply_metrics(payload: MetricSelectionRequest):
 
     metrics = get_oncology_metrics(ta)
 
-    lot = payload.lots[0].lower()
-    chart_key = (
-        f"{product}-{indication}-{lot}"
-        if metric == "market_share"
-        else f"{indication}-{lot}"
-    )
+    train_start = parse_month_date(config["train_start_date"])
+    train_end = parse_month_date(config["train_end_date"])
 
-    if chart_key not in metrics:
-        raise HTTPException(400, "Selected series not found")
+    # -------- BASE SERIES (for factors only) --------
+    first_key = list(metrics.keys())[0]
+    base_data = metrics[first_key]
 
-    chart_data = metrics[chart_key]
-
-    # -------- FORECAST --------
-    chart = process_forecast(
-        chart_data["month"],
-        chart_data[metric],
-        config["train_start_date"],
-        config["train_end_date"],
+    base_row = process_forecast(
+        base_data["month"],
+        base_data[metric],
+        train_start,
+        train_end,
         config["forecast_periods"],
         multiplier=1.0,
         override_params=None,
@@ -131,15 +108,78 @@ def apply_metrics(payload: MetricSelectionRequest):
         metric=metric
     )
 
-    # ✅ Build factors BEFORE removing from chart
-    factors = build_factors(chart)
+    factors = build_factors(base_row)
 
-    # ✅ Remove duplication
-    chart.pop("factors", None)
+    # -------- MULTI SERIES CHART --------
+    series_list = []
+    months = None
+    forecast_start_index = None
 
-    # -------- TABLE --------
+    selected_lot = payload.lots[0].lower()
+
+    for key, data in metrics.items():
+        parts = key.split("-")
+
+        if metric == "market_share":
+            if len(parts) != 3:
+                continue
+
+            prod, ind, lot_val = parts
+
+            # filter indication
+            if ind != indication:
+                continue
+
+            # ✅ ONLY SELECTED LOT
+            if lot_val.lower() != selected_lot:
+                continue
+
+        else:
+            if len(parts) != 2:
+                continue
+
+            ind, lot_val = parts
+
+            if ind != indication:
+                continue
+
+        lot_label = data["display"]["lot"]
+        label = data["display"]["brand"] if metric == "market_share" else "NPS"
+
+        series = data["market_share"] if metric == "market_share" else data["nps"]
+
+        row = process_forecast(
+            data["month"],
+            series,
+            train_start,
+            train_end,
+            config["forecast_periods"],
+            multiplier=1.0,
+            override_params=None,
+            seasonality="none",
+            metric=metric
+        )
+
+        if months is None:
+            months = row["months"]
+            forecast_start_index = row["forecast_start_index"]
+
+        series_list.append({
+            "lot": lot_label,
+            "label": label,
+            "train_values": row["train_values"],
+            "forecast_values": row["forecast_values"]
+        })
+
+    chart = {
+        "months": months,
+        "forecast_start_index": forecast_start_index,
+        "series": series_list
+    }
+
+    # -------- TABLE (unchanged) --------
     grouped = {}
-    num_months = len(chart["months"])
+    num_months = len(months)
 
     for key, data in metrics.items():
         parts = key.split("-")
@@ -159,13 +199,11 @@ def apply_metrics(payload: MetricSelectionRequest):
             "children": []
         })
 
-        series = data["market_share"] if metric == "market_share" else data["nps"]
-
         row = process_forecast(
             data["month"],
-            series,
-            config["train_start_date"],
-            config["train_end_date"],
+            data["market_share"] if metric == "market_share" else data["nps"],
+            train_start,
+            train_end,
             config["forecast_periods"],
             multiplier=1.0,
             override_params=None,
@@ -193,11 +231,7 @@ def apply_metrics(payload: MetricSelectionRequest):
 # RECALCULATE
 # =====================================================
 @router.post("/metrics/recalculate")
-
-def recalculate_metrics(
-    payload: MetricRecalculateRequest
-):
-
+def recalculate_metrics(payload: MetricRecalculateRequest):
 
     ta = payload.ta_name
     indication = payload.indications[0].lower()
@@ -205,11 +239,7 @@ def recalculate_metrics(
     product = payload.product.strip().lower() if payload.product else ""
     model_type = payload.model_type.lower()
 
-    factors_input = payload.factors
-
-    #normalize pydantic → dict
-    if hasattr(factors_input, "dict"):
-        factors_input = factors_input.dict()
+    factors_input = payload.factors.dict() if hasattr(payload.factors, "dict") else payload.factors
 
     multiplier = factors_input.get("multiplier", 1.0)
     ets = factors_input.get("ets", {})
@@ -219,14 +249,11 @@ def recalculate_metrics(
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(
-            """
+        cur.execute("""
             SELECT config
             FROM raw.forecast_configurations
             WHERE config->>'ta_name' = %s
-            """,
-            (ta,)
-        )
+        """, (ta,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(400, "Forecast config not found")
@@ -237,24 +264,18 @@ def recalculate_metrics(
 
     metrics = get_oncology_metrics(ta)
 
-    lot = payload.lots[0].lower()
-    chart_key = (
-        f"{product}-{indication}-{lot}"
-        if metric == "market_share"
-        else f"{indication}-{lot}"
-    )
+    train_start = parse_month_date(config["train_start_date"])
+    train_end = parse_month_date(config["train_end_date"])
 
-    if chart_key not in metrics:
-        raise HTTPException(400, "Selected series not found")
+    # -------- BASE SERIES FOR FACTORS --------
+    first_key = list(metrics.keys())[0]
+    base_data = metrics[first_key]
 
-    chart_data = metrics[chart_key]
-
-    # -------- FORECAST --------
-    chart = process_forecast(
-        chart_data["month"],
-        chart_data[metric],
-        config["train_start_date"],
-        config["train_end_date"],
+    base_row = process_forecast(
+        base_data["month"],
+        base_data[metric],
+        train_start,
+        train_end,
         config["forecast_periods"],
         multiplier=multiplier,
         override_params={
@@ -270,18 +291,85 @@ def recalculate_metrics(
         trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
     )
 
-    # ✅ Rebuild factors from backend truth
-    rebuilt_factors = build_factors(
-        chart,
-        trajectory_input=trajectory if model_type == "trajectory" else None
-    )
+    rebuilt_factors = build_factors(base_row, trajectory_input=trajectory)
 
-    # ✅ Remove duplication
-    chart.pop("factors", None)
+    # -------- MULTI SERIES --------
+    series_list = []
+    months = None
+    forecast_start_index = None
 
-    # -------- TABLE --------
+    selected_lot = payload.lots[0].lower()
+
+    for key, data in metrics.items():
+        parts = key.split("-")
+
+        if metric == "market_share":
+            if len(parts) != 3:
+                continue
+
+            prod, ind, lot_val = parts
+
+            if ind != indication:
+                continue
+
+            # ✅ STRICT LOT FILTER
+            if lot_val.lower() != selected_lot:
+                continue
+
+        else:
+            if len(parts) != 2:
+                continue
+
+            ind, lot_val = parts
+
+            if ind != indication:
+                continue
+
+        lot_label = data["display"]["lot"]
+        label = data["display"]["brand"] if metric == "market_share" else "NPS"
+
+        series = data["market_share"] if metric == "market_share" else data["nps"]
+
+        row = process_forecast(
+            data["month"],
+            series,
+            train_start,
+            train_end,
+            config["forecast_periods"],
+            multiplier=multiplier,
+            override_params={
+                "alpha": ets.get("alpha"),
+                "beta": ets.get("beta"),
+                "gamma": ets.get("gamma"),
+            },
+            seasonality=(ets.get("seasonality") or "none").lower(),
+            metric=metric,
+            growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
+            total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
+            growth_duration=trajectory.get("duration"),
+            trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
+        )
+
+        if months is None:
+            months = row["months"]
+            forecast_start_index = row["forecast_start_index"]
+
+        series_list.append({
+            "lot": lot_label,
+            "label": label,
+            "train_values": row["train_values"],
+            "forecast_values": row["forecast_values"]
+        })
+
+    chart = {
+        "months": months,
+        "forecast_start_index": forecast_start_index,
+        "series": series_list
+    }
+
+    # -------- TABLE (same logic) --------
     grouped = {}
-    num_months = len(chart["months"])
+    num_months = len(months)
 
     for key, data in metrics.items():
         parts = key.split("-")
@@ -301,13 +389,11 @@ def recalculate_metrics(
             "children": []
         })
 
-        series = data["market_share"] if metric == "market_share" else data["nps"]
-
         row = process_forecast(
             data["month"],
-            series,
-            config["train_start_date"],
-            config["train_end_date"],
+            data["market_share"] if metric == "market_share" else data["nps"],
+            train_start,
+            train_end,
             config["forecast_periods"],
             multiplier=multiplier,
             override_params={
@@ -383,7 +469,7 @@ def save_changes(payload: SaveChangesRequest):
     train_start_date = config["train_start_date"]
 
     # --------------------------------------------------
-    # ✅ Find values row correctly (Pydantic-safe)
+    # Find values row correctly (Pydantic-safe)
     # --------------------------------------------------
     product_values = None
 
@@ -392,13 +478,13 @@ def save_changes(payload: SaveChangesRequest):
             continue
 
         if metric == "market_share":
-            # ✅ product is required
+            # product is required
             for child in lot_group.children:
                 if child.label == payload.product:
                     product_values = child.values
                     break
 
-        else:  # ✅ NPS — single row, no product
+        else:  # NPS — single row, no product
             if lot_group.children:
                 product_values = lot_group.children[0].values
 
@@ -409,7 +495,7 @@ def save_changes(payload: SaveChangesRequest):
         )
 
     # --------------------------------------------------
-    # ✅ Train / forecast split
+    # Train / forecast split
     # --------------------------------------------------
     train_len = len(product_values) - forecast_periods
     if train_len < 0:
@@ -419,7 +505,7 @@ def save_changes(payload: SaveChangesRequest):
         )
 
     # --------------------------------------------------
-    # ✅ Build MONTHS (same logic as your earlier version)
+    # Build MONTHS (same logic as your earlier version)
     # --------------------------------------------------
     train_start = datetime.fromisoformat(train_start_date).replace(day=1)
 
@@ -435,7 +521,7 @@ def save_changes(payload: SaveChangesRequest):
     ]
 
     # --------------------------------------------------
-    # ✅ Final chart
+    # Final chart
     # --------------------------------------------------
     chart = {
         "months": train_months + forecast_months,
@@ -457,7 +543,7 @@ def save_scenario(payload: SaveScenarioRequest):
     try:
         cur.execute(
             """
-            INSERT INTO forecast_scenarios (
+            INSERT INTO raw.forecast_scenarios (
                 scenario_name,
                 user_id,
                 ta_name,

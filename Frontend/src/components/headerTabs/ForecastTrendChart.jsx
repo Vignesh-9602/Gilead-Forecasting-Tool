@@ -43,9 +43,9 @@ export default function ForecastTrendChart({
             })
         ) || [];
 
-    const trainValues = chartData?.train_values || [];
-    const forecastValues = chartData?.forecast_values || [];
-    const forecastStartIndex = chartData?.forecast_start_index || 0;
+    // const trainValues = chartData?.train_values || [];
+    // const forecastValues = chartData?.forecast_values || [];
+    // const forecastStartIndex = chartData?.forecast_start_index || 0;
 
     const [editable, setEditable] = useState(false);
     const [tableRows, setTableRows] = useState([]);
@@ -171,18 +171,82 @@ export default function ForecastTrendChart({
     //     console.log("Saved rows:", tableRows);
     // };
 
-    const trainX = allMonths.slice(0, forecastStartIndex);
-    const trainY = trainValues;
+    // const trainX = allMonths.slice(0, forecastStartIndex);
+    // const trainY = trainValues;
 
-    const forecastX = [
-        allMonths[forecastStartIndex - 1],
-        ...allMonths.slice(forecastStartIndex),
-    ];
+    // const forecastX = [
+    //     allMonths[forecastStartIndex - 1],
+    //     ...allMonths.slice(forecastStartIndex),
+    // ];
 
-    const forecastY = [
-        trainValues[trainValues.length - 1],
-        ...forecastValues,
-    ];
+    // const forecastY = [
+    //     trainValues[trainValues.length - 1],
+    //     ...forecastValues,
+    // ];
+
+    const forecastStartIndex = chartData?.forecast_start_index || 0;
+    const series = chartData?.series || [];
+
+    const traces = series.flatMap((item) => {
+        const trainX = allMonths.slice(0, forecastStartIndex);
+
+        const forecastX = [
+            allMonths[forecastStartIndex - 1],
+            ...allMonths.slice(forecastStartIndex),
+        ];
+
+        const isNps = metric === "nps";
+
+        const isSelectedLot =
+            item.lot?.toLowerCase() === selectedLot?.toLowerCase();
+
+        const isSelectedProduct =
+            item.label?.toLowerCase() === selectedProduct?.toLowerCase();
+
+        let color = "#d1d5db";
+        let width = 2;
+
+        if (isNps) {
+            if (isSelectedLot) {
+                color = "#f59e0b";
+                width = 3;
+            }
+        } else {
+            if (isSelectedProduct) {
+                color = "#f59e0b";
+                width = 3;
+            }
+        }
+
+        return [
+            {
+                x: trainX,
+                y: item.train_values,
+                type: "scatter",
+                mode: "lines",
+                name: `${item.lot} ${item.label}`,
+                line: {
+                    color,
+                    width,
+                },
+            },
+            {
+                x: forecastX,
+                y: [
+                    item.train_values[item.train_values.length - 1],
+                    ...item.forecast_values,
+                ],
+                type: "scatter",
+                mode: "lines",
+                showlegend: false,
+                line: {
+                    color,
+                    width,
+                    dash: "dot",
+                },
+            },
+        ];
+    });
 
     const handleExpandAll = () => {
         const allExpanded = {};
@@ -272,31 +336,7 @@ export default function ForecastTrendChart({
                     ) : (
                         <Paper sx={{ boxShadow: "none" }}>
                             <PlotComponent
-                                data={[
-                                    {
-                                        x: trainX,
-                                        y: trainY,
-                                        type: "scatter",
-                                        mode: "lines",
-                                        name: "Train Data",
-                                        line: {
-                                            color: "#f59e0b",
-                                            width: 3,
-                                        },
-                                    },
-                                    {
-                                        x: forecastX,
-                                        y: forecastY,
-                                        type: "scatter",
-                                        mode: "lines",
-                                        name: "Forecast Data",
-                                        line: {
-                                            color: "#f59e0b",
-                                            width: 3,
-                                            dash: "dot",
-                                        },
-                                    },
-                                ]}
+                                data={traces}
                                 layout={{
                                     autosize: true,
                                     height: 350,

@@ -253,15 +253,16 @@ export default function ModelInput() {
                 active_model: showTrajectory ? "trajectory" : "ets"
             },
 
-            chart: chartData,   // ✅ direct
+            chart: chartData,
 
-            table: tableData    // ✅ always latest (after fix)
+            table: tableData    // always latest
         };
 
         try {
             const res = await saveScenario(payload);
             console.log("Scenario saved:", res.data);
             alert("Scenario saved successfully!");
+            // setScenarioName("")
         } catch (err) {
             console.error("Save scenario failed", err);
             alert("Failed to save scenario");

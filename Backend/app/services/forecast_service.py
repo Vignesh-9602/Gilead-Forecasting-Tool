@@ -206,8 +206,16 @@ def process_forecast(
     trajectory_start=None
 ):
 
-    train_start = datetime.fromisoformat(train_start_date)
-    train_end = datetime.fromisoformat(train_end_date)
+    # -------- Normalize train dates (accept str or datetime) --------
+    if isinstance(train_start_date, str):
+        train_start = datetime.fromisoformat(train_start_date).replace(day=1)
+    else:
+        train_start = train_start_date.replace(day=1)
+
+    if isinstance(train_end_date, str):
+        train_end = datetime.fromisoformat(train_end_date).replace(day=1)
+    else:
+        train_end = train_end_date.replace(day=1)
 
     train_months, train_values = [], []
 
