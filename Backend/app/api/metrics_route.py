@@ -206,6 +206,11 @@ def recalculate_metrics(
     model_type = payload.model_type.lower()
 
     factors_input = payload.factors
+
+    #normalize pydantic → dict
+    if hasattr(factors_input, "dict"):
+        factors_input = factors_input.dict()
+
     multiplier = factors_input.get("multiplier", 1.0)
     ets = factors_input.get("ets", {})
     trajectory = factors_input.get("trajectory", {})
