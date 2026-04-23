@@ -1,6 +1,7 @@
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
-from fastapi import APIRouter, HTTPException
+import json
+
+from fastapi import APIRouter, Body, HTTPException
 
 from app.db.connection import get_connection
 from app.repository.metrics_repo import get_oncology_metrics
@@ -8,14 +9,69 @@ from app.schemas.metrics_selection_schema import (
     MetricSelectionRequest,
     MetricRecalculateRequest,
     SaveChangesRequest,
+    SaveScenarioRequest,
 )
 from app.services.forecast_service import process_forecast
+from dateutil.relativedelta import relativedelta
 
 router = APIRouter(prefix="/api")
 
 
 # =====================================================
-# POST: APPLY (initial computation)
+# Helper: Build Factors (Single Source of Truth)
+# =====================================================
+def build_factors(chart, trajectory_input=None):
+    """
+    Builds response factors in a consistent format.
+    Handles both dict and Pydantic inputs safely.
+    """
+
+    # -------- Forecast start → trajectory start --------
+    forecast_start_index = chart["forecast_start_index"]
+    forecast_months = chart["months"][forecast_start_index:]
+    trajectory_start = forecast_months[0] if forecast_months else None
+
+    # -------- Normalize trajectory input (dict safe) --------
+    if trajectory_input is not None:
+        if hasattr(trajectory_input, "dict"):
+            trajectory_input = trajectory_input.dict()
+
+    # -------- ETS --------
+    ets_block = {
+        "alpha": chart["factors"]["alpha"],
+        "beta": chart["factors"]["beta"],
+        "gamma": chart["factors"]["gamma"],
+        "trend_type": chart["factors"].get("trend_type", "additive"),
+        "seasonality": chart["factors"].get("seasonality", "none"),
+    }
+
+    # -------- Trajectory --------
+    trajectory_block = {
+        "growth_type": (
+            trajectory_input.get("growth_type")
+            if trajectory_input else "linear"
+        ),
+        "total_growth": (
+            trajectory_input.get("total_growth")
+            if trajectory_input else 0
+        ),
+        "duration": (
+            trajectory_input.get("duration")
+            if trajectory_input else 12
+        ),
+        "trajectory_start": trajectory_start,
+    }
+
+    # -------- Final --------
+    return {
+        "multiplier": chart["factors"].get("multiplier", 1.0),
+        "ets": ets_block,
+        "trajectory": trajectory_block
+    }
+
+
+# =====================================================
+# APPLY
 # =====================================================
 @router.post("/metrics/apply")
 def apply_metrics(payload: MetricSelectionRequest):
@@ -26,14 +82,9 @@ def apply_metrics(payload: MetricSelectionRequest):
     product = payload.product.strip().lower() if payload.product else ""
 
     if metric == "market_share" and not product:
-        raise HTTPException(
-            status_code=400,
-            detail="Product is required when metric_filter is market_share"
-        )
+        raise HTTPException(400, "Product is required")
 
-    # ---------------------------
-    # Load forecast config
-    # ---------------------------
+    # -------- CONFIG --------
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -53,15 +104,8 @@ def apply_metrics(payload: MetricSelectionRequest):
         cur.close()
         conn.close()
 
-    # ✅ IMPORTANT: DO NOT normalize dates here
-    train_start_str = config["train_start_date"]
-    train_end_str = config["train_end_date"]
-
     metrics = get_oncology_metrics(ta)
 
-    # ---------------------------
-    # Chart (focus series only)
-    # ---------------------------
     lot = payload.lots[0].lower()
     chart_key = (
         f"{product}-{indication}-{lot}"
@@ -74,196 +118,38 @@ def apply_metrics(payload: MetricSelectionRequest):
 
     chart_data = metrics[chart_key]
 
+    # -------- FORECAST --------
     chart = process_forecast(
         chart_data["month"],
         chart_data[metric],
-        train_start_str,
-        train_end_str,
+        config["train_start_date"],
+        config["train_end_date"],
         config["forecast_periods"],
         multiplier=1.0,
         override_params=None,
-        trend_type_override="additive",
         seasonality="none",
         metric=metric
     )
 
-    # ==================================================
-    # TABLE (NESTED STRUCTURE)
-    # ==================================================
-    table = []
-    grouped = {}
+    # ✅ Build factors BEFORE removing from chart
+    factors = build_factors(chart)
 
-    if metric == "market_share":
-        num_months = len(chart["months"])
+    # ✅ Remove duplication
+    chart.pop("factors", None)
 
-        for key, data in metrics.items():
-            parts = key.split("-")
-            if len(parts) != 3:
-                continue
-
-            _, ind_n, _ = parts
-            if ind_n != indication:
-                continue
-
-            lot_label = data["display"]["lot"]
-
-            if lot_label not in grouped:
-                grouped[lot_label] = {
-                    "lot": lot_label,
-                    "total": [100.0] * num_months,
-                    "children": []
-                }
-
-            row = process_forecast(
-                data["month"],
-                data["market_share"],
-                config["train_start_date"],
-                config["train_end_date"],
-                config["forecast_periods"],
-                multiplier=1.0,
-                override_params=None,
-                trend_type_override="additive",
-                seasonality="none",
-                metric="market_share"
-            )
-
-            grouped[lot_label]["children"].append({
-                "label": data["display"]["brand"],
-                "values": row["train_values"] + row["forecast_values"]
-            })
-
-    else:  # NPS
-        for key, data in metrics.items():
-            parts = key.split("-")
-            if len(parts) != 2:
-                continue
-
-            ind_n, _ = parts
-            if ind_n != indication:
-                continue
-
-            lot_label = data["display"]["lot"]
-
-            if lot_label not in grouped:
-                grouped[lot_label] = {
-                    "lot": lot_label,
-                    "total": [],
-                    "children": []
-                }
-
-            row = process_forecast(
-                data["month"],
-                data["nps"],
-                config["train_start_date"],
-                config["train_end_date"],
-                config["forecast_periods"],
-                multiplier=1.0,
-                override_params=None,
-                trend_type_override="additive",
-                seasonality="none",
-                metric="nps"
-            )
-
-            grouped[lot_label]["children"].append({
-                "label": "NPS",
-                "values": row["train_values"] + row["forecast_values"]
-            })
-
-    table = list(grouped.values())
-
-    return {
-        "therapy_area": ta,
-        "indication": payload.indications[0],
-        "metric": metric.replace("_", " ").title(),
-        "product": payload.product if payload.product else None,
-        "factors": chart["factors"],
-        "chart": chart,
-        "table": table
-    }
-
-# =====================================================
-# POST: RECALCULATE (user‑adjusted factors)
-# =====================================================
-@router.post("/metrics/recalculate")
-def recalculate_metrics(payload: MetricRecalculateRequest):
-
-    ta = payload.ta_name
-    indication = payload.indications[0].lower()
-    metric = payload.metric_filter.lower()
-    product = payload.product.strip().lower() if payload.product else ""
-    factors = payload.factors
-
-    if metric == "market_share" and not product:
-        raise HTTPException(
-            status_code=400,
-            detail="Product is required when metric_filter is market_share"
-        )
-
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT config
-            FROM raw.forecast_configurations
-            WHERE config->>'ta_name' = %s
-            """,
-            (ta,)
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(400, "Forecast config not found")
-        config = row[0]
-    finally:
-        cur.close()
-        conn.close()
-
-    # ✅ SAME RULE: pass config dates AS-IS
-    train_start_str = config["train_start_date"]
-    train_end_str = config["train_end_date"]
-
-    metrics = get_oncology_metrics(ta)
-
-    lot = payload.lots[0].lower()
-    chart_key = (
-        f"{product}-{indication}-{lot}"
-        if metric == "market_share"
-        else f"{indication}-{lot}"
-    )
-
-    if chart_key not in metrics:
-        raise HTTPException(400, "Selected series not found")
-
-    chart_data = metrics[chart_key]
-
-    chart = process_forecast(
-        chart_data["month"],
-        chart_data[metric],
-        train_start_str,
-        train_end_str,
-        config["forecast_periods"],
-        multiplier=factors.multiplier,
-        override_params={
-            "alpha": factors.alpha,
-            "beta": factors.beta,
-            "gamma": factors.gamma
-        },
-        trend_type_override=factors.trend_type.lower(),
-        seasonality=factors.seasonality.lower(),
-        metric=metric
-    )
-
+    # -------- TABLE --------
     grouped = {}
     num_months = len(chart["months"])
 
     for key, data in metrics.items():
         parts = key.split("-")
-        if (metric == "market_share" and len(parts) != 3) or \
-           (metric == "nps" and len(parts) != 2):
-            continue
 
-        if parts[1] != indication:
-            continue
+        if metric == "market_share":
+            if len(parts) != 3 or parts[1] != indication:
+                continue
+        else:
+            if len(parts) != 2 or parts[0] != indication:
+                continue
 
         lot_label = data["display"]["lot"]
 
@@ -278,17 +164,12 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         row = process_forecast(
             data["month"],
             series,
-            train_start_str,
-            train_end_str,
+            config["train_start_date"],
+            config["train_end_date"],
             config["forecast_periods"],
-            multiplier=factors.multiplier,
-            override_params={
-                "alpha": factors.alpha,
-                "beta": factors.beta,
-                "gamma": factors.gamma
-            },
-            trend_type_override=factors.trend_type.lower(),
-            seasonality=factors.seasonality.lower(),
+            multiplier=1.0,
+            override_params=None,
+            seasonality="none",
             metric=metric
         )
 
@@ -301,15 +182,159 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         "therapy_area": ta,
         "indication": payload.indications[0],
         "metric": metric.replace("_", " ").title(),
-        "product": payload.product if payload.product else None,
-        "factors": chart["factors"],
+        "product": payload.product or None,
+        "factors": factors,
         "chart": chart,
         "table": list(grouped.values())
     }
 
 
 # =====================================================
-# POST: RECALCULATE (user‑adjusted factors)
+# RECALCULATE
+# =====================================================
+@router.post("/metrics/recalculate")
+
+def recalculate_metrics(
+    payload: MetricRecalculateRequest
+):
+
+
+    ta = payload.ta_name
+    indication = payload.indications[0].lower()
+    metric = payload.metric_filter.lower()
+    product = payload.product.strip().lower() if payload.product else ""
+    model_type = payload.model_type.lower()
+
+    factors_input = payload.factors
+    multiplier = factors_input.get("multiplier", 1.0)
+    ets = factors_input.get("ets", {})
+    trajectory = factors_input.get("trajectory", {})
+
+    # -------- CONFIG --------
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT config
+            FROM raw.forecast_configurations
+            WHERE config->>'ta_name' = %s
+            """,
+            (ta,)
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(400, "Forecast config not found")
+        config = row[0]
+    finally:
+        cur.close()
+        conn.close()
+
+    metrics = get_oncology_metrics(ta)
+
+    lot = payload.lots[0].lower()
+    chart_key = (
+        f"{product}-{indication}-{lot}"
+        if metric == "market_share"
+        else f"{indication}-{lot}"
+    )
+
+    if chart_key not in metrics:
+        raise HTTPException(400, "Selected series not found")
+
+    chart_data = metrics[chart_key]
+
+    # -------- FORECAST --------
+    chart = process_forecast(
+        chart_data["month"],
+        chart_data[metric],
+        config["train_start_date"],
+        config["train_end_date"],
+        config["forecast_periods"],
+        multiplier=multiplier,
+        override_params={
+            "alpha": ets.get("alpha"),
+            "beta": ets.get("beta"),
+            "gamma": ets.get("gamma"),
+        },
+        seasonality=(ets.get("seasonality") or "none").lower(),
+        metric=metric,
+        growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
+        total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
+        growth_duration=trajectory.get("duration"),
+        trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
+    )
+
+    # ✅ Rebuild factors from backend truth
+    rebuilt_factors = build_factors(
+        chart,
+        trajectory_input=trajectory if model_type == "trajectory" else None
+    )
+
+    # ✅ Remove duplication
+    chart.pop("factors", None)
+
+    # -------- TABLE --------
+    grouped = {}
+    num_months = len(chart["months"])
+
+    for key, data in metrics.items():
+        parts = key.split("-")
+
+        if metric == "market_share":
+            if len(parts) != 3 or parts[1] != indication:
+                continue
+        else:
+            if len(parts) != 2 or parts[0] != indication:
+                continue
+
+        lot_label = data["display"]["lot"]
+
+        grouped.setdefault(lot_label, {
+            "lot": lot_label,
+            "total": [100.0] * num_months if metric == "market_share" else [],
+            "children": []
+        })
+
+        series = data["market_share"] if metric == "market_share" else data["nps"]
+
+        row = process_forecast(
+            data["month"],
+            series,
+            config["train_start_date"],
+            config["train_end_date"],
+            config["forecast_periods"],
+            multiplier=multiplier,
+            override_params={
+                "alpha": ets.get("alpha"),
+                "beta": ets.get("beta"),
+                "gamma": ets.get("gamma"),
+            },
+            seasonality=(ets.get("seasonality") or "none").lower(),
+            metric=metric,
+            growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
+            total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
+            growth_duration=trajectory.get("duration"),
+            trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
+        )
+
+        grouped[lot_label]["children"].append({
+            "label": data["display"]["brand"] if metric == "market_share" else "NPS",
+            "values": row["train_values"] + row["forecast_values"]
+        })
+
+    return {
+        "therapy_area": ta,
+        "indication": payload.indications[0],
+        "metric": metric.replace("_", " ").title(),
+        "product": payload.product or None,
+        "factors": rebuilt_factors,
+        "chart": chart,
+        "table": list(grouped.values())
+    }
+
+# =====================================================
+# POST: SAVE CHANGES (UNCHANGED)
 # =====================================================
 @router.post("/metrics/save-changes")
 def save_changes(payload: SaveChangesRequest):
@@ -417,4 +442,56 @@ def save_changes(payload: SaveChangesRequest):
     return {
         "chart": chart,
         "table": payload.table
+    }
+@router.post("/metrics/save")
+def save_scenario(payload: SaveScenarioRequest):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO forecast_scenarios (
+                scenario_name,
+                user_id,
+                ta_name,
+                indication,
+                lot,
+                metric,
+                product,
+                model_type,
+                factors,
+                chart,
+                table_data
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                payload.scenario_name,
+                payload.user_id,
+                payload.ta_name,
+                payload.indication,
+                payload.lot,
+                payload.metric,
+                payload.product,
+                payload.model_type,
+                json.dumps(payload.factors),
+                json.dumps(payload.chart),
+                json.dumps(payload.table),
+            )
+        )
+
+        scenario_id = cur.fetchone()[0]
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "scenario_id": f"SCN_{scenario_id}",
+        "scenario_name": payload.scenario_name,
+        "message": "Scenario saved successfully"
     }

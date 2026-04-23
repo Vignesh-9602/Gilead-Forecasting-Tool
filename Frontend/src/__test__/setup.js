@@ -4,19 +4,35 @@ import * as matchers from '@testing-library/jest-dom/matchers';
 
 expect.extend(matchers);
 
-global.HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
-    // Implement your mocked getContext behavior here, if needed
-}));
-
-// Mock the canvas npm package if Plotly.js requires it
-vi.mock('canvas', () => ({
-    createContext: vi.fn(),
-}));
-
-// setup.js
-
-window.URL.createObjectURL = vi.fn();
-
 afterEach(() => {
     cleanup();
 });
+
+window.URL.createObjectURL = vi.fn();
+
+global.HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+    fillRect: vi.fn(),
+    clearRect: vi.fn(),
+    getImageData: vi.fn(),
+    putImageData: vi.fn(),
+    createImageData: vi.fn(),
+    setTransform: vi.fn(),
+    drawImage: vi.fn(),
+    save: vi.fn(),
+    fillText: vi.fn(),
+    restore: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    closePath: vi.fn(),
+    stroke: vi.fn(),
+    translate: vi.fn(),
+    scale: vi.fn(),
+    rotate: vi.fn(),
+    arc: vi.fn(),
+    fill: vi.fn(),
+}));
+
+vi.mock('canvas', () => ({
+    createCanvas: vi.fn(),
+}));

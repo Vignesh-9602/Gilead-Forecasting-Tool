@@ -45,6 +45,10 @@ export const saveChanges = async (payload) => {
   return httpClient.post("/api/metrics/save-changes", payload);
 };
 
+
+export const saveScenario = async (payload) => {
+  return httpClient.post("/api/metrics/save", payload);
+};
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

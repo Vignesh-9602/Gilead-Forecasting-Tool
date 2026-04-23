@@ -1,20 +1,21 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+
   build: {
     outDir: 'build',
     esbuild: {
-      loader: {
-        '.js': 'jsx', // Ensures JSX syntax is parsed in .js files
-      },
+      loader: 'jsx',
+      include: /src\/.*\.[jt]sx?$/,
+      exclude: [],
     },
   },
+
   test: {
-    environment: 'jsdom',
     globals: true,
+    environment: 'jsdom',
     setupFiles: './src/__test__/setup.js',
   },
-})
+});

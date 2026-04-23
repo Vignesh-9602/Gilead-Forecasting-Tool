@@ -48,7 +48,7 @@ export default function LandingPage() {
     }
 
     return (
-        <Box data-testid="login-form"
+        <Box data-testid="landing-page"
             sx={{
                 minHeight: "100vh",
                 display: "flex",

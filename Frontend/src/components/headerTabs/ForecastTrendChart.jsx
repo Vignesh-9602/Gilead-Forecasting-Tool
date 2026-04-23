@@ -33,6 +33,7 @@ export default function ForecastTrendChart({
     chartData,
     tableData,
     updateChartData,
+    updateTableData
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -89,7 +90,6 @@ export default function ForecastTrendChart({
         const updatedRows = JSON.parse(JSON.stringify(tableRows));
 
         if (updatedRows[lotIndex]?.children?.length) {
-            // ✅ CHANGE HERE
             updatedRows[lotIndex].children[childIndex].values[colIndex] =
                 value === "" ? "" : Number(value);
 
@@ -110,6 +110,9 @@ export default function ForecastTrendChart({
         }
 
         setTableRows(updatedRows);
+        if (typeof updateTableData === "function") {
+            updateTableData(updatedRows);
+        }
     };
 
     const handleNormalize = () => {
@@ -205,19 +208,23 @@ export default function ForecastTrendChart({
                 metric,
                 product: selectedProduct,
                 lot: selectedLot,
-                table: tableRows, // ✅ directly send nested structure
+                table: tableRows, // directly send nested structure
             };
 
             const res = await saveChanges(payload);
             const data = res.data;
 
-            // ✅ Update table (same structure)
+            // Update table (same structure)
             setTableRows(data.table);
             setOriginalRows(data.table);
 
-            // ✅ Update chart
+            // Update chart
             if (typeof updateChartData === "function") {
                 updateChartData(data.chart);
+            }
+
+            if (typeof updateTableData === "function") {
+                updateTableData(data.table);
             }
 
             setEditable(false);

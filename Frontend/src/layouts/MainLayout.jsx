@@ -4,6 +4,7 @@ import Header from "../components/Header";
 import GlobalConfiguration from "../components/headerTabs/GlobalConfigurations";
 import SnackbarNotification from "../components/snackBar/SnackBar";
 import ModelInput from "../components/headerTabs/ModelInput";
+import Scenarios from "../components/headerTabs/scenario/Scenarios";
 
 const tabs = [
     "Configurations",
@@ -32,6 +33,8 @@ export default function MainLayout() {
                 return <GlobalConfiguration />;
             case "Model Inputs":
                 return <ModelInput />;
+            case "Scenarios":
+                return <Scenarios />;
             default:
                 return (
                     <Box p={3}>

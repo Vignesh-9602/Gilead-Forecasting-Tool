@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
+from typing import Annotated, Any, Dict, List, Optional, Literal, Union
 
 
 # ------------------------------------
@@ -14,27 +14,65 @@ class MetricSelectionRequest(BaseModel):
 
 
 # ------------------------------------
-# RECALCULATE FACTORS
+# ETS FACTORS
 # ------------------------------------
-class RecalculateFactors(BaseModel):
+class ETSFactors(BaseModel):
+    alpha: float
+    beta: float
+    gamma: float
+    trend_type: Literal["additive"]
+    seasonality: Optional[str] = "none"
+
+# ------------------------------------
+# TRAJECTORY FACTORS
+# ------------------------------------
+class TrajectoryFactors(BaseModel):
+    growth_type: Literal["linear", "exponential", "logarithmic"]
+    total_growth: float
+    duration: int
+    trajectory_start: Optional[str] = None
+
+class RecalculateETSFactors(BaseModel):
     multiplier: float
-    alpha: float           # level α
-    beta: float            # trend β
-    gamma: float           # damping φ
-    trend_type: str        # "additive" | "none"
-    seasonality: Optional[str] = ""        # "monthly" | "none" (metadata only)
+    ets: ETSFactors
 
+class RecalculateTrajectoryFactors(BaseModel):
+    multiplier: float
+    ets: ETSFactors
+    trajectory: TrajectoryFactors
 
-# ------------------------------------
-# RECALCULATE REQUEST
-# ------------------------------------
-class MetricRecalculateRequest(BaseModel):
+class MetricRecalculateETSRequest(BaseModel):
     ta_name: str
     indications: List[str]
     lots: List[str]
     metric_filter: str
     product: Optional[str] = ""
-    factors: RecalculateFactors
+
+    model_type: Literal["ets"]
+    factors: RecalculateETSFactors
+
+class MetricRecalculateTrajectoryRequest(BaseModel):
+    ta_name: str
+    indications: List[str]
+    lots: List[str]
+    metric_filter: str
+    product: Optional[str] = ""
+
+    model_type: Literal["trajectory"]
+    factors: RecalculateTrajectoryFactors
+# ------------------------------------
+# UNION (IMPORTANT)
+# ------------------------------------
+
+
+MetricRecalculateRequest = Annotated[
+    Union[
+        MetricRecalculateETSRequest,
+        MetricRecalculateTrajectoryRequest
+    ],
+    Field(discriminator="model_type")
+]
+
 
 # ------------------------------------
 # save changes
@@ -53,9 +91,25 @@ class SaveChangesRequest(BaseModel):
     therapy_area: str
     indication: str
     metric: str
-    product: Optional[str] = "" 
+    product: str
     lot: str
     table: List[LotGroup]
+# ------------------------------------
+# save scenario
+# ------------------------------------
 
+class SaveScenarioRequest(BaseModel):
+    scenario_name: str
+    user_id: Optional[str] = None
 
- 
+    ta_name: str
+    indication: str
+    lot: str
+    metric: str
+    product: Optional[str] = None
+
+    model_type: str  # "ets" or "trajectory"
+
+    factors: Dict[str, Any]
+    chart: Dict[str, Any]
+    table: List[Dict[str, Any]]
