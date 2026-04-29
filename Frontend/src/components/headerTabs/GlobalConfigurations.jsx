@@ -22,6 +22,8 @@ import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import dayjs from "dayjs";
 import { GlobalContext } from "../../context/Provider";
+import { useLoadingStore } from "../../stores";
+
 
 export default function GlobalConfiguration() {
     // const [therapyArea, setTherapyArea] = useState("");
@@ -34,6 +36,9 @@ export default function GlobalConfiguration() {
     const [openModal, setOpenModal] = useState(false);
     const { favState } = useContext(GlobalContext);
     const therapyArea = favState?.selectedTherapyArea;
+    // const [loading, setLoading] = useState(false);
+    // const { setLoading } = useLoadingStore();
+    const { setLoading, isLoading } = useLoadingStore();
 
     useEffect(() => {
         if (therapyArea) {
@@ -103,6 +108,7 @@ export default function GlobalConfiguration() {
         };
 
         try {
+            setLoading(true);
             await saveConfigurations(payload);
 
             showSnackbar("Configurations saved successfully", "success");
@@ -111,12 +117,33 @@ export default function GlobalConfiguration() {
         } catch (error) {
             console.error("Save configuration failed:", error);
             showSnackbar("Failed to save configuration", "error");
+        } finally {
+            setLoading(false);
         }
     };
     console.log("favstate------", favState)
 
     return (
         <Box sx={{ p: 3 }}>
+            {/* {loading && (
+                <Box
+                    sx={{
+                        position: "fixed",
+                        top: 0,
+                        left: 0,
+                        width: "100vw",
+                        height: "100vh",
+                        backgroundColor: "rgba(255, 255, 255, 0.6)",
+                        // backdropFilter: "blur(4px)",
+                        zIndex: 2000,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                    }}
+                >
+                    <CircularProgress size={50} sx={{ color: "#4F46E5" }} />
+                </Box>
+            )} */}
             <Box display="flex" justifyContent="space-between" alignItems="center">
                 <Typography
                     sx={{
@@ -341,6 +368,7 @@ export default function GlobalConfiguration() {
                     <Button
                         variant="contained"
                         onClick={handleSave}
+                        disabled={isLoading}
                         sx={{
                             backgroundColor: "#4F46E5",
                             px: 2,

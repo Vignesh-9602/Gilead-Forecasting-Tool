@@ -21,8 +21,8 @@ def get_oncology_metrics(ta_name: str):
              AND ms.lot = mp.lot
              AND ms.year = mp.year
              AND ms.month = mp.month
-            WHERE ms.ta = %s and ms.brand in ('Trodelvy','Trodelvy Combo','TPC')
-            ORDER BY ms.year, ms.month
+            WHERE ms.ta = %s AND ms.brand in ('Trodelvy','Trodelvy Combo','TPC')
+            ORDER BY ms.indication, ms.lot, ms.brand, ms.year, ms.month
             """,
             (ta_name,)
         )
@@ -32,12 +32,11 @@ def get_oncology_metrics(ta_name: str):
         seen_nps_months = set()
 
         for brand, indication, lot, month, market_share, nps in rows:
-            # ✅ DISPLAY — EXACT DB VALUES
+
             brand_disp = brand.strip() if brand else None
             indication_disp = indication.strip()
             lot_disp = lot.strip()
 
-            # ✅ INTERNAL KEYS — ALWAYS LOWERCASE
             brand_n = brand_disp.lower() if brand_disp else None
             indication_n = indication_disp.lower()
             lot_n = lot_disp.lower()
@@ -54,7 +53,7 @@ def get_oncology_metrics(ta_name: str):
                     metrics[key] = {
                         "month": [],
                         "market_share": [],
-                        "nps": [],
+                        "nps": None,
                         "display": {
                             "brand": brand_disp,
                             "indication": indication_disp,
@@ -64,10 +63,9 @@ def get_oncology_metrics(ta_name: str):
 
                 metrics[key]["month"].append(month_str)
                 metrics[key]["market_share"].append(float(market_share or 0))
-                metrics[key]["nps"].append(0)
 
             # ---------------------------
-            # NPS (once per month)
+            # NPS
             # ---------------------------
             nps_key = f"{indication_n}-{lot_n}"
 
@@ -84,6 +82,7 @@ def get_oncology_metrics(ta_name: str):
                 }
 
             dedup_key = (nps_key, month_str)
+
             if dedup_key not in seen_nps_months:
                 seen_nps_months.add(dedup_key)
                 metrics[nps_key]["month"].append(month_str)

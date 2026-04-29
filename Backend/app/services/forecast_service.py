@@ -190,6 +190,7 @@ def apply_multiplier_and_trajectory(
 # ======================================================
 # MAIN
 # ======================================================
+
 def process_forecast(
     series_months,
     series_values,
@@ -197,6 +198,7 @@ def process_forecast(
     train_end_date,
     forecast_periods,
     multiplier=1.0,
+    multiplier_horizon="Forecast",   # ✅ UI NAMING
     override_params=None,
     seasonality="none",
     metric="nps",
@@ -205,17 +207,20 @@ def process_forecast(
     growth_duration=None,
     trajectory_start=None
 ):
+    # ------------------------------------------------------
+    # Normalize train dates
+    # ------------------------------------------------------
+    train_start = (
+        datetime.fromisoformat(train_start_date).replace(day=1)
+        if isinstance(train_start_date, str)
+        else train_start_date.replace(day=1)
+    )
 
-    # -------- Normalize train dates (accept str or datetime) --------
-    if isinstance(train_start_date, str):
-        train_start = datetime.fromisoformat(train_start_date).replace(day=1)
-    else:
-        train_start = train_start_date.replace(day=1)
-
-    if isinstance(train_end_date, str):
-        train_end = datetime.fromisoformat(train_end_date).replace(day=1)
-    else:
-        train_end = train_end_date.replace(day=1)
+    train_end = (
+        datetime.fromisoformat(train_end_date).replace(day=1)
+        if isinstance(train_end_date, str)
+        else train_end_date.replace(day=1)
+    )
 
     train_months, train_values = [], []
 
@@ -228,13 +233,19 @@ def process_forecast(
     if len(train_values) < 3:
         raise ValueError("Insufficient training data")
 
+    # ------------------------------------------------------
+    # ETS parameter estimation / override
+    # ------------------------------------------------------
     if override_params:
-        alpha = override_params["alpha"]
-        beta = override_params["beta"]
-        gamma = override_params["gamma"]
+        alpha = override_params.get("alpha")
+        beta = override_params.get("beta")
+        gamma = override_params.get("gamma")
     else:
         alpha, beta, gamma = estimate_parameters(train_values)
 
+    # ------------------------------------------------------
+    # FORECAST (ETS)
+    # ------------------------------------------------------
     forecast_values = forecast_series(
         train_values,
         forecast_periods,
@@ -252,17 +263,40 @@ def process_forecast(
         for i in range(1, forecast_periods + 1)
     ]
 
-    forecast_values = apply_multiplier_and_trajectory(
-        forecast_months,
-        forecast_values,
-        multiplier,
-        growth_type,
-        total_growth_pct,
-        growth_duration or forecast_periods,
-        trajectory_start,
-        metric
-    )
+    # ------------------------------------------------------
+    # APPLY MULTIPLIER + TRAJECTORY TO FORECAST (IF NEEDED)
+    # ------------------------------------------------------
+    mh = (multiplier_horizon or "Forecast").strip().lower()
 
+    apply_to_history = mh == "history" or mh == "both history & forecast"
+    apply_to_forecast = mh == "forecast" or mh == "both history & forecast"
+
+    if apply_to_forecast:
+        forecast_values = apply_multiplier_and_trajectory(
+            forecast_months,
+            forecast_values,
+            multiplier,
+            growth_type,
+            total_growth_pct,
+            growth_duration or forecast_periods,
+            trajectory_start,
+            metric
+        )
+
+    # ------------------------------------------------------
+    # APPLY MULTIPLIER TO HISTORY (POST‑MODEL)
+    # ------------------------------------------------------
+    if apply_to_history and multiplier != 1.0:
+        train_values = [round(v * multiplier, 2) for v in train_values]
+
+        if metric == "market_share":
+            train_values = [max(min(v, 100), 0) for v in train_values]
+        else:
+            train_values = [max(v, 0) for v in train_values]
+
+    # ------------------------------------------------------
+    # FINAL OUTPUT
+    # ------------------------------------------------------
     return {
         "months": train_months + forecast_months,
         "train_values": train_values,
@@ -274,8 +308,162 @@ def process_forecast(
             "gamma": gamma,
             "seasonality": seasonality,
             "multiplier": multiplier,
+            "multiplier_horizon": multiplier_horizon,  # ✅ UI VALUE PRESERVED
             "growth_type": growth_type,
             "growth_pct": total_growth_pct,
             "trajectory_start": trajectory_start
         }
+    }
+
+# ======================================================
+# MAIN Forecast for all indication 
+# ======================================================
+
+def generate_full_base_forecast(
+    metrics,
+    config,
+    metric,
+    train_start,
+    train_end
+):
+    """
+    Generates base forecast series and factor map.
+
+    Returns:
+    {
+        months: [...],
+        forecast_start_index: int,
+        series: [
+            {
+                key,
+                lot,
+                label,
+                train_values,
+                forecast_values,
+                display
+            }
+        ],
+        factors_map: {
+            (indication, lot) OR (indication, lot, product): factors
+        }
+    }
+    """
+
+    series_list = []
+    factors_map = {}
+    months = None
+    forecast_start_index = None
+
+    # Stable iteration order
+    for key, data in sorted(metrics.items(), key=lambda x: x[0]):
+        parts = key.split("-")
+
+        # -----------------------------
+        # DISPLAY VALUES (SOURCE OF TRUTH)
+        # -----------------------------
+        display_indication = data["display"]["indication"]   # e.g. mTNBC (or code equivalent)
+        display_lot = data["display"]["lot"]                 # e.g. 1L
+
+        # -----------------------------
+        # NPS
+        # -----------------------------
+        if metric == "nps":
+
+            if len(parts) != 2:
+                continue
+
+            series_values = data.get("nps", [])
+            if not series_values or len(series_values) < 3:
+                continue
+
+            label = "NPS"
+
+            # ✅ FACTOR KEY
+            factor_key = (display_indication, display_lot)
+
+        # -----------------------------
+        # MARKET SHARE
+        # -----------------------------
+        else:
+            if len(parts) != 3:
+                continue
+
+            display_product = data["display"]["brand"]       # canonical brand
+            series_values = data.get("market_share", [])
+
+            if not series_values or len(series_values) < 3:
+                continue
+
+            label = display_product
+
+            # ✅ FACTOR KEY
+            factor_key = (display_indication, display_lot, display_product)
+
+        # -----------------------------
+        # FORECAST
+        # -----------------------------
+        row = process_forecast(
+            data["month"],
+            series_values,
+            train_start,
+            train_end,
+            config["forecast_periods"],
+            metric=metric
+        )
+
+        # Capture shared timeline once
+        if months is None:
+            months = row["months"]
+            forecast_start_index = row["forecast_start_index"]
+
+        # -----------------------------
+        # SERIES OUTPUT
+        # -----------------------------
+        series_list.append({
+            "key": key,
+            "lot": display_lot,
+            "label": label,
+            "train_values": row["train_values"],
+            "forecast_values": row["forecast_values"],
+            "display": {
+                "indication": display_indication,
+                "lot": display_lot,
+                "product": label if metric == "market_share" else None
+            }
+        })
+
+        # -----------------------------
+        # FACTORS
+        # -----------------------------
+        start_idx = row["forecast_start_index"]
+        trajectory_start = (
+            row["months"][start_idx]
+            if start_idx < len(row["months"])
+            else None
+        )
+
+        factors_map[factor_key] = {
+            "multiplier": 1.0,
+            "ets": {
+                "alpha": row["factors"]["alpha"],
+                "beta": row["factors"]["beta"],
+                "gamma": row["factors"]["gamma"],
+                "seasonality": row["factors"]["seasonality"],
+            },
+            "trajectory": {
+                "growth_type": "linear",
+                "total_growth": 0,
+                "duration": config["forecast_periods"],
+                "trajectory_start": trajectory_start,
+            }
+        }
+
+    if not series_list:
+        raise ValueError("No valid series found for base forecast")
+
+    return {
+        "months": months,
+        "forecast_start_index": forecast_start_index,
+        "series": series_list,
+        "factors_map": factors_map
     }

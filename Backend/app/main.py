@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.route import router
 from app.api.metrics_route import router as metrics_router
+from app.api.Scenario_comparision_route import router as Scenario_comparision_router
 
 app = FastAPI(title="TA Forecast API")
 
@@ -18,3 +19,4 @@ app.add_middleware(
 # Include API router
 app.include_router(router)
 app.include_router(metrics_router)
+app.include_router(Scenario_comparision_router)

@@ -6,6 +6,7 @@ import ForecastTrendChart from "./ForecastTrendChart";
 import { getMetricFilters, applyMetricFilters, recalculateMetrics, saveScenario } from "../../services/apiService";
 
 export default function ModelInput() {
+    const [scenarioSelector, setScenarioSelector] = useState("");
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
     const [metric, setMetric] = useState("");
@@ -20,21 +21,28 @@ export default function ModelInput() {
     const [duration, setDuration] = useState(12);
 
     const [multiplier, setMultiplier] = useState(1.0);
+    const [multiplierHorizon, setMultiplierHorizon] = useState("Forecast");
     const [alpha, setAlpha] = useState(0);
     const [beta, setBeta] = useState(0);
     const [gamma, setGamma] = useState(0);
 
-    const [trendType, setTrendType] = useState("");
-    const [seasonality, setSeasonality] = useState("None");
+    // const [trendType, setTrendType] = useState("");
+    // const [seasonality, setSeasonality] = useState("None");
 
     const [mappingData, setMappingData] = useState({});
     const [filterOptions, setFilterOptions] = useState({
         indications: [],
         metric_filters: [],
+        scenario_names: [],
     });
 
     const [chartData, setChartData] = useState(null);
     const [tableData, setTableData] = useState([]);
+
+    const [allMetricsData, setAllMetricsData] = useState({
+        nps: { chart: null, table: [] },
+        market_share: { chart: null, table: [] }
+    });
 
     const [etsFactors, setEtsFactors] = useState({});
     const [trajectoryFactors, setTrajectoryFactors] = useState({});
@@ -55,7 +63,7 @@ export default function ModelInput() {
         setAlpha(etsFactors?.alpha ?? 0);
         setBeta(etsFactors?.beta ?? 0);
         setGamma(etsFactors?.gamma ?? 0);
-        setTrendType(etsFactors?.trend_type || "");
+        // setTrendType(etsFactors?.trend_type || "");
 
         setGrowthType(trajectoryFactors?.growth_type || "linear");
         setTotalGrowth(trajectoryFactors?.total_growth ?? 0);
@@ -71,11 +79,15 @@ export default function ModelInput() {
             setMappingData(resData?.data || {});
 
             setFilterOptions({
-                indications: Object.keys(resData?.data || {}),
+                indications: [],
                 metric_filters: resData?.metric_filters || [],
+                scenario_names: resData?.scenario_names || [],
             });
 
-            // reset
+            // no default selection
+            setScenarioSelector("");
+
+            // reset dependent fields
             setIndication("");
             setLot("");
             setMetric("");
@@ -88,6 +100,7 @@ export default function ModelInput() {
     const handleApplyFilter = async () => {
         const payload = {
             ta_name: therapyArea,
+            scenario_name: scenarioSelector,
             indications: indication ? [indication] : [],
             lots: lot ? [lot] : [],
             metric_filter: metric,
@@ -102,6 +115,7 @@ export default function ModelInput() {
             const trajectory = data?.factors?.trajectory || {};
 
             setMultiplier(data?.factors?.multiplier ?? 1);
+            setMultiplierHorizon(data?.factors?.multiplier_horizon ?? "Forecast");
 
             setEtsFactors(ets);
             setTrajectoryFactors(trajectory);
@@ -109,20 +123,34 @@ export default function ModelInput() {
             setAlpha(ets?.alpha ?? 0);
             setBeta(ets?.beta ?? 0);
             setGamma(ets?.gamma ?? 0);
-            setTrendType(ets?.trend_type || "");
+            // setTrendType(ets?.trend_type || "");
 
             setGrowthType(trajectory?.growth_type || "linear");
             setTotalGrowth(trajectory?.total_growth ?? 0);
             setDuration(trajectory?.duration ?? 12);
 
+            // setTrajectoryStart(
+            //     trajectory?.trajectory_start ||
+            //     data?.chart?.months?.[data?.chart?.forecast_start_index] ||
+            //     ""
+            // );
+
+            // store both metrics (important for save scenario)
+            setAllMetricsData(data?.metrics_data || {});
+
+            // show only selected metric in UI
+            const selectedMetricData = data?.metrics_data?.[metric];
+
+            setChartData(selectedMetricData?.chart || null);
+            setTableData(selectedMetricData?.table || []);
+
             setTrajectoryStart(
                 trajectory?.trajectory_start ||
-                data?.chart?.months?.[data?.chart?.forecast_start_index] ||
+                selectedMetricData?.chart?.months?.[
+                selectedMetricData?.chart?.forecast_start_index
+                ] ||
                 ""
             );
-
-            setChartData(data?.chart || null);
-            setTableData(data?.table || []);
             setEditable(false);
         } catch (error) {
             console.error("Failed to apply metric filters", error);
@@ -139,12 +167,13 @@ export default function ModelInput() {
             model_type: showTrajectory ? "trajectory" : "ets",
             factors: {
                 multiplier,
+                multiplier_horizon: multiplierHorizon,
                 ets: {
                     alpha,
                     beta,
                     gamma,
-                    trend_type: trendType,
-                    seasonality: seasonality || "none",
+                    // trend_type: trendType,
+                    // seasonality: seasonality || "none",
                 },
                 ...(showTrajectory && {
                     trajectory: {
@@ -165,15 +194,18 @@ export default function ModelInput() {
             const trajectory = data?.factors?.trajectory || {};
 
             setMultiplier(data?.factors?.multiplier ?? 1);
+            setMultiplierHorizon(data?.factors?.multiplier_horizon ?? "Forecast");
 
             setEtsFactors(ets);
             setTrajectoryFactors(trajectory);
 
-            // update chart
-            setChartData(data?.chart || null);
+            // update chart and table
+            setAllMetricsData(data?.metrics_data || {});
 
-            // update table
-            setTableData(data?.table || []);
+            const selectedMetricData = data?.metrics_data?.[metric];
+
+            setChartData(selectedMetricData?.chart || null);
+            setTableData(selectedMetricData?.table || []);
 
             setEditable(false);
         } catch (error) {
@@ -183,13 +215,14 @@ export default function ModelInput() {
 
 
     //  Dynamic values
-    const availableLots = indication
-        ? Object.keys(mappingData[indication] || {})
-        : [];
+    const availableLots =
+        scenarioSelector && indication
+            ? Object.keys(mappingData?.[scenarioSelector]?.[indication] || {})
+            : [];
 
     const availableBrands =
-        indication && lot
-            ? mappingData[indication]?.[lot] || []
+        scenarioSelector && indication && lot
+            ? mappingData?.[scenarioSelector]?.[indication]?.[lot] || []
             : [];
 
     const inputStyle = {
@@ -233,16 +266,17 @@ export default function ModelInput() {
             metric,
             product: brand || null,
             lot,
-            model_type: modelSelection,
+            // model_type: modelSelection, take a look in this
 
             factors: {
                 multiplier,
+                multiplier_horizon: multiplierHorizon,
                 ets: {
                     alpha,
                     beta,
                     gamma,
-                    trend_type: trendType,
-                    seasonality: seasonality || "none"
+                    // trend_type: trendType,
+                    // seasonality: seasonality || "none"
                 },
                 trajectory: {
                     growth_type: growthType,
@@ -253,9 +287,7 @@ export default function ModelInput() {
                 active_model: showTrajectory ? "trajectory" : "ets"
             },
 
-            chart: chartData,
-
-            table: tableData    // always latest
+            metrics_data: allMetricsData
         };
 
         try {
@@ -285,6 +317,41 @@ export default function ModelInput() {
                                 <Typography>{therapyArea}</Typography>
                             </Box>
                         </Box>
+
+                        <Box>
+                            <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}> SCENARIO SELECTOR </Typography>
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={scenarioSelector}
+                                    onChange={(e) => {
+                                        const selectedScenario = e.target.value;
+
+                                        setScenarioSelector(selectedScenario);
+                                        setIndication("");
+                                        setLot("");
+                                        setBrand("");
+
+                                        setFilterOptions((prev) => ({
+                                            ...prev,
+                                            indications: Object.keys(mappingData?.[selectedScenario] || {}),
+                                        }));
+
+                                        setChartData(null);
+                                        setTableData([]);
+                                    }}
+                                    displayEmpty
+                                >
+                                    <MenuItem value="" disabled>Select Scenario</MenuItem>
+
+                                    {filterOptions.scenario_names.map((scenario) => (
+                                        <MenuItem key={scenario} value={scenario}>
+                                            {scenario}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
+                        </Box>
+
                         {/* Indication */}
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>
@@ -299,6 +366,7 @@ export default function ModelInput() {
                                         setBrand("");
                                     }}
                                     displayEmpty
+                                    disabled={!scenarioSelector}
                                 >
                                     <MenuItem value="" disabled>Select Indication</MenuItem>
                                     {filterOptions.indications.map((item) => (
@@ -320,7 +388,7 @@ export default function ModelInput() {
                                         setBrand("");
                                     }}
                                     displayEmpty
-                                // disabled={!indication}
+                                    disabled={!indication}
                                 >
                                     <MenuItem value="" disabled>Select LOT</MenuItem>
                                     {availableLots.map((item) => (
@@ -584,7 +652,7 @@ export default function ModelInput() {
                         <Divider orientation="vertical" flexItem sx={{ mx: 0 }} />
 
                         <Box sx={{ width: 160 }}>
-                            <Typography sx={{ mb: 1 }}>
+                            <Typography sx={{ mb: 1, fontSize: "14px" }}>
                                 MULTIPLIER{" "}
                                 <span style={{ fontWeight: 700 }}>
                                     {multiplier.toFixed(2)}
@@ -600,6 +668,23 @@ export default function ModelInput() {
                                 onChange={(e, val) => setMultiplier(val)}
                             />
                         </Box>
+                        <Box>
+                            <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                                MULTIPLIER HORIZON
+                            </Typography>
+
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={multiplierHorizon}
+                                    onChange={(e) => setMultiplierHorizon(e.target.value)}
+                                    disabled={!editable}
+                                >
+                                    <MenuItem value="History">History</MenuItem>
+                                    <MenuItem value="Forecast">Forecast</MenuItem>
+                                    <MenuItem value="Both History & Forecast">Both History & Forecast </MenuItem>
+                                </Select>
+                            </FormControl>
+                        </Box>
 
                         {/* RECALCULATE */}
                         <Button
@@ -607,7 +692,7 @@ export default function ModelInput() {
                             disabled={!editable}
                             onClick={handleRecalculate}
                             sx={{ height: "35px", mt: 3, textTransform: "none", backgroundColor: "#6b7280", borderRadius: "8px" }}>
-                            Refresh
+                            Recalculate
                         </Button>
                     </Box>
                 </Paper>
@@ -621,6 +706,7 @@ export default function ModelInput() {
                     tableData={tableData}
                     updateChartData={setChartData}
                     updateTableData={setTableData}
+                    updateAllMetricsData={setAllMetricsData}
                 />
             </Paper>
         </Box>

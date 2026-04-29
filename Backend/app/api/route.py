@@ -3,12 +3,15 @@ from uuid import uuid4
 from datetime import date
 import json
 
+from app.api.metrics_route import parse_month_date
 from app.db.connection import get_connection
 from app.schemas.config_schema import (
     SaveConfigRequest,
     UpdateAvgVialsRequest
 )
 from app.repository.metrics_repo import build_metrics_filter_data, build_metrics_hierarchy, get_oncology_metrics
+from app.services.Secenario_Selection import save_base_scenario
+from app.services.forecast_service import generate_full_base_forecast
 
 router = APIRouter(prefix="/api")
 
@@ -137,43 +140,151 @@ def get_configuration_by_ta(ta_name: str):
 # ----------------------------------------------------
 @router.post("/configurations")
 def save_configuration(payload: SaveConfigRequest):
+
     cfg = payload.config
 
+    # =====================================================
+    # 0. VALIDATION
+    # =====================================================
     start_date = date.fromisoformat(cfg.train_start_date)
     end_date = date.fromisoformat(cfg.train_end_date)
 
     if start_date > end_date:
-        raise HTTPException(400, "train_start_date cannot be after train_end_date")
+        raise HTTPException(
+            400,
+            "train_start_date cannot be after train_end_date"
+        )
 
     if cfg.model_granularity.lower() != "monthly":
-        raise HTTPException(400, "Only 'monthly' granularity is supported")
+        raise HTTPException(
+            400,
+            "Only 'monthly' granularity is supported"
+        )
 
+    ta = cfg.ta_name
+
+    # =====================================================
+    # 1. UPSERT CONFIGURATION
+    # =====================================================
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        # ✅ UPSERT config (avg_vials untouched)
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO raw.forecast_configurations (config_id, config)
             VALUES (%s, %s)
             ON CONFLICT ((config->>'ta_name'))
             DO UPDATE SET
                 config = EXCLUDED.config,
                 updated_at = CURRENT_TIMESTAMP
-            """,
-            (
-                str(uuid4()),
-                json.dumps(cfg.model_dump()),
-            )
-        )
-
+        """, (
+            str(uuid4()),
+            json.dumps(cfg.model_dump())
+        ))
         conn.commit()
-        return {"ta_name": cfg.ta_name, "status": "config_saved"}
 
     finally:
         cur.close()
         conn.close()
+
+    # =====================================================
+    # 🚨 2. INVALIDATE EXISTING BASE (CRITICAL FIX)
+    # =====================================================
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            DELETE FROM raw.forecast_scenarios
+            WHERE scenario_name = 'BASE'
+              AND ta_name = %s
+        """, (ta,))
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    # =====================================================
+    # 3. GENERATE BASE DATA
+    # =====================================================
+    train_start = parse_month_date(cfg.train_start_date)
+    train_end = parse_month_date(cfg.train_end_date)
+
+    metrics_data = get_oncology_metrics(ta)
+
+  # ---------- NPS BASE ----------
+    nps_base = generate_full_base_forecast(
+        metrics=metrics_data,
+        config=cfg.model_dump(),
+        metric="nps",
+        train_start=train_start,
+        train_end=train_end
+    )
+
+    for s in nps_base["series"]:
+        indication = s["display"]["indication"]   # ✅ DISPLAY VALUE
+        lot = s["display"]["lot"]                 # ✅ DISPLAY VALUE
+
+        factors = nps_base["factors_map"][(indication, lot)]
+        # ↑ NO .get(), crash loudly if mismatched
+
+        save_base_scenario(
+            ta=ta,
+            indication=indication,
+            lot=lot,
+            metric="nps",
+            product=None,
+            chart={
+                "months": nps_base["months"],
+                "forecast_start_index": nps_base["forecast_start_index"],
+                "train_values": s["train_values"],
+                "forecast_values": s["forecast_values"],
+            },
+            factors=factors
+        )
+
+    # ---------- MARKET SHARE BASE ----------
+    ms_base = generate_full_base_forecast(
+        metrics=metrics_data,
+        config=cfg.model_dump(),
+        metric="market_share",
+        train_start=train_start,
+        train_end=train_end
+    )
+
+    for s in ms_base["series"]:
+        indication = s["display"]["indication"]   
+        lot = s["display"]["lot"]                 
+        product = s["display"]["product"]         
+
+        factors = ms_base["factors_map"][(indication, lot, product)]
+        # ↑ NO .get()
+
+        save_base_scenario(
+            ta=ta,
+            indication=indication,
+            lot=lot,
+            metric="market_share",
+            product=product,
+            chart={
+                "months": ms_base["months"],
+                "forecast_start_index": ms_base["forecast_start_index"],
+                "train_values": s["train_values"],
+                "forecast_values": s["forecast_values"],
+            },
+            factors=factors
+        )
+
+
+    # =====================================================
+    # ✅ FINAL RESPONSE
+    # =====================================================
+    return {
+        "ta_name": ta,
+        "status": "config_saved_and_base_rebuilt"
+    }
+
 
 
 # ----------------------------------------------------
@@ -243,19 +354,69 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
 @router.get("/metrics/filters/{ta_name}")
 def get_metrics_filters(ta_name: str):
 
-    metrics = get_oncology_metrics(ta_name)
+    conn = get_connection()
+    cur = conn.cursor()
 
-    if not metrics:
-        return {
-            "ta_name": ta_name,
-            "data": {},
-            "metric_filters": []
-        }
+    try:
+        # Scenario names
+        cur.execute("""
+            SELECT DISTINCT scenario_name
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
+            ORDER BY scenario_name
+        """, (ta_name,))
+        scenario_names = [r[0] for r in cur.fetchall()]
 
-    data = build_metrics_filter_data(metrics)
+        if not scenario_names:
+            return {
+                "ta_name": ta_name,
+                "scenario_names": [],
+                "data": {},
+                "metric_filters": []
+            }
+
+        # Fetch filters with canonical indication + product
+        cur.execute("""
+            SELECT
+                fs.scenario_name,
+                im.indications   AS indication,     -- ✅ canonical
+                fs.lot,
+                fs.metric,
+                im.brand_name    AS product          -- ✅ canonical
+            FROM raw.forecast_scenarios fs
+            JOIN raw.indication_master im
+              ON im.ta = fs.ta_name
+             AND LOWER(im.indications) = LOWER(fs.indication)
+             AND (
+                  fs.metric != 'market_share'
+                  OR LOWER(im.brand_name) = LOWER(fs.product)
+                 )
+            WHERE fs.ta_name = %s
+            ORDER BY fs.scenario_name, im.indications, fs.lot, im.brand_name
+        """, (ta_name,))
+
+        rows = cur.fetchall()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    # Build structure
+    data = {}
+
+    for scenario, indication, lot, metric, product in rows:
+        scenario_map = data.setdefault(scenario, {})
+        indication_map = scenario_map.setdefault(indication, {})
+        lot_products = indication_map.setdefault(lot, [])
+
+        # Only add products for market_share
+        if metric == "market_share" and product:
+            if product not in lot_products:
+                lot_products.append(product)
 
     return {
         "ta_name": ta_name,
+        "scenario_names": scenario_names,
         "data": data,
         "metric_filters": [
             { "label": "Market Share", "value": "market_share" },

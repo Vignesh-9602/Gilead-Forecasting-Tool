@@ -7,11 +7,11 @@ from typing import Annotated, Any, Dict, List, Optional, Literal, Union
 # ------------------------------------
 class MetricSelectionRequest(BaseModel):
     ta_name: str
+    scenario_name: str              
     indications: List[str]
     lots: List[str]
     metric_filter: str              # "market_share" | "nps"
     product: Optional[str] = ""     # required only for market_share
-
 
 # ------------------------------------
 # ETS FACTORS
@@ -20,8 +20,8 @@ class ETSFactors(BaseModel):
     alpha: float
     beta: float
     gamma: float
-    trend_type: Literal["additive"]
-    seasonality: Optional[str] = "none"
+    # trend_type: Literal["additive"]
+    # seasonality: Optional[str] = "none"
 
 # ------------------------------------
 # TRAJECTORY FACTORS
@@ -32,12 +32,23 @@ class TrajectoryFactors(BaseModel):
     duration: int
     trajectory_start: Optional[str] = None
 
+from typing import Literal
+
+MultiplierHorizon = Literal[
+    "Forecast",
+    "History",
+    "Both History & Forecast"
+]
+
+
 class RecalculateETSFactors(BaseModel):
     multiplier: float
+    multiplier_horizon: MultiplierHorizon = "Forecast"
     ets: ETSFactors
 
 class RecalculateTrajectoryFactors(BaseModel):
     multiplier: float
+    multiplier_horizon: MultiplierHorizon = "Forecast"
     ets: ETSFactors
     trajectory: TrajectoryFactors
 

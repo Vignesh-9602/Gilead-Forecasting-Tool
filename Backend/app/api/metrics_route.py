@@ -10,7 +10,8 @@ from app.schemas.metrics_selection_schema import (
     SaveChangesRequest,
     SaveScenarioRequest,
 )
-from app.services.forecast_service import process_forecast
+from app.services.Secenario_Selection import get_base_scenario,save_base_scenario
+from app.services.forecast_service import generate_full_base_forecast, process_forecast
 
 router = APIRouter(prefix="/api")
 
@@ -63,169 +64,177 @@ def build_factors(chart, trajectory_input=None):
 def apply_metrics(payload: MetricSelectionRequest):
 
     ta = payload.ta_name
-    indication = payload.indications[0].lower()
-    metric = payload.metric_filter.lower()
-    product = payload.product.strip().lower() if payload.product else ""
+    scenario = payload.scenario_name
+    indication_code = payload.indications[0].strip().lower()
+    selected_product_code = payload.product.strip().lower() if payload.product else None
+    selected_lot_code = payload.lots[0].strip().lower()
 
-    if metric == "market_share" and not product:
-        raise HTTPException(400, "Product is required")
-
-    # -------- CONFIG --------
     conn = get_connection()
     cur = conn.cursor()
+
     try:
+        # =====================================================
+        # 1️⃣ FETCH INDICATION + BASE FACTORS (NPS default)
+        # =====================================================
         cur.execute("""
-            SELECT config
-            FROM raw.forecast_configurations
-            WHERE config->>'ta_name' = %s
-        """, (ta,))
+            SELECT
+                fs.factors,
+                im.indications
+            FROM raw.forecast_scenarios fs
+            JOIN raw.indication_master im
+              ON im.ta = fs.ta_name
+             AND LOWER(im.indications) = LOWER(fs.indication)
+            WHERE
+                fs.ta_name = %s
+                AND fs.scenario_name = %s
+                AND LOWER(fs.indication) = %s
+            ORDER BY fs.lot
+            LIMIT 1
+        """, (ta, scenario, indication_code))
+
         row = cur.fetchone()
-        if not row:
-            raise HTTPException(400, "Forecast config not found")
-        config = row[0]
+        factors = row[0] if row else {}
+        indication = row[1] if row else payload.indications[0]
+
+        # =====================================================
+        # 2️⃣ NPS DATA (ALL LOTS)
+        # =====================================================
+        cur.execute("""
+            SELECT fs.lot, fs.chart
+            FROM raw.forecast_scenarios fs
+            WHERE
+                fs.ta_name = %s
+                AND fs.scenario_name = %s
+                AND LOWER(fs.indication) = %s
+                AND fs.metric = 'nps'
+            ORDER BY fs.lot
+        """, (ta, scenario, indication_code))
+
+        nps_rows = cur.fetchall()
+
+        nps_series = []
+        nps_table = {}
+        months = None
+        forecast_start_index = None
+
+        for lot, chart in nps_rows:
+            months = chart["months"]
+            forecast_start_index = chart["forecast_start_index"]
+
+            nps_series.append({
+                "lot": lot,
+                "label": "NPS",
+                "train_values": chart["train_values"],
+                "forecast_values": chart["forecast_values"],
+            })
+
+            nps_table.setdefault(lot, {
+                "lot": lot,
+                "total": [],
+                "children": []
+            })["children"].append({
+                "label": "NPS",
+                "values": chart["train_values"] + chart["forecast_values"]
+            })
+
+        # =====================================================
+        # 3️⃣ MARKET SHARE DATA
+        # =====================================================
+        cur.execute("""
+            SELECT
+                fs.lot,
+                fs.chart,
+                im.brand_name
+            FROM raw.forecast_scenarios fs
+            JOIN raw.indication_master im
+              ON im.ta = fs.ta_name
+             AND LOWER(im.indications) = LOWER(fs.indication)
+             AND LOWER(im.brand_name) = LOWER(fs.product)
+            WHERE
+                fs.ta_name = %s
+                AND fs.scenario_name = %s
+                AND LOWER(fs.indication) = %s
+                AND fs.metric = 'market_share'
+            ORDER BY fs.lot, im.brand_name
+        """, (ta, scenario, indication_code))
+
+        ms_rows = cur.fetchall()
+
+        ms_series = []
+        ms_table = {}
+
+        for lot, chart, product in ms_rows:
+
+            # ✅ CHART → selected LOT only
+            if lot.lower() == selected_lot_code:
+                ms_series.append({
+                    "lot": lot,
+                    "label": product,
+                    "train_values": chart["train_values"],
+                    "forecast_values": chart["forecast_values"],
+                })
+
+            # ✅ TABLE → all LOTs + all products
+            ms_table.setdefault(lot, {
+                "lot": lot,
+                "total": [100.0] * len(months),
+                "children": []
+            })["children"].append({
+                "label": product,
+                "values": chart["train_values"] + chart["forecast_values"]
+            })
+
+        # =====================================================
+        # 4️⃣ MARKET SHARE FACTORS (SELECTED PRODUCT)
+        # =====================================================
+        if selected_product_code:
+            cur.execute("""
+                SELECT fs.factors
+                FROM raw.forecast_scenarios fs
+                WHERE
+                    fs.ta_name = %s
+                    AND fs.scenario_name = %s
+                    AND LOWER(fs.indication) = %s
+                    AND fs.metric = 'market_share'
+                    AND LOWER(fs.product) = %s
+                ORDER BY fs.lot
+                LIMIT 1
+            """, (ta, scenario, indication_code, selected_product_code))
+
+            row = cur.fetchone()
+            if row:
+                factors = row[0]
+
     finally:
         cur.close()
         conn.close()
 
-    metrics = get_oncology_metrics(ta)
-
-    train_start = parse_month_date(config["train_start_date"])
-    train_end = parse_month_date(config["train_end_date"])
-
-    # -------- BASE SERIES (for factors only) --------
-    first_key = list(metrics.keys())[0]
-    base_data = metrics[first_key]
-
-    base_row = process_forecast(
-        base_data["month"],
-        base_data[metric],
-        train_start,
-        train_end,
-        config["forecast_periods"],
-        multiplier=1.0,
-        override_params=None,
-        seasonality="none",
-        metric=metric
-    )
-
-    factors = build_factors(base_row)
-
-    # -------- MULTI SERIES CHART --------
-    series_list = []
-    months = None
-    forecast_start_index = None
-
-    selected_lot = payload.lots[0].lower()
-
-    for key, data in metrics.items():
-        parts = key.split("-")
-
-        if metric == "market_share":
-            if len(parts) != 3:
-                continue
-
-            prod, ind, lot_val = parts
-
-            # filter indication
-            if ind != indication:
-                continue
-
-            # ✅ ONLY SELECTED LOT
-            if lot_val.lower() != selected_lot:
-                continue
-
-        else:
-            if len(parts) != 2:
-                continue
-
-            ind, lot_val = parts
-
-            if ind != indication:
-                continue
-
-        lot_label = data["display"]["lot"]
-        label = data["display"]["brand"] if metric == "market_share" else "NPS"
-
-        series = data["market_share"] if metric == "market_share" else data["nps"]
-
-        row = process_forecast(
-            data["month"],
-            series,
-            train_start,
-            train_end,
-            config["forecast_periods"],
-            multiplier=1.0,
-            override_params=None,
-            seasonality="none",
-            metric=metric
-        )
-
-        if months is None:
-            months = row["months"]
-            forecast_start_index = row["forecast_start_index"]
-
-        series_list.append({
-            "lot": lot_label,
-            "label": label,
-            "train_values": row["train_values"],
-            "forecast_values": row["forecast_values"]
-        })
-
-    chart = {
-        "months": months,
-        "forecast_start_index": forecast_start_index,
-        "series": series_list
-    }
-
-    # -------- TABLE (unchanged) --------
-    grouped = {}
-    num_months = len(months)
-
-    for key, data in metrics.items():
-        parts = key.split("-")
-
-        if metric == "market_share":
-            if len(parts) != 3 or parts[1] != indication:
-                continue
-        else:
-            if len(parts) != 2 or parts[0] != indication:
-                continue
-
-        lot_label = data["display"]["lot"]
-
-        grouped.setdefault(lot_label, {
-            "lot": lot_label,
-            "total": [100.0] * num_months if metric == "market_share" else [],
-            "children": []
-        })
-
-        row = process_forecast(
-            data["month"],
-            data["market_share"] if metric == "market_share" else data["nps"],
-            train_start,
-            train_end,
-            config["forecast_periods"],
-            multiplier=1.0,
-            override_params=None,
-            seasonality="none",
-            metric=metric
-        )
-
-        grouped[lot_label]["children"].append({
-            "label": data["display"]["brand"] if metric == "market_share" else "NPS",
-            "values": row["train_values"] + row["forecast_values"]
-        })
-
+    # =====================================================
+    # ✅ FINAL RESPONSE
+    # =====================================================
     return {
         "therapy_area": ta,
-        "indication": payload.indications[0],
-        "metric": metric.replace("_", " ").title(),
-        "product": payload.product or None,
-        "factors": factors,
-        "chart": chart,
-        "table": list(grouped.values())
+        "indication": indication,
+        "factors": factors,  # includes multiplier_horizon
+        "metrics_data": {
+            "nps": {
+                "chart": {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "series": nps_series,
+                },
+                "table": list(nps_table.values()),
+            },
+            "market_share": {
+                "chart": {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "series": ms_series,
+                },
+                "table": list(ms_table.values()),
+            },
+        }
     }
-
 
 # =====================================================
 # RECALCULATE
@@ -233,19 +242,34 @@ def apply_metrics(payload: MetricSelectionRequest):
 @router.post("/metrics/recalculate")
 def recalculate_metrics(payload: MetricRecalculateRequest):
 
+    # -----------------------------------------------------
+    # INPUT NORMALIZATION
+    # -----------------------------------------------------
     ta = payload.ta_name
-    indication = payload.indications[0].lower()
-    metric = payload.metric_filter.lower()
-    product = payload.product.strip().lower() if payload.product else ""
-    model_type = payload.model_type.lower()
 
-    factors_input = payload.factors.dict() if hasattr(payload.factors, "dict") else payload.factors
+    indication_input = payload.indications[0].strip()
+    indication_l = indication_input.lower()
+
+    selected_lot_input = payload.lots[0].strip()
+    selected_lot_l = selected_lot_input.lower()
+
+    metric_to_recalc = payload.metric_filter.strip().lower()
+
+    selected_product_input = payload.product.strip() if payload.product else None
+    selected_product_l = selected_product_input.lower() if selected_product_input else None
+
+    model_type = payload.model_type.lower()
+    factors_input = payload.factors.dict()
 
     multiplier = factors_input.get("multiplier", 1.0)
+    multiplier_horizon = factors_input.get("multiplier_horizon", "Forecast")
+
     ets = factors_input.get("ets", {})
     trajectory = factors_input.get("trajectory", {})
 
-    # -------- CONFIG --------
+    # -----------------------------------------------------
+    # 1️⃣ LOAD CONFIG
+    # -----------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -262,166 +286,178 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         cur.close()
         conn.close()
 
-    metrics = get_oncology_metrics(ta)
-
     train_start = parse_month_date(config["train_start_date"])
     train_end = parse_month_date(config["train_end_date"])
+    forecast_periods = config["forecast_periods"]
 
-    # -------- BASE SERIES FOR FACTORS --------
-    first_key = list(metrics.keys())[0]
-    base_data = metrics[first_key]
+    # -----------------------------------------------------
+    # 2️⃣ LOAD BASE SERIES FROM DB (ONLY SOURCE)
+    # -----------------------------------------------------
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT metric, lot, product, chart
+            FROM raw.forecast_scenarios
+            WHERE
+                scenario_name = 'BASE'
+                AND ta_name = %s
+                AND LOWER(indication) = %s
+        """, (ta, indication_l))
+        base_rows = cur.fetchall()
+        if not base_rows:
+            raise HTTPException(400, "Base scenario not found")
+    finally:
+        cur.close()
+        conn.close()
 
-    base_row = process_forecast(
-        base_data["month"],
-        base_data[metric],
-        train_start,
-        train_end,
-        config["forecast_periods"],
-        multiplier=multiplier,
-        override_params={
-            "alpha": ets.get("alpha"),
-            "beta": ets.get("beta"),
-            "gamma": ets.get("gamma"),
-        },
-        seasonality=(ets.get("seasonality") or "none").lower(),
-        metric=metric,
-        growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
-        total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
-        growth_duration=trajectory.get("duration"),
-        trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
-    )
+    # -----------------------------------------------------
+    # SERIES CONTAINERS
+    # -----------------------------------------------------
+    nps_series = []
+    ms_chart_series = []   # ✅ Chart → selected LOT only
+    ms_table_series = []   # ✅ Table → all LOTs
 
-    rebuilt_factors = build_factors(base_row, trajectory_input=trajectory)
-
-    # -------- MULTI SERIES --------
-    series_list = []
     months = None
     forecast_start_index = None
 
-    selected_lot = payload.lots[0].lower()
+    # -----------------------------------------------------
+    # 3️⃣ LOOP THROUGH BASE SERIES
+    # -----------------------------------------------------
+    for metric, lot, product, base_chart in base_rows:
 
-    for key, data in metrics.items():
-        parts = key.split("-")
+        lot_l = lot.lower()
+        product_l = product.lower() if product else None
 
-        if metric == "market_share":
-            if len(parts) != 3:
-                continue
-
-            prod, ind, lot_val = parts
-
-            if ind != indication:
-                continue
-
-            # ✅ STRICT LOT FILTER
-            if lot_val.lower() != selected_lot:
-                continue
-
-        else:
-            if len(parts) != 2:
-                continue
-
-            ind, lot_val = parts
-
-            if ind != indication:
-                continue
-
-        lot_label = data["display"]["lot"]
-        label = data["display"]["brand"] if metric == "market_share" else "NPS"
-
-        series = data["market_share"] if metric == "market_share" else data["nps"]
-
-        row = process_forecast(
-            data["month"],
-            series,
-            train_start,
-            train_end,
-            config["forecast_periods"],
-            multiplier=multiplier,
-            override_params={
-                "alpha": ets.get("alpha"),
-                "beta": ets.get("beta"),
-                "gamma": ets.get("gamma"),
-            },
-            seasonality=(ets.get("seasonality") or "none").lower(),
-            metric=metric,
-            growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
-            total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
-            growth_duration=trajectory.get("duration"),
-            trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
+        is_selected = (
+            metric == metric_to_recalc
+            and lot_l == selected_lot_l
+            and (metric != "market_share" or product_l == selected_product_l)
         )
 
-        if months is None:
-            months = row["months"]
-            forecast_start_index = row["forecast_start_index"]
+        base_months = base_chart["months"]
+        base_train_values = base_chart["train_values"]
+        base_forecast_values = base_chart["forecast_values"]
+        base_start_idx = base_chart["forecast_start_index"]
 
-        series_list.append({
-            "lot": lot_label,
-            "label": label,
+        # ---------------------------
+        # RECALCULATE SELECTED SERIES
+        # ---------------------------
+        if is_selected:
+            full_series_months = base_months
+            full_series_values = base_train_values + base_forecast_values
+
+            row = process_forecast(
+                full_series_months,
+                full_series_values,
+                train_start,
+                train_end,
+                forecast_periods,
+                multiplier=multiplier,
+                multiplier_horizon=multiplier_horizon,
+                override_params={
+                    "alpha": ets.get("alpha"),
+                    "beta": ets.get("beta"),
+                    "gamma": ets.get("gamma"),
+                },
+                seasonality=ets.get("seasonality", "none"),
+                metric=metric,
+                growth_type=trajectory.get("growth_type")
+                    if model_type == "trajectory"
+                    else None,
+                total_growth_pct=trajectory.get("total_growth", 0)
+                    if model_type == "trajectory"
+                    else 0,
+                growth_duration=trajectory.get("duration"),
+                trajectory_start=trajectory.get("trajectory_start"),
+            )
+
+        # ---------------------------
+        # KEEP BASE
+        # ---------------------------
+        else:
+            row = {
+                "months": base_months,
+                "train_values": base_train_values,
+                "forecast_values": base_forecast_values,
+                "forecast_start_index": base_start_idx,
+            }
+
+        months = row["months"]
+        forecast_start_index = row["forecast_start_index"]
+
+        series_entry = {
+            "lot": lot,
+            "label": product if metric == "market_share" else "NPS",
             "train_values": row["train_values"],
-            "forecast_values": row["forecast_values"]
-        })
+            "forecast_values": row["forecast_values"],
+        }
 
-    chart = {
-        "months": months,
-        "forecast_start_index": forecast_start_index,
-        "series": series_list
-    }
+        # ---------------------------
+        # ROUTING TO CHART / TABLE
+        # ---------------------------
+        if metric == "nps":
+            nps_series.append(series_entry)
 
-    # -------- TABLE (same logic) --------
-    grouped = {}
+        else:
+            # ✅ Market share table → all LOTs
+            ms_table_series.append(series_entry)
+
+            # ✅ Market share chart → selected LOT only
+            if lot_l == selected_lot_l:
+                ms_chart_series.append(series_entry)
+
+    # -----------------------------------------------------
+    # 4️⃣ BUILD TABLES (DERIVED)
+    # -----------------------------------------------------
+    nps_table, ms_table = {}, {}
     num_months = len(months)
 
-    for key, data in metrics.items():
-        parts = key.split("-")
-
-        if metric == "market_share":
-            if len(parts) != 3 or parts[1] != indication:
-                continue
-        else:
-            if len(parts) != 2 or parts[0] != indication:
-                continue
-
-        lot_label = data["display"]["lot"]
-
-        grouped.setdefault(lot_label, {
-            "lot": lot_label,
-            "total": [100.0] * num_months if metric == "market_share" else [],
+    for s in nps_series:
+        nps_table.setdefault(s["lot"], {
+            "lot": s["lot"],
+            "total": [],
             "children": []
+        })["children"].append({
+            "label": "NPS",
+            "values": s["train_values"] + s["forecast_values"]
         })
 
-        row = process_forecast(
-            data["month"],
-            data["market_share"] if metric == "market_share" else data["nps"],
-            train_start,
-            train_end,
-            config["forecast_periods"],
-            multiplier=multiplier,
-            override_params={
-                "alpha": ets.get("alpha"),
-                "beta": ets.get("beta"),
-                "gamma": ets.get("gamma"),
-            },
-            seasonality=(ets.get("seasonality") or "none").lower(),
-            metric=metric,
-            growth_type=trajectory.get("growth_type") if model_type == "trajectory" else None,
-            total_growth_pct=trajectory.get("total_growth") if model_type == "trajectory" else 0,
-            growth_duration=trajectory.get("duration"),
-            trajectory_start=trajectory.get("trajectory_start") if model_type == "trajectory" else None
-        )
-
-        grouped[lot_label]["children"].append({
-            "label": data["display"]["brand"] if metric == "market_share" else "NPS",
-            "values": row["train_values"] + row["forecast_values"]
+    for s in ms_table_series:
+        ms_table.setdefault(s["lot"], {
+            "lot": s["lot"],
+            "total": [100.0] * num_months,
+            "children": []
+        })["children"].append({
+            "label": s["label"],
+            "values": s["train_values"] + s["forecast_values"]
         })
 
+    # -----------------------------------------------------
+    # ✅ FINAL RESPONSE
+    # -----------------------------------------------------
     return {
         "therapy_area": ta,
-        "indication": payload.indications[0],
-        "metric": metric.replace("_", " ").title(),
-        "product": payload.product or None,
-        "factors": rebuilt_factors,
-        "chart": chart,
-        "table": list(grouped.values())
+        "indication": indication_input,
+        "factors": factors_input,
+        "metrics_data": {
+            "nps": {
+                "chart": {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "series": nps_series,
+                },
+                "table": list(nps_table.values()),
+            },
+            "market_share": {
+                "chart": {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "series": ms_chart_series,
+                },
+                "table": list(ms_table.values()),
+            }
+        }
     }
 
 # =====================================================
@@ -521,19 +557,40 @@ def save_changes(payload: SaveChangesRequest):
     ]
 
     # --------------------------------------------------
-    # Final chart
+# Build MULTI SERIES from table (LIKE APPLY)
+# --------------------------------------------------
+    series_list = []
+
+    months = train_months + forecast_months
+    forecast_start_index = train_len
+
+    for lot_group in payload.table:
+        lot_label = lot_group.lot
+
+        for child in lot_group.children:
+            values = child.values
+
+            series_list.append({
+                "lot": lot_label,
+                "label": child.label,
+                "train_values": values[:train_len],
+                "forecast_values": values[train_len:]
+            })
+
+    # --------------------------------------------------
+    # Final chart (MULTI SERIES)
     # --------------------------------------------------
     chart = {
-        "months": train_months + forecast_months,
-        "train_values": product_values[:train_len],
-        "forecast_values": product_values[train_len:],
-        "forecast_start_index": train_len
+        "months": months,
+        "forecast_start_index": forecast_start_index,
+        "series": series_list
     }
 
     return {
         "chart": chart,
         "table": payload.table
     }
+        
 @router.post("/metrics/save")
 def save_scenario(payload: SaveScenarioRequest):
 

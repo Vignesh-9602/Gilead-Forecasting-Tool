@@ -12,7 +12,7 @@ import {
     TableHead,
     TableRow,
     Button,
-    Box,
+    Box, TextField
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import Plot from "react-plotly.js";
@@ -33,7 +33,8 @@ export default function ForecastTrendChart({
     chartData,
     tableData,
     updateChartData,
-    updateTableData
+    updateTableData,
+    updateAllMetricsData
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -110,9 +111,19 @@ export default function ForecastTrendChart({
         }
 
         setTableRows(updatedRows);
-        if (typeof updateTableData === "function") {
-            updateTableData(updatedRows);
-        }
+        // if (typeof updateTableData === "function") {
+        //     updateTableData(updatedRows);
+        // }
+
+        // if (typeof updateAllMetricsData === "function") {
+        //     updateAllMetricsData(prev => ({
+        //         ...prev,
+        //         [metric]: {
+        //             ...prev[metric],
+        //             table: updatedRows
+        //         }
+        //     }));
+        // }
     };
 
     const handleNormalize = () => {
@@ -281,14 +292,23 @@ export default function ForecastTrendChart({
             // Update table (same structure)
             setTableRows(data.table);
             setOriginalRows(data.table);
+            console.log("Saved rows:", data);
 
             // Update chart
             if (typeof updateChartData === "function") {
                 updateChartData(data.chart);
             }
 
-            if (typeof updateTableData === "function") {
-                updateTableData(data.table);
+            // 🔥 update metrics_data also
+            if (typeof updateAllMetricsData === "function") {
+                updateAllMetricsData(prev => ({
+                    ...prev,
+                    [metric]: {
+                        ...prev[metric],
+                        table: data.table,
+                        chart: data.chart
+                    }
+                }));
             }
 
             setEditable(false);
@@ -296,6 +316,62 @@ export default function ForecastTrendChart({
             console.error("Save Changes API failed:", error);
         }
     };
+
+    const renderEditableCell = (
+        value,
+        lotIndex,
+        childIndex,
+        index,
+        highlight = false
+    ) => {
+        return editable ? (
+            <input
+                value={value}
+                onChange={(e) => {
+                    const input = e.target.value;
+                    if (/^\d*\.?\d*$/.test(input)) {
+                        handleCellChange(lotIndex, childIndex, index, input);
+                    }
+                }}
+                style={{
+                    // width: "42px",
+                    width: "100%",
+                    maxWidth: "38px",
+                    border: "none",
+                    outline: "none",
+                    background: "transparent",
+                    textAlign: "center",
+                    fontSize: "14px",
+                    padding: 0,
+                }}
+            />
+        ) : (
+            <Box
+                sx={{
+                    color: highlight ? "#f59e0b" : "#334155",
+                    fontWeight: highlight ? 700 : 400,
+                }}
+            >
+                {value}
+            </Box>
+        );
+    };
+
+    const allValues = series.flatMap(item => [
+        ...item.train_values,
+        ...item.forecast_values
+    ]);
+
+    const maxValue = Math.max(...allValues);
+
+    // Option 1: simple buffer
+    const yMax = maxValue + 800;
+
+    // Option 2: round to next 100
+    const yMaxRounded = Math.ceil(maxValue / 1000) * 1000;
+
+    // Option 3: round to next 1000
+    const yMax1000 = Math.ceil(maxValue / 1500) * 1500;
 
     return (
         <>
@@ -357,6 +433,8 @@ export default function ForecastTrendChart({
                                     },
                                     yaxis: {
                                         showgrid: true,
+                                        range: [0, yMax],
+                                        // dtick: 50,
                                     },
                                 }}
                                 style={{ width: "100%" }}
@@ -452,12 +530,14 @@ export default function ForecastTrendChart({
                         <TableHead>
                             <TableRow>
                                 <TableCell
-                                    sx={{ fontWeight: 700, minWidth: 150, position: "sticky", left: 0, zIndex: 3, backgroundColor: "#fff" }}>
+                                    sx={{ fontWeight: 700, minWidth: 150, position: "sticky", left: 0, zIndex: 3, backgroundColor: "#fff", borderRight: "1px solid #E2E8F0", }}>
                                     Product / LOT
                                 </TableCell>
 
                                 {allMonths.map((month, index) => (
-                                    <TableCell key={`${month}-${index}`} align="center">
+                                    <TableCell key={`${month}-${index}`} align="center" sx={{
+                                        borderRight: "1px solid #E2E8F0",
+                                    }}>
                                         {month}
                                     </TableCell>
                                 ))}
@@ -481,7 +561,7 @@ export default function ForecastTrendChart({
                                             </TableCell>
 
                                             {(lotGroup.total || []).map((value, i) => (
-                                                <TableCell key={i} align="center" sx={{ fontWeight: 700 }}>
+                                                <TableCell key={i} align="center" sx={{ fontWeight: 700, borderRight: "1px solid #E2E8F0", }}>
                                                     {value}
                                                 </TableCell>
                                             ))}
@@ -491,7 +571,26 @@ export default function ForecastTrendChart({
                                             lotGroup.children.map((row, childIndex) => (
                                                 <TableRow key={`${lotGroup.lot}-${row.label}`}>
                                                     <TableCell
-                                                        sx={{ pl: 4, position: "sticky", left: 0, zIndex: 1, backgroundColor: "#fff", }}>
+                                                        sx={{
+                                                            pl: 4, position: "sticky", left: 0, zIndex: 1, backgroundColor: "#fff", borderRight: "1px solid #E2E8F0",
+                                                            backgroundColor:
+                                                                row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                    lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                    ? "#fffbeb"
+                                                                    : "#fff",
+
+                                                            color:
+                                                                row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                    lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                    ? "#f59e0b"
+                                                                    : "#334155",
+
+                                                            fontWeight:
+                                                                row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                    lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                    ? 700
+                                                                    : 400,
+                                                        }}>
                                                         {row.label}
                                                     </TableCell>
 
@@ -500,48 +599,39 @@ export default function ForecastTrendChart({
                                                             key={index}
                                                             align="center"
                                                             sx={{
+                                                                borderRight: "1px solid #E2E8F0",
+
+                                                                backgroundColor:
+                                                                    index < forecastStartIndex
+                                                                        ? "#f1f5f9"
+                                                                        : row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                            lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                            ? "#fffbeb"
+                                                                            : "#fff",
+
                                                                 color:
-                                                                    row.label?.toLowerCase() ===
-                                                                        selectedProduct?.toLowerCase() &&
-                                                                        index >= forecastStartIndex
+                                                                    index >= forecastStartIndex &&
+                                                                        row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                        lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
                                                                         ? "#f59e0b"
                                                                         : "#334155",
+
                                                                 fontWeight:
-                                                                    row.label?.toLowerCase() ===
-                                                                        selectedProduct?.toLowerCase() &&
-                                                                        index >= forecastStartIndex
+                                                                    index >= forecastStartIndex &&
+                                                                        row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                        lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
                                                                         ? 700
                                                                         : 400,
-                                                                backgroundColor:
-                                                                    row.label?.toLowerCase() ===
-                                                                        selectedProduct?.toLowerCase() &&
-                                                                        index >= forecastStartIndex
-                                                                        ? "#fffdf5"
-                                                                        : "white",
                                                             }}
                                                         >
-                                                            {editable ? (
-                                                                <input
-                                                                    value={value}
-                                                                    onChange={(e) =>
-                                                                        handleCellChange(
-                                                                            lotIndex,
-                                                                            childIndex,
-                                                                            index,
-                                                                            e.target.value
-                                                                        )
-                                                                    }
-                                                                    style={{
-                                                                        width: "70px",
-                                                                        height: "28px",
-                                                                        border: "1px solid #CBD5E1",
-                                                                        borderRadius: "4px",
-                                                                        padding: "4px 6px",
-                                                                        textAlign: "center",
-                                                                    }}
-                                                                />
-                                                            ) : (
-                                                                value
+                                                            {renderEditableCell(
+                                                                value,
+                                                                lotIndex,
+                                                                childIndex,
+                                                                index,
+                                                                index >= forecastStartIndex &&
+                                                                row.label?.toLowerCase() === selectedProduct?.toLowerCase() &&
+                                                                lotGroup.lot?.toLowerCase() === selectedLot?.toLowerCase()
                                                             )}
                                                         </TableCell>
                                                     ))}
@@ -556,7 +646,18 @@ export default function ForecastTrendChart({
                                     return (
                                         <TableRow key={`${row.lot}-${rowIndex}`}>
                                             <TableCell
-                                                sx={{ fontWeight: 700, position: "sticky", left: 0, zIndex: 1, backgroundColor: "#fff" }}>
+                                                sx={{
+                                                    fontWeight: 700, position: "sticky", left: 0, zIndex: 1, backgroundColor: "#fff",
+                                                    backgroundColor:
+                                                        row.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                            ? "#fffbeb"
+                                                            : "#fff",
+
+                                                    color:
+                                                        row.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                            ? "#f59e0b"
+                                                            : "#334155",
+                                                }}>
                                                 {row.lot}
                                             </TableCell>
 
@@ -565,36 +666,35 @@ export default function ForecastTrendChart({
                                                     key={index}
                                                     align="center"
                                                     sx={{
+                                                        borderRight: "1px solid #E2E8F0",
+
+                                                        backgroundColor:
+                                                            index < forecastStartIndex
+                                                                ? "#f1f5f9"
+                                                                : row.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                    ? "#fffbeb"
+                                                                    : "#fff",
+
                                                         color:
-                                                            row.lot?.toLowerCase() ===
-                                                                selectedLot?.toLowerCase() &&
-                                                                index >= forecastStartIndex
+                                                            index >= forecastStartIndex &&
+                                                                row.lot?.toLowerCase() === selectedLot?.toLowerCase()
                                                                 ? "#f59e0b"
                                                                 : "#334155",
+
+                                                        fontWeight:
+                                                            index >= forecastStartIndex &&
+                                                                row.lot?.toLowerCase() === selectedLot?.toLowerCase()
+                                                                ? 700
+                                                                : 400,
                                                     }}
                                                 >
-                                                    {editable ? (
-                                                        <input
-                                                            value={value}
-                                                            onChange={(e) =>
-                                                                handleCellChange(
-                                                                    rowIndex,
-                                                                    0,
-                                                                    index,
-                                                                    e.target.value
-                                                                )
-                                                            }
-                                                            style={{
-                                                                width: "70px",
-                                                                height: "28px",
-                                                                border: "1px solid #CBD5E1",
-                                                                borderRadius: "4px",
-                                                                padding: "4px 6px",
-                                                                textAlign: "center",
-                                                            }}
-                                                        />
-                                                    ) : (
-                                                        value
+                                                    {renderEditableCell(
+                                                        value,
+                                                        rowIndex,
+                                                        0,
+                                                        index,
+                                                        row.lot?.toLowerCase() === selectedLot?.toLowerCase() &&
+                                                        index >= forecastStartIndex
                                                     )}
                                                 </TableCell>
                                             ))}
@@ -604,8 +704,9 @@ export default function ForecastTrendChart({
                             )}
                         </TableBody>
                     </Table>
-                </TableContainer>
-            )}
+                </TableContainer >
+            )
+            }
         </>
     );
 }
