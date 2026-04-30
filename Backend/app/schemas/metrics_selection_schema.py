@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Annotated, Any, Dict, List, Optional, Literal, Union
 
 
@@ -14,25 +14,12 @@ class MetricSelectionRequest(BaseModel):
     product: Optional[str] = ""     # required only for market_share
 
 # ------------------------------------
-# ETS FACTORS
+# MODEL TYPES
 # ------------------------------------
-class ETSFactors(BaseModel):
-    alpha: float
-    beta: float
-    gamma: float
-    # trend_type: Literal["additive"]
-    # seasonality: Optional[str] = "none"
+from pydantic import BaseModel, model_validator
+from typing import Optional, Literal, List
 
-# ------------------------------------
-# TRAJECTORY FACTORS
-# ------------------------------------
-class TrajectoryFactors(BaseModel):
-    growth_type: Literal["linear", "exponential", "logarithmic"]
-    total_growth: float
-    duration: int
-    trajectory_start: Optional[str] = None
-
-from typing import Literal
+ModelType = Literal["ets", "linear", "exponential", "logarithmic", "s_curve"]
 
 MultiplierHorizon = Literal[
     "Forecast",
@@ -40,50 +27,66 @@ MultiplierHorizon = Literal[
     "Both History & Forecast"
 ]
 
+class ETSFactors(BaseModel):
+    alpha: float
+    beta: float
+    gamma: float
 
-class RecalculateETSFactors(BaseModel):
-    multiplier: float
+class GrowthFactors(BaseModel):
+    total_growth_pct: float
+    duration: int
+    k: Optional[float] = None  # required for exp/log/s_curve; not allowed for linear
+
+class RecalculateFactors(BaseModel):
+    multiplier: float = 1.0
     multiplier_horizon: MultiplierHorizon = "Forecast"
-    ets: ETSFactors
 
-class RecalculateTrajectoryFactors(BaseModel):
-    multiplier: float
-    multiplier_horizon: MultiplierHorizon = "Forecast"
-    ets: ETSFactors
-    trajectory: TrajectoryFactors
+    ets: Optional[ETSFactors] = None
+    growth: Optional[GrowthFactors] = None  # used for linear/exp/log/s_curve
 
-class MetricRecalculateETSRequest(BaseModel):
+class MetricRecalculateRequest(BaseModel):
     ta_name: str
     indications: List[str]
     lots: List[str]
     metric_filter: str
     product: Optional[str] = ""
 
-    model_type: Literal["ets"]
-    factors: RecalculateETSFactors
+    model_type: ModelType
+    factors: RecalculateFactors
 
-class MetricRecalculateTrajectoryRequest(BaseModel):
-    ta_name: str
-    indications: List[str]
-    lots: List[str]
-    metric_filter: str
-    product: Optional[str] = ""
+    @model_validator(mode="after")
+    def validate_payload(self):
+        mt = self.model_type
+        f = self.factors
 
-    model_type: Literal["trajectory"]
-    factors: RecalculateTrajectoryFactors
-# ------------------------------------
-# UNION (IMPORTANT)
-# ------------------------------------
+        # ETS selected
+        if mt == "ets":
+            if f.ets is None:
+                raise ValueError("For model_type='ets', factors.ets is required")
+            if f.growth is not None:
+                raise ValueError("For model_type='ets', do not send factors.growth")
+            return self
 
+        # Non-ETS selected (linear/exp/log/s_curve)
+        if f.growth is None:
+            raise ValueError(f"For model_type='{mt}', factors.growth is required")
+        if f.ets is not None:
+            raise ValueError(f"For model_type='{mt}', do not send factors.ets")
 
-MetricRecalculateRequest = Annotated[
-    Union[
-        MetricRecalculateETSRequest,
-        MetricRecalculateTrajectoryRequest
-    ],
-    Field(discriminator="model_type")
-]
+        if f.growth.duration <= 0:
+            raise ValueError("duration must be > 0")
 
+        # k rules by model
+        if mt == "linear":
+            if f.growth.k is not None:
+                raise ValueError("linear model should not include k")
+        else:
+            if f.growth.k is None:
+                raise ValueError(f"{mt} model requires k")
+            if f.growth.k <= 0:
+                raise ValueError("k must be > 0")
+
+        return self
 
 # ------------------------------------
 # save changes

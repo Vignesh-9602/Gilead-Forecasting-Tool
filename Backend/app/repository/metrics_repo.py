@@ -21,7 +21,7 @@ def get_oncology_metrics(ta_name: str):
              AND ms.lot = mp.lot
              AND ms.year = mp.year
              AND ms.month = mp.month
-            WHERE ms.ta = %s AND ms.brand in ('Trodelvy','Trodelvy Combo','TPC')
+            WHERE ms.ta = %s 
             ORDER BY ms.indication, ms.lot, ms.brand, ms.year, ms.month
             """,
             (ta_name,)

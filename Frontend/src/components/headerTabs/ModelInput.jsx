@@ -15,19 +15,18 @@ export default function ModelInput() {
     const [editable, setEditable] = useState(false);
 
     const [modelSelection, setModelSelection] = useState("ets");
+    const [allFactors, setAllFactors] = useState({});
 
-    const [growthType, setGrowthType] = useState("linear");
     const [totalGrowth, setTotalGrowth] = useState(10);
     const [duration, setDuration] = useState(12);
+    const [kValue, setKValue] = useState(1);
 
     const [multiplier, setMultiplier] = useState(1.0);
     const [multiplierHorizon, setMultiplierHorizon] = useState("Forecast");
+
     const [alpha, setAlpha] = useState(0);
     const [beta, setBeta] = useState(0);
     const [gamma, setGamma] = useState(0);
-
-    // const [trendType, setTrendType] = useState("");
-    // const [seasonality, setSeasonality] = useState("None");
 
     const [mappingData, setMappingData] = useState({});
     const [filterOptions, setFilterOptions] = useState({
@@ -47,7 +46,7 @@ export default function ModelInput() {
     const [etsFactors, setEtsFactors] = useState({});
     const [trajectoryFactors, setTrajectoryFactors] = useState({});
 
-    const [showTrajectory, setShowTrajectory] = useState(false);
+    // const [showTrajectory, setShowTrajectory] = useState(false);
     const [trajectoryStart, setTrajectoryStart] = useState("");
 
     const { favState } = useContext(GlobalContext);
@@ -60,16 +59,24 @@ export default function ModelInput() {
     }, [therapyArea]);
 
     useEffect(() => {
-        setAlpha(etsFactors?.alpha ?? 0);
-        setBeta(etsFactors?.beta ?? 0);
-        setGamma(etsFactors?.gamma ?? 0);
-        // setTrendType(etsFactors?.trend_type || "");
+        if (!allFactors || !Object.keys(allFactors).length) return;
 
-        setGrowthType(trajectoryFactors?.growth_type || "linear");
-        setTotalGrowth(trajectoryFactors?.total_growth ?? 0);
-        setDuration(trajectoryFactors?.duration ?? 12);
-        setTrajectoryStart(trajectoryFactors?.trajectory_start || "");
-    }, [etsFactors, trajectoryFactors]);
+        const selected = modelSelection;
+
+        if (selected === "ets") {
+            const ets = allFactors?.ets || {};
+            setAlpha(ets?.alpha ?? 0);
+            setBeta(ets?.beta ?? 0);
+            setGamma(ets?.gamma ?? 0);
+        } else {
+            const traj = allFactors?.[selected] || {};
+            setTotalGrowth(traj?.total_growth ?? 0);
+            setDuration(traj?.duration ?? 12);
+            setTrajectoryStart(traj?.trajectory_start || "");
+            setKValue(traj?.k_value ?? 1);
+        }
+
+    }, [modelSelection, allFactors]);
 
     const fetchMetricFilters = async () => {
         try {
@@ -111,29 +118,56 @@ export default function ModelInput() {
             const response = await applyMetricFilters(payload);
             const data = response?.data;
 
-            const ets = data?.factors?.ets || {};
-            const trajectory = data?.factors?.trajectory || {};
+            const factors = data?.factors || {};
+            const activeModel = factors?.active_model || "ets";
 
-            setMultiplier(data?.factors?.multiplier ?? 1);
-            setMultiplierHorizon(data?.factors?.multiplier_horizon ?? "Forecast");
+            setModelSelection(activeModel);
+            setAllFactors(factors);
 
-            setEtsFactors(ets);
-            setTrajectoryFactors(trajectory);
+            // const ets = data?.factors?.ets || {};
+            // const trajectory = data?.factors?.trajectory || {};
 
+            setMultiplier(factors?.multiplier ?? 1);
+            setMultiplierHorizon(factors?.multiplier_horizon ?? "Forecast");
+
+            const ets = factors?.ets || {};
             setAlpha(ets?.alpha ?? 0);
             setBeta(ets?.beta ?? 0);
             setGamma(ets?.gamma ?? 0);
-            // setTrendType(ets?.trend_type || "");
 
-            setGrowthType(trajectory?.growth_type || "linear");
-            setTotalGrowth(trajectory?.total_growth ?? 0);
-            setDuration(trajectory?.duration ?? 12);
+            // setEtsFactors(ets);
+            // setTrajectoryFactors(trajectory);
 
-            // setTrajectoryStart(
-            //     trajectory?.trajectory_start ||
-            //     data?.chart?.months?.[data?.chart?.forecast_start_index] ||
-            //     ""
-            // );
+            // setAlpha(ets?.alpha ?? 0);
+            // setBeta(ets?.beta ?? 0);
+            // setGamma(ets?.gamma ?? 0);
+
+            // setGrowthType(trajectory?.growth_type || "linear");
+            // setTotalGrowth(trajectory?.total_growth ?? 0);
+            // setDuration(trajectory?.duration ?? 12);
+            // setKValue(trajectory?.k_value ?? 1);
+            // trajectory based on active model
+            if (activeModel !== "ets") {
+                const traj = factors?.growth || factors?.[activeModel] || {};
+
+                setTotalGrowth(
+                    traj?.total_growth ??
+                    traj?.total_growth_pct ??
+                    0
+                );
+
+                setDuration(traj?.duration ?? 12);
+
+                setTrajectoryStart(
+                    traj?.trajectory_start || ""
+                );
+
+                setKValue(
+                    traj?.k_value ??
+                    traj?.k ??
+                    1
+                );
+            }
 
             // store both metrics (important for save scenario)
             setAllMetricsData(data?.metrics_data || {});
@@ -144,13 +178,13 @@ export default function ModelInput() {
             setChartData(selectedMetricData?.chart || null);
             setTableData(selectedMetricData?.table || []);
 
-            setTrajectoryStart(
-                trajectory?.trajectory_start ||
-                selectedMetricData?.chart?.months?.[
-                selectedMetricData?.chart?.forecast_start_index
-                ] ||
-                ""
-            );
+            // setTrajectoryStart(
+            //     trajectory?.trajectory_start ||
+            //     selectedMetricData?.chart?.months?.[
+            //     selectedMetricData?.chart?.forecast_start_index
+            //     ] ||
+            //     ""
+            // );
             setEditable(false);
         } catch (error) {
             console.error("Failed to apply metric filters", error);
@@ -158,46 +192,89 @@ export default function ModelInput() {
     };
 
     const handleRecalculate = async () => {
+        let modelFactors = {};
+
+        if (modelSelection === "ets") {
+            modelFactors = {
+                ets: {
+                    alpha,
+                    beta,
+                    gamma
+                }
+            };
+        } else {
+            const growthPayload = {
+                total_growth_pct: totalGrowth,
+                duration,
+                trajectory_start: trajectoryStart
+            };
+
+            // only non-linear models need k
+            if (modelSelection !== "linear") {
+                growthPayload.k = Number(kValue);
+            }
+
+            modelFactors = {
+                growth: growthPayload
+            };
+        }
+
         const payload = {
             ta_name: therapyArea,
             indications: indication ? [indication] : [],
             lots: lot ? [lot] : [],
             metric_filter: metric,
             product: metric === "market_share" ? brand : "",
-            model_type: showTrajectory ? "trajectory" : "ets",
+            model_type: modelSelection,
             factors: {
                 multiplier,
                 multiplier_horizon: multiplierHorizon,
-                ets: {
-                    alpha,
-                    beta,
-                    gamma,
-                    // trend_type: trendType,
-                    // seasonality: seasonality || "none",
-                },
-                ...(showTrajectory && {
-                    trajectory: {
-                        growth_type: growthType,
-                        total_growth: totalGrowth,
-                        duration,
-                        trajectory_start: trajectoryStart,
-                    },
-                }),
-            },
+                ...modelFactors
+            }
         };
 
         try {
             const response = await recalculateMetrics(payload);
             const data = response?.data;
 
-            const ets = data?.factors?.ets || {};
-            const trajectory = data?.factors?.trajectory || {};
+            const factors = data?.factors || {};
+            const activeModel = factors?.active_model;
 
-            setMultiplier(data?.factors?.multiplier ?? 1);
-            setMultiplierHorizon(data?.factors?.multiplier_horizon ?? "Forecast");
+            // const ets = data?.factors?.ets || {};
+            // const trajectory = data?.factors?.trajectory || {};
+            setAllFactors(factors);
 
-            setEtsFactors(ets);
-            setTrajectoryFactors(trajectory);
+            setMultiplier(factors?.multiplier ?? 1);
+            setMultiplierHorizon(factors?.multiplier_horizon ?? "Forecast");
+
+            // setEtsFactors(ets);
+            // setTrajectoryFactors(trajectory);
+            if (activeModel === "ets") {
+                const ets = factors?.ets || {};
+                setAlpha(ets.alpha ?? 0);
+                setBeta(ets.beta ?? 0);
+                setGamma(ets.gamma ?? 0);
+            } else {
+                const traj = factors?.growth || factors?.[activeModel] || {};
+
+                setTotalGrowth(
+                    traj?.total_growth ??
+                    traj?.total_growth_pct ??
+                    0
+                );
+
+                setDuration(traj?.duration ?? 12);
+
+                setTrajectoryStart(
+                    traj?.trajectory_start || ""
+                );
+
+                setKValue(
+                    traj?.k_value ??
+                    traj?.k ??
+                    1
+                );
+            }
 
             // update chart and table
             setAllMetricsData(data?.metrics_data || {});
@@ -271,20 +348,34 @@ export default function ModelInput() {
             factors: {
                 multiplier,
                 multiplier_horizon: multiplierHorizon,
-                ets: {
-                    alpha,
-                    beta,
-                    gamma,
-                    // trend_type: trendType,
-                    // seasonality: seasonality || "none"
-                },
-                trajectory: {
-                    growth_type: growthType,
+
+                ets: { alpha, beta, gamma },
+
+                linear: {
                     total_growth: totalGrowth,
                     duration,
                     trajectory_start: trajectoryStart
                 },
-                active_model: showTrajectory ? "trajectory" : "ets"
+                exponential: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: kValue
+                },
+                logarithmic: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: kValue
+                },
+                s_curve: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: kValue
+                },
+
+                active_model: modelSelection
             },
 
             metrics_data: allMetricsData
@@ -300,6 +391,75 @@ export default function ModelInput() {
             alert("Failed to save scenario");
         }
     };
+
+    const TrajectoryControls = ({ showKValue }) => (
+        <>
+            <Box sx={{ width: 160 }}>
+                <Typography>
+                    Total Growth % <b>{totalGrowth.toFixed(1)}%</b>
+                </Typography>
+                <Slider
+                    value={totalGrowth}
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    disabled={!editable}
+                    onChange={(e, val) => setTotalGrowth(val)}
+                />
+            </Box>
+
+            <Box sx={{ width: 160 }}>
+                <Typography>
+                    Duration (Mos) <b>{duration}</b>
+                </Typography>
+                <Slider
+                    value={duration}
+                    min={0}
+                    max={24}
+                    step={1}
+                    disabled={!editable}
+                    onChange={(e, val) => setDuration(val)}
+                />
+            </Box>
+
+            {showKValue && (
+                <Box sx={{ width: 160 }}>
+                    <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700 }}>
+                        K Value
+                    </Typography>
+                    <TextField
+                        placeholder="e.g. 1"
+                        value={kValue}
+                        onChange={(e) => setKValue(e.target.value)}
+                        sx={inputStyle}
+                    />
+                </Box>
+            )}
+
+            <Box>
+                <Typography sx={{ mb: 1, fontSize: "13px", fontWeight: 700 }}>
+                    TRAJECTORY START
+                </Typography>
+
+                <FormControl sx={inputStyle}>
+                    <Select
+                        value={trajectoryStart}
+                        onChange={(e) => setTrajectoryStart(e.target.value)}
+                        disabled={!editable}
+                    >
+                        {chartData?.months?.map((month) => (
+                            <MenuItem key={month} value={month}>
+                                {new Date(month).toLocaleDateString("en-US", {
+                                    month: "short",
+                                    year: "2-digit",
+                                })}
+                            </MenuItem>
+                        ))}
+                    </Select>
+                </FormControl>
+            </Box>
+        </>
+    );
 
     return (
         <Box sx={{ p: 3 }}>
@@ -474,18 +634,6 @@ export default function ModelInput() {
                         <Typography sx={{ fontSize: "14px", fontWeight: 700, color: "#1d4ed8", textTransform: "uppercase" }} > STATISTICAL PROJECTION ENGINE </Typography>
                         <Box display="flex" gap={2}>
                             <Button
-                                variant={showTrajectory ? "contained" : "outlined"}
-                                size="small"
-                                onClick={() => setShowTrajectory(!showTrajectory)}
-                                sx={{
-                                    textTransform: "none",
-                                    borderRadius: "8px",
-                                }}
-                            >
-                                Trajectory
-                            </Button>
-
-                            <Button
                                 variant="outlined"
                                 size="small"
                                 onClick={() => setEditable(!editable)}
@@ -510,146 +658,48 @@ export default function ModelInput() {
                                     disabled={!editable}
                                 >
                                     <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
-                                    {/* <MenuItem value="trajectory">Trajectory</MenuItem> */}
+                                    <MenuItem value="linear">Linear</MenuItem>
+                                    <MenuItem value="exponential">Exponential</MenuItem>
+                                    <MenuItem value="logarithmic">Logarithmic</MenuItem>
+                                    <MenuItem value="scurve">S-Curve</MenuItem>
                                 </Select>
                             </FormControl>
-                            {/* <Box sx={{ height: 35, px: 2, display: "flex", alignItems: "center", gap: 1, border: "1px solid #D8DEE8", borderRadius: "8px", backgroundColor: "#d7dde6", minWidth: "120px", }} >
-                                <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: "#22c55e", }} />
-                                <Typography>Exponential Smoothing(ETS)</Typography>
-                            </Box> */}
                         </Box>
 
                         {/* ETS BLOCK */}
-                        {/* {modelSelection === "ets" && ( */}
-                        <>
-                            {[
-                                // { label: "MULTIPLIER", value: multiplier, setValue: setMultiplier, min: 0, max: 3, },
-                                { label: "LEVEL (α)", value: alpha, setValue: setAlpha, min: 0, max: 1, },
-                                { label: "TREND (β)", value: beta, setValue: setBeta, min: 0, max: 1, },
-                                { label: "DAMPING (φ)", value: gamma, setValue: setGamma, min: 0, max: 1, },
-
-                            ].map((item, index) => (
-                                <Box key={index} sx={{ width: 160 }}>
-                                    <Typography sx={{ fontSize: "14px", mb: 1 }}>
-                                        {item.label}{" "}
-                                        <span style={{ fontWeight: 700 }}>{item.value.toFixed(2)}</span>
-                                    </Typography>
-
-                                    <Slider
-                                        value={item.value}
-                                        min={item.min}
-                                        max={item.max}
-                                        step={0.01}
-                                        disabled={!editable}
-                                        onChange={(e, val) => item.setValue(val)}
-                                    />
-                                </Box>
-                            ))}
-
-                            {/* TREND TYPE */}
-                            {/* <Box>
-                                <Typography sx={{ mb: 1, fontSize: "13px", fontWeight: 700 }}>
-                                    TREND TYPE
-                                </Typography>
-                                <FormControl sx={inputStyle}>
-                                    <Select
-                                        value={trendType}
-                                        onChange={(e) => setTrendType(e.target.value)}
-                                        disabled={!editable}
-                                        size="small"
-                                        displayEmpty
-                                    >
-                                        <MenuItem value="" disabled>
-                                            Select Trend Type
-                                        </MenuItem>
-                                        <MenuItem value="additive">Additive</MenuItem>
-                                        <MenuItem value="multiplicative">Multiplicative</MenuItem>
-                                    </Select>
-                                </FormControl>
-                            </Box> */}
-                        </>
-                        {/* )} */}
-
-                        {/* TRAJECTORY BLOCK */}
-                        {showTrajectory && (
+                        {modelSelection === "ets" && (
                             <>
-                                {/* <Box sx={{ borderLeft: "10px solid #d1d5db"}} /> */}
-                                <Divider orientation="vertical" flexItem sx={{ mx: 0 }} />
+                                {[
+                                    // { label: "MULTIPLIER", value: multiplier, setValue: setMultiplier, min: 0, max: 3, },
+                                    { label: "LEVEL (α)", value: alpha, setValue: setAlpha, min: 0, max: 1, },
+                                    { label: "TREND (β)", value: beta, setValue: setBeta, min: 0, max: 1, },
+                                    { label: "DAMPING (φ)", value: gamma, setValue: setGamma, min: 0, max: 1, },
 
-                                <Box>
-                                    <Typography sx={{ mb: 1, fontSize: "13px", fontWeight: 700 }}>
-                                        TRAJECTORY START
-                                    </Typography>
+                                ].map((item, index) => (
+                                    <Box key={index} sx={{ width: 160 }}>
+                                        <Typography sx={{ fontSize: "14px", mb: 1 }}>
+                                            {item.label}{" "}
+                                            <span style={{ fontWeight: 700 }}>{item.value.toFixed(2)}</span>
+                                        </Typography>
 
-                                    <FormControl sx={inputStyle}>
-                                        <Select
-                                            value={trajectoryStart}
-                                            onChange={(e) => setTrajectoryStart(e.target.value)}
+                                        <Slider
+                                            value={item.value}
+                                            min={item.min}
+                                            max={item.max}
+                                            step={0.01}
                                             disabled={!editable}
-                                        >
-                                            {chartData?.months?.map((month) => (
-                                                <MenuItem key={month} value={month}>
-                                                    {new Date(month).toLocaleDateString("en-US", {
-                                                        month: "short",
-                                                        year: "2-digit",
-                                                    })}
-                                                </MenuItem>
-                                            ))}
-                                        </Select>
-                                    </FormControl>
-                                </Box>
-
-                                <Box>
-                                    <Typography sx={{ mb: 1, fontSize: "13px", fontWeight: 700 }}>
-                                        GROWTH TYPE
-                                    </Typography>
-
-                                    <FormControl sx={inputStyle}>
-                                        <Select
-                                            value={growthType}
-                                            onChange={(e) => setGrowthType(e.target.value)}
-                                            disabled={!editable}
-                                        >
-                                            <MenuItem value="linear">Linear</MenuItem>
-                                            <MenuItem value="exponential">Exponential</MenuItem>
-                                            <MenuItem value="logarithmic">Logarithmic</MenuItem>
-                                        </Select>
-                                    </FormControl>
-                                </Box>
-
-                                <Box sx={{ width: 220 }}>
-                                    <Typography sx={{ mb: 1 }}>
-                                        Total Growth % <b>{totalGrowth.toFixed(1)}%</b>
-                                    </Typography>
-
-                                    <Slider
-                                        value={totalGrowth}
-                                        min={0}
-                                        max={100}
-                                        step={0.1}
-                                        disabled={!editable}
-                                        onChange={(e, val) => setTotalGrowth(val)}
-                                    />
-                                </Box>
-
-                                <Box sx={{ width: 200 }}>
-                                    <Typography sx={{ mb: 1 }}>
-                                        Duration (Mos) <b>{duration}</b>
-                                    </Typography>
-
-                                    <Slider
-                                        value={duration}
-                                        min={0}
-                                        max={24}
-                                        step={1}
-                                        disabled={!editable}
-                                        onChange={(e, val) => setDuration(val)}
-                                    />
-                                </Box>
+                                            onChange={(e, val) => item.setValue(val)}
+                                        />
+                                    </Box>
+                                ))}
                             </>
                         )}
 
-                        <Divider orientation="vertical" flexItem sx={{ mx: 0 }} />
+                        {["linear", "exponential", "logarithmic", "scurve"].includes(modelSelection) && (
+                            <TrajectoryControls
+                                showKValue={modelSelection !== "linear"}
+                            />
+                        )}
 
                         <Box sx={{ width: 160 }}>
                             <Typography sx={{ mb: 1, fontSize: "14px" }}>

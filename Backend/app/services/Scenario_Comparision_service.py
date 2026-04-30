@@ -142,12 +142,12 @@ def apply_filters(payload):
 
             chart_series = chart_data.get("series", [])
 
-            # 👉 Filter selected LOT
+            # Filter selected LOT
             lot_series = [
                 s for s in chart_series if s.get("lot") == selected_lot
             ]
 
-            # 👉 Get TOTAL NPS series (LOT level)
+            # Get TOTAL NPS series (LOT level)
             # assuming stored like: train_values + forecast_values
             total_nps_series = chart_data.get("train_values", []) + chart_data.get("forecast_values", [])
 
@@ -159,7 +159,7 @@ def apply_filters(payload):
                 forecast_vals = s.get("forecast_values", [])
                 ms_values = (train_vals or []) + (forecast_vals or [])
 
-                # 🔥 CORE LOGIC
+                # CORE LOGIC
                 product_nps = [
                     (ms / 100.0) * nps   # if MS stored as %
                     for ms, nps in zip(ms_values, total_nps_series)

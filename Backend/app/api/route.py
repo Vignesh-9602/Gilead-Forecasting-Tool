@@ -420,6 +420,6 @@ def get_metrics_filters(ta_name: str):
         "data": data,
         "metric_filters": [
             { "label": "Market Share", "value": "market_share" },
-            { "label": "New Patient Start", "value": "nps" }
+            { "label": "Overall Market Volume", "value": "nps" }
         ]
     }

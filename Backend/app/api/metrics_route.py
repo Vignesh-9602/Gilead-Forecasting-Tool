@@ -165,7 +165,7 @@ def apply_metrics(payload: MetricSelectionRequest):
 
         for lot, chart, product in ms_rows:
 
-            # ✅ CHART → selected LOT only
+            #   CHART → selected LOT only
             if lot.lower() == selected_lot_code:
                 ms_series.append({
                     "lot": lot,
@@ -174,7 +174,7 @@ def apply_metrics(payload: MetricSelectionRequest):
                     "forecast_values": chart["forecast_values"],
                 })
 
-            # ✅ TABLE → all LOTs + all products
+            #   TABLE → all LOTs + all products
             ms_table.setdefault(lot, {
                 "lot": lot,
                 "total": [100.0] * len(months),
@@ -210,7 +210,7 @@ def apply_metrics(payload: MetricSelectionRequest):
         conn.close()
 
     # =====================================================
-    # ✅ FINAL RESPONSE
+    #   FINAL RESPONSE
     # =====================================================
     return {
         "therapy_area": ta,
@@ -239,6 +239,8 @@ def apply_metrics(payload: MetricSelectionRequest):
 # =====================================================
 # RECALCULATE
 # =====================================================
+from fastapi import HTTPException
+
 @router.post("/metrics/recalculate")
 def recalculate_metrics(payload: MetricRecalculateRequest):
 
@@ -258,17 +260,22 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     selected_product_input = payload.product.strip() if payload.product else None
     selected_product_l = selected_product_input.lower() if selected_product_input else None
 
-    model_type = payload.model_type.lower()
-    factors_input = payload.factors.dict()
+    model_type = (payload.model_type or "ets").lower().strip()
 
+    # Pydantic v2 safe dump
+    factors_input = payload.factors.model_dump()
     multiplier = factors_input.get("multiplier", 1.0)
     multiplier_horizon = factors_input.get("multiplier_horizon", "Forecast")
 
-    ets = factors_input.get("ets", {})
-    trajectory = factors_input.get("trajectory", {})
+    ets = factors_input.get("ets") or {}
+    growth = factors_input.get("growth") or {}
+
+    # Market share requires product
+    if metric_to_recalc == "market_share" and not selected_product_l:
+        raise HTTPException(400, "product is required for market_share recalculate")
 
     # -----------------------------------------------------
-    # 1️⃣ LOAD CONFIG
+    # LOAD CONFIG
     # -----------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
@@ -286,12 +293,13 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         cur.close()
         conn.close()
 
+    # NOTE: parse_month_date should accept both string and datetime
     train_start = parse_month_date(config["train_start_date"])
     train_end = parse_month_date(config["train_end_date"])
-    forecast_periods = config["forecast_periods"]
+    forecast_periods = int(config["forecast_periods"])
 
     # -----------------------------------------------------
-    # 2️⃣ LOAD BASE SERIES FROM DB (ONLY SOURCE)
+    # LOAD BASE SERIES FROM DB (ONLY SOURCE)
     # -----------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
@@ -315,24 +323,25 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     # SERIES CONTAINERS
     # -----------------------------------------------------
     nps_series = []
-    ms_chart_series = []   # ✅ Chart → selected LOT only
-    ms_table_series = []   # ✅ Table → all LOTs
+    ms_chart_series = []   # chart → selected LOT only
+    ms_table_series = []   # table → all LOTs
 
     months = None
     forecast_start_index = None
 
     # -----------------------------------------------------
-    # 3️⃣ LOOP THROUGH BASE SERIES
+    # LOOP THROUGH BASE SERIES
     # -----------------------------------------------------
     for metric, lot, product, base_chart in base_rows:
 
-        lot_l = lot.lower()
-        product_l = product.lower() if product else None
+        metric_l = (metric or "").lower()
+        lot_l = (lot or "").lower()
+        product_l = (product or "").lower() if product else None
 
         is_selected = (
-            metric == metric_to_recalc
+            metric_l == metric_to_recalc
             and lot_l == selected_lot_l
-            and (metric != "market_share" or product_l == selected_product_l)
+            and (metric_l != "market_share" or product_l == selected_product_l)
         )
 
         base_months = base_chart["months"]
@@ -347,33 +356,41 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
             full_series_months = base_months
             full_series_values = base_train_values + base_forecast_values
 
-            row = process_forecast(
-                full_series_months,
-                full_series_values,
-                train_start,
-                train_end,
-                forecast_periods,
-                multiplier=multiplier,
-                multiplier_horizon=multiplier_horizon,
-                override_params={
-                    "alpha": ets.get("alpha"),
-                    "beta": ets.get("beta"),
-                    "gamma": ets.get("gamma"),
-                },
-                seasonality=ets.get("seasonality", "none"),
-                metric=metric,
-                growth_type=trajectory.get("growth_type")
-                    if model_type == "trajectory"
-                    else None,
-                total_growth_pct=trajectory.get("total_growth", 0)
-                    if model_type == "trajectory"
-                    else 0,
-                growth_duration=trajectory.get("duration"),
-                trajectory_start=trajectory.get("trajectory_start"),
-            )
+            if model_type == "ets":
+                # ETS override params from request
+                row = process_forecast(
+                    full_series_months,
+                    full_series_values,
+                    train_start,
+                    train_end,
+                    forecast_periods,
+                    model_type="ets",
+                    metric=metric_l,
+                    multiplier=multiplier,
+                    multiplier_horizon=multiplier_horizon,
+                    alpha=ets.get("alpha"),
+                    beta=ets.get("beta"),
+                    gamma=ets.get("gamma")
+                )
+            else:
+                # Growth models (linear/exponential/logarithmic/s_curve)
+                row = process_forecast(
+                    full_series_months,
+                    full_series_values,
+                    train_start,
+                    train_end,
+                    forecast_periods,
+                    model_type=model_type,
+                    metric=metric_l,
+                    multiplier=multiplier,
+                    multiplier_horizon=multiplier_horizon,
+                    total_growth_pct=growth.get("total_growth_pct", 0),
+                    duration=growth.get("duration", forecast_periods),
+                    k=growth.get("k"),
+                )
 
         # ---------------------------
-        # KEEP BASE
+        # KEEP BASE FOR OTHERS
         # ---------------------------
         else:
             row = {
@@ -383,12 +400,14 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                 "forecast_start_index": base_start_idx,
             }
 
-        months = row["months"]
-        forecast_start_index = row["forecast_start_index"]
+        # capture shared timeline once
+        if months is None:
+            months = row["months"]
+            forecast_start_index = row["forecast_start_index"]
 
         series_entry = {
             "lot": lot,
-            "label": product if metric == "market_share" else "NPS",
+            "label": product if metric_l == "market_share" else "NPS",
             "train_values": row["train_values"],
             "forecast_values": row["forecast_values"],
         }
@@ -396,22 +415,22 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         # ---------------------------
         # ROUTING TO CHART / TABLE
         # ---------------------------
-        if metric == "nps":
+        if metric_l == "nps":
             nps_series.append(series_entry)
 
-        else:
-            # ✅ Market share table → all LOTs
+        elif metric_l == "market_share":
+            # table → all lots
             ms_table_series.append(series_entry)
 
-            # ✅ Market share chart → selected LOT only
+            # chart → selected lot only
             if lot_l == selected_lot_l:
                 ms_chart_series.append(series_entry)
 
     # -----------------------------------------------------
-    # 4️⃣ BUILD TABLES (DERIVED)
+    # BUILD TABLES
     # -----------------------------------------------------
     nps_table, ms_table = {}, {}
-    num_months = len(months)
+    num_months = len(months) if months else 0
 
     for s in nps_series:
         nps_table.setdefault(s["lot"], {
@@ -434,12 +453,37 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         })
 
     # -----------------------------------------------------
-    # ✅ FINAL RESPONSE
+    # BUILD RESPONSE FACTORS (ONLY ACTIVE MODEL)
+    # -----------------------------------------------------
+    active_factors = {
+        "active_model": model_type,
+        "multiplier": float(multiplier),
+        "multiplier_horizon": multiplier_horizon,
+    }
+
+    if model_type == "ets":
+        active_factors["ets"] = {
+            "alpha": ets.get("alpha"),
+            "beta": ets.get("beta"),
+            "gamma": ets.get("gamma"),
+            **({"seasonality": ets.get("seasonality", "none")} if "seasonality" in ets else {})
+        }
+    else:
+        block = {
+            "total_growth_pct": growth.get("total_growth_pct"),
+            "duration": growth.get("duration"),
+        }
+        if model_type != "linear":
+            block["k"] = growth.get("k")
+        active_factors[model_type] = block
+
+    # -----------------------------------------------------
+    # FINAL RESPONSE (apply-like)
     # -----------------------------------------------------
     return {
         "therapy_area": ta,
         "indication": indication_input,
-        "factors": factors_input,
+        "factors": active_factors,
         "metrics_data": {
             "nps": {
                 "chart": {
@@ -501,7 +545,7 @@ def save_changes(payload: SaveChangesRequest):
         cur.close()
         conn.close()
 
-    forecast_periods = config["forecast_periods"]
+    forecast_periods = int(config["forecast_periods"])
     train_start_date = config["train_start_date"]
 
     # --------------------------------------------------
@@ -541,29 +585,34 @@ def save_changes(payload: SaveChangesRequest):
         )
 
     # --------------------------------------------------
-    # Build MONTHS (same logic as your earlier version)
+    # Build MONTHS
     # --------------------------------------------------
     train_start = datetime.fromisoformat(train_start_date).replace(day=1)
 
+    # train_len can be 0; handle safely
     train_months = [
         (train_start + relativedelta(months=i)).strftime("%Y-%m-%d")
         for i in range(train_len)
     ]
 
-    last_train_month = datetime.fromisoformat(train_months[-1])
+    if train_len > 0:
+        last_train_month = datetime.fromisoformat(train_months[-1])
+    else:
+        # if no training months, consider train_start as base for forecast months
+        last_train_month = train_start
+
     forecast_months = [
         (last_train_month + relativedelta(months=i)).strftime("%Y-%m-%d")
         for i in range(1, forecast_periods + 1)
     ]
 
-    # --------------------------------------------------
-# Build MULTI SERIES from table (LIKE APPLY)
-# --------------------------------------------------
-    series_list = []
-
     months = train_months + forecast_months
     forecast_start_index = train_len
 
+    # --------------------------------------------------
+    # Build MULTI SERIES from table (LIKE APPLY)
+    # --------------------------------------------------
+    series_list = []
     for lot_group in payload.table:
         lot_label = lot_group.lot
 
@@ -586,11 +635,41 @@ def save_changes(payload: SaveChangesRequest):
         "series": series_list
     }
 
-    return {
+    # --------------------------------------------------
+    # APPLY/RECALC-LIKE RESPONSE SHAPE (ONLY RETURN CHANGED)
+    # --------------------------------------------------
+
+    # Build metric block for the edited metric
+    updated_metric_block = {
         "chart": chart,
         "table": payload.table
     }
-        
+
+    # Placeholders for the other metric (so FE always gets both keys)
+    empty_metric_block = {
+        "chart": {
+            "months": months,                 # keep timeline consistent
+            "forecast_start_index": forecast_start_index,
+            "series": []
+        },
+        "table": []
+    }
+
+    metrics_data = {
+        "nps": updated_metric_block if metric == "nps" else empty_metric_block,
+        "market_share": updated_metric_block if metric == "market_share" else empty_metric_block
+    }
+
+    # If your SaveChangesRequest contains indication/factors, return them. If not, keep safe defaults.
+    indication = getattr(payload, "indication", None) or ""
+    factors = getattr(payload, "factors", None) or {}
+
+    return {
+        "therapy_area": payload.therapy_area,
+        "indication": indication,
+        "metrics_data": metrics_data
+    }
+
 @router.post("/metrics/save")
 def save_scenario(payload: SaveScenarioRequest):
 

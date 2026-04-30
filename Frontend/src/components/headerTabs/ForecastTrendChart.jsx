@@ -289,26 +289,28 @@ export default function ForecastTrendChart({
             const res = await saveChanges(payload);
             const data = res.data;
 
-            // Update table (same structure)
-            setTableRows(data.table);
-            setOriginalRows(data.table);
-            console.log("Saved rows:", data);
+            const updatedMetricData = data?.metrics_data?.[metric];
 
-            // Update chart
-            if (typeof updateChartData === "function") {
-                updateChartData(data.chart);
-            }
+            if (updatedMetricData) {
+                // update table after backend recalculation
+                setTableRows(updatedMetricData.table || []);
+                setOriginalRows(updatedMetricData.table || []);
 
-            // 🔥 update metrics_data also
-            if (typeof updateAllMetricsData === "function") {
-                updateAllMetricsData(prev => ({
-                    ...prev,
-                    [metric]: {
-                        ...prev[metric],
-                        table: data.table,
-                        chart: data.chart
-                    }
-                }));
+                // update chart
+                if (typeof updateChartData === "function") {
+                    updateChartData(updatedMetricData.chart || null);
+                }
+
+                // update parent metrics_data
+                if (typeof updateAllMetricsData === "function") {
+                    updateAllMetricsData(prev => ({
+                        ...prev,
+                        [metric]: {
+                            chart: updatedMetricData.chart || null,
+                            table: updatedMetricData.table || []
+                        }
+                    }));
+                }
             }
 
             setEditable(false);
