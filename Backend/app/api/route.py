@@ -27,7 +27,7 @@ def health():
 # ----------------------------------------------------
 # GET: TA LIST
 # ----------------------------------------------------
-@router.get("/ta/list")
+@router.get("/ta/list",tags=["Configuration"])
 def get_ta_list():
     conn = get_connection()
     cur = conn.cursor()
@@ -48,7 +48,7 @@ def get_ta_list():
 # ----------------------------------------------------
 # GET: AVG VIAL MASTER (DEFAULTS)
 # ----------------------------------------------------
-@router.get("/configurations/{ta_name}/avg-vials")
+@router.get("/configurations/{ta_name}/avg-vials",tags=["Configuration"])
 def get_avg_vials_by_ta(ta_name: str):
     conn = get_connection()
     cur = conn.cursor()
@@ -112,7 +112,7 @@ def get_avg_vials_by_ta(ta_name: str):
 # ----------------------------------------------------
 # GET: LOAD FULL CONFIG BY TA
 # ----------------------------------------------------
-@router.get("/configurations/{ta_name}")
+@router.get("/configurations/{ta_name}",tags=["Configuration"])
 def get_configuration_by_ta(ta_name: str):
     conn = get_connection()
     cur = conn.cursor()
@@ -138,7 +138,7 @@ def get_configuration_by_ta(ta_name: str):
 # ----------------------------------------------------
 # POST: SAVE / UPDATE FORECAST CONFIG
 # ----------------------------------------------------
-@router.post("/configurations")
+@router.post("/configurations",tags=["Configuration"])
 def save_configuration(payload: SaveConfigRequest):
 
     cfg = payload.config
@@ -160,7 +160,52 @@ def save_configuration(payload: SaveConfigRequest):
             400,
             "Only 'monthly' granularity is supported"
         )
+    # =============================
+    # VALIDATE AGAINST DB DATES
+    # =============================
+    conn = get_connection()
+    cur = conn.cursor()
 
+    try:
+        cur.execute("""
+            SELECT 
+                MIN(make_date(year, month, 1)) AS min_date,
+                MAX(make_date(year, month, 1)) AS max_date
+            FROM raw.fact_market_share
+            WHERE ta = %s
+        """, (cfg.ta_name,))
+
+        row = cur.fetchone()
+
+        if not row or not row[0] or not row[1]:
+            raise HTTPException(
+                400,
+                "No data available for selected TA"
+            )
+
+        min_date, max_date = row
+
+    finally:
+        cur.close()
+        conn.close()
+
+    # =============================
+    # VALIDATION LOGIC
+    # =============================
+
+    # Start date check
+    if start_date < min_date or start_date > max_date:
+        raise HTTPException(
+            400,
+            f"Invalid Train Start Date. Available data is from {min_date} to {max_date}"
+        )
+
+    # End date check
+    if end_date < min_date or end_date > max_date:
+        raise HTTPException(
+            400,
+            f"Invalid Train End Date. Available data is from {min_date} to {max_date}"
+    )
     ta = cfg.ta_name
 
     # =====================================================
@@ -188,7 +233,7 @@ def save_configuration(payload: SaveConfigRequest):
         conn.close()
 
     # =====================================================
-    # 🚨 2. INVALIDATE EXISTING BASE (CRITICAL FIX)
+    # 2. INVALIDATE EXISTING BASE (CRITICAL FIX)
     # =====================================================
     conn = get_connection()
     cur = conn.cursor()
@@ -223,8 +268,8 @@ def save_configuration(payload: SaveConfigRequest):
     )
 
     for s in nps_base["series"]:
-        indication = s["display"]["indication"]   # ✅ DISPLAY VALUE
-        lot = s["display"]["lot"]                 # ✅ DISPLAY VALUE
+        indication = s["display"]["indication"]   #    DISPLAY VALUE
+        lot = s["display"]["lot"]                 #    DISPLAY VALUE
 
         factors = nps_base["factors_map"][(indication, lot)]
         # ↑ NO .get(), crash loudly if mismatched
@@ -278,7 +323,7 @@ def save_configuration(payload: SaveConfigRequest):
 
 
     # =====================================================
-    # ✅ FINAL RESPONSE
+    #    FINAL RESPONSE
     # =====================================================
     return {
         "ta_name": ta,
@@ -290,13 +335,13 @@ def save_configuration(payload: SaveConfigRequest):
 # ----------------------------------------------------
 # POST: SAVE / UPDATE AVG VIALS (UPSERT SAFE)
 # ----------------------------------------------------
-@router.post("/configurations/avg-vials")
+@router.post("/configurations/avg-vials",tags=["Configuration"])
 def update_avg_vials(payload: UpdateAvgVialsRequest):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        # ✅ Valid brands check
+        #    Valid brands check
         cur.execute("SELECT DISTINCT Brand FROM raw.Dose_Master")
         valid_brands = {row[0] for row in cur.fetchall()}
 
@@ -319,7 +364,7 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
         if not avg_vials_map:
             raise HTTPException(400, "No valid avg_vials data provided")
 
-        # ✅ UPSERT avg_vials (insert row if config not present)
+        #    UPSERT avg_vials (insert row if config not present)
         cur.execute(
             """
             INSERT INTO raw.forecast_configurations
@@ -351,7 +396,7 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
         cur.close()
         conn.close()
 
-@router.get("/metrics/filters/{ta_name}")
+@router.get("/metrics/filters/{ta_name}",tags=["Model_Input"])
 def get_metrics_filters(ta_name: str):
 
     conn = get_connection()
@@ -379,10 +424,10 @@ def get_metrics_filters(ta_name: str):
         cur.execute("""
             SELECT
                 fs.scenario_name,
-                im.indications   AS indication,     -- ✅ canonical
+                im.indications   AS indication,     --    canonical
                 fs.lot,
                 fs.metric,
-                im.brand_name    AS product          -- ✅ canonical
+                im.brand_name    AS product          --    canonical
             FROM raw.forecast_scenarios fs
             JOIN raw.indication_master im
               ON im.ta = fs.ta_name

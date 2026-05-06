@@ -21,6 +21,10 @@ import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import { saveChanges } from "../../services/apiService";
+import Dialog from "@mui/material/Dialog";
+import DialogTitle from "@mui/material/DialogTitle";
+import DialogContent from "@mui/material/DialogContent";
+import DialogActions from "@mui/material/DialogActions";
 
 const PlotComponent = Plot.default || Plot;
 
@@ -34,7 +38,10 @@ export default function ForecastTrendChart({
     tableData,
     updateChartData,
     updateTableData,
-    updateAllMetricsData
+    updateAllMetricsData,
+    onUpdateScenario,
+    onSaveScenario,
+    scenarioSelector
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -53,6 +60,8 @@ export default function ForecastTrendChart({
     const [originalRows, setOriginalRows] = useState([]);
     const [expandedLots, setExpandedLots] = useState({});
     const [lastEditedCell, setLastEditedCell] = useState(null);
+    const [openDialog, setOpenDialog] = useState(false);
+    const [scenarioName, setScenarioName] = useState("");
 
     useEffect(() => {
         if (tableData?.length) {
@@ -78,6 +87,22 @@ export default function ForecastTrendChart({
         setExpandedLots({});
         setLastEditedCell(null);
         setEditable(false);
+
+        // Clear chart instantly
+        if (typeof updateChartData === "function") {
+            updateChartData(null);
+        }
+
+        // Optional: also clear this metric from parent state
+        if (typeof updateAllMetricsData === "function") {
+            updateAllMetricsData(prev => ({
+                ...prev,
+                [metric]: {
+                    chart: null,
+                    table: []
+                }
+            }));
+        }
     }, [metric]);
 
     const toggleLot = (lot) => {
@@ -177,11 +202,6 @@ export default function ForecastTrendChart({
         setLastEditedCell(null);
     };
 
-    // const handleSave = () => {
-    //     setEditable(false);
-    //     console.log("Saved rows:", tableRows);
-    // };
-
     // const trainX = allMonths.slice(0, forecastStartIndex);
     // const trainY = trainValues;
 
@@ -259,6 +279,17 @@ export default function ForecastTrendChart({
         ];
     });
 
+    const inputStyle = {
+        bgcolor: "#fcfcfd",
+        borderRadius: "8px",
+        minWidth: "160px",
+        "& .MuiOutlinedInput-root": {
+            borderRadius: "8px",
+            height: "35px",
+            backgroundColor: "#fcfcfd",
+        },
+    };
+
     const handleExpandAll = () => {
         const allExpanded = {};
         tableRows.forEach((row) => {
@@ -275,7 +306,7 @@ export default function ForecastTrendChart({
         setExpandedLots(allCollapsed);
     };
 
-    const handleSave = async () => {
+    const handleRefresh = async () => {
         try {
             const payload = {
                 therapy_area: therapyArea,
@@ -476,21 +507,57 @@ export default function ForecastTrendChart({
                             </Tooltip>
                         </>
                     )}
+                    <Button
+                        variant="contained"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        onClick={() => setOpenDialog(true)}
+                        disabled={!tableRows.length}
+                    // disabled={scenarioSelector !== "BASE"}
+                    >
+                        Save Scenario
+                    </Button>
                 </Box>
 
                 {/* RIGHT SIDE BUTTONS */}
                 <Box sx={{ display: "flex", gap: 2 }}>
                     <Button
+                        variant="contained"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        disabled={editable || !tableData.length || !tableRows.length}
+                        onClick={() => {
+                            if (scenarioSelector?.toUpperCase() === "BASE") {
+                                setOpenDialog(true);   // open save modal
+                            } else {
+                                onUpdateScenario();    // normal update
+                            }
+                        }}
+                    >
+                        Save
+                    </Button>
+                    <Button
                         variant="outlined"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
                         disabled={!tableRows.length}
                         onClick={() => setEditable(true)}
                     >
                         Edit Changes
                     </Button>
 
-                    {metric === "market_share" && (
+                    {editable && (
+                        <Button
+                            variant="contained"
+                            sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                            disabled={!tableRows.length}
+                            onClick={handleRefresh}
+                        >
+                            Refresh
+                        </Button>
+                    )}
+
+                    {metric === "market_share" && editable && (
                         <Button
                             variant="outlined"
+                            sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
                             disabled={!tableRows.length}
                             onClick={handleNormalize}
                         >
@@ -500,18 +567,11 @@ export default function ForecastTrendChart({
 
                     <Button
                         variant="outlined"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
                         disabled={!tableRows.length}
                         onClick={handleCancel}
                     >
                         Cancel
-                    </Button>
-
-                    <Button
-                        variant="contained"
-                        disabled={!tableRows.length}
-                        onClick={handleSave}
-                    >
-                        Save Changes
                     </Button>
                 </Box>
             </Box>
@@ -709,6 +769,38 @@ export default function ForecastTrendChart({
                 </TableContainer >
             )
             }
+            <Dialog open={openDialog} onClose={() => setOpenDialog(false)}>
+                <DialogTitle>Save Scenario</DialogTitle>
+
+                <DialogContent>
+                    <TextField
+                        autoFocus
+                        fullWidth
+                        label="Scenario Name"
+                        placeholder="e.g. Adjusted Baseline"
+                        value={scenarioName}
+                        onChange={(e) => setScenarioName(e.target.value)}
+                        sx={{ mt: 1 }}
+                    />
+                </DialogContent>
+
+                <DialogActions>
+                    <Button onClick={() => setOpenDialog(false)}>
+                        Cancel
+                    </Button>
+
+                    <Button
+                        variant="contained"
+                        onClick={() => {
+                            onSaveScenario(scenarioName);
+                            setOpenDialog(false);
+                            setScenarioName("");
+                        }}
+                    >
+                        Save
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </>
     );
 }

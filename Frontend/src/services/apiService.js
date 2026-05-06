@@ -42,12 +42,24 @@ export const normalizeMarketShare = async (payload) => {
 };
 
 export const saveChanges = async (payload) => {
-  return httpClient.post("/api/metrics/save-changes", payload);
+  return httpClient.post("/api/metrics/refresh", payload);
 };
 
 
 export const saveScenario = async (payload) => {
   return httpClient.post("/api/metrics/save", payload);
+};
+
+export const updateScenario = (payload) => {
+  return httpClient.put("/api/update-scenario", payload);
+};
+
+export const getScenarioFilters = (taName) => {
+  return httpClient.get(`/api/scenario/filters/${taName}`);
+};
+
+export const applyScenarioFilters = (payload) => {
+  return httpClient.post(`/api/scenario/apply-filters`, payload);
 };
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;

@@ -19,7 +19,7 @@ class MetricSelectionRequest(BaseModel):
 from pydantic import BaseModel, model_validator
 from typing import Optional, Literal, List
 
-ModelType = Literal["ets", "linear", "exponential", "logarithmic", "s_curve"]
+ModelType = Literal["ets", "linear", "exponential", "logarithmic", "scurve"]
 
 MultiplierHorizon = Literal[
     "Forecast",
@@ -33,9 +33,9 @@ class ETSFactors(BaseModel):
     gamma: float
 
 class GrowthFactors(BaseModel):
-    total_growth_pct: float
+    total_growth: float
     duration: int
-    k: Optional[float] = None  # required for exp/log/s_curve; not allowed for linear
+    k_value: Optional[float] = None  # required for exp/log/s_curve; not allowed for linear
 
 class RecalculateFactors(BaseModel):
     multiplier: float = 1.0
@@ -78,13 +78,13 @@ class MetricRecalculateRequest(BaseModel):
 
         # k rules by model
         if mt == "linear":
-            if f.growth.k is not None:
-                raise ValueError("linear model should not include k")
+            if f.growth.k_value is not None:
+                raise ValueError("linear model should not include k_value")
         else:
-            if f.growth.k is None:
-                raise ValueError(f"{mt} model requires k")
-            if f.growth.k <= 0:
-                raise ValueError("k must be > 0")
+            if f.growth.k_value is None:
+                raise ValueError(f"{mt} model requires k_value")
+            if f.growth.k_value <= 0:
+                raise ValueError("k_value must be > 0")
 
         return self
 
@@ -101,13 +101,14 @@ class LotGroup(BaseModel):
     total: List[float]
     children: List[ChildRow]
 
-class SaveChangesRequest(BaseModel):
+class Refreshchangerequest(BaseModel):
     therapy_area: str
     indication: str
     metric: str
     product: str
     lot: str
     table: List[LotGroup]
+
 # ------------------------------------
 # save scenario
 # ------------------------------------
@@ -118,12 +119,24 @@ class SaveScenarioRequest(BaseModel):
 
     ta_name: str
     indication: str
+
+    metric: Optional[str] = None
+    product: Optional[str] = None
+    lot: Optional[str] = None
+    model_type: str
+
+    factors: Dict[str, Any]
+    metrics_data: Dict[str, Any]
+
+
+class UpdateScenarioRequest(BaseModel):
+    scenario_name: str
+    ta_name: str
+    indication: str
     lot: str
     metric: str
     product: Optional[str] = None
 
-    model_type: str  # "ets" or "trajectory"
-
+    model_type: str
     factors: Dict[str, Any]
-    chart: Dict[str, Any]
-    table: List[Dict[str, Any]]
+    metrics_data: Dict[str, Any]

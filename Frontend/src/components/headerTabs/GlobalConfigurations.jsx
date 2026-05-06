@@ -116,7 +116,12 @@ export default function GlobalConfiguration() {
             console.log("Payload sent:", payload);
         } catch (error) {
             console.error("Save configuration failed:", error);
-            showSnackbar("Failed to save configuration", "error");
+
+            const errorMessage =
+                error?.response?.data?.detail ||
+                "Failed to save configuration";
+
+            showSnackbar(errorMessage, "error");
         } finally {
             setLoading(false);
         }
@@ -155,7 +160,7 @@ export default function GlobalConfiguration() {
                     Global Configurations
                 </Typography>
 
-                <Button
+                {/* <Button
                     variant="outlined"
                     onClick={() => setOpenModal(true)}
                     sx={{
@@ -164,7 +169,7 @@ export default function GlobalConfiguration() {
                     }}
                 >
                     Dose Configuration
-                </Button>
+                </Button> */}
             </Box>
 
             <Typography
@@ -303,6 +308,7 @@ export default function GlobalConfiguration() {
                                     setTrainEndDate(newValue ? newValue.format("YYYY-MM-DD") : "")
                                 }
                                 format="DD-MMM-YYYY"
+                                maxDate={dayjs()}
                                 slotProps={{
                                     textField: {
                                         fullWidth: true,

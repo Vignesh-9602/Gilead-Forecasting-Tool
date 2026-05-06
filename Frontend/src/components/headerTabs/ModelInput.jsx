@@ -3,15 +3,17 @@ import { Box, Paper, Typography, FormControl, Select, MenuItem, TextField, Butto
 import Slider from "@mui/material/Slider";
 import { GlobalContext } from "../../context/Provider";
 import ForecastTrendChart from "./ForecastTrendChart";
-import { getMetricFilters, applyMetricFilters, recalculateMetrics, saveScenario } from "../../services/apiService";
+import { getMetricFilters, applyMetricFilters, recalculateMetrics, saveScenario, updateScenario } from "../../services/apiService";
+import { useSnackbarStore } from "../../stores";
 
 export default function ModelInput() {
+    const { showSnackbar } = useSnackbarStore();
     const [scenarioSelector, setScenarioSelector] = useState("");
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
     const [metric, setMetric] = useState("");
     const [brand, setBrand] = useState("");
-    const [scenarioName, setScenarioName] = useState("");
+    // const [scenarioName, setScenarioName] = useState("");
     const [editable, setEditable] = useState(false);
 
     const [modelSelection, setModelSelection] = useState("ets");
@@ -101,6 +103,7 @@ export default function ModelInput() {
             setBrand("");
         } catch (error) {
             console.error("Failed to fetch metric filters", error);
+            showSnackbar("Failed to fetch metric filters", "error");
         }
     };
 
@@ -149,6 +152,7 @@ export default function ModelInput() {
             // trajectory based on active model
             if (activeModel !== "ets") {
                 const traj = factors?.growth || factors?.[activeModel] || {};
+                console.log("----->", traj)
 
                 setTotalGrowth(
                     traj?.total_growth ??
@@ -186,8 +190,10 @@ export default function ModelInput() {
             //     ""
             // );
             setEditable(false);
+            showSnackbar("Filters applied successfully", "success");
         } catch (error) {
             console.error("Failed to apply metric filters", error);
+            showSnackbar("Failed to apply metric filters", "error");
         }
     };
 
@@ -204,14 +210,14 @@ export default function ModelInput() {
             };
         } else {
             const growthPayload = {
-                total_growth_pct: totalGrowth,
+                total_growth: totalGrowth,
                 duration,
                 trajectory_start: trajectoryStart
             };
 
             // only non-linear models need k
             if (modelSelection !== "linear") {
-                growthPayload.k = Number(kValue);
+                growthPayload.k_value = Number(kValue);
             }
 
             modelFactors = {
@@ -285,8 +291,10 @@ export default function ModelInput() {
             setTableData(selectedMetricData?.table || []);
 
             setEditable(false);
+            showSnackbar("Metrics recalculated successfully", "success");
         } catch (error) {
             console.error("Failed to recalculate metrics", error);
+            showSnackbar("Failed to recalculate metrics", "error");
         }
     };
 
@@ -324,8 +332,119 @@ export default function ModelInput() {
             })
         ) || [];
 
-    const handleSaveScenario = async () => {
-        if (!scenarioName) {
+    const handleUpdateScenario = async () => {
+        if (!scenarioSelector) {
+            alert("Please select a scenario to update");
+            return;
+        }
+
+        if (!chartData || !tableData.length) {
+            alert("No data to update");
+            return;
+        }
+
+        const payload = {
+            scenario_name: scenarioSelector,
+
+            ta_name: therapyArea,
+            indication,
+            metric,
+            product: brand || null,
+            lot,
+
+            model_type: modelSelection,
+
+            factors: {
+                multiplier,
+                multiplier_horizon: multiplierHorizon,
+
+                ets: {
+                    alpha,
+                    beta,
+                    gamma
+                },
+
+                linear: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart
+                },
+                exponential: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: Number(kValue)
+                },
+                logarithmic: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: Number(kValue)
+                },
+                s_curve: {
+                    total_growth: totalGrowth,
+                    duration,
+                    trajectory_start: trajectoryStart,
+                    k_value: Number(kValue)
+                },
+
+                active_model: modelSelection
+            },
+
+            metrics_data: allMetricsData
+        };
+
+        try {
+            const res = await updateScenario(payload);
+            const data = res?.data;
+
+            // sync FE state with backend response
+            const factors = data?.factors || {};
+            setAllFactors(factors);
+
+            setMultiplier(factors?.multiplier ?? 1);
+            setMultiplierHorizon(factors?.multiplier_horizon ?? "Forecast");
+
+            const activeModel = factors?.active_model || "ets";
+            setModelSelection(activeModel);
+
+            if (activeModel === "ets") {
+                const ets = factors?.ets || {};
+                setAlpha(ets.alpha ?? 0);
+                setBeta(ets.beta ?? 0);
+                setGamma(ets.gamma ?? 0);
+            } else {
+                const traj = factors?.growth || factors?.[activeModel] || {};
+
+                setTotalGrowth(
+                    traj?.total_growth ??
+                    traj?.total_growth_pct ??
+                    0
+                );
+
+                setDuration(traj?.duration ?? 12);
+                setTrajectoryStart(traj?.trajectory_start || "");
+                setKValue(traj?.k_value ?? traj?.k ?? 1);
+            }
+
+            // update metrics
+            setAllMetricsData(data?.metrics_data || {});
+
+            const selectedMetricData = data?.metrics_data?.[metric];
+            setChartData(selectedMetricData?.chart || null);
+            setTableData(selectedMetricData?.table || []);
+
+            setEditable(false);
+
+            alert("Scenario updated successfully!");
+        } catch (error) {
+            console.error("Update scenario failed", error);
+            alert("Failed to update scenario");
+        }
+    };
+
+    const handleSaveScenario = async (scenarioNameFromDialog) => {
+        if (!scenarioNameFromDialog) {
             alert("Please enter scenario name");
             return;
         }
@@ -336,14 +455,14 @@ export default function ModelInput() {
         }
 
         const payload = {
-            scenario_name: scenarioName,
+            scenario_name: scenarioNameFromDialog,
 
             ta_name: therapyArea,
             indication,
             metric,
             product: brand || null,
             lot,
-            // model_type: modelSelection, take a look in this
+            model_type: modelSelection,
 
             factors: {
                 multiplier,
@@ -385,10 +504,32 @@ export default function ModelInput() {
             const res = await saveScenario(payload);
             console.log("Scenario saved:", res.data);
             alert("Scenario saved successfully!");
+            // Re-fetch filters so new scenario appears in dropdown
+            const response = await getMetricFilters(therapyArea);
+            const resData = response?.data;
+
+            const newMappingData = resData?.data || {};
+            setMappingData(newMappingData);
+
+            const newScenarioNames = resData?.scenario_names || [];
+
+            // Update filter options but preserve current indication list for new scenario
+            setFilterOptions({
+                indications: Object.keys(newMappingData?.[scenarioNameFromDialog] || {}),
+                metric_filters: resData?.metric_filters || [],
+                scenario_names: newScenarioNames,
+            });
+
+            // Auto-select the newly saved scenario
+            setScenarioSelector(scenarioNameFromDialog);
+
+            // Keep current selections intact (don't reset)
+            // indication, lot, brand, metric remain as-is so user can Apply Filter immediately
             // setScenarioName("")
         } catch (err) {
             console.error("Save scenario failed", err);
-            alert("Failed to save scenario");
+            showSnackbar("Failed to save scenario", "error");
+            // alert("Failed to save scenario");
         }
     };
 
@@ -608,7 +749,7 @@ export default function ModelInput() {
                     {/* <Divider orientation="vertical" flexItem sx={{ mx: 2 }} /> */}
 
                     {/* RIGHT SIDE */}
-                    <Box sx={{ display: "flex", gap: 2, alignItems: "end" }} >
+                    {/* <Box sx={{ display: "flex", gap: 2, alignItems: "end" }} >
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>
                                 SCENARIO NAME
@@ -624,7 +765,7 @@ export default function ModelInput() {
                         <Button variant="contained" sx={{ height: "35px", px: 4, borderRadius: "10px", backgroundColor: "#4F46E5", textTransform: "none" }} onClick={handleSaveScenario} >
                             Save Scenario
                         </Button>
-                    </Box>
+                    </Box> */}
                 </Box>
 
                 {/* slider */}
@@ -757,6 +898,11 @@ export default function ModelInput() {
                     updateChartData={setChartData}
                     updateTableData={setTableData}
                     updateAllMetricsData={setAllMetricsData}
+                    onUpdateScenario={handleUpdateScenario}
+                    onSaveScenario={handleSaveScenario}
+                    scenarioSelector={scenarioSelector}
+                // scenarioName={scenarioName}
+                // setScenarioName={setScenarioName}
                 />
             </Paper>
         </Box>

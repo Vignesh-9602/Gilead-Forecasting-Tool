@@ -13,6 +13,7 @@ import Plot from "react-plotly.js";
 const PlotComponent = Plot.default || Plot;
 
 export default function ScenarioChart({ chartData }) {
+
     const allMonths =
         chartData?.months?.map((month) =>
             new Date(month).toLocaleDateString("en-US", {
@@ -21,17 +22,39 @@ export default function ScenarioChart({ chartData }) {
             })
         ) || [];
 
-    const trainValues = chartData?.train_values || [];
     const forecastStartIndex = chartData?.forecast_start_index || 0;
+    const series = chartData?.series || [];
 
-    const scenarios = chartData?.scenario_values || {};
+    //  Build traces (NO dotted lines, single smooth line)
+    const traces = series.map((item, idx) => {
 
-    const trainX = allMonths.slice(0, forecastStartIndex);
+        const x = allMonths;
 
-    const forecastX = [
-        allMonths[forecastStartIndex - 1],
-        ...allMonths.slice(forecastStartIndex),
-    ];
+        const y = [
+            ...item.train_values,
+            ...item.forecast_values,
+        ];
+
+        return {
+            x,
+            y,
+            type: "scatter",
+            mode: "lines",
+            name: item.scenario,
+            line: {
+                width: 3,
+            },
+        };
+    });
+
+    //  Dynamic Y-axis scaling (same logic as ForecastTrend)
+    const allValues = series.flatMap(item => [
+        ...item.train_values,
+        ...item.forecast_values
+    ]);
+
+    const maxValue = Math.max(...allValues, 0);
+    const yMax = Math.ceil(maxValue * 1.15); // 15% headroom
 
     return (
         <Accordion
@@ -50,60 +73,48 @@ export default function ScenarioChart({ chartData }) {
                 </Typography>
             </AccordionSummary>
 
-            <AccordionDetails sx={{ pt: 0 }}>
+            <AccordionDetails sx={{ pt: 0, pb: 1, px: 1 }}>
                 {!chartData?.months?.length ? (
-                    <Box sx={{ p: 4, textAlign: "center" }}>
-                        No chart data available
+                    <Box
+                        sx={{
+                            mt: 3,
+                            p: 4,
+                            textAlign: "center",
+                            color: "#94a3b8",
+                            fontWeight: 500,
+                        }}
+                    >
+                        No chart data available. Please select filters and apply.
                     </Box>
                 ) : (
                     <Paper sx={{ boxShadow: "none" }}>
                         <PlotComponent
-                            data={[
-                                {
-                                    x: trainX,
-                                    y: trainValues,
-                                    type: "scatter",
-                                    mode: "lines",
-                                    name: "Base Case (Actual)",
-                                    line: {
-                                        color: "#4f46e5",
-                                        width: 3,
-                                    },
-                                },
-
-                                ...Object.entries(scenarios).map(([name, values]) => ({
-                                    x: forecastX,
-                                    y: [trainValues[trainValues.length - 1], ...values],
-                                    type: "scatter",
-                                    mode: "lines",
-                                    name,
-                                    line: {
-                                        dash: "dot",
-                                        width: 3,
-                                    },
-                                })),
-                            ]}
+                            data={traces}
                             layout={{
                                 autosize: true,
-                                height: 420,
+                                height: 350,
                                 margin: {
                                     l: 50,
                                     r: 30,
-                                    t: 10,
-                                    b: 70,
+                                    t: 5,
+                                    b: 60,
                                 },
                                 legend: {
                                     orientation: "h",
-                                    x: 0.2,
-                                    y: 1.12,
+                                    x: 0.35,
+                                    y: -0.2,
                                 },
+                                showlegend: true,
                                 xaxis: {
                                     tickangle: -45,
                                     showgrid: true,
                                 },
                                 yaxis: {
                                     showgrid: true,
+                                    range: [0, yMax],
                                 },
+                                paper_bgcolor: "white",
+                                plot_bgcolor: "white",
                             }}
                             style={{ width: "100%" }}
                             config={{

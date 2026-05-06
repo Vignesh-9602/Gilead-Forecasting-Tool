@@ -12,16 +12,16 @@ import {
 } from "@mui/material";
 
 import { GlobalContext } from "../../../context/Provider";
-import { getMetricFilters } from "../../../services/apiService";
+import { getScenarioFilters, applyScenarioFilters } from "../../../services/apiService";
 import ScenarioChart from "./ScenarioChart";
 import ScenarioTable from "./ScenarioTable";
 
-const scenarioOptions = [
-    "Base Case",
-    "Optimized Case",
-    "ETS",
-    "Bear Case",
-];
+// const scenarioOptions = [
+//     "Base Case",
+//     "Optimized Case",
+//     "ETS",
+//     "Bear Case",
+// ];
 
 export default function Scenarios() {
     const { favState } = useContext(GlobalContext);
@@ -30,6 +30,7 @@ export default function Scenarios() {
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
     const [metric, setMetric] = useState("");
+    const [brand, setBrand] = useState("");
     const [compareScenarios, setCompareScenarios] = useState([]);
 
     const [mappingData, setMappingData] = useState({});
@@ -38,82 +39,80 @@ export default function Scenarios() {
         metric_filters: [],
     });
 
-    const [chartData, setChartData] = useState({
-        months: [
-            "2024-04-01", "2024-05-01", "2024-06-01", "2024-07-01", "2024-08-01",
-            "2024-09-01", "2024-10-01", "2024-11-01", "2024-12-01", "2025-01-01",
-            "2025-02-01", "2025-03-01", "2025-04-01", "2025-05-01", "2025-06-01",
-            "2025-07-01", "2025-08-01", "2025-09-01", "2025-10-01", "2025-11-01",
-            "2025-12-01", "2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"
-        ],
-        train_values: [
-            392, 761, 647, 769, 740, 512, 526, 775, 496, 531,
-            674, 525, 623, 657, 610, 319, 777, 405, 628, 502, 791, 631
-        ],
-        forecast_start_index: 22,
-        scenario_values: {
-            "Optimized Case (Actual)": [664, 700, 735],
-            "ETS (Actual)": [664, 690, 720],
-            "Bear Case (Actual)": [664, 650, 680],
-        },
-    });
-
-    const [tableData, setTableData] = useState([
-        {
-            scenario: "Base Case",
-            total: [392, 761, 647, 769, 740, 512, 526, 775, 496, 531, 674, 525, 623, 657, 610, 319, 777, 405, 628, 502, 791, 631, 664, 700, 735],
-            children: [
-                {
-                    label: "Trodelvy",
-                    values: [196, 380, 323, 384, 370, 256, 263, 387, 248, 265, 337, 262, 311, 328, 305, 159, 388, 202, 314, 251, 395, 315, 332, 350, 367],
-                },
-                {
-                    label: "Trodelvy Combo",
-                    values: [196, 381, 324, 385, 370, 256, 263, 388, 248, 266, 337, 263, 312, 329, 305, 160, 389, 203, 314, 251, 396, 316, 332, 350, 368],
-                },
-            ],
-        },
-        {
-            scenario: "Optimized Case",
-            total: [392, 761, 647, 769, 740, 512, 526, 775, 496, 531, 674, 525, 623, 657, 610, 319, 777, 405, 628, 502, 791, 631, 664, 700, 735],
-            children: [
-                {
-                    label: "TPC",
-                    values: [196, 380, 323, 384, 370, 256, 263, 387, 248, 265, 337, 262, 311, 328, 305, 159, 388, 202, 314, 251, 395, 315, 332, 350, 367],
-                },
-                {
-                    label: "Trodelvy",
-                    values: [196, 381, 324, 385, 370, 256, 263, 388, 248, 266, 337, 263, 312, 329, 305, 160, 389, 203, 314, 251, 396, 316, 332, 350, 368],
-                },
-            ],
-        },
-    ]);
+    const [chartData, setChartData] = useState(null);
+    const [tableData, setTableData] = useState([]);
 
     useEffect(() => {
         if (therapyArea) {
-            fetchMetricFilters();
+            fetchScenarioFilters();
         }
     }, [therapyArea]);
 
-    const fetchMetricFilters = async () => {
+    useEffect(() => {
+        setChartData(null);
+        setTableData([]);
+    }, [indication, lot, metric]);
+    
+
+    const fetchScenarioFilters = async () => {
         try {
-            const response = await getMetricFilters(therapyArea);
+            const response = await getScenarioFilters(therapyArea);
             const resData = response?.data;
 
+            // full mapping
             setMappingData(resData?.data || {});
 
+            // indications (top-level keys)
             setFilterOptions({
                 indications: Object.keys(resData?.data || {}),
                 metric_filters: resData?.metric_filters || [],
             });
+
         } catch (error) {
-            console.error("Failed to fetch metric filters", error);
+            console.error("Failed to fetch scenario filters", error);
+        }
+    };
+
+    const handleApply = async () => {
+        if (!therapyArea || !indication || !lot || !metric) return;
+
+        const payload = {
+            ta_name: therapyArea,
+            indication,
+            lot,
+            metric,
+            scenario_names: availableScenarios
+                .filter(sc => compareScenarios.includes(sc.scenario_id))
+                .map(sc => sc.scenario_name),
+            product: metric === "market_share" ? brand : ""
+        };
+
+        try {
+            const response = await applyScenarioFilters(payload);
+            const data = response?.data;
+
+            // DIRECT ASSIGN (no transformation needed)
+            setChartData(data.chart);
+            setTableData(data.table);
+
+        } catch (error) {
+            console.error("Apply filter failed", error);
         }
     };
 
     const availableLots = indication
         ? Object.keys(mappingData[indication] || {})
         : [];
+
+    const availableProducts =
+        indication && lot
+            ? mappingData[indication]?.[lot]?.products || []
+            : [];
+
+    const availableScenarios =
+        indication && lot
+            ? mappingData[indication]?.[lot]?.available_scenarios || []
+            : [];
 
     const inputStyle = {
         bgcolor: "#fcfcfd",
@@ -126,15 +125,15 @@ export default function Scenarios() {
         },
     };
 
-    const handleApply = () => {
-        console.log({
-            therapyArea,
-            indication,
-            lot,
-            metric,
-            compareScenarios,
-        });
-    };
+    // const handleApply = () => {
+    //     console.log({
+    //         therapyArea,
+    //         indication,
+    //         lot,
+    //         metric,
+    //         compareScenarios,
+    //     });
+    // };
 
     return (
         <Box sx={{ p: 3 }}>
@@ -197,6 +196,7 @@ export default function Scenarios() {
                                 onChange={(e) => {
                                     setIndication(e.target.value);
                                     setLot("");
+                                    setCompareScenarios([]);
                                 }}
                                 displayEmpty
                             >
@@ -219,7 +219,11 @@ export default function Scenarios() {
                         <FormControl sx={inputStyle}>
                             <Select
                                 value={lot}
-                                onChange={(e) => setLot(e.target.value)}
+                                onChange={(e) => {
+                                    setLot(e.target.value)
+                                    setBrand("");
+                                    setCompareScenarios([]);
+                                }}
                                 displayEmpty
                             >
                                 <MenuItem value="" disabled>Select LOT</MenuItem>
@@ -241,13 +245,39 @@ export default function Scenarios() {
                         <FormControl sx={inputStyle}>
                             <Select
                                 value={metric}
-                                onChange={(e) => setMetric(e.target.value)}
+                                onChange={(e) => {
+                                    setMetric(e.target.value);
+                                    setBrand("");
+                                }}
                                 displayEmpty
                             >
                                 <MenuItem value="" disabled>Select Metric</MenuItem>
                                 {filterOptions.metric_filters.map((item) => (
                                     <MenuItem key={item.value} value={item.value}>
                                         {item.label}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    </Box>
+
+                    <Box>
+                        <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>
+                            PRODUCT
+                        </Typography>
+
+                        <FormControl sx={inputStyle}>
+                            <Select
+                                value={brand}
+                                onChange={(e) => setBrand(e.target.value)}
+                                disabled={metric !== "market_share" || !lot}
+                                displayEmpty
+                            >
+                                <MenuItem value="" disabled>Select Product</MenuItem>
+
+                                {availableProducts.map((item) => (
+                                    <MenuItem key={item} value={item}>
+                                        {item}
                                     </MenuItem>
                                 ))}
                             </Select>
@@ -267,10 +297,10 @@ export default function Scenarios() {
                                 onChange={(e) => setCompareScenarios(e.target.value)}
                                 renderValue={(selected) => selected.join(", ")}
                             >
-                                {scenarioOptions.map((name) => (
-                                    <MenuItem key={name} value={name}>
-                                        <Checkbox checked={compareScenarios.includes(name)} />
-                                        <ListItemText primary={name} />
+                                {availableScenarios.map((sc) => (
+                                    <MenuItem key={sc.scenario_id} value={sc.scenario_id}>
+                                        <Checkbox checked={compareScenarios.includes(sc.scenario_id)} />
+                                        <ListItemText primary={sc.scenario_name} />
                                     </MenuItem>
                                 ))}
                             </Select>
@@ -401,7 +431,7 @@ export default function Scenarios() {
                         Finalize All Scenarios
                     </Button>
                 </Box>
-            </Paper>
-        </Box>
+            </Paper >
+        </Box >
     );
 }

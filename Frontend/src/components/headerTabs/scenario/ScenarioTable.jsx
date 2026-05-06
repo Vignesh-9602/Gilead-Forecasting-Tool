@@ -35,7 +35,7 @@ export default function ScenarioTable({
 
     useEffect(() => {
         const initial = {};
-        tableData.forEach((row) => {
+        (tableData || []).forEach((row) => {
             initial[row.scenario] = false;
         });
         setExpandedRows(initial);
@@ -50,7 +50,7 @@ export default function ScenarioTable({
 
     const handleExpandAll = () => {
         const all = {};
-        tableData.forEach((row) => {
+        (tableData || []).forEach((row) => {
             all[row.scenario] = true;
         });
         setExpandedRows(all);
@@ -58,7 +58,7 @@ export default function ScenarioTable({
 
     const handleCollapseAll = () => {
         const all = {};
-        tableData.forEach((row) => {
+        (tableData || []).forEach((row) => {
             all[row.scenario] = false;
         });
         setExpandedRows(all);
@@ -88,177 +88,196 @@ export default function ScenarioTable({
                     COMPARISON MATRIX
                 </Typography>
 
-                <Box sx={{ display: "flex", gap: 1 }}>
-                    <Tooltip title="Expand All">
-                        <IconButton onClick={handleExpandAll}>
-                            <UnfoldMoreIcon />
-                        </IconButton>
-                    </Tooltip>
+                {tableData?.length > 0 && (
+                    <Box sx={{ display: "flex", gap: 1 }}>
+                        <Tooltip title="Expand All">
+                            <IconButton onClick={handleExpandAll}>
+                                <UnfoldMoreIcon />
+                            </IconButton>
+                        </Tooltip>
 
-                    <Tooltip title="Collapse All">
-                        <IconButton onClick={handleCollapseAll}>
-                            <UnfoldLessIcon />
-                        </IconButton>
-                    </Tooltip>
+                        <Tooltip title="Collapse All">
+                            <IconButton onClick={handleCollapseAll}>
+                                <UnfoldLessIcon />
+                            </IconButton>
+                        </Tooltip>
 
-                    <Button
-                        variant="contained"
-                        onClick={handleSaveSelection}
-                        sx={{
-                            textTransform: "none",
-                            borderRadius: "8px",
-                            backgroundColor: "#1e293b",
-                        }}
-                    >
-                        Save Selection for {selectedLot || "LOT"}
-                    </Button>
-                </Box>
+                        <Button
+                            variant="contained"
+                            onClick={handleSaveSelection}
+                            sx={{
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                backgroundColor: "#1e293b",
+                                // disabled: "!tableData"
+                            }}
+                        >
+                            Save Selection for {selectedLot || "LOT"}
+                        </Button>
+                    </Box>
+                )}
             </Box>
 
-            <TableContainer
-                sx={{
-                    border: "1px solid #D8DEE8",
-                    borderRadius: "12px",
-                    overflowX: "auto",
-                    maxHeight: 500,
-                }}
-            >
-                <Table size="small" sx={{ minWidth: "max-content" }}>
-                    <TableHead>
-                        <TableRow>
-                            <TableCell
-                                sx={{
-                                    fontWeight: 700,
-                                    position: "sticky",
-                                    left: 0,
-                                    zIndex: 5,
-                                    backgroundColor: "#fff",
-                                    minWidth: 70,
-                                }}
-                            >
-                                Select
-                            </TableCell>
-
-                            <TableCell
-                                sx={{
-                                    fontWeight: 700,
-                                    position: "sticky",
-                                    left: 70,
-                                    zIndex: 5,
-                                    backgroundColor: "#fff",
-                                    minWidth: 180,
-                                }}
-                            >
-                                Scenario
-                            </TableCell>
-
-                            {allMonths.map((month, index) => (
-                                <TableCell key={index} align="center">
-                                    {month}
+            {!tableData?.length ? (
+                <Box
+                    sx={{
+                        mt: 3,
+                        p: 4,
+                        textAlign: "center",
+                        color: "#94a3b8",
+                        fontWeight: 500,
+                        border: "1px solid #D8DEE8",
+                        borderRadius: "12px",
+                    }}
+                >
+                    No table data available. Please select filters and apply.
+                </Box>
+            ) : (
+                <TableContainer
+                    sx={{
+                        border: "1px solid #D8DEE8",
+                        borderRadius: "12px",
+                        overflowX: "auto",
+                        maxHeight: 500,
+                    }}
+                >
+                    <Table size="small" sx={{ minWidth: "max-content" }}>
+                        <TableHead>
+                            <TableRow>
+                                <TableCell
+                                    sx={{
+                                        fontWeight: 700,
+                                        position: "sticky",
+                                        left: 0,
+                                        zIndex: 5,
+                                        backgroundColor: "#fff",
+                                        minWidth: 70,
+                                    }}
+                                >
+                                    Select
                                 </TableCell>
-                            ))}
-                        </TableRow>
-                    </TableHead>
 
-                    <TableBody>
-                        {tableData.map((scenarioRow) => {
-                            const isSelected =
-                                selectedScenario === scenarioRow.scenario;
+                                <TableCell
+                                    sx={{
+                                        fontWeight: 700,
+                                        position: "sticky",
+                                        left: 70,
+                                        zIndex: 5,
+                                        backgroundColor: "#fff",
+                                        minWidth: 180,
+                                    }}
+                                >
+                                    Scenario
+                                </TableCell>
 
-                            return (
-                                <React.Fragment key={scenarioRow.scenario}>
-                                    <TableRow
-                                        sx={{
-                                            backgroundColor: isSelected
-                                                ? "#dbeafe"
-                                                : "#f8fafc",
-                                        }}
-                                    >
-                                        <TableCell
+                                {allMonths.map((month, index) => (
+                                    <TableCell key={index} align="center">
+                                        {month}
+                                    </TableCell>
+                                ))}
+                            </TableRow>
+                        </TableHead>
+
+                        <TableBody>
+                            {tableData.map((scenarioRow) => {
+                                const isSelected =
+                                    selectedScenario === scenarioRow.scenario;
+
+                                return (
+                                    <React.Fragment key={scenarioRow.scenario}>
+                                        <TableRow
                                             sx={{
-                                                position: "sticky",
-                                                left: 0,
                                                 backgroundColor: isSelected
                                                     ? "#dbeafe"
                                                     : "#f8fafc",
-                                                zIndex: 4,
                                             }}
                                         >
-                                            <Radio
-                                                checked={isSelected}
-                                                onChange={() =>
-                                                    setSelectedScenario(
-                                                        scenarioRow.scenario
-                                                    )
-                                                }
-                                            />
-                                        </TableCell>
-
-                                        <TableCell
-                                            onClick={() =>
-                                                toggleRow(scenarioRow.scenario)
-                                            }
-                                            sx={{
-                                                fontWeight: 700,
-                                                cursor: "pointer",
-                                                position: "sticky",
-                                                left: 70,
-                                                backgroundColor: isSelected
-                                                    ? "#dbeafe"
-                                                    : "#f8fafc",
-                                                zIndex: 4,
-                                            }}
-                                        >
-                                            {expandedRows[scenarioRow.scenario]
-                                                ? "▼"
-                                                : "▶"}{" "}
-                                            {scenarioRow.scenario}
-                                        </TableCell>
-
-                                        {scenarioRow.total.map((value, index) => (
-                                            <TableCell key={index} align="center">
-                                                {value}
-                                            </TableCell>
-                                        ))}
-                                    </TableRow>
-
-                                    {expandedRows[scenarioRow.scenario] &&
-                                        scenarioRow.children.map((child) => (
-                                            <TableRow key={child.label}>
-                                                <TableCell
-                                                    sx={{
-                                                        position: "sticky",
-                                                        left: 0,
-                                                        backgroundColor: "#fff",
-                                                        zIndex: 3,
-                                                    }}
+                                            <TableCell
+                                                sx={{
+                                                    position: "sticky",
+                                                    left: 0,
+                                                    backgroundColor: isSelected
+                                                        ? "#dbeafe"
+                                                        : "#f8fafc",
+                                                    zIndex: 4,
+                                                }}
+                                            >
+                                                <Radio
+                                                    checked={isSelected}
+                                                    onChange={() =>
+                                                        setSelectedScenario(
+                                                            scenarioRow.scenario
+                                                        )
+                                                    }
                                                 />
+                                            </TableCell>
 
-                                                <TableCell
-                                                    sx={{
-                                                        pl: 4,
-                                                        position: "sticky",
-                                                        left: 70,
-                                                        backgroundColor: "#fff",
-                                                        zIndex: 3,
-                                                    }}
-                                                >
-                                                    {child.label}
+                                            <TableCell
+                                                onClick={() =>
+                                                    toggleRow(scenarioRow.scenario)
+                                                }
+                                                sx={{
+                                                    fontWeight: 700,
+                                                    cursor: "pointer",
+                                                    position: "sticky",
+                                                    left: 70,
+                                                    backgroundColor: isSelected
+                                                        ? "#dbeafe"
+                                                        : "#f8fafc",
+                                                    zIndex: 4,
+                                                }}
+                                            >
+                                                {expandedRows[scenarioRow.scenario]
+                                                    ? "▼"
+                                                    : "▶"}{" "}
+                                                {scenarioRow.scenario}
+                                            </TableCell>
+
+                                            {scenarioRow.total.map((value, index) => (
+                                                <TableCell key={index} align="center">
+                                                    {value}
                                                 </TableCell>
+                                            ))}
+                                        </TableRow>
 
-                                                {child.values.map((value, index) => (
-                                                    <TableCell key={index} align="center">
-                                                        {value}
+                                        {expandedRows[scenarioRow.scenario] &&
+                                            scenarioRow.children.map((child) => (
+                                                <TableRow key={child.label}>
+                                                    <TableCell
+                                                        sx={{
+                                                            position: "sticky",
+                                                            left: 0,
+                                                            backgroundColor: "#fff",
+                                                            zIndex: 3,
+                                                        }}
+                                                    />
+
+                                                    <TableCell
+                                                        sx={{
+                                                            pl: 4,
+                                                            position: "sticky",
+                                                            left: 70,
+                                                            backgroundColor: "#fff",
+                                                            zIndex: 3,
+                                                        }}
+                                                    >
+                                                        {child.label}
                                                     </TableCell>
-                                                ))}
-                                            </TableRow>
-                                        ))}
-                                </React.Fragment>
-                            );
-                        })}
-                    </TableBody>
-                </Table>
-            </TableContainer>
+
+                                                    {child.values.map((value, index) => (
+                                                        <TableCell key={index} align="center">
+                                                            {value}
+                                                        </TableCell>
+                                                    ))}
+                                                </TableRow>
+                                            ))}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </TableBody>
+                    </Table>
+                </TableContainer>
+            )}
         </>
     );
 }

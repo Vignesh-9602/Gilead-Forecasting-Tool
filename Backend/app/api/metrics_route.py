@@ -7,8 +7,9 @@ from app.repository.metrics_repo import get_oncology_metrics
 from app.schemas.metrics_selection_schema import (
     MetricSelectionRequest,
     MetricRecalculateRequest,
-    SaveChangesRequest,
+    Refreshchangerequest,
     SaveScenarioRequest,
+    UpdateScenarioRequest
 )
 from app.services.Secenario_Selection import get_base_scenario,save_base_scenario
 from app.services.forecast_service import generate_full_base_forecast, process_forecast
@@ -60,7 +61,7 @@ def build_factors(chart, trajectory_input=None):
 # =====================================================
 # APPLY
 # =====================================================
-@router.post("/metrics/apply")
+@router.post("/metrics/apply",tags=["Model_Input"])
 def apply_metrics(payload: MetricSelectionRequest):
 
     ta = payload.ta_name
@@ -74,7 +75,7 @@ def apply_metrics(payload: MetricSelectionRequest):
 
     try:
         # =====================================================
-        # 1️⃣ FETCH INDICATION + BASE FACTORS (NPS default)
+        # FETCH INDICATION + BASE FACTORS (NPS default)
         # =====================================================
         cur.execute("""
             SELECT
@@ -97,7 +98,7 @@ def apply_metrics(payload: MetricSelectionRequest):
         indication = row[1] if row else payload.indications[0]
 
         # =====================================================
-        # 2️⃣ NPS DATA (ALL LOTS)
+        # NPS DATA (ALL LOTS)
         # =====================================================
         cur.execute("""
             SELECT fs.lot, fs.chart
@@ -138,7 +139,7 @@ def apply_metrics(payload: MetricSelectionRequest):
             })
 
         # =====================================================
-        # 3️⃣ MARKET SHARE DATA
+        # MARKET SHARE DATA
         # =====================================================
         cur.execute("""
             SELECT
@@ -185,7 +186,7 @@ def apply_metrics(payload: MetricSelectionRequest):
             })
 
         # =====================================================
-        # 4️⃣ MARKET SHARE FACTORS (SELECTED PRODUCT)
+        # MARKET SHARE FACTORS (SELECTED PRODUCT)
         # =====================================================
         if selected_product_code:
             cur.execute("""
@@ -239,9 +240,7 @@ def apply_metrics(payload: MetricSelectionRequest):
 # =====================================================
 # RECALCULATE
 # =====================================================
-from fastapi import HTTPException
-
-@router.post("/metrics/recalculate")
+@router.post("/metrics/recalculate",tags=["Model_Input"])
 def recalculate_metrics(payload: MetricRecalculateRequest):
 
     # -----------------------------------------------------
@@ -260,17 +259,16 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     selected_product_input = payload.product.strip() if payload.product else None
     selected_product_l = selected_product_input.lower() if selected_product_input else None
 
-    model_type = (payload.model_type or "ets").lower().strip()
+    model_type = payload.model_type.lower().strip()
 
-    # Pydantic v2 safe dump
     factors_input = payload.factors.model_dump()
+
     multiplier = factors_input.get("multiplier", 1.0)
     multiplier_horizon = factors_input.get("multiplier_horizon", "Forecast")
 
     ets = factors_input.get("ets") or {}
     growth = factors_input.get("growth") or {}
 
-    # Market share requires product
     if metric_to_recalc == "market_share" and not selected_product_l:
         raise HTTPException(400, "product is required for market_share recalculate")
 
@@ -279,42 +277,55 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     # -----------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
+
     try:
         cur.execute("""
             SELECT config
             FROM raw.forecast_configurations
             WHERE config->>'ta_name' = %s
         """, (ta,))
+
         row = cur.fetchone()
+
         if not row:
             raise HTTPException(400, "Forecast config not found")
+
         config = row[0]
+
     finally:
         cur.close()
         conn.close()
 
-    # NOTE: parse_month_date should accept both string and datetime
     train_start = parse_month_date(config["train_start_date"])
     train_end = parse_month_date(config["train_end_date"])
     forecast_periods = int(config["forecast_periods"])
 
     # -----------------------------------------------------
-    # LOAD BASE SERIES FROM DB (ONLY SOURCE)
+    # LOAD BASE SERIES FROM DB
     # -----------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
+
     try:
         cur.execute("""
-            SELECT metric, lot, product, chart
+            SELECT
+                metric,
+                lot,
+                product,
+                chart,
+                factors
             FROM raw.forecast_scenarios
             WHERE
                 scenario_name = 'BASE'
                 AND ta_name = %s
                 AND LOWER(indication) = %s
         """, (ta, indication_l))
+
         base_rows = cur.fetchall()
+
         if not base_rows:
             raise HTTPException(400, "Base scenario not found")
+
     finally:
         cur.close()
         conn.close()
@@ -323,16 +334,18 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     # SERIES CONTAINERS
     # -----------------------------------------------------
     nps_series = []
-    ms_chart_series = []   # chart → selected LOT only
-    ms_table_series = []   # table → all LOTs
+    ms_chart_series = []
+    ms_table_series = []
 
     months = None
     forecast_start_index = None
 
+    selected_base_factors = {}
+
     # -----------------------------------------------------
     # LOOP THROUGH BASE SERIES
     # -----------------------------------------------------
-    for metric, lot, product, base_chart in base_rows:
+    for metric, lot, product, base_chart, base_factors in base_rows:
 
         metric_l = (metric or "").lower()
         lot_l = (lot or "").lower()
@@ -341,7 +354,10 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         is_selected = (
             metric_l == metric_to_recalc
             and lot_l == selected_lot_l
-            and (metric_l != "market_share" or product_l == selected_product_l)
+            and (
+                metric_l != "market_share"
+                or product_l == selected_product_l
+            )
         )
 
         base_months = base_chart["months"]
@@ -349,15 +365,17 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         base_forecast_values = base_chart["forecast_values"]
         base_start_idx = base_chart["forecast_start_index"]
 
-        # ---------------------------
-        # RECALCULATE SELECTED SERIES
-        # ---------------------------
+        # Save factors from selected BASE row
         if is_selected:
+            selected_base_factors = base_factors or {}
+
             full_series_months = base_months
             full_series_values = base_train_values + base_forecast_values
 
+            # -----------------------------------------------------
+            # RECALCULATE SELECTED SERIES
+            # -----------------------------------------------------
             if model_type == "ets":
-                # ETS override params from request
                 row = process_forecast(
                     full_series_months,
                     full_series_values,
@@ -372,8 +390,8 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                     beta=ets.get("beta"),
                     gamma=ets.get("gamma")
                 )
+
             else:
-                # Growth models (linear/exponential/logarithmic/s_curve)
                 row = process_forecast(
                     full_series_months,
                     full_series_values,
@@ -384,23 +402,22 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                     metric=metric_l,
                     multiplier=multiplier,
                     multiplier_horizon=multiplier_horizon,
-                    total_growth_pct=growth.get("total_growth_pct", 0),
+                    total_growth_pct=growth.get("total_growth", 0),
                     duration=growth.get("duration", forecast_periods),
-                    k=growth.get("k"),
+                    k=growth.get("k_value")
                 )
 
-        # ---------------------------
-        # KEEP BASE FOR OTHERS
-        # ---------------------------
         else:
+            # -----------------------------------------------------
+            # KEEP BASE FOR NON-SELECTED SERIES
+            # -----------------------------------------------------
             row = {
                 "months": base_months,
                 "train_values": base_train_values,
                 "forecast_values": base_forecast_values,
-                "forecast_start_index": base_start_idx,
+                "forecast_start_index": base_start_idx
             }
 
-        # capture shared timeline once
         if months is None:
             months = row["months"]
             forecast_start_index = row["forecast_start_index"]
@@ -409,27 +426,24 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
             "lot": lot,
             "label": product if metric_l == "market_share" else "NPS",
             "train_values": row["train_values"],
-            "forecast_values": row["forecast_values"],
+            "forecast_values": row["forecast_values"]
         }
 
-        # ---------------------------
-        # ROUTING TO CHART / TABLE
-        # ---------------------------
         if metric_l == "nps":
             nps_series.append(series_entry)
 
         elif metric_l == "market_share":
-            # table → all lots
             ms_table_series.append(series_entry)
 
-            # chart → selected lot only
             if lot_l == selected_lot_l:
                 ms_chart_series.append(series_entry)
 
     # -----------------------------------------------------
     # BUILD TABLES
     # -----------------------------------------------------
-    nps_table, ms_table = {}, {}
+    nps_table = {}
+    ms_table = {}
+
     num_months = len(months) if months else 0
 
     for s in nps_series:
@@ -453,53 +467,106 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         })
 
     # -----------------------------------------------------
-    # BUILD RESPONSE FACTORS (ONLY ACTIVE MODEL)
+    # BUILD RESPONSE FACTORS - ALL MODELS
     # -----------------------------------------------------
-    active_factors = {
+        # -----------------------------------------------------
+    # BUILD RESPONSE FACTORS - ALL MODELS
+    # -----------------------------------------------------
+    s_curve_factors = (
+        # selected_base_factors.get("s_curve")
+        # or 
+        selected_base_factors.get("scurve")
+        # or selected_base_factors.get("s-curve")
+        # or selected_base_factors.get("S-curve")
+        # or selected_base_factors.get("sCurve")
+        # or {}
+    )
+
+    response_factors = {
         "active_model": model_type,
         "multiplier": float(multiplier),
         "multiplier_horizon": multiplier_horizon,
+
+        "ets": selected_base_factors.get("ets", {
+            "alpha": None,
+            "beta": None,
+            "gamma": None
+        }),
+
+        "linear": selected_base_factors.get("linear", {
+            "total_growth": None,
+            "duration": None,
+            "trajectory_start": None
+        }),
+
+        "exponential": selected_base_factors.get("exponential", {
+            "total_growth": None,
+            "duration": None,
+            "k_value": None,
+            "trajectory_start": None
+        }),
+
+        "logarithmic": selected_base_factors.get("logarithmic", {
+            "total_growth": None,
+            "duration": None,
+            "k_value": None,
+            "trajectory_start": None
+        }),
+
+        # IMPORTANT: keep this as s_curve, not scurve
+        "scurve": {
+            "total_growth": s_curve_factors.get("total_growth"),
+            "duration": s_curve_factors.get("duration"),
+            "k_value": s_curve_factors.get("k_value"),
+            "trajectory_start": s_curve_factors.get("trajectory_start")
+        }
     }
 
+    # -----------------------------------------------------
+    # OVERRIDE ONLY CURRENT RECALCULATED MODEL
+    # -----------------------------------------------------
     if model_type == "ets":
-        active_factors["ets"] = {
+        response_factors["ets"] = {
             "alpha": ets.get("alpha"),
             "beta": ets.get("beta"),
-            "gamma": ets.get("gamma"),
-            **({"seasonality": ets.get("seasonality", "none")} if "seasonality" in ets else {})
+            "gamma": ets.get("gamma")
         }
+
     else:
-        block = {
-            "total_growth_pct": growth.get("total_growth_pct"),
+        existing_model_factors = response_factors.get(model_type, {})
+
+        response_factors[model_type] = {
+            "total_growth": growth.get("total_growth"),
             "duration": growth.get("duration"),
+            "trajectory_start": existing_model_factors.get("trajectory_start")
         }
+
         if model_type != "linear":
-            block["k"] = growth.get("k")
-        active_factors[model_type] = block
+            response_factors[model_type]["k_value"] = growth.get("k_value")
 
     # -----------------------------------------------------
-    # FINAL RESPONSE (apply-like)
+    # FINAL RESPONSE
     # -----------------------------------------------------
     return {
         "therapy_area": ta,
         "indication": indication_input,
-        "factors": active_factors,
+        "factors": response_factors,
         "metrics_data": {
             "nps": {
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
-                    "series": nps_series,
+                    "series": nps_series
                 },
-                "table": list(nps_table.values()),
+                "table": list(nps_table.values())
             },
             "market_share": {
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
-                    "series": ms_chart_series,
+                    "series": ms_chart_series
                 },
-                "table": list(ms_table.values()),
+                "table": list(ms_table.values())
             }
         }
     }
@@ -507,16 +574,12 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
 # =====================================================
 # POST: SAVE CHANGES (UNCHANGED)
 # =====================================================
-@router.post("/metrics/save-changes")
-def save_changes(payload: SaveChangesRequest):
-    """
-    Save user-edited table values and update chart accordingly.
-    - Backend DOES NOT recompute totals
-    - Backend DOES NOT smooth history
-    - Backend trusts FE table as authoritative
-    """
+# =====================================================
+@router.post("/metrics/refresh",tags=["Model_Input"])
+def refresh_changes(payload: Refreshchangerequest):
 
     metric = payload.metric.lower()
+
     if metric not in ["market_share", "nps"]:
         raise HTTPException(
             status_code=400,
@@ -528,19 +591,21 @@ def save_changes(payload: SaveChangesRequest):
     # --------------------------------------------------
     conn = get_connection()
     cur = conn.cursor()
+
     try:
-        cur.execute(
-            """
+        cur.execute("""
             SELECT config
             FROM raw.forecast_configurations
             WHERE config->>'ta_name' = %s
-            """,
-            (payload.therapy_area,)
-        )
+        """, (payload.therapy_area,))
+
         row = cur.fetchone()
+
         if not row:
             raise HTTPException(400, "Forecast config not found")
+
         config = row[0]
+
     finally:
         cur.close()
         conn.close()
@@ -549,22 +614,21 @@ def save_changes(payload: SaveChangesRequest):
     train_start_date = config["train_start_date"]
 
     # --------------------------------------------------
-    # Find values row correctly (Pydantic-safe)
+    # Find selected edited row
     # --------------------------------------------------
     product_values = None
 
     for lot_group in payload.table:
-        if lot_group.lot != payload.lot:
+        if lot_group.lot.lower() != payload.lot.lower():
             continue
 
         if metric == "market_share":
-            # product is required
             for child in lot_group.children:
-                if child.label == payload.product:
+                if child.label.lower() == payload.product.lower():
                     product_values = child.values
                     break
 
-        else:  # NPS — single row, no product
+        else:
             if lot_group.children:
                 product_values = lot_group.children[0].values
 
@@ -578,6 +642,7 @@ def save_changes(payload: SaveChangesRequest):
     # Train / forecast split
     # --------------------------------------------------
     train_len = len(product_values) - forecast_periods
+
     if train_len < 0:
         raise HTTPException(
             status_code=400,
@@ -585,11 +650,10 @@ def save_changes(payload: SaveChangesRequest):
         )
 
     # --------------------------------------------------
-    # Build MONTHS
+    # Build months
     # --------------------------------------------------
     train_start = datetime.fromisoformat(train_start_date).replace(day=1)
 
-    # train_len can be 0; handle safely
     train_months = [
         (train_start + relativedelta(months=i)).strftime("%Y-%m-%d")
         for i in range(train_len)
@@ -598,7 +662,6 @@ def save_changes(payload: SaveChangesRequest):
     if train_len > 0:
         last_train_month = datetime.fromisoformat(train_months[-1])
     else:
-        # if no training months, consider train_start as base for forecast months
         last_train_month = train_start
 
     forecast_months = [
@@ -610,115 +673,577 @@ def save_changes(payload: SaveChangesRequest):
     forecast_start_index = train_len
 
     # --------------------------------------------------
-    # Build MULTI SERIES from table (LIKE APPLY)
+    # Build selected metric chart
     # --------------------------------------------------
-    series_list = []
+    selected_chart_series = []
+
     for lot_group in payload.table:
         lot_label = lot_group.lot
 
+        # For market_share chart, send only selected LOT and its products
+        if metric == "market_share" and lot_label.lower() != payload.lot.lower():
+            continue
+
+        # For NPS chart, send all LOTs
         for child in lot_group.children:
             values = child.values
 
-            series_list.append({
+            selected_chart_series.append({
                 "lot": lot_label,
                 "label": child.label,
                 "train_values": values[:train_len],
                 "forecast_values": values[train_len:]
             })
 
-    # --------------------------------------------------
-    # Final chart (MULTI SERIES)
-    # --------------------------------------------------
-    chart = {
-        "months": months,
-        "forecast_start_index": forecast_start_index,
-        "series": series_list
-    }
-
-    # --------------------------------------------------
-    # APPLY/RECALC-LIKE RESPONSE SHAPE (ONLY RETURN CHANGED)
-    # --------------------------------------------------
-
-    # Build metric block for the edited metric
     updated_metric_block = {
-        "chart": chart,
+        "chart": {
+            "months": months,
+            "forecast_start_index": forecast_start_index,
+            "series": selected_chart_series
+        },
         "table": payload.table
     }
 
-    # Placeholders for the other metric (so FE always gets both keys)
-    empty_metric_block = {
-        "chart": {
-            "months": months,                 # keep timeline consistent
-            "forecast_start_index": forecast_start_index,
-            "series": []
-        },
-        "table": []
-    }
-
-    metrics_data = {
-        "nps": updated_metric_block if metric == "nps" else empty_metric_block,
-        "market_share": updated_metric_block if metric == "market_share" else empty_metric_block
-    }
-
-    # If your SaveChangesRequest contains indication/factors, return them. If not, keep safe defaults.
-    indication = getattr(payload, "indication", None) or ""
-    factors = getattr(payload, "factors", None) or {}
-
-    return {
-        "therapy_area": payload.therapy_area,
-        "indication": indication,
-        "metrics_data": metrics_data
-    }
-
-@router.post("/metrics/save")
-def save_scenario(payload: SaveScenarioRequest):
+    # --------------------------------------------------
+    # Load other metric from DB instead of sending empty
+    # --------------------------------------------------
+    other_metric = "market_share" if metric == "nps" else "nps"
 
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        cur.execute(
-            """
-            INSERT INTO raw.forecast_scenarios (
-                scenario_name,
-                user_id,
-                ta_name,
-                indication,
-                lot,
-                metric,
-                product,
-                model_type,
-                factors,
-                chart,
-                table_data
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                payload.scenario_name,
-                payload.user_id,
-                payload.ta_name,
-                payload.indication,
-                payload.lot,
-                payload.metric,
-                payload.product,
-                payload.model_type,
-                json.dumps(payload.factors),
-                json.dumps(payload.chart),
-                json.dumps(payload.table),
-            )
+        if other_metric == "nps":
+            cur.execute("""
+                SELECT lot, chart
+                FROM raw.forecast_scenarios
+                WHERE
+                    scenario_name = 'BASE'
+                    AND ta_name = %s
+                    AND LOWER(indication) = LOWER(%s)
+                    AND metric = 'nps'
+                ORDER BY lot
+            """, (payload.therapy_area, payload.indication))
+
+            rows = cur.fetchall()
+
+            other_series = []
+            other_table = {}
+
+            for lot, chart in rows:
+                other_series.append({
+                    "lot": lot,
+                    "label": "NPS",
+                    "train_values": chart["train_values"],
+                    "forecast_values": chart["forecast_values"]
+                })
+
+                other_table.setdefault(lot, {
+                    "lot": lot,
+                    "total": [],
+                    "children": []
+                })["children"].append({
+                    "label": "NPS",
+                    "values": chart["train_values"] + chart["forecast_values"]
+                })
+
+        else:
+            cur.execute("""
+                SELECT lot, product, chart
+                FROM raw.forecast_scenarios
+                WHERE
+                    scenario_name = 'BASE'
+                    AND ta_name = %s
+                    AND LOWER(indication) = LOWER(%s)
+                    AND metric = 'market_share'
+                ORDER BY lot, product
+            """, (payload.therapy_area, payload.indication))
+
+            rows = cur.fetchall()
+
+            other_series = []
+            other_table = {}
+
+            for lot, product, chart in rows:
+
+                # Chart only selected LOT products
+                if lot.lower() == payload.lot.lower():
+                    other_series.append({
+                        "lot": lot,
+                        "label": product,
+                        "train_values": chart["train_values"],
+                        "forecast_values": chart["forecast_values"]
+                    })
+
+                other_table.setdefault(lot, {
+                    "lot": lot,
+                    "total": [100.0] * len(months),
+                    "children": []
+                })["children"].append({
+                    "label": product,
+                    "values": chart["train_values"] + chart["forecast_values"]
+                })
+
+    finally:
+        cur.close()
+        conn.close()
+
+    other_metric_block = {
+        "chart": {
+            "months": months,
+            "forecast_start_index": forecast_start_index,
+            "series": other_series
+        },
+        "table": list(other_table.values())
+    }
+
+    # --------------------------------------------------
+    # Final response
+    # --------------------------------------------------
+    if metric == "nps":
+        metrics_data = {
+            "nps": updated_metric_block,
+            "market_share": other_metric_block
+        }
+    else:
+        metrics_data = {
+            "market_share": updated_metric_block,
+            "nps": other_metric_block
+        }
+
+    return {
+        "therapy_area": payload.therapy_area,
+        "indication": payload.indication,
+        "metrics_data": metrics_data
+    }
+
+@router.post("/metrics/save",tags=["Model_Input"])
+def save_scenario(payload: SaveScenarioRequest):
+
+    # --------------------------------------------------
+    # DO NOT ALLOW USER TO SAVE AS BASE
+    # --------------------------------------------------
+    if payload.scenario_name.strip().upper() == "BASE":
+        raise HTTPException(
+            status_code=400,
+            detail="BASE scenario cannot be overwritten. Please save as a different scenario name."
         )
 
-        scenario_id = cur.fetchone()[0]
+    conn = get_connection()
+    cur = conn.cursor()
+
+    saved_ids = []
+
+    try:
+        metrics_data = payload.metrics_data or {}
+
+        # --------------------------------------------------
+        # DO NOT ALLOW DUPLICATE SCENARIO NAME
+        # --------------------------------------------------
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM raw.forecast_scenarios
+            WHERE scenario_name = %s
+              AND ta_name = %s
+              AND LOWER(indication) = LOWER(%s)
+        """, (
+            payload.scenario_name,
+            payload.ta_name,
+            payload.indication
+        ))
+
+        existing_count = cur.fetchone()[0]
+
+        if existing_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Scenario name already exists. Please use Update to overwrite this scenario or provide a new scenario name."
+            )
+
+        # ==================================================
+        # SAVE NPS - ONE ROW PER LOT
+        # ==================================================
+        nps_block = metrics_data.get("nps")
+
+        if nps_block:
+            nps_chart = nps_block.get("chart", {}) or {}
+            nps_table = nps_block.get("table", []) or []
+
+            months = nps_chart.get("months", []) or []
+            forecast_start_index = nps_chart.get("forecast_start_index", 0) or 0
+            nps_series = nps_chart.get("series", []) or []
+
+            for series in nps_series:
+                lot = series.get("lot")
+
+                if not lot:
+                    continue
+
+                row_chart = {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "train_values": series.get("train_values", []) or [],
+                    "forecast_values": series.get("forecast_values", []) or []
+                }
+
+                row_table = [
+                    t for t in nps_table
+                    if str(t.get("lot", "")).lower().strip()
+                    == str(lot).lower().strip()
+                ]
+
+                cur.execute("""
+                    INSERT INTO raw.forecast_scenarios (
+                        scenario_name,
+                        user_id,
+                        ta_name,
+                        indication,
+                        lot,
+                        metric,
+                        product,
+                        model_type,
+                        factors,
+                        chart,
+                        table_data
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    payload.scenario_name,
+                    payload.user_id,
+                    payload.ta_name,
+                    payload.indication,
+                    lot,
+                    "nps",
+                    None,
+                    payload.model_type,
+                    json.dumps(payload.factors),
+                    json.dumps(row_chart),
+                    json.dumps(row_table),
+                ))
+
+                saved_ids.append(cur.fetchone()[0])
+
+        # ==================================================
+        # SAVE MARKET SHARE - ONE ROW PER LOT + PRODUCT
+        # ==================================================
+        ms_block = metrics_data.get("market_share")
+
+        if ms_block:
+            ms_chart = ms_block.get("chart", {}) or {}
+            ms_table = ms_block.get("table", []) or []
+
+            months = ms_chart.get("months", []) or []
+            forecast_start_index = ms_chart.get("forecast_start_index", 0) or 0
+
+            for lot_group in ms_table:
+                lot = lot_group.get("lot")
+
+                if not lot:
+                    continue
+
+                children = lot_group.get("children", []) or []
+
+                for child in children:
+                    product = child.get("label")
+                    values = child.get("values", []) or []
+
+                    if not product:
+                        continue
+
+                    row_chart = {
+                        "months": months,
+                        "forecast_start_index": forecast_start_index,
+                        "train_values": values[:forecast_start_index],
+                        "forecast_values": values[forecast_start_index:]
+                    }
+
+                    row_table = [{
+                        "lot": lot,
+                        "total": lot_group.get("total", []) or [],
+                        "children": [child]
+                    }]
+
+                    cur.execute("""
+                        INSERT INTO raw.forecast_scenarios (
+                            scenario_name,
+                            user_id,
+                            ta_name,
+                            indication,
+                            lot,
+                            metric,
+                            product,
+                            model_type,
+                            factors,
+                            chart,
+                            table_data
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        payload.scenario_name,
+                        payload.user_id,
+                        payload.ta_name,
+                        payload.indication,
+                        lot,
+                        "market_share",
+                        product,
+                        payload.model_type,
+                        json.dumps(payload.factors),
+                        json.dumps(row_chart),
+                        json.dumps(row_table),
+                    ))
+
+                    saved_ids.append(cur.fetchone()[0])
+
+        if not saved_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No scenario data found to save."
+            )
+
         conn.commit()
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+        conn.rollback()
+        raise e
 
     finally:
         cur.close()
         conn.close()
 
     return {
-        "scenario_id": f"SCN_{scenario_id}",
         "scenario_name": payload.scenario_name,
+        "saved_rows": len(saved_ids),
+        "scenario_ids": [f"SCN_{sid}" for sid in saved_ids],
         "message": "Scenario saved successfully"
+    }
+
+@router.put("/update-scenario",tags=["Model_Input"])
+def update_scenario(payload: UpdateScenarioRequest):
+
+    # --------------------------------------------------
+    # BASE SCENARIO CANNOT BE UPDATED
+    # --------------------------------------------------
+    # if payload.scenario_name.strip().upper() == "BASE":
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail="BASE scenario cannot be updated. Please create a new scenario."
+    #     )
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    saved_ids = []
+
+    try:
+        metrics_data = payload.metrics_data or {}
+
+        # --------------------------------------------------
+        # CHECK SCENARIO EXISTS
+        # --------------------------------------------------
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM raw.forecast_scenarios
+            WHERE scenario_name = %s
+              AND ta_name = %s
+              AND LOWER(indication) = LOWER(%s)
+              AND scenario_name <> 'BASE'
+        """, (
+            payload.scenario_name,
+            payload.ta_name,
+            payload.indication
+        ))
+
+        scenario_exists = cur.fetchone()[0]
+
+        if scenario_exists == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Scenario does not exist. Please use Save Scenario to create a new scenario first."
+            )
+
+        # --------------------------------------------------
+        # DELETE OLD SCENARIO SNAPSHOT
+        # --------------------------------------------------
+        cur.execute("""
+            DELETE FROM raw.forecast_scenarios
+            WHERE scenario_name = %s
+              AND ta_name = %s
+              AND LOWER(indication) = LOWER(%s)
+              AND scenario_name <> 'BASE'
+        """, (
+            payload.scenario_name,
+            payload.ta_name,
+            payload.indication
+        ))
+
+        # ==================================================
+        # INSERT NPS - ONE ROW PER LOT
+        # ==================================================
+        nps_block = metrics_data.get("nps")
+
+        if nps_block:
+            nps_chart = nps_block.get("chart", {}) or {}
+            nps_table = nps_block.get("table", []) or []
+
+            months = nps_chart.get("months", []) or []
+            forecast_start_index = nps_chart.get("forecast_start_index", 0) or 0
+            nps_series = nps_chart.get("series", []) or []
+
+            for series in nps_series:
+                lot = series.get("lot")
+
+                if not lot:
+                    continue
+
+                row_chart = {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "train_values": series.get("train_values", []) or [],
+                    "forecast_values": series.get("forecast_values", []) or []
+                }
+
+                row_table = [
+                    t for t in nps_table
+                    if str(t.get("lot", "")).lower().strip()
+                    == str(lot).lower().strip()
+                ]
+
+                cur.execute("""
+                    INSERT INTO raw.forecast_scenarios (
+                        scenario_name,
+                        ta_name,
+                        indication,
+                        lot,
+                        metric,
+                        product,
+                        model_type,
+                        factors,
+                        chart,
+                        table_data
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    payload.scenario_name,
+                    payload.ta_name,
+                    payload.indication,
+                    lot,
+                    "nps",
+                    None,
+                    payload.model_type,
+                    json.dumps(payload.factors),
+                    json.dumps(row_chart),
+                    json.dumps(row_table),
+                ))
+
+                saved_ids.append(cur.fetchone()[0])
+
+        # ==================================================
+        # INSERT MARKET SHARE - ONE ROW PER LOT + PRODUCT
+        # ==================================================
+        ms_block = metrics_data.get("market_share")
+
+        if ms_block:
+            ms_chart = ms_block.get("chart", {}) or {}
+            ms_table = ms_block.get("table", []) or []
+
+            months = ms_chart.get("months", []) or []
+            forecast_start_index = ms_chart.get("forecast_start_index", 0) or 0
+
+            for lot_group in ms_table:
+                lot = lot_group.get("lot")
+
+                if not lot:
+                    continue
+
+                children = lot_group.get("children", []) or []
+
+                for child in children:
+                    product = child.get("label")
+                    values = child.get("values", []) or []
+
+                    if not product:
+                        continue
+
+                    row_chart = {
+                        "months": months,
+                        "forecast_start_index": forecast_start_index,
+                        "train_values": values[:forecast_start_index],
+                        "forecast_values": values[forecast_start_index:]
+                    }
+
+                    row_table = [{
+                        "lot": lot,
+                        "total": lot_group.get("total", []) or [],
+                        "children": [child]
+                    }]
+
+                    cur.execute("""
+                        INSERT INTO raw.forecast_scenarios (
+                            scenario_name,
+                            ta_name,
+                            indication,
+                            lot,
+                            metric,
+                            product,
+                            model_type,
+                            factors,
+                            chart,
+                            table_data
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        payload.scenario_name,
+                        payload.ta_name,
+                        payload.indication,
+                        lot,
+                        "market_share",
+                        product,
+                        payload.model_type,
+                        json.dumps(payload.factors),
+                        json.dumps(row_chart),
+                        json.dumps(row_table),
+                    ))
+
+                    saved_ids.append(cur.fetchone()[0])
+
+        if not saved_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No scenario data found to update."
+            )
+
+        conn.commit()
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+        conn.rollback()
+        raise e
+
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "therapy_area": payload.ta_name,
+        "indication": payload.indication,
+        "lot": payload.lot,
+        "metric": payload.metric,
+        "product": payload.product,
+        "scenario_name": payload.scenario_name,
+        "updated_rows": len(saved_ids),
+        "scenario_ids": [f"SCN_{sid}" for sid in saved_ids],
+        "factors": payload.factors,
+        "metrics_data": payload.metrics_data,
+        "message": "Scenario updated successfully"
     }
