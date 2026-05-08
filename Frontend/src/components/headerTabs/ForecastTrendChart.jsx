@@ -465,7 +465,7 @@ export default function ForecastTrendChart({
                                         showgrid: true,
                                     },
                                     yaxis: {
-                                        showgrid: true,
+                                        showgrid: false,
                                         range: [0, yMax],
                                         // dtick: 50,
                                     },

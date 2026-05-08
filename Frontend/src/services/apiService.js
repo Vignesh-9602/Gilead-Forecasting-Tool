@@ -61,6 +61,22 @@ export const getScenarioFilters = (taName) => {
 export const applyScenarioFilters = (payload) => {
   return httpClient.post(`/api/scenario/apply-filters`, payload);
 };
+
+export const saveScenarioSelection = (payload) => {
+  return httpClient.post(`/api/scenario/save`, payload);
+};
+
+export const finalizeScenarios = (payload) => {
+  return httpClient.post(`/api/scenario/finalize-scenarios`, payload);
+};
+
+export const getScenarioStatus = (payload) => {
+  return httpClient.post(`/api/scenario/status`, payload);
+};
+
+export const clearStatus = (payload) => {
+  return httpClient.post(`/api/scenario/clear`, payload);
+};
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

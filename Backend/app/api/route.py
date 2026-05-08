@@ -396,7 +396,7 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
         cur.close()
         conn.close()
 
-@router.get("/metrics/filters/{ta_name}",tags=["Model_Input"])
+@router.get("/metrics/filters/{ta_name}", tags=["Model_Input"])
 def get_metrics_filters(ta_name: str):
 
     conn = get_connection()
@@ -410,6 +410,7 @@ def get_metrics_filters(ta_name: str):
             WHERE ta_name = %s
             ORDER BY scenario_name
         """, (ta_name,))
+
         scenario_names = [r[0] for r in cur.fetchall()]
 
         if not scenario_names:
@@ -420,24 +421,32 @@ def get_metrics_filters(ta_name: str):
                 "metric_filters": []
             }
 
-        # Fetch filters with canonical indication + product
+        # Get all brands from indication_master for each scenario + indication + lot
         cur.execute("""
+            WITH scenario_lots AS (
+                SELECT DISTINCT
+                    scenario_name,
+                    ta_name,
+                    indication,
+                    lot
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+            )
             SELECT
-                fs.scenario_name,
-                im.indications   AS indication,     --    canonical
-                fs.lot,
-                fs.metric,
-                im.brand_name    AS product          --    canonical
-            FROM raw.forecast_scenarios fs
+                sl.scenario_name,
+                im.indications AS indication,
+                sl.lot,
+                im.brand_name AS product
+            FROM scenario_lots sl
             JOIN raw.indication_master im
-              ON im.ta = fs.ta_name
-             AND LOWER(im.indications) = LOWER(fs.indication)
-             AND (
-                  fs.metric != 'market_share'
-                  OR LOWER(im.brand_name) = LOWER(fs.product)
-                 )
-            WHERE fs.ta_name = %s
-            ORDER BY fs.scenario_name, im.indications, fs.lot, im.brand_name
+              ON im.ta = sl.ta_name
+             AND LOWER(im.indications) = LOWER(sl.indication)
+            WHERE im.brand_name IS NOT NULL
+            ORDER BY
+                sl.scenario_name,
+                im.indications,
+                sl.lot,
+                im.brand_name
         """, (ta_name,))
 
         rows = cur.fetchall()
@@ -446,25 +455,22 @@ def get_metrics_filters(ta_name: str):
         cur.close()
         conn.close()
 
-    # Build structure
     data = {}
 
-    for scenario, indication, lot, metric, product in rows:
+    for scenario, indication, lot, product in rows:
         scenario_map = data.setdefault(scenario, {})
         indication_map = scenario_map.setdefault(indication, {})
         lot_products = indication_map.setdefault(lot, [])
 
-        # Only add products for market_share
-        if metric == "market_share" and product:
-            if product not in lot_products:
-                lot_products.append(product)
+        if product and product not in lot_products:
+            lot_products.append(product)
 
     return {
         "ta_name": ta_name,
         "scenario_names": scenario_names,
         "data": data,
         "metric_filters": [
-            { "label": "Market Share", "value": "market_share" },
-            { "label": "Overall Market Volume", "value": "nps" }
+            {"label": "Market Share", "value": "market_share"},
+            {"label": "Overall Market Volume", "value": "nps"}
         ]
     }

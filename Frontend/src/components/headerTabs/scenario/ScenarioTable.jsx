@@ -12,6 +12,9 @@ import {
     Typography,
     Button,
     Radio,
+    FormControl,
+    Select,
+    MenuItem,
 } from "@mui/material";
 
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
@@ -21,6 +24,9 @@ export default function ScenarioTable({
     chartData,
     tableData,
     selectedLot,
+    tableMetric,
+    setTableMetric,
+    onSaveSelection
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -32,7 +38,15 @@ export default function ScenarioTable({
 
     const [expandedRows, setExpandedRows] = useState({});
     const [selectedScenario, setSelectedScenario] = useState("");
+    const formatValue = (value) => {
+        if (value === null || value === undefined) return "-";
 
+        if (tableMetric === "market_share") {
+            return `${Number(value).toFixed(2)}%`;
+        }
+
+        return Number(value).toFixed(0);
+    };
     useEffect(() => {
         const initial = {};
         (tableData || []).forEach((row) => {
@@ -65,12 +79,8 @@ export default function ScenarioTable({
     };
 
     const handleSaveSelection = () => {
-        const payload = {
-            selected_lot: selectedLot,
-            selected_scenario: selectedScenario,
-        };
-
-        console.log(payload);
+        if (!selectedScenario) return;
+        onSaveSelection(selectedScenario);
     };
 
     return (
@@ -88,8 +98,20 @@ export default function ScenarioTable({
                     COMPARISON MATRIX
                 </Typography>
 
+
                 {tableData?.length > 0 && (
                     <Box sx={{ display: "flex", gap: 1 }}>
+                        <FormControl size="small" sx={{ minWidth: 180 }}>
+                            <Select
+                                value={tableMetric}
+                                onChange={(e) => setTableMetric(e.target.value)}
+                            >
+                                <MenuItem value="nps">Overall Market Volume</MenuItem>
+                                <MenuItem value="market_share">
+                                    Market Share
+                                </MenuItem>
+                            </Select>
+                        </FormControl>
                         <Tooltip title="Expand All">
                             <IconButton onClick={handleExpandAll}>
                                 <UnfoldMoreIcon />
@@ -105,6 +127,7 @@ export default function ScenarioTable({
                         <Button
                             variant="contained"
                             onClick={handleSaveSelection}
+                            disabled={!selectedScenario}
                             sx={{
                                 textTransform: "none",
                                 borderRadius: "8px",

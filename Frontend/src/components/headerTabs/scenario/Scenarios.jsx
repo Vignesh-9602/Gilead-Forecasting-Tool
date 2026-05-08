@@ -9,19 +9,18 @@ import {
     Button,
     Checkbox,
     ListItemText,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogContentText,
+    DialogActions,
 } from "@mui/material";
 
 import { GlobalContext } from "../../../context/Provider";
-import { getScenarioFilters, applyScenarioFilters } from "../../../services/apiService";
+import { getScenarioFilters, applyScenarioFilters, saveScenarioSelection, finalizeScenarios, getScenarioStatus, clearStatus } from "../../../services/apiService";
 import ScenarioChart from "./ScenarioChart";
 import ScenarioTable from "./ScenarioTable";
-
-// const scenarioOptions = [
-//     "Base Case",
-//     "Optimized Case",
-//     "ETS",
-//     "Bear Case",
-// ];
+import { useSnackbarStore } from "../../../stores";
 
 export default function Scenarios() {
     const { favState } = useContext(GlobalContext);
@@ -29,9 +28,14 @@ export default function Scenarios() {
 
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
-    const [metric, setMetric] = useState("");
-    const [brand, setBrand] = useState("");
+    // const [metric, setMetric] = useState("");
+    // const [brand, setBrand] = useState("");
     const [compareScenarios, setCompareScenarios] = useState([]);
+    const [finalizationStatus, setFinalizationStatus] = useState({});
+    const [canFinalize, setCanFinalize] = useState(false);
+    const { showSnackbar } = useSnackbarStore();
+    const [isDataLoaded, setIsDataLoaded] = useState(false);
+    const [tableMetric, setTableMetric] = useState("nps");
 
     const [mappingData, setMappingData] = useState({});
     const [filterOptions, setFilterOptions] = useState({
@@ -40,7 +44,9 @@ export default function Scenarios() {
     });
 
     const [chartData, setChartData] = useState(null);
-    const [tableData, setTableData] = useState([]);
+    const [tableData, setTableData] = useState({});
+
+    const [openResetDialog, setOpenResetDialog] = useState(false);
 
     useEffect(() => {
         if (therapyArea) {
@@ -48,11 +54,52 @@ export default function Scenarios() {
         }
     }, [therapyArea]);
 
+    const metric = "nps";
+
+    useEffect(() => {
+        if (!therapyArea || !indication || !metric) return;
+
+        fetchScenarioStatus();
+    }, [therapyArea, indication]);
+
     useEffect(() => {
         setChartData(null);
         setTableData([]);
-    }, [indication, lot, metric]);
-    
+        setTableMetric("nps");
+        setIsDataLoaded(false);
+    }, [indication]);
+
+    // Auto-select all scenarios when lot changes
+    useEffect(() => {
+        if (indication && lot && mappingData[indication]?.[lot]?.available_scenarios) {
+            const allScenarioIds = mappingData[indication][lot].available_scenarios.map(sc => sc.scenario_id);
+            setCompareScenarios(allScenarioIds);
+        }
+    }, [lot, indication, mappingData]);
+
+    const fetchScenarioStatus = async () => {
+        try {
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                metric: "nps",
+            };
+
+            const response = await getScenarioStatus(payload);
+            const data = response?.data;
+
+            setFinalizationStatus(data.finalization_status || {});
+            setCanFinalize(data.can_finalize);
+
+        } catch (error) {
+            console.error("Failed to fetch scenario status", error);
+
+            // fallback → show all pending
+            setFinalizationStatus({});
+            setCanFinalize(false);
+        }
+    };
+
 
     const fetchScenarioFilters = async () => {
         try {
@@ -74,29 +121,130 @@ export default function Scenarios() {
     };
 
     const handleApply = async () => {
-        if (!therapyArea || !indication || !lot || !metric) return;
+        if (!therapyArea || !indication || !lot) return;
 
         const payload = {
             ta_name: therapyArea,
             indication,
             lot,
-            metric,
+            metric: "nps",
             scenario_names: availableScenarios
                 .filter(sc => compareScenarios.includes(sc.scenario_id))
                 .map(sc => sc.scenario_name),
-            product: metric === "market_share" ? brand : ""
+            // product: metric === "market_share" ? brand : ""
         };
 
         try {
             const response = await applyScenarioFilters(payload);
+
             const data = response?.data;
 
             // DIRECT ASSIGN (no transformation needed)
             setChartData(data.chart);
             setTableData(data.table);
+            setIsDataLoaded(true);
+            showSnackbar("Filters applied successfully", "success");
 
         } catch (error) {
             console.error("Apply filter failed", error);
+            showSnackbar("Failed to apply filter", "error");
+        }
+    };
+
+    const handleSaveScenario = async (selectedScenario) => {
+        if (!selectedScenario) return;
+
+        const payload = {
+            ta_name: therapyArea,
+            indication,
+            lot,
+            metric: "nps",
+            scenario_name: selectedScenario,
+        };
+
+        try {
+            const response = await saveScenarioSelection(payload);
+            const data = response?.data;
+
+            console.log("Saved:", data);
+
+            // Update UI
+            setFinalizationStatus(data.finalization_status || {});
+            setCanFinalize(data.can_finalize);
+            showSnackbar(`Scenario saved successfully for ${lot}`, "success");
+
+        } catch (error) {
+            console.error("Save scenario failed", error);
+            showSnackbar("Failed to save scenario", "error");
+        }
+    };
+
+    const handleFinalizeScenarios = async () => {
+        if (!therapyArea || !indication) return;
+
+        const payload = {
+            ta_name: therapyArea,
+            indication,
+            metric: "nps",
+        };
+
+        try {
+            const response = await finalizeScenarios(payload);
+            const data = response?.data;
+
+            console.log("Finalized:", data);
+
+            //  Map backend response to your UI format
+            const mappedStatus = {};
+
+            Object.entries(data.finalized_selections || {}).forEach(
+                ([lotKey, value]) => {
+                    mappedStatus[lotKey] = {
+                        finalized: true,
+                        scenario_name: value?.scenario_name,
+                    };
+                }
+            );
+
+            // Update UI state
+            setFinalizationStatus(mappedStatus);
+            setCanFinalize(false);
+            showSnackbar("Scenarios finalized successfully", "success");
+
+        } catch (error) {
+            console.error("Finalize failed", error);
+            showSnackbar("Failed to finalize scenarios", "error");
+        }
+    };
+    const handleResetStatus = async () => {
+        try {
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                metric: "nps",
+            };
+
+            const response = await clearStatus(payload);
+
+            const data = response?.data;
+
+            setFinalizationStatus(data.finalization_status || {});
+            setCanFinalize(false);
+
+            setOpenResetDialog(false);
+
+            showSnackbar(
+                "Scenario status reset successfully",
+                "success"
+            );
+
+        } catch (error) {
+            console.error("Reset status failed", error);
+
+            showSnackbar(
+                "Failed to reset scenario status",
+                "error"
+            );
         }
     };
 
@@ -104,10 +252,10 @@ export default function Scenarios() {
         ? Object.keys(mappingData[indication] || {})
         : [];
 
-    const availableProducts =
-        indication && lot
-            ? mappingData[indication]?.[lot]?.products || []
-            : [];
+    // const availableProducts =
+    //     indication && lot
+    //         ? mappingData[indication]?.[lot]?.products || []
+    //         : [];
 
     const availableScenarios =
         indication && lot
@@ -123,6 +271,38 @@ export default function Scenarios() {
             height: "35px",
             backgroundColor: "#fcfcfd",
         },
+    };
+
+    const handleSelectAllScenarios = () => {
+        const allScenarioIds = availableScenarios.map(sc => sc.scenario_id);
+        const isAllSelected = compareScenarios.length === availableScenarios.length;
+
+        if (isAllSelected) {
+            // If all are selected, deselect all
+            setCompareScenarios([]);
+        } else {
+            // Select all
+            setCompareScenarios(allScenarioIds);
+        }
+    };
+
+    const handleCompareScenarioChange = (event) => {
+        const { value } = event.target;
+
+        // Check if "SELECT_ALL" option was selected
+        if (value.includes("SELECT_ALL")) {
+            const allScenarioIds = availableScenarios.map(sc => sc.scenario_id);
+
+            // If all are selected, deselect all; otherwise select all
+            if (compareScenarios.length === availableScenarios.length) {
+                setCompareScenarios([]);
+            } else {
+                setCompareScenarios(allScenarioIds);
+            }
+        } else {
+            // Normal scenario selection
+            setCompareScenarios(value);
+        }
     };
 
     // const handleApply = () => {
@@ -221,8 +401,8 @@ export default function Scenarios() {
                                 value={lot}
                                 onChange={(e) => {
                                     setLot(e.target.value)
-                                    setBrand("");
-                                    setCompareScenarios([]);
+                                    // setBrand("");
+                                    // setCompareScenarios([]);
                                 }}
                                 displayEmpty
                             >
@@ -237,7 +417,7 @@ export default function Scenarios() {
                     </Box>
 
                     {/* Metric */}
-                    <Box>
+                    {/* <Box>
                         <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>
                             METRIC
                         </Typography>
@@ -282,7 +462,7 @@ export default function Scenarios() {
                                 ))}
                             </Select>
                         </FormControl>
-                    </Box>
+                    </Box> */}
 
                     {/* Compare Scenarios */}
                     <Box>
@@ -294,9 +474,21 @@ export default function Scenarios() {
                             <Select
                                 multiple
                                 value={compareScenarios}
-                                onChange={(e) => setCompareScenarios(e.target.value)}
-                                renderValue={(selected) => selected.join(", ")}
+                                onChange={handleCompareScenarioChange}
+                                renderValue={(selected) =>
+                                    availableScenarios
+                                        .filter((sc) => selected.includes(sc.scenario_id))
+                                        .map((sc) => sc.scenario_name)
+                                        .join(", ")
+                                }
                             >
+                                <MenuItem value="SELECT_ALL">
+                                    <Checkbox
+                                        checked={compareScenarios.length === availableScenarios.length && availableScenarios.length > 0}
+                                        indeterminate={compareScenarios.length > 0 && compareScenarios.length < availableScenarios.length}
+                                    />
+                                    <ListItemText primary="Select All" sx={{ fontWeight: 700 }} />
+                                </MenuItem>
                                 {availableScenarios.map((sc) => (
                                     <MenuItem key={sc.scenario_id} value={sc.scenario_id}>
                                         <Checkbox checked={compareScenarios.includes(sc.scenario_id)} />
@@ -338,99 +530,137 @@ export default function Scenarios() {
                         sx={{
                             display: "flex",
                             alignItems: "center",
-                            gap: 6,
+                            justifyContent: "space-between",
+                            // gap: 6,
                             flexWrap: "wrap",
                         }}
                     >
-                        {/* Label */}
-                        <Typography
+                        <Box
                             sx={{
-                                fontSize: "16px",
-                                fontWeight: 700,
-                                color: "#64748b",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 4,
+                                flexWrap: "wrap",
                             }}
                         >
-                            FINALIZATION STATUS:
-                        </Typography>
-
-                        {/* 1L */}
-                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                            <Box
-                                sx={{
-                                    width: 12,
-                                    height: 12,
-                                    borderRadius: "50%",
-                                    backgroundColor: "#f59e0b",
-                                }}
-                            />
-                            <Typography sx={{ fontSize: "16px", fontWeight: 600 }}>
-                                1L: Pending
-                            </Typography>
-                        </Box>
-
-                        {/* 2L */}
-                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                            <Box
-                                sx={{
-                                    width: 12,
-                                    height: 12,
-                                    borderRadius: "50%",
-                                    backgroundColor: "#10b981",
-                                }}
-                            />
+                            {/* Label */}
                             <Typography
                                 sx={{
                                     fontSize: "16px",
                                     fontWeight: 700,
-                                    color: "#10b981",
+                                    color: "#64748b",
                                 }}
                             >
-                                2L: Optimized Case
+                                FINALIZATION STATUS:
                             </Typography>
-                        </Box>
 
-                        {/* 3L */}
-                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                            <Box
+                            {availableLots.map((lotKey) => {
+                                const lotData = finalizationStatus?.[lotKey];
+
+                                const isFinalized = lotData?.finalized || false;
+                                const scenarioName = lotData?.scenario_name;
+
+                                return (
+                                    <Box
+                                        key={lotKey}
+                                        sx={{ display: "flex", alignItems: "center", gap: 1 }}
+                                    >
+                                        {/* Status dot */}
+                                        <Box
+                                            sx={{
+                                                width: 12,
+                                                height: 12,
+                                                borderRadius: "50%",
+                                                backgroundColor: isFinalized ? "#10b981" : "#f59e0b",
+                                            }}
+                                        />
+
+                                        {/* Text */}
+                                        <Typography
+                                            sx={{
+                                                fontSize: "16px",
+                                                fontWeight: isFinalized ? 700 : 600,
+                                                color: isFinalized ? "#10b981" : "#000",
+                                            }}
+                                        >
+                                            {lotKey}: {scenarioName || "Pending"}
+                                        </Typography>
+                                    </Box>
+                                );
+                            })}
+                        </Box>
+                        <Box sx={{ display: "flex", gap: 2 }}>
+                            <Button
+                                variant="outlined"
+                                disabled={!isDataLoaded}
+                                onClick={() => setOpenResetDialog(true)}
                                 sx={{
-                                    width: 12,
-                                    height: 12,
-                                    borderRadius: "50%",
-                                    backgroundColor: "#f59e0b",
+                                    minWidth: "80px",
+                                    height: "42px",
+                                    borderRadius: "10px",
+                                    textTransform: "none",
                                 }}
-                            />
-                            <Typography sx={{ fontSize: "16px", fontWeight: 600 }}>
-                                3L: Pending
-                            </Typography>
+                            >
+                                Reset
+                            </Button>
+                            <Button
+                                variant="contained"
+                                disabled={!canFinalize || !isDataLoaded}
+                                onClick={handleFinalizeScenarios}
+                                sx={{
+                                    minWidth: "220px",
+                                    height: "42px",
+                                    borderRadius: "10px",
+                                    textTransform: "none",
+                                    backgroundColor: "#0f172a",
+                                    whiteSpace: "nowrap",
+                                }}
+                            >
+                                Finalize All Scenarios
+                            </Button>
                         </Box>
                     </Box>
                 </Paper>
                 <ScenarioChart chartData={chartData} />
-                <ScenarioTable chartData={chartData} tableData={tableData} selectedLot={lot} />
-                <Box
-                    sx={{
-                        display: "flex",
-                        justifyContent: "center",
-                        mt: 4,
-                    }}
+                <ScenarioTable
+                    chartData={chartData}
+                    tableData={tableData?.[tableMetric] || []}
+                    tableMetric={tableMetric}
+                    setTableMetric={setTableMetric}
+                    selectedLot={lot}
+                    onSaveSelection={handleSaveScenario}
+                />
+                <Dialog
+                    open={openResetDialog}
+                    onClose={() => setOpenResetDialog(false)}
                 >
-                    <Button
-                        variant="contained"
-                        disabled
-                        // disabled={
-                        //     !["1L", "2L", "3L+"].every((lotKey) => savedSelections[lotKey])
-                        // }
-                        sx={{
-                            minWidth: "220px",
-                            height: "42px",
-                            borderRadius: "10px",
-                            textTransform: "none",
-                            backgroundColor: "#0f172a",
-                        }}
-                    >
-                        Finalize All Scenarios
-                    </Button>
-                </Box>
+                    <DialogTitle>
+                        Reset Finalization Status
+                    </DialogTitle>
+
+                    <DialogContent>
+                        <DialogContentText>
+                            Are you sure you want to reset all saved
+                            scenarios?
+                        </DialogContentText>
+                    </DialogContent>
+
+                    <DialogActions>
+                        <Button
+                            onClick={() => setOpenResetDialog(false)}
+                        >
+                            Cancel
+                        </Button>
+
+                        <Button
+                            color="error"
+                            variant="contained"
+                            onClick={handleResetStatus}
+                        >
+                            Reset
+                        </Button>
+                    </DialogActions>
+                </Dialog>
             </Paper >
         </Box >
     );

@@ -25,26 +25,80 @@ export default function ScenarioChart({ chartData }) {
     const forecastStartIndex = chartData?.forecast_start_index || 0;
     const series = chartData?.series || [];
 
-    //  Build traces (NO dotted lines, single smooth line)
-    const traces = series.map((item, idx) => {
+    //  Build traces
+    const BASE_COLOR = "#2563EB";
 
-        const x = allMonths;
+    const PLOTLY_COLORS = [
+        "#EF553B",
+        "#00CC96",
+        "#AB63FA",
+        "#FFA15A",
+        "#19D3F3",
+        "#FF6692",
+        "#B6E880",
+        "#FF97FF",
+        "#FECB52",
+    ];
 
-        const y = [
-            ...item.train_values,
+
+    // Move BASE to end so it renders on TOP
+    const orderedSeries = [
+        ...series.filter((s) => s.scenario !== "BASE"),
+        ...series.filter((s) => s.scenario === "BASE"),
+    ];
+
+    const traces = orderedSeries.flatMap((item, idx) => {
+
+        // BASE always blue
+        const color =
+            item.scenario === "BASE"
+                ? BASE_COLOR
+                : PLOTLY_COLORS[idx % PLOTLY_COLORS.length];
+
+        const trainX = allMonths.slice(0, forecastStartIndex);
+        const trainY = item.train_values;
+
+        const forecastX = [
+            allMonths[forecastStartIndex - 1],
+            ...allMonths.slice(forecastStartIndex),
+        ];
+
+        const forecastY = [
+            item.train_values[item.train_values.length - 1],
             ...item.forecast_values,
         ];
 
-        return {
-            x,
-            y,
-            type: "scatter",
-            mode: "lines",
-            name: item.scenario,
-            line: {
-                width: 3,
+        return [
+            // Historical
+            {
+                x: trainX,
+                y: trainY,
+                type: "scatter",
+                mode: "lines",
+                name: item.scenario,
+                legendgroup: item.scenario,
+                line: {
+                    color,
+                    width: 3,
+                },
             },
-        };
+
+            // Forecast
+            {
+                x: forecastX,
+                y: forecastY,
+                type: "scatter",
+                mode: "lines",
+                name: item.scenario,
+                legendgroup: item.scenario,
+                showlegend: false,
+                line: {
+                    color,
+                    width: 3,
+                    dash: "dot",
+                },
+            },
+        ];
     });
 
     //  Dynamic Y-axis scaling (same logic as ForecastTrend)
@@ -110,7 +164,7 @@ export default function ScenarioChart({ chartData }) {
                                     showgrid: true,
                                 },
                                 yaxis: {
-                                    showgrid: true,
+                                    showgrid: false,
                                     range: [0, yMax],
                                 },
                                 paper_bgcolor: "white",
