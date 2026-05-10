@@ -5,6 +5,7 @@ import GlobalConfiguration from "../components/headerTabs/GlobalConfigurations";
 import SnackbarNotification from "../components/snackBar/SnackBar";
 import ModelInput from "../components/headerTabs/ModelInput";
 import Scenarios from "../components/headerTabs/scenario/Scenarios";
+import MarketEvents from "../components/headerTabs/marketEvents/MarketEvent";
 
 const tabs = [
     "Configurations",
@@ -35,6 +36,8 @@ export default function MainLayout() {
                 return <ModelInput />;
             case "Scenarios":
                 return <Scenarios />;
+            case "Market Events":
+                return <MarketEvents />;
             default:
                 return (
                     <Box p={3}>
