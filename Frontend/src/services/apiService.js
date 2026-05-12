@@ -77,6 +77,10 @@ export const getScenarioStatus = (payload) => {
 export const clearStatus = (payload) => {
   return httpClient.post(`/api/scenario/clear`, payload);
 };
+
+export const getMarketEventFilters = (taName) => {
+  return httpClient.get(`/api/market-events/filters/${taName}`);
+};
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };
@@ -113,26 +117,6 @@ export const clearStatus = (payload) => {
 
 // export const getAllChats = () => {
 //   return httpClient.get(`/api/conversations/summary`);
-// };
-
-// export const updatePin = (conv_id, is_pinned) => {
-//   return httpClient.put(`/api/conversations/${conv_id}/pin`, {
-//     is_pinned
-//   });
-// };
-
-// export const deleteChats = (conv_id) => {
-//   return httpClient.delete(`/api/conversations/${conv_id}`);
-// };
-
-// export const getAllBookmarkedChats = () => {
-//   return httpClient.get(`/api/conversations/messages/bookmark_list`);
-// };
-
-// export const updateBookmarkTitle = (message_id, new_bookmark_title) => {
-//   return httpClient.put(`/api/conversations/messages/${message_id}/title`, {
-//     new_bookmark_title
-//   });
 // };
 
 // export const deleteBookmark = (message_id, is_bookmarked) => {

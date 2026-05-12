@@ -16,8 +16,6 @@ class MetricSelectionRequest(BaseModel):
 # ------------------------------------
 # MODEL TYPES
 # ------------------------------------
-from pydantic import BaseModel, model_validator
-from typing import Optional, Literal, List
 
 ModelType = Literal["ets", "linear", "exponential", "logarithmic", "scurve"]
 
@@ -136,7 +134,6 @@ class UpdateScenarioRequest(BaseModel):
     lot: str
     metric: str
     product: Optional[str] = None
-
     model_type: str
     factors: Dict[str, Any]
     metrics_data: Dict[str, Any]
