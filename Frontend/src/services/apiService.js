@@ -81,6 +81,13 @@ export const clearStatus = (payload) => {
 export const getMarketEventFilters = (taName) => {
   return httpClient.get(`/api/market-events/filters/${taName}`);
 };
+
+export const applyMarketEventFilters = (payload) => {
+  return httpClient.post(
+    "/api/market-events/apply-filters",
+    payload
+  );
+};
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

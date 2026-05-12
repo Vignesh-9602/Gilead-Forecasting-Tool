@@ -29,7 +29,7 @@ import AccordionDetails from "@mui/material/AccordionDetails";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 
 import { GlobalContext } from "../../../context/Provider";
-import { getMarketEventFilters } from "../../../services/apiService";
+import { getMarketEventFilters, applyMarketEventFilters } from "../../../services/apiService";
 import MarketEventChart from "./MarketEventChart";
 import MarketEventOutputTable from "./MarketEventTable";
 
@@ -42,33 +42,13 @@ export default function MarketEvents() {
     const [filterOptions, setFilterOptions] = useState({
         indications: [],
     });
-    const [sourceOptions] = useState([
-        "Trodelvy",
-        "Keytruda",
-        "Enhertu",
-    ]);
+    const [sourceOptions, setSourceOptions] = useState([]);
+    const [targetProducts, setTargetProducts] = useState([]);
+    const [lots, setLots] = useState([]);
+    const [curveTypes, setCurveTypes] = useState([]);
+    const [forecastStartDate, setForecastStartDate] = useState("");
 
-    const [eventRows, setEventRows] = useState([
-        {
-            event_name: "",
-            lot: "l1",
-            target_product: "trodelvy",
-            start_date: "2026-03-01",
-            curve_type: "S-Curve",
-
-            start_percent: "",
-            peak_percent: "",
-            months: "",
-            factor: "",
-
-            source_percentages: {
-                Trodelvy: 0,
-                Keytruda: 0,
-                Enhertu: 0,
-            },
-
-        },
-    ]);
+    const [eventRows, setEventRows] = useState([]);
 
     const [menuAnchorEl, setMenuAnchorEl] = useState(null);
     const [selectedRowIndex, setSelectedRowIndex] = useState(null);
@@ -103,22 +83,85 @@ export default function MarketEvents() {
         }
     };
 
+    const handleApplyFilter = async () => {
+        if (!therapyArea || !indication || !selectedScenario) {
+            return;
+        }
+
+        const payload = {
+            ta_name: therapyArea,
+            indication,
+            scenario_name: selectedScenario,
+        };
+
+        try {
+            const response =
+                await applyMarketEventFilters(payload);
+
+            const data = response?.data;
+
+            // dropdown data
+            setLots(data?.lots || []);
+
+            setTargetProducts(
+                data?.target_products || []
+            );
+
+            setSourceOptions(
+                data?.source_products || []
+            );
+
+            setCurveTypes(
+                data?.curve_types || []
+            );
+
+            setForecastStartDate(
+                data?.forecast_start_date || ""
+            );
+
+            // create first default row dynamically
+            setEventRows([
+                {
+                    event_name: "",
+
+                    lot: data?.lots?.[0] || "",
+
+                    target_product:
+                        data?.target_products?.[0] || "",
+
+                    start_date:
+                        data?.forecast_start_date || "",
+
+                    curve_type:
+                        data?.curve_types?.[0] || "",
+
+                    peak_percent: "",
+                    months: "",
+                    factor: "",
+
+                    source_percentages:
+                        (data?.source_products || []).reduce(
+                            (acc, item) => {
+                                acc[item] = "";
+                                return acc;
+                            },
+                            {}
+                        ),
+                },
+            ]);
+
+        } catch (error) {
+            console.error(
+                "Failed to apply market event filters",
+                error
+            );
+        }
+    };
+
     const availableScenarios =
         indication
             ? mappingData?.[indication]?.scenarios || []
             : [];
-
-    const handleApplyFilter = () => {
-        const payload = {
-            ta_name: therapyArea,
-            indication,
-            // lot,
-        };
-
-        console.log("Market Event Payload:", payload);
-
-        // future API call here
-    };
 
     const inputStyle = {
         bgcolor: "#fcfcfd",
@@ -144,10 +187,10 @@ export default function MarketEvents() {
     const handleAddNewEvent = () => {
         const newRow = {
             event_name: "",
-            lot: eventRows?.[0]?.lot || "",
-            target_product: eventRows?.[0]?.target_product || "",
-            start_date: "",
-            curve_type: "S-Curve",
+            lot: lots?.[0] || "",
+            target_product: targetProducts?.[0] || "",
+            start_date: forecastStartDate || "",
+            curve_type: curveTypes?.[0] || "",
             peak_percent: "",
             months: "",
             factor: "",
@@ -283,7 +326,7 @@ export default function MarketEvents() {
 
     const createEmptySourcePercentages = () => {
         return sourceOptions.reduce((acc, source) => {
-            acc[source] = 0;
+            acc[source] = "";
             return acc;
         }, {});
     };
@@ -593,232 +636,235 @@ export default function MarketEvents() {
                             </Box>
 
                             {/* Rows */}
-                            {eventRows.map((row, index) => (
+                            {eventRows.length === 0 ? (
                                 <Box
-                                    key={index}
                                     sx={{
-                                        display: "grid",
-                                        gridTemplateColumns:
-                                            "0.8fr 0.4fr 0.7fr 0.5fr 0.7fr 0.3fr 0.3fr 0.5fr 1.1fr 40px",
-                                        gap: 2,
-                                        px: 2,
-                                        py: 1.5,
-                                        alignItems: "center",
-                                        minWidth: "1400px",
+                                        p: 2,
+                                        textAlign: "center",
+                                        color: "#94a3b8",
                                     }}
                                 >
-                                    {/* Event Name */}
-                                    <TextField
-                                        value={row.event_name}
-                                        onChange={(e) =>
-                                            handleRowChange(
-                                                index,
-                                                "event_name",
-                                                e.target.value
-                                            )
-                                        }
-                                        size="small"
-                                        placeholder="e.g. Growth Initiative"
-                                        sx={tableInputStyle}
-                                    />
-
-                                    <FormControl size="small">
-                                        <Select
-                                            value={row.lot}
-                                            onChange={(e) =>
-                                                handleRowChange(
-                                                    index,
-                                                    "lot",
-                                                    e.target.value
-                                                )
-                                            }
-                                            sx={{
-                                                borderRadius: "6px",
-                                                height: "32px",
-                                                fontSize: "13px",
-                                            }}
-                                        >
-                                            <MenuItem value="l1">
-                                                L1
-                                            </MenuItem>
-
-                                            <MenuItem value="l2">
-                                                L2
-                                            </MenuItem>
-
-                                            <MenuItem value="l3+">
-                                                L3+
-                                            </MenuItem>
-                                        </Select>
-                                    </FormControl>
-
-                                    <FormControl size="small">
-                                        <Select
-                                            value={row.target_product}
-                                            onChange={(e) =>
-                                                handleRowChange(
-                                                    index,
-                                                    "target_product",
-                                                    e.target.value
-                                                )
-                                            }
-                                            sx={{
-                                                borderRadius: "6px",
-                                                height: "32px",
-                                                fontSize: "13px",
-                                            }}
-                                        >
-                                            <MenuItem value="trodelvy">
-                                                Trodely
-                                            </MenuItem>
-
-                                            <MenuItem value="troCombo">
-                                                Trodevly Combo
-                                            </MenuItem>
-
-                                            <MenuItem value="brand1">
-                                                Brand 1
-                                            </MenuItem>
-                                        </Select>
-                                    </FormControl>
-
-                                    {/* Source */}
-                                    <Button
-                                        variant="outlined"
-                                        onClick={() =>
-                                            handleOpenSourceDialog(index)
-                                        }
-                                        sx={{
-                                            textTransform: "none",
-                                            borderRadius: "6px",
-                                            height: "32px",
-                                            fontSize: "12px",
-                                            minWidth: "90px",
-                                        }}
-                                    >
-                                        Edit Source
-                                    </Button>
-
-                                    {/* Start Date */}
-                                    <LocalizationProvider dateAdapter={AdapterDayjs}>
-                                        <DatePicker
-                                            value={
-                                                row.start_date
-                                                    ? dayjs(row.start_date)
-                                                    : null
-                                            }
-                                            onChange={(newValue) =>
-                                                handleRowChange(
-                                                    index,
-                                                    "start_date",
-                                                    newValue
-                                                        ? newValue.format("YYYY-MM-DD")
-                                                        : ""
-                                                )
-                                            }
-                                            format="DD-MM-YYYY"
-                                            slotProps={{
-                                                textField: {
-                                                    size: "small",
-                                                    sx: tableInputStyle,
-                                                },
-                                            }}
-                                        />
-                                    </LocalizationProvider>
-
-                                    {/* Peak % */}
-                                    <TextField
-                                        value={row.peak_percent}
-                                        size="small"
-                                        placeholder="e.g. 1"
-                                        onChange={(e) =>
-                                            handleRowChange(
-                                                index,
-                                                "peak_percent",
-                                                e.target.value
-                                            )
-                                        }
-                                        sx={tableInputStyle}
-                                    />
-
-                                    {/* Months */}
-                                    <TextField
-                                        value={row.months}
-                                        onChange={(e) =>
-                                            handleRowChange(
-                                                index,
-                                                "months",
-                                                e.target.value
-                                            )
-                                        }
-                                        size="small"
-                                        placeholder="e.g. 6"
-                                        sx={tableInputStyle}
-                                    />
-
-                                    {/* Curve */}
-                                    <FormControl size="small">
-                                        <Select
-                                            value={row.curve_type}
-                                            onChange={(e) =>
-                                                handleRowChange(
-                                                    index,
-                                                    "curve_type",
-                                                    e.target.value
-                                                )
-                                            }
-                                            sx={{
-                                                borderRadius: "6px",
-                                                height: "32px",
-                                                fontSize: "13px",
-                                            }}
-                                        >
-                                            <MenuItem value="S-Curve">
-                                                S-Curve
-                                            </MenuItem>
-
-                                            <MenuItem value="Linear">
-                                                Linear
-                                            </MenuItem>
-
-                                            <MenuItem value="Exponential">
-                                                Exponential
-                                            </MenuItem>
-                                        </Select>
-                                    </FormControl>
-
-                                    {/* Factor */}
-                                    <TextField
-                                        value={row.factor}
-                                        onChange={(e) =>
-                                            handleRowChange(
-                                                index,
-                                                "factor",
-                                                e.target.value
-                                            )
-                                        }
-                                        size="small"
-                                        placeholder="e.g. 1"
-                                        sx={tableInputStyle}
-                                    />
-
-                                    {/* 3 dots */}
-                                    <Box
-                                        sx={{
-                                            display: "flex",
-                                            justifyContent: "center",
-                                            cursor: "pointer",
-                                            color: "#64748b",
-                                        }}
-                                        onClick={(event) =>
-                                            handleOpenMenu(event, index)
-                                        }
-                                    >
-                                        <MoreVertIcon fontSize="small" />
-                                    </Box>
+                                    Please apply filters to configure events.
                                 </Box>
-                            ))}
-                            <Menu
+                            ) : (
+                                eventRows.map((row, index) => (
+                                    <Box
+                                        key={index}
+                                        sx={{
+                                            display: "grid",
+                                            gridTemplateColumns:
+                                                "0.8fr 0.4fr 0.7fr 0.5fr 0.7fr 0.3fr 0.3fr 0.5fr 1.1fr 40px",
+                                            gap: 2,
+                                            px: 2,
+                                            py: 1.5,
+                                            alignItems: "center",
+                                            minWidth: "1400px",
+                                        }}
+                                    >
+                                        {/* Event Name */}
+                                        <TextField
+                                            value={row.event_name}
+                                            onChange={(e) =>
+                                                handleRowChange(
+                                                    index,
+                                                    "event_name",
+                                                    e.target.value
+                                                )
+                                            }
+                                            size="small"
+                                            placeholder="e.g. Growth Initiative"
+                                            sx={tableInputStyle}
+                                        />
+
+                                        <FormControl size="small">
+                                            <Select
+                                                value={row.lot}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "lot",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    borderRadius: "6px",
+                                                    height: "32px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                {lots.map((item) => (
+                                                    <MenuItem
+                                                        key={item}
+                                                        value={item}
+                                                    >
+                                                        {item}
+                                                    </MenuItem>
+                                                ))}
+                                            </Select>
+                                        </FormControl>
+
+                                        <FormControl size="small">
+                                            <Select
+                                                value={row.target_product}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "target_product",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    borderRadius: "6px",
+                                                    height: "32px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                {targetProducts.map((item) => (
+                                                    <MenuItem
+                                                        key={item}
+                                                        value={item}
+                                                    >
+                                                        {item}
+                                                    </MenuItem>
+                                                ))}
+                                            </Select>
+                                        </FormControl>
+
+                                        {/* Source */}
+                                        <Button
+                                            variant="outlined"
+                                            onClick={() =>
+                                                handleOpenSourceDialog(index)
+                                            }
+                                            sx={{
+                                                textTransform: "none",
+                                                borderRadius: "6px",
+                                                height: "32px",
+                                                fontSize: "12px",
+                                                minWidth: "90px",
+                                            }}
+                                        >
+                                            Edit Source
+                                        </Button>
+
+                                        {/* Start Date */}
+                                        <LocalizationProvider dateAdapter={AdapterDayjs}>
+                                            <DatePicker
+                                                value={
+                                                    row.start_date
+                                                        ? dayjs(row.start_date)
+                                                        : null
+                                                }
+                                                onChange={(newValue) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "start_date",
+                                                        newValue
+                                                            ? newValue.format("YYYY-MM-DD")
+                                                            : ""
+                                                    )
+                                                }
+                                                format="DD-MM-YYYY"
+                                                slotProps={{
+                                                    textField: {
+                                                        size: "small",
+                                                        sx: tableInputStyle,
+                                                    },
+                                                }}
+                                            />
+                                        </LocalizationProvider>
+
+                                        {/* Peak % */}
+                                        <TextField
+                                            value={row.peak_percent}
+                                            size="small"
+                                            placeholder="e.g. 1"
+                                            onChange={(e) =>
+                                                handleRowChange(
+                                                    index,
+                                                    "peak_percent",
+                                                    e.target.value
+                                                )
+                                            }
+                                            sx={tableInputStyle}
+                                        />
+
+                                        {/* Months */}
+                                        <TextField
+                                            value={row.months}
+                                            onChange={(e) =>
+                                                handleRowChange(
+                                                    index,
+                                                    "months",
+                                                    e.target.value
+                                                )
+                                            }
+                                            size="small"
+                                            placeholder="e.g. 6"
+                                            sx={tableInputStyle}
+                                        />
+
+                                        {/* Curve */}
+                                        <FormControl size="small">
+                                            <Select
+                                                value={row.curve_type}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "curve_type",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    borderRadius: "6px",
+                                                    height: "32px",
+                                                    fontSize: "13px",
+                                                }}
+                                            >
+                                                {curveTypes.map((item) => (
+                                                    <MenuItem
+                                                        key={item}
+                                                        value={item}
+                                                    >
+                                                        {item}
+                                                    </MenuItem>
+                                                ))}
+                                            </Select>
+                                        </FormControl>
+
+                                        {/* Factor */}
+                                        <TextField
+                                            value={row.factor}
+                                            onChange={(e) =>
+                                                handleRowChange(
+                                                    index,
+                                                    "factor",
+                                                    e.target.value
+                                                )
+                                            }
+                                            size="small"
+                                            placeholder="e.g. 1"
+                                            sx={tableInputStyle}
+                                        />
+
+                                        {/* 3 dots */}
+                                        <Box
+                                            sx={{
+                                                display: "flex",
+                                                justifyContent: "center",
+                                                cursor: "pointer",
+                                                color: "#64748b",
+                                            }}
+                                            onClick={(event) =>
+                                                handleOpenMenu(event, index)
+                                            }
+                                        >
+                                            <MoreVertIcon fontSize="small" />
+                                        </Box>
+                                    </Box>
+                                ))
+                            )}
+                            < Menu
                                 anchorEl={menuAnchorEl}
                                 open={Boolean(menuAnchorEl)}
                                 onClose={handleCloseMenu}
@@ -1028,6 +1074,6 @@ export default function MarketEvents() {
                 </Accordion>
                 <MarketEventOutputTable />
             </Paper>
-        </Box>
+        </Box >
     );
 }

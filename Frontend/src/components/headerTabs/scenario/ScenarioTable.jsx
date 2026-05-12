@@ -36,6 +36,10 @@ export default function ScenarioTable({
             })
         ) || [];
 
+
+    const forecastStartIndex =
+        chartData?.forecast_start_index || 0;
+
     const [expandedRows, setExpandedRows] = useState({});
     const [selectedScenario, setSelectedScenario] = useState("");
     const formatValue = (value) => {
@@ -175,6 +179,7 @@ export default function ScenarioTable({
                                         zIndex: 5,
                                         backgroundColor: "#fff",
                                         minWidth: 70,
+                                        borderRight: "1px solid #E2E8F0",
                                     }}
                                 >
                                     Select
@@ -188,13 +193,17 @@ export default function ScenarioTable({
                                         zIndex: 5,
                                         backgroundColor: "#fff",
                                         minWidth: 180,
+                                        borderRight: "1px solid #E2E8F0",
                                     }}
                                 >
                                     Scenario
                                 </TableCell>
 
                                 {allMonths.map((month, index) => (
-                                    <TableCell key={index} align="center">
+                                    <TableCell key={index} align="center"
+                                        sx={{
+                                            borderRight: "1px solid #E2E8F0",
+                                        }}>
                                         {month}
                                     </TableCell>
                                 ))}
@@ -223,6 +232,7 @@ export default function ScenarioTable({
                                                         ? "#dbeafe"
                                                         : "#f8fafc",
                                                     zIndex: 4,
+                                                    borderRight: "1px solid #E2E8F0",
                                                 }}
                                             >
                                                 <Radio
@@ -248,6 +258,7 @@ export default function ScenarioTable({
                                                         ? "#dbeafe"
                                                         : "#f8fafc",
                                                     zIndex: 4,
+                                                    borderRight: "1px solid #E2E8F0",
                                                 }}
                                             >
                                                 {expandedRows[scenarioRow.scenario]
@@ -257,7 +268,14 @@ export default function ScenarioTable({
                                             </TableCell>
 
                                             {scenarioRow.total.map((value, index) => (
-                                                <TableCell key={index} align="center">
+                                                <TableCell key={index} align="center"
+                                                    sx={{
+                                                        backgroundColor:
+                                                            index < forecastStartIndex
+                                                                ? "#f1f5f9"
+                                                                : "#fff",
+                                                        borderRight: "1px solid #E2E8F0",
+                                                    }}>
                                                     {value}
                                                 </TableCell>
                                             ))}
@@ -272,6 +290,7 @@ export default function ScenarioTable({
                                                             left: 0,
                                                             backgroundColor: "#fff",
                                                             zIndex: 3,
+                                                            borderRight: "1px solid #E2E8F0",
                                                         }}
                                                     />
 
@@ -282,13 +301,20 @@ export default function ScenarioTable({
                                                             left: 70,
                                                             backgroundColor: "#fff",
                                                             zIndex: 3,
+                                                            borderRight: "1px solid #E2E8F0",
                                                         }}
                                                     >
                                                         {child.label}
                                                     </TableCell>
 
                                                     {child.values.map((value, index) => (
-                                                        <TableCell key={index} align="center">
+                                                        <TableCell key={index} align="center" sx={{
+                                                            backgroundColor:
+                                                                index < forecastStartIndex
+                                                                    ? "#f1f5f9"
+                                                                    : "#fff",
+                                                            borderRight: "1px solid #E2E8F0",
+                                                        }}>
                                                             {value}
                                                         </TableCell>
                                                     ))}
