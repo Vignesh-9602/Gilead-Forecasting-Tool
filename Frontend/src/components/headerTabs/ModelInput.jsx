@@ -138,18 +138,6 @@ export default function ModelInput() {
             setBeta(ets?.beta ?? 0);
             setGamma(ets?.gamma ?? 0);
 
-            // setEtsFactors(ets);
-            // setTrajectoryFactors(trajectory);
-
-            // setAlpha(ets?.alpha ?? 0);
-            // setBeta(ets?.beta ?? 0);
-            // setGamma(ets?.gamma ?? 0);
-
-            // setGrowthType(trajectory?.growth_type || "linear");
-            // setTotalGrowth(trajectory?.total_growth ?? 0);
-            // setDuration(trajectory?.duration ?? 12);
-            // setKValue(trajectory?.k_value ?? 1);
-            // trajectory based on active model
             if (activeModel !== "ets") {
                 const traj = factors?.growth || factors?.[activeModel] || {};
                 console.log("----->", traj)
@@ -227,6 +215,7 @@ export default function ModelInput() {
 
         const payload = {
             ta_name: therapyArea,
+            scenario_name: scenarioSelector,
             indications: indication ? [indication] : [],
             lots: lot ? [lot] : [],
             metric_filter: metric,
@@ -290,7 +279,7 @@ export default function ModelInput() {
             setChartData(selectedMetricData?.chart || null);
             setTableData(selectedMetricData?.table || []);
 
-            setEditable(false);
+            // setEditable(false);
             showSnackbar("Metrics recalculated successfully", "success");
         } catch (error) {
             console.error("Failed to recalculate metrics", error);
@@ -436,10 +425,11 @@ export default function ModelInput() {
 
             setEditable(false);
 
-            alert("Scenario updated successfully!");
+            // alert("Scenario updated successfully!");
+            showSnackbar("Scenario updated successfully", "success");
         } catch (error) {
             console.error("Update scenario failed", error);
-            alert("Failed to update scenario");
+            showSnackbar("Failed to update scenario", "error");
         }
     };
 
@@ -503,7 +493,8 @@ export default function ModelInput() {
         try {
             const res = await saveScenario(payload);
             console.log("Scenario saved:", res.data);
-            alert("Scenario saved successfully!");
+            showSnackbar("Scenario created successfully", "success");
+            // alert("Scenario saved successfully!");
             // Re-fetch filters so new scenario appears in dropdown
             const response = await getMetricFilters(therapyArea);
             const resData = response?.data;
@@ -526,6 +517,7 @@ export default function ModelInput() {
             // Keep current selections intact (don't reset)
             // indication, lot, brand, metric remain as-is so user can Apply Filter immediately
             // setScenarioName("")
+
         } catch (err) {
             console.error("Save scenario failed", err);
             showSnackbar("Failed to save scenario", "error");

@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
+
 import {
     Box,
     Typography,
@@ -11,141 +12,45 @@ import Plot from "react-plotly.js";
 
 const PlotComponent = Plot.default || Plot;
 
-export default function MarketEventChart() {
+export default function MarketEventChart({
+    chartData,
+}) {
 
-    const chartData = {
-        months: [
-            "2024-04-01",
-            "2024-05-01",
-            "2024-06-01",
-            "2024-07-01",
-            "2024-08-01",
-            "2024-09-01",
-            "2024-10-01",
-            "2024-11-01",
-            "2024-12-01",
-            "2025-01-01",
-            "2025-02-01",
-            "2025-03-01",
-            "2025-04-01",
-            "2025-05-01",
-            "2025-06-01",
-            "2025-07-01",
-            "2025-08-01",
-            "2025-09-01",
-            "2025-10-01",
-            "2025-11-01",
-            "2025-12-01",
-            "2026-01-01",
-            "2026-02-01",
-            "2026-03-01",
-            "2026-04-01",
-        ],
+    const availableLots = useMemo(() => {
 
-        forecast_start_index: 22,
+        const lots =
+            chartData?.series?.map(
+                (item) => item.lot
+            ) || [];
 
-        series: [
-            {
-                lot: "1L",
+        return [...new Set(lots)];
 
-                children: [
-                    {
-                        label: "Taxanes",
-
-                        train_values: [
-                            13, 12, 11, 10, 9, 8,
-                            7, 6, 5, 4, 3, 2,
-                            3, 4, 5, 6, 7, 8,
-                            9, 10, 11, 12,
-                        ],
-
-                        forecast_values: [
-                            13,
-                            14,
-                            15,
-                        ],
-                    },
-
-                    {
-                        label: "Trodelvy",
-
-                        train_values: [
-                            20, 21, 22, 23, 24, 25,
-                            26, 27, 28, 29, 30, 31,
-                            32, 33, 34, 35, 36, 37,
-                            38, 39, 40, 41,
-                        ],
-
-                        forecast_values: [
-                            42,
-                            43,
-                            44,
-                        ],
-                    },
-                ],
-            },
-
-            {
-                lot: "2L",
-
-                children: [
-                    {
-                        label: "TPC",
-
-                        train_values: [
-                            10, 11, 12, 13, 14, 15,
-                            16, 17, 18, 19, 20, 21,
-                            22, 23, 24, 25, 26, 27,
-                            28, 29, 30, 31,
-                        ],
-
-                        forecast_values: [
-                            32,
-                            33,
-                            34,
-                        ],
-                    },
-                ],
-            },
-
-            {
-                lot: "3L+",
-
-                children: [
-                    {
-                        label: "Enhertu",
-
-                        train_values: [
-                            8, 9, 10, 11, 12, 13,
-                            14, 15, 16, 17, 18, 19,
-                            20, 21, 22, 23, 24, 25,
-                            26, 27, 28, 29,
-                        ],
-
-                        forecast_values: [
-                            30,
-                            31,
-                            32,
-                        ],
-                    },
-                ],
-            },
-        ],
-    };
+    }, [chartData]);
 
     const [selectedLot, setSelectedLot] =
-        useState("1L");
+        useState("");
 
-    const availableLots =
-        chartData?.series?.map(
-            (item) => item.lot
-        ) || [];
+    // auto select first lot
+    useEffect(() => {
 
-    const selectedLotData = useMemo(() => {
-        return chartData?.series?.find(
-            (item) => item.lot === selectedLot
+        if (
+            availableLots.length > 0 &&
+            !selectedLot
+        ) {
+            setSelectedLot(availableLots[0]);
+        }
+
+    }, [availableLots]);
+
+    const selectedLotSeries = useMemo(() => {
+
+        return (
+            chartData?.series?.filter(
+                (item) => item.lot === selectedLot
+            ) || []
         );
-    }, [selectedLot]);
+
+    }, [chartData, selectedLot]);
 
     const allMonths =
         chartData?.months?.map((month) =>
@@ -171,7 +76,7 @@ export default function MarketEventChart() {
     ];
 
     const traces =
-        selectedLotData?.children?.flatMap(
+        selectedLotSeries.flatMap(
             (item, idx) => {
 
                 const color =
@@ -179,13 +84,11 @@ export default function MarketEventChart() {
                     idx % PLOTLY_COLORS.length
                     ];
 
-                const trainX = allMonths.slice(
-                    0,
-                    forecastStartIndex
-                );
-
-                const trainY =
-                    item.train_values;
+                const trainX =
+                    allMonths.slice(
+                        0,
+                        forecastStartIndex
+                    );
 
                 const forecastX = [
                     allMonths[
@@ -197,19 +100,12 @@ export default function MarketEventChart() {
                     ),
                 ];
 
-                const forecastY = [
-                    item.train_values[
-                    item.train_values.length - 1
-                    ],
-
-                    ...item.forecast_values,
-                ];
-
                 return [
                     // Actual
                     {
                         x: trainX,
-                        y: trainY,
+
+                        y: item.train_values,
 
                         type: "scatter",
                         mode: "lines",
@@ -227,7 +123,14 @@ export default function MarketEventChart() {
                     // Forecast
                     {
                         x: forecastX,
-                        y: forecastY,
+
+                        y: [
+                            item.train_values[
+                            item.train_values.length - 1
+                            ],
+
+                            ...item.forecast_values,
+                        ],
 
                         type: "scatter",
                         mode: "lines",
@@ -249,16 +152,18 @@ export default function MarketEventChart() {
         ) || [];
 
     const allValues =
-        selectedLotData?.children?.flatMap(
+        selectedLotSeries.flatMap(
             (item) => [
                 ...item.train_values,
                 ...item.forecast_values,
             ]
         ) || [];
 
-    const maxValue = Math.max(...allValues, 0);
+    const maxValue =
+        Math.max(...allValues, 0);
 
-    const yMax = Math.ceil(maxValue * 1.15);
+    const yMax =
+        Math.ceil(maxValue * 1.15);
 
     return (
         <Box
@@ -305,6 +210,7 @@ export default function MarketEventChart() {
                             fontSize: "13px",
                         },
                     }}
+                    disabled={!chartData?.series?.length}
                 >
                     <Select
                         value={selectedLot}
@@ -313,7 +219,9 @@ export default function MarketEventChart() {
                                 e.target.value
                             )
                         }
+                        displayEmpty
                     >
+                        <MenuItem value="" disabled> LOTs </MenuItem>
                         {availableLots.map((lot) => (
                             <MenuItem
                                 key={lot}
@@ -326,47 +234,70 @@ export default function MarketEventChart() {
                 </FormControl>
             </Box>
 
-            <PlotComponent
-                data={traces}
-                layout={{
-                    autosize: true,
+            {!chartData?.series?.length ? (
 
-                    height: 300,
+                <Box
+                    sx={{
+                        height: 50,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#94a3b8",
+                        fontSize: "14px",
+                    }}
+                >
+                    No chart data available.
+                    Please apply filters.
+                </Box>
 
-                    margin: {
-                        l: 50,
-                        r: 30,
-                        t: 10,
-                        b: 60,
-                    },
+            ) : (
 
-                    legend: {
-                        orientation: "h",
-                        x: 0,
-                        y: -0.25,
-                    },
+                <PlotComponent
+                    data={traces}
 
-                    xaxis: {
-                        tickangle: -45,
-                        showgrid: true,
-                    },
+                    layout={{
+                        autosize: true,
 
-                    yaxis: {
-                        showgrid: false,
-                        range: [0, yMax],
-                    },
+                        height: 320,
 
-                    paper_bgcolor: "white",
-                    plot_bgcolor: "white",
-                }}
-                style={{
-                    width: "100%",
-                }}
-                config={{
-                    responsive: true,
-                    displayModeBar: false,
-                }}
-            />
+                        margin: {
+                            l: 50,
+                            r: 20,
+                            t: 10,
+                            b: 70,
+                        },
+
+                        legend: {
+                            orientation: "h",
+                            x: 0,
+                            y: -0.25,
+                        },
+
+                        xaxis: {
+                            tickangle: -45,
+                            showgrid: true,
+                        },
+
+                        yaxis: {
+                            showgrid: false,
+                            range: [0, yMax],
+                        },
+
+                        paper_bgcolor: "white",
+                        plot_bgcolor: "white",
+                    }}
+
+                    style={{
+                        width: "100%",
+                    }}
+
+                    config={{
+                        responsive: true,
+                        displayModeBar: false,
+                    }}
+                />
+
+            )}
         </Box>
     );
 }

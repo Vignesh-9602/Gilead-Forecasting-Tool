@@ -25,6 +25,7 @@ import Dialog from "@mui/material/Dialog";
 import DialogTitle from "@mui/material/DialogTitle";
 import DialogContent from "@mui/material/DialogContent";
 import DialogActions from "@mui/material/DialogActions";
+import { useSnackbarStore } from "../../stores";
 
 const PlotComponent = Plot.default || Plot;
 
@@ -54,6 +55,7 @@ export default function ForecastTrendChart({
     // const trainValues = chartData?.train_values || [];
     // const forecastValues = chartData?.forecast_values || [];
     // const forecastStartIndex = chartData?.forecast_start_index || 0;
+    const { showSnackbar } = useSnackbarStore();
 
     const [editable, setEditable] = useState(false);
     const [tableRows, setTableRows] = useState([]);
@@ -345,8 +347,10 @@ export default function ForecastTrendChart({
             }
 
             setEditable(false);
+            showSnackbar("Data refreshed successfully", "success");
         } catch (error) {
             console.error("Save Changes API failed:", error);
+            showSnackbar("Failed to refresh data", "error");
         }
     };
 
@@ -406,6 +410,19 @@ export default function ForecastTrendChart({
     // Option 3: round to next 1000
     const yMax1000 = Math.ceil(maxValue / 1500) * 1500;
 
+    const isMarketShare = metric === "market_share";
+
+    const yAxisConfig = isMarketShare
+        ? {
+            showgrid: false,
+            range: [0, 100],   // fixed for %
+            // dtick: 10
+        }
+        : {
+            showgrid: false,
+            range: [0, yMax],  // for NPS
+        };
+
     return (
         <>
             <Accordion
@@ -464,11 +481,7 @@ export default function ForecastTrendChart({
                                         tickangle: -45,
                                         showgrid: true,
                                     },
-                                    yaxis: {
-                                        showgrid: false,
-                                        range: [0, yMax],
-                                        // dtick: 50,
-                                    },
+                                    yaxis: yAxisConfig
                                 }}
                                 style={{ width: "100%" }}
                                 config={{

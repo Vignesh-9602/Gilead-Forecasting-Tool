@@ -234,7 +234,7 @@ export default function Scenarios() {
             setOpenResetDialog(false);
 
             showSnackbar(
-                "Scenario status reset successfully",
+                "Selected scenarios were cleared successfully",
                 "success"
             );
 
@@ -470,7 +470,7 @@ export default function Scenarios() {
                             COMPARE SCENARIOS
                         </Typography>
 
-                        <FormControl sx={{ ...inputStyle, minWidth: 220 }}>
+                        <FormControl sx={{ ...inputStyle, maxWidth: 220 }}>
                             <Select
                                 multiple
                                 value={compareScenarios}

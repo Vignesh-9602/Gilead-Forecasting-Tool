@@ -88,6 +88,20 @@ export const applyMarketEventFilters = (payload) => {
     payload
   );
 };
+
+export const runMarketEventCalculation = (payload) => {
+  return httpClient.post(
+    "/api/market-events/run-calculation",
+    payload
+  );
+};
+
+export const saveMarketEventTable = (payload) => {
+  return httpClient.post(
+    "/api/market-event/market-event/save",
+    payload
+  );
+};
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

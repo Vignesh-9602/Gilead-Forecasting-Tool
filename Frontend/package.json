@@ -25,6 +25,7 @@
     "ag-grid-react": "^35.2.1",
     "axios": "1.14.0",
     "dayjs": "^1.11.20",
+    "file-saver": "^2.0.5",
     "handsontable": "^17.0.1",
     "plotly.js": "^3.5.0",
     "plotly.js-dist-min": "^3.5.0",

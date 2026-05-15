@@ -29,7 +29,7 @@ import AccordionDetails from "@mui/material/AccordionDetails";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 
 import { GlobalContext } from "../../../context/Provider";
-import { getMarketEventFilters, applyMarketEventFilters } from "../../../services/apiService";
+import { getMarketEventFilters, applyMarketEventFilters, runMarketEventCalculation } from "../../../services/apiService";
 import MarketEventChart from "./MarketEventChart";
 import MarketEventOutputTable from "./MarketEventTable";
 
@@ -57,8 +57,9 @@ export default function MarketEvents() {
 
     const [openSourceDialog, setOpenSourceDialog] = useState(false);
 
-    const [selectedSourceRowIndex, setSelectedSourceRowIndex] =
-        useState(null);
+    const [selectedSourceRowIndex, setSelectedSourceRowIndex] = useState(null);
+    const [marketShareChartData, setMarketShareChartData] = useState(null);
+    const [marketEventMetricsData, setMarketEventMetricsData] = useState(null);
 
     useEffect(() => {
         if (therapyArea) {
@@ -117,6 +118,14 @@ export default function MarketEvents() {
 
             setForecastStartDate(
                 data?.forecast_start_date || ""
+            );
+
+            setMarketShareChartData(
+                data?.metrics_data?.market_share?.chart || null
+            );
+
+            setMarketEventMetricsData(
+                data?.metrics_data || null
             );
 
             // create first default row dynamically
@@ -217,6 +226,10 @@ export default function MarketEvents() {
 
         const duplicatedRow = {
             ...selectedRow,
+
+            source_percentages: {
+                ...selectedRow.source_percentages,
+            },
         };
 
         const updatedRows = [...eventRows];
@@ -289,7 +302,7 @@ export default function MarketEvents() {
         setEventRows(updatedRows);
     };
 
-    const handleRunCalculation = () => {
+    const handleRunCalculation = async () => {
         const payload = {
             ta_name: therapyArea,
             indication,
@@ -299,16 +312,22 @@ export default function MarketEvents() {
                 event_name: row.event_name,
                 lot: row.lot,
                 target_product: row.target_product,
-                source_percentages:
-                    row.source_percentages,
+                source_percentages: Object.fromEntries(
+                    Object.entries(row.source_percentages).map(
+                        ([key, value]) => [
+                            key,
+                            Number(value || 0),
+                        ]
+                    )
+                ),
                 start_date: row.start_date,
 
                 curve_type: row.curve_type,
 
-                start_percent: Number(row.start_percent || 0),
+                // start_percent: Number(row.start_percent || 0),
                 peak_percent: Number(row.peak_percent || 0),
-                months: Number(row.months || 0),
-                factor: Number(row.factor || 0),
+                duration_months: Number(row.months || 0),
+                k_value: Number(row.factor || 0),
             })),
         };
 
@@ -322,6 +341,21 @@ export default function MarketEvents() {
 
         // future API call
         // runCalculation(payload);
+        try {
+            const response = await runMarketEventCalculation(payload);
+            const data = response?.data;
+
+            console.log("RUN CALCULATION RESPONSE", data);
+
+            // update chart
+            setMarketShareChartData(data?.metrics_data?.market_share?.chart || null)
+
+            // update table
+            setMarketEventMetricsData(data?.metrics_data || null)
+
+        } catch (error) {
+            console.error("Run calculation failed", error);
+        }
     };
 
     const createEmptySourcePercentages = () => {
@@ -538,6 +572,7 @@ export default function MarketEvents() {
                             <Box>
                                 <Button
                                     variant="contained"
+                                    disabled={!marketShareChartData}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         handleRunCalculation();
@@ -557,6 +592,7 @@ export default function MarketEvents() {
 
                                 <Button
                                     variant="contained"
+                                    disabled={!marketShareChartData}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         handleAddNewEvent();
@@ -1069,10 +1105,24 @@ export default function MarketEvents() {
                         </Paper>
 
                         {/* </Paper> */}
-                        <MarketEventChart />
+                        <MarketEventChart chartData={marketShareChartData} />
                     </AccordionDetails>
                 </Accordion>
-                <MarketEventOutputTable />
+                <MarketEventOutputTable
+                    metricsData={marketEventMetricsData}
+                    months={
+                        marketShareChartData?.months || []
+                    }
+                    therapyArea={therapyArea}
+                    indication={indication}
+                    selectedScenario={selectedScenario}
+                    setMarketShareChartData={
+                        setMarketShareChartData
+                    }
+                    setMarketEventMetricsData={
+                        setMarketEventMetricsData
+                    }
+                />
             </Paper>
         </Box >
     );

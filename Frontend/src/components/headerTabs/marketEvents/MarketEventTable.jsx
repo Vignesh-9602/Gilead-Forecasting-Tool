@@ -1,4 +1,8 @@
-import React, { useState } from "react";
+import React, {
+    useMemo,
+    useState,
+    useEffect,
+} from "react";
 
 import {
     Box,
@@ -19,115 +23,77 @@ import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import { saveMarketEventTable } from "../../../services/apiService";
 
-export default function MarketEventTable() {
-
-    const months = [
-        "Apr-24",
-        "May-24",
-        "Jun-24",
-        "Jul-24",
-        "Aug-24",
-        "Sep-24",
-        "Oct-24",
-        "Nov-24",
-        "Dec-24",
-        "Jan-25",
-        "Feb-25",
-        "Mar-25",
-    ];
-
-    const initialData = [
-        {
-            lot: "1L",
-
-            total: [
-                100, 100, 100, 100, 100, 100,
-                100, 100, 100, 100, 100, 100,
-            ],
-
-            children: [
-                {
-                    label: "Taxanes",
-
-                    values: [
-                        13.25, 13, 12.75, 12.5,
-                        12.25, 12, 11.75, 11.5,
-                        11.25, 11, 10.75, 10.5,
-                    ],
-                },
-
-                {
-                    label: "TPC",
-
-                    values: [
-                        14.25, 14, 13.75, 13.5,
-                        13.25, 13, 12.75, 12.5,
-                        12.25, 12, 11.75, 11.5,
-                    ],
-                },
-
-                {
-                    label: "Trodelvy",
-
-                    values: [
-                        26, 26.5, 27, 27.5,
-                        28, 28.5, 29, 29.5,
-                        30, 30.5, 31, 31.5,
-                    ],
-                },
-            ],
-        },
-
-        {
-            lot: "2L",
-
-            total: [
-                100, 100, 100, 100, 100, 100,
-                100, 100, 100, 100, 100, 100,
-            ],
-
-            children: [
-                {
-                    label: "Taxanes",
-
-                    values: [
-                        12.25, 12, 11.75, 11.5,
-                        11.25, 11, 10.75, 10.5,
-                        10.25, 10, 9.75, 9.5,
-                    ],
-                },
-
-                {
-                    label: "Trodelvy",
-
-                    values: [
-                        25.7, 26.2, 26.7, 27.2,
-                        27.7, 28.2, 28.7, 29.2,
-                        29.7, 30.2, 30.7, 31.2,
-                    ],
-                },
-            ],
-        },
-    ];
+export default function MarketEventTable({
+    metricsData,
+    months,
+    therapyArea,
+    indication,
+    selectedScenario,
+    setMarketShareChartData,
+    setMarketEventMetricsData,
+}) {
 
     const [editable, setEditable] = useState(false);
+    const [selectedMetricView, setSelectedMetricView] = useState("nps");
+    const [editedCell, setEditedCell] = useState(null);
 
-    const [selectedMetricView, setSelectedMetricView] =
-        useState("overall_market_volume");
+    const formattedMonths = useMemo(() => {
+        return (
+            months?.map((month) =>
+                new Date(month).toLocaleDateString(
+                    "en-US",
+                    {
+                        month: "short",
+                        year: "2-digit",
+                    }
+                )
+            ) || []
+        );
 
-    const [tableRows, setTableRows] = useState(
-        JSON.parse(JSON.stringify(initialData))
-    );
+    }, [months]);
 
-    const [originalRows, setOriginalRows] = useState(
-        JSON.parse(JSON.stringify(initialData))
-    );
+    // dynamic table source
+    const tableRows = useMemo(() => {
 
-    const [expandedLots, setExpandedLots] = useState({
-        "1L": true,
-        "2L": true,
-    });
+        if (!metricsData) return [];
+
+        return (
+            metricsData?.[selectedMetricView]
+                ?.table || []
+        );
+
+    }, [metricsData, selectedMetricView]);
+
+    const [editableRows, setEditableRows] = useState([]);
+
+    const [originalRows, setOriginalRows] = useState([]);
+
+    useEffect(() => {
+        const cloned =
+            JSON.parse(
+                JSON.stringify(tableRows)
+            );
+
+        setEditableRows(cloned);
+        setOriginalRows(cloned);
+
+    }, [tableRows]);
+
+    const [expandedLots, setExpandedLots] =
+        useState({});
+
+    useEffect(() => {
+        const expanded = {};
+        tableRows.forEach((row) => {
+            expanded[row.lot] = true;
+        });
+        setExpandedLots(expanded);
+
+    }, [tableRows]);
+
+    const hasTableData = editableRows.length > 0;
 
     const handleCellChange = (
         lotIndex,
@@ -137,19 +103,23 @@ export default function MarketEventTable() {
     ) => {
 
         const updatedRows =
-            JSON.parse(JSON.stringify(tableRows));
+            JSON.parse(
+                JSON.stringify(editableRows)
+            );
 
         updatedRows[lotIndex]
             .children[childIndex]
             .values[valueIndex] = value;
 
-        setTableRows(updatedRows);
+        setEditableRows(updatedRows);
     };
 
     const handleCancel = () => {
 
-        setTableRows(
-            JSON.parse(JSON.stringify(originalRows))
+        setEditableRows(
+            JSON.parse(
+                JSON.stringify(originalRows)
+            )
         );
 
         setEditable(false);
@@ -159,7 +129,7 @@ export default function MarketEventTable() {
 
         const expanded = {};
 
-        tableRows.forEach((row) => {
+        editableRows.forEach((row) => {
             expanded[row.lot] = true;
         });
 
@@ -170,7 +140,7 @@ export default function MarketEventTable() {
 
         const collapsed = {};
 
-        tableRows.forEach((row) => {
+        editableRows.forEach((row) => {
             collapsed[row.lot] = false;
         });
 
@@ -193,13 +163,18 @@ export default function MarketEventTable() {
     ) => {
 
         return editable ? (
+
             <input
                 value={value}
+
                 onChange={(e) => {
 
-                    const input = e.target.value;
+                    const input =
+                        e.target.value;
 
-                    if (/^\d*\.?\d*$/.test(input)) {
+                    if (
+                        /^\d*\.?\d*$/.test(input)
+                    ) {
 
                         handleCellChange(
                             lotIndex,
@@ -207,11 +182,17 @@ export default function MarketEventTable() {
                             valueIndex,
                             input
                         );
+                        setEditedCell({
+                            lotIndex,
+                            childIndex,
+                            valueIndex,
+                        })
                     }
                 }}
+
                 style={{
                     width: "100%",
-                    maxWidth: "42px",
+                    maxWidth: "50px",
                     border: "none",
                     outline: "none",
                     background: "transparent",
@@ -221,16 +202,181 @@ export default function MarketEventTable() {
                     color: "#334155",
                 }}
             />
+
         ) : (
+
             <Box
                 sx={{
                     color: "#334155",
                     fontSize: "13px",
                 }}
             >
-                {value}
+                {Number(value)}
             </Box>
         );
+    };
+
+    const handleNormalize = () => {
+
+        if (!editedCell) return;
+
+        const updatedRows =
+            JSON.parse(JSON.stringify(editableRows));
+
+        const {
+            lotIndex,
+            childIndex,
+            valueIndex,
+        } = editedCell;
+
+        const lotGroup =
+            updatedRows[lotIndex];
+
+        const targetTotal =
+            Number(
+                lotGroup.total[valueIndex]
+            );
+
+        const editedValue =
+            Number(
+                lotGroup.children[
+                    childIndex
+                ].values[valueIndex]
+            );
+
+        const remainingChildren =
+            lotGroup.children.filter(
+                (_, idx) => idx !== childIndex
+            );
+
+        const remainingCurrentTotal =
+            remainingChildren.reduce(
+                (sum, child) =>
+                    sum +
+                    Number(
+                        child.values[valueIndex] || 0
+                    ),
+                0
+            );
+
+        const remainingTarget =
+            targetTotal - editedValue;
+
+        if (
+            remainingCurrentTotal <= 0
+        ) {
+            return;
+        }
+
+        const ratio =
+            remainingTarget /
+            remainingCurrentTotal;
+
+        remainingChildren.forEach(
+            (child) => {
+
+                const current =
+                    Number(
+                        child.values[valueIndex] || 0
+                    );
+
+                const normalizedValue =
+                    current * ratio;
+
+                if (selectedMetricView === "nps") {
+
+                    child.values[valueIndex] =
+                        Math.round(normalizedValue);
+
+                } else {
+
+                    child.values[valueIndex] =
+                        Number(
+                            normalizedValue.toFixed(2)
+                        );
+                }
+            }
+        );
+
+        setEditableRows(updatedRows);
+    };
+
+    const handleSave = async () => {
+
+        try {
+
+            const payload = {
+                ta_name: therapyArea,
+
+                indication,
+
+                scenario_name: selectedScenario,
+
+                metric: selectedMetricView,
+
+                table: editableRows.map((row) => ({
+                    lot: row.lot,
+
+                    total: row.total.map((value) =>
+                        Number(value)
+                    ),
+
+                    children: row.children.map(
+                        (child) => ({
+                            label: child.label,
+
+                            values: child.values.map(
+                                (value) =>
+                                    Number(value)
+                            ),
+                        })
+                    ),
+                })),
+            };
+
+            console.log(
+                "SAVE MARKET EVENT TABLE PAYLOAD"
+            );
+
+            console.log(payload);
+
+            const response =
+                await saveMarketEventTable(
+                    payload
+                );
+
+            const data = response?.data;
+
+            console.log(
+                "SAVE RESPONSE",
+                data
+            );
+
+            // update chart
+            setMarketShareChartData(
+                data?.metrics_data
+                    ?.market_share?.chart || null
+            );
+
+            // update table
+            setMarketEventMetricsData(
+                data?.metrics_data || null
+            );
+
+            // exit edit mode
+            setEditable(false);
+
+            setOriginalRows(
+                JSON.parse(JSON.stringify(editableRows))
+            );
+
+        } catch (error) {
+
+            console.error(
+                "Failed to save market event table",
+                error
+            );
+        }
     };
 
     return (
@@ -256,7 +402,7 @@ export default function MarketEventTable() {
                 }}
             >
 
-                {/* LEFT SIDE */}
+                {/* LEFT */}
                 <Box
                     sx={{
                         display: "flex",
@@ -265,19 +411,25 @@ export default function MarketEventTable() {
                     }}
                 >
                     <Tooltip title="Expand All">
-                        <IconButton onClick={handleExpandAll}>
+                        <IconButton
+                            onClick={handleExpandAll}
+                            disabled={!hasTableData}
+                        >
                             <UnfoldMoreIcon />
                         </IconButton>
                     </Tooltip>
 
                     <Tooltip title="Collapse All">
-                        <IconButton onClick={handleCollapseAll}>
+                        <IconButton
+                            onClick={handleCollapseAll}
+                            disabled={!hasTableData}
+                        >
                             <UnfoldLessIcon />
                         </IconButton>
                     </Tooltip>
                 </Box>
 
-                {/* RIGHT SIDE */}
+                {/* RIGHT */}
                 <Box
                     sx={{
                         display: "flex",
@@ -287,7 +439,7 @@ export default function MarketEventTable() {
                     }}
                 >
 
-                    {/* DROPDOWN */}
+                    {/* METRIC SELECT */}
                     <FormControl
                         size="small"
                         sx={{
@@ -299,6 +451,7 @@ export default function MarketEventTable() {
                                 backgroundColor: "#fff",
                             },
                         }}
+                        disabled={!hasTableData}
                     >
                         <Select
                             value={selectedMetricView}
@@ -308,7 +461,7 @@ export default function MarketEventTable() {
                                 )
                             }
                         >
-                            <MenuItem value="overall_market_volume">
+                            <MenuItem value="nps">
                                 Overall Market Volume
                             </MenuItem>
 
@@ -318,32 +471,34 @@ export default function MarketEventTable() {
                         </Select>
                     </FormControl>
 
-                    {/* SAVE */}
                     <Button
                         variant="contained"
+                        onClick={handleSave}
                         sx={{
                             height: "35px",
                             borderRadius: "10px",
                             textTransform: "none",
                         }}
+                        disabled={!hasTableData || !editable}
                     >
                         Save
                     </Button>
 
-                    {/* EDIT */}
                     <Button
                         variant="outlined"
-                        onClick={() => setEditable(true)}
+                        onClick={() =>
+                            setEditable(true)
+                        }
                         sx={{
                             height: "35px",
                             borderRadius: "10px",
                             textTransform: "none",
                         }}
+                        disabled={!hasTableData}
                     >
                         Edit Changes
                     </Button>
 
-                    {/* NORMALIZE */}
                     <Button
                         variant="outlined"
                         sx={{
@@ -351,11 +506,12 @@ export default function MarketEventTable() {
                             borderRadius: "10px",
                             textTransform: "none",
                         }}
+                        disabled={!hasTableData}
+                        onClick={handleNormalize}
                     >
                         Normalize
                     </Button>
 
-                    {/* CANCEL */}
                     <Button
                         variant="outlined"
                         color="error"
@@ -365,6 +521,7 @@ export default function MarketEventTable() {
                             borderRadius: "10px",
                             textTransform: "none",
                         }}
+                        disabled={!hasTableData}
                     >
                         Cancel
                     </Button>
@@ -372,161 +529,217 @@ export default function MarketEventTable() {
             </Box>
 
             {/* TABLE */}
-            <TableContainer
-                sx={{
-                    overflowX: "auto",
-                    border: "1px solid #D8DEE8",
-                    borderRadius: "12px",
-                }}
-            >
-                <Table
-                    size="small"
+            {editableRows.length === 0 ? (
+                <Box
                     sx={{
-                        minWidth: "max-content",
+                        height: 120,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#94a3b8",
+                        fontSize: "14px",
+                        border: "1px solid #D8DEE8",
+                        borderRadius: "12px",
                     }}
                 >
+                    No table data available. Please apply filters.
+                </Box>
 
-                    {/* HEADER */}
-                    <TableHead>
-                        <TableRow>
+            ) : (
+                <TableContainer
+                    sx={{
+                        overflowX: "auto",
+                        border: "1px solid #D8DEE8",
+                        borderRadius: "12px",
+                    }}
+                >
+                    <Table
+                        size="small"
+                        sx={{
+                            minWidth: "max-content",
+                        }}
+                    >
 
-                            <TableCell
-                                sx={{
-                                    fontWeight: 700,
-                                    minWidth: 180,
-                                    position: "sticky",
-                                    left: 0,
-                                    zIndex: 3,
-                                    backgroundColor: "#fff",
-                                    borderRight: "1px solid #E2E8F0",
-                                }}
-                            >
-                                Product / LOT
-                            </TableCell>
+                        {/* HEADER */}
+                        <TableHead>
 
-                            {months.map((month, index) => (
+                            <TableRow>
 
                                 <TableCell
-                                    key={index}
-                                    align="center"
                                     sx={{
                                         fontWeight: 700,
-                                        minWidth: 90,
-                                        borderRight: "1px solid #E2E8F0",
+                                        minWidth: 180,
+                                        position: "sticky",
+                                        left: 0,
+                                        zIndex: 3,
+                                        backgroundColor: "#fff",
+                                        borderRight:
+                                            "1px solid #E2E8F0",
                                     }}
                                 >
-                                    {month}
+                                    Product / LOT
                                 </TableCell>
-                            ))}
-                        </TableRow>
-                    </TableHead>
 
-                    {/* BODY */}
-                    <TableBody>
+                                {formattedMonths.map(
+                                    (month, index) => (
 
-                        {tableRows.map((lotGroup, lotIndex) => (
+                                        <TableCell
+                                            key={index}
+                                            align="center"
+                                            sx={{
+                                                fontWeight: 700,
+                                                minWidth: 90,
+                                                borderRight:
+                                                    "1px solid #E2E8F0",
+                                            }}
+                                        >
+                                            {month}
+                                        </TableCell>
+                                    )
+                                )}
+                            </TableRow>
 
-                            <React.Fragment key={lotGroup.lot}>
+                        </TableHead>
 
-                                {/* LOT ROW */}
-                                <TableRow
-                                    onClick={() =>
-                                        toggleLot(lotGroup.lot)
-                                    }
-                                    sx={{
-                                        cursor: "pointer",
-                                        backgroundColor: "#f8fafc",
-                                    }}
-                                >
-                                    <TableCell
-                                        sx={{
-                                            fontWeight: 700,
-                                            position: "sticky",
-                                            left: 0,
-                                            zIndex: 2,
-                                            backgroundColor: "#f8fafc",
-                                            borderRight:
-                                                "1px solid #E2E8F0",
-                                        }}
+                        {/* BODY */}
+                        <TableBody>
+
+                            {editableRows.map(
+                                (lotGroup, lotIndex) => (
+
+                                    <React.Fragment
+                                        key={lotGroup.lot}
                                     >
-                                        {expandedLots[lotGroup.lot]
-                                            ? "▼"
-                                            : "▶"}{" "}
-                                        {lotGroup.lot}
-                                    </TableCell>
 
-                                    {lotGroup.total.map(
-                                        (value, index) => (
+                                        {/* LOT ROW */}
+                                        <TableRow
+                                            onClick={() =>
+                                                toggleLot(
+                                                    lotGroup.lot
+                                                )
+                                            }
+                                            sx={{
+                                                cursor: "pointer",
+                                                backgroundColor:
+                                                    "#f8fafc",
+                                            }}
+                                        >
 
                                             <TableCell
-                                                key={index}
-                                                align="center"
                                                 sx={{
                                                     fontWeight: 700,
-                                                    borderRight:
-                                                        "1px solid #E2E8F0",
+                                                    position: "sticky",
+                                                    left: 0,
+                                                    zIndex: 2,
                                                     backgroundColor:
                                                         "#f8fafc",
+                                                    borderRight:
+                                                        "1px solid #E2E8F0",
                                                 }}
                                             >
-                                                {value}
+                                                {expandedLots[
+                                                    lotGroup.lot
+                                                ]
+                                                    ? "▼"
+                                                    : "▶"}{" "}
+                                                {lotGroup.lot}
                                             </TableCell>
-                                        )
-                                    )}
-                                </TableRow>
 
-                                {/* CHILD ROWS */}
-                                {expandedLots[lotGroup.lot] &&
-                                    lotGroup.children.map(
-                                        (row, childIndex) => (
+                                            {lotGroup.total.map(
+                                                (
+                                                    value,
+                                                    index
+                                                ) => (
 
-                                            <TableRow key={childIndex}>
+                                                    <TableCell
+                                                        key={index}
+                                                        align="center"
+                                                        sx={{
+                                                            fontWeight: 700,
+                                                            borderRight:
+                                                                "1px solid #E2E8F0",
+                                                            backgroundColor:
+                                                                "#f8fafc",
+                                                        }}
+                                                    >
+                                                        {Number(value)}
+                                                    </TableCell>
+                                                )
+                                            )}
+                                        </TableRow>
 
-                                                <TableCell
-                                                    sx={{
-                                                        pl: 4,
-                                                        position: "sticky",
-                                                        left: 0,
-                                                        zIndex: 1,
-                                                        backgroundColor: "#fff",
-                                                        borderRight:
-                                                            "1px solid #E2E8F0",
-                                                    }}
-                                                >
-                                                    {row.label}
-                                                </TableCell>
+                                        {/* CHILD ROWS */}
+                                        {expandedLots[
+                                            lotGroup.lot
+                                        ] &&
+                                            lotGroup.children.map(
+                                                (
+                                                    row,
+                                                    childIndex
+                                                ) => (
 
-                                                {row.values.map(
-                                                    (
-                                                        value,
-                                                        valueIndex
-                                                    ) => (
+                                                    <TableRow
+                                                        key={
+                                                            childIndex
+                                                        }
+                                                    >
 
                                                         <TableCell
-                                                            key={valueIndex}
-                                                            align="center"
                                                             sx={{
+                                                                pl: 4,
+                                                                position:
+                                                                    "sticky",
+                                                                left: 0,
+                                                                zIndex: 1,
+                                                                backgroundColor:
+                                                                    "#fff",
                                                                 borderRight:
                                                                     "1px solid #E2E8F0",
                                                             }}
                                                         >
-                                                            {renderEditableCell(
-                                                                value,
-                                                                lotIndex,
-                                                                childIndex,
-                                                                valueIndex
-                                                            )}
+                                                            {
+                                                                row.label
+                                                            }
                                                         </TableCell>
-                                                    )
-                                                )}
-                                            </TableRow>
-                                        )
-                                    )}
-                            </React.Fragment>
-                        ))}
-                    </TableBody>
-                </Table>
-            </TableContainer>
+
+                                                        {row.values.map(
+                                                            (
+                                                                value,
+                                                                valueIndex
+                                                            ) => (
+
+                                                                <TableCell
+                                                                    key={
+                                                                        valueIndex
+                                                                    }
+                                                                    align="center"
+                                                                    sx={{
+                                                                        borderRight:
+                                                                            "1px solid #E2E8F0",
+                                                                    }}
+                                                                >
+                                                                    {renderEditableCell(
+                                                                        value,
+                                                                        lotIndex,
+                                                                        childIndex,
+                                                                        valueIndex
+                                                                    )}
+                                                                </TableCell>
+                                                            )
+                                                        )}
+
+                                                    </TableRow>
+                                                )
+                                            )}
+
+                                    </React.Fragment>
+                                )
+                            )}
+
+                        </TableBody>
+                    </Table>
+                </TableContainer>
+            )}
         </Paper>
     );
 }
