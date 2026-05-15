@@ -18,7 +18,7 @@ class MarketEventApplyFilterRequest(BaseModel):
 
 
 class MarketEventApplyFilterResponse(BaseModel):
-    therapy_area: str
+    ta_name: str
     indication: str
     scenario_name: str
 
@@ -56,5 +56,22 @@ class MarketEventRunCalculationResponse(BaseModel):
     indication: str
     scenario_name: str
     events_applied: int
-    chart: Dict[str, Any]
-    table: Dict[str, Any]
+    metrics_data: Dict[str, Any]
+
+class MarketEventChildRow(BaseModel):
+    label: str
+    values: List[float]
+
+
+class MarketEventLotGroup(BaseModel):
+    lot: str
+    total: List[float]
+    children: List[MarketEventChildRow]
+
+
+class MarketEventSaveRequest(BaseModel):
+    ta_name: str
+    indication: str
+    scenario_name: str
+    metric: str
+    table: List[MarketEventLotGroup]

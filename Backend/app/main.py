@@ -1,8 +1,8 @@
 # app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.route import router
-from app.api.metrics_route import router as metrics_router
+from app.api.Configuration_Route import router as Configuration_Router
+from app.api.Model_Inputs_Route import router as Model_Inputs_Router
 from app.api.Scenario_comparision_route import router as Scenario_comparision_router
 from app.api.market_events_route import router as market_events_router
 
@@ -18,7 +18,7 @@ app.add_middleware(
 )
 
 # Include API router
-app.include_router(router)
-app.include_router(metrics_router)
+app.include_router(Configuration_Router)
+app.include_router(Model_Inputs_Router)
 app.include_router(Scenario_comparision_router)
 app.include_router(market_events_router)

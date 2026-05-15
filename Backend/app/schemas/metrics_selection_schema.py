@@ -44,6 +44,7 @@ class RecalculateFactors(BaseModel):
 
 class MetricRecalculateRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indications: List[str]
     lots: List[str]
     metric_filter: str
