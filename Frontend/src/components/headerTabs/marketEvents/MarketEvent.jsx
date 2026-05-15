@@ -32,10 +32,13 @@ import { GlobalContext } from "../../../context/Provider";
 import { getMarketEventFilters, applyMarketEventFilters, runMarketEventCalculation } from "../../../services/apiService";
 import MarketEventChart from "./MarketEventChart";
 import MarketEventOutputTable from "./MarketEventTable";
+import { useSnackbarStore } from "../../../stores";
+import { useLoadingStore } from "../../../stores";
 
 export default function MarketEvents() {
     const { favState } = useContext(GlobalContext);
     const therapyArea = favState?.selectedTherapyArea;
+    const { showSnackbar } = useSnackbarStore();
     const [indication, setIndication] = useState("");
     const [selectedScenario, setSelectedScenario] = useState("");
     const [mappingData, setMappingData] = useState({});
@@ -60,6 +63,7 @@ export default function MarketEvents() {
     const [selectedSourceRowIndex, setSelectedSourceRowIndex] = useState(null);
     const [marketShareChartData, setMarketShareChartData] = useState(null);
     const [marketEventMetricsData, setMarketEventMetricsData] = useState(null);
+    const { setLoading, isLoading } = useLoadingStore();
 
     useEffect(() => {
         if (therapyArea) {
@@ -81,6 +85,7 @@ export default function MarketEvents() {
 
         } catch (error) {
             console.error("Failed to fetch market event filters", error);
+            showSnackbar("Failed to fetch market event filters", "error");
         }
     };
 
@@ -96,6 +101,7 @@ export default function MarketEvents() {
         };
 
         try {
+            setLoading(true);
             const response =
                 await applyMarketEventFilters(payload);
 
@@ -158,12 +164,12 @@ export default function MarketEvents() {
                         ),
                 },
             ]);
-
+            showSnackbar("Filters applied successfully", "success");
         } catch (error) {
-            console.error(
-                "Failed to apply market event filters",
-                error
-            );
+            console.error("Failed to apply market event filters", error);
+            showSnackbar("Failed to apply filter", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -327,20 +333,22 @@ export default function MarketEvents() {
                 // start_percent: Number(row.start_percent || 0),
                 peak_percent: Number(row.peak_percent || 0),
                 duration_months: Number(row.months || 0),
-                k_value: Number(row.factor || 0),
+                k_value:
+                    row.curve_type?.toLowerCase() === "linear"
+                        ? null
+                        : row.factor
+                            ? Number(row.factor)
+                            : null,
             })),
         };
 
-        console.log("========== RUN CALCULATION PAYLOAD ==========");
-        console.log(payload);
+        // console.log("========== RUN CALCULATION PAYLOAD ==========");
+        // console.log(payload);
 
-        console.log(
-            "Payload JSON:",
-            JSON.stringify(payload, null, 2)
-        );
-
-        // future API call
-        // runCalculation(payload);
+        // console.log(
+        //     "Payload JSON:",
+        //     JSON.stringify(payload, null, 2)
+        // );
         try {
             const response = await runMarketEventCalculation(payload);
             const data = response?.data;
@@ -353,8 +361,11 @@ export default function MarketEvents() {
             // update table
             setMarketEventMetricsData(data?.metrics_data || null)
 
+            showSnackbar("Market event calculation completed successfully", "success");
+
         } catch (error) {
             console.error("Run calculation failed", error);
+            showSnackbar("Failed to run calculation", "error");
         }
     };
 
@@ -511,6 +522,7 @@ export default function MarketEvents() {
                         <Button
                             variant="contained"
                             onClick={handleApplyFilter}
+                            disabled={isLoading}
                             sx={{
                                 textTransform: "none",
                                 borderRadius: "8px",
@@ -637,13 +649,13 @@ export default function MarketEvents() {
                                 sx={{
                                     display: "grid",
                                     gridTemplateColumns:
-                                        "0.8fr 0.4fr 0.7fr 0.5fr 0.7fr 0.3fr 0.3fr 0.5fr 1.1fr 40px",
+                                        "0.65fr 0.3fr 0.55fr 0.45fr 0.55fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
                                     gap: 2,
                                     px: 2,
                                     py: 1.5,
                                     backgroundColor: "#f8fafc",
                                     borderBottom: "1px solid #D8DEE8",
-                                    minWidth: "1400px",
+                                    minWidth: "1050px",
                                 }}
                             >
                                 {[
@@ -689,12 +701,12 @@ export default function MarketEvents() {
                                         sx={{
                                             display: "grid",
                                             gridTemplateColumns:
-                                                "0.8fr 0.4fr 0.7fr 0.5fr 0.7fr 0.3fr 0.3fr 0.5fr 1.1fr 40px",
+                                                "0.65fr 0.3fr 0.55fr 0.45fr 0.55fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
                                             gap: 2,
                                             px: 2,
                                             py: 1.5,
                                             alignItems: "center",
-                                            minWidth: "1400px",
+                                            minWidth: "1050px",
                                         }}
                                     >
                                         {/* Event Name */}
@@ -880,7 +892,23 @@ export default function MarketEvents() {
                                             }
                                             size="small"
                                             placeholder="e.g. 1"
-                                            sx={tableInputStyle}
+                                            disabled={
+                                                row.curve_type?.toLowerCase() === "linear"
+                                            }
+                                            sx={{
+                                                ...tableInputStyle,
+
+                                                "& .MuiOutlinedInput-root": {
+                                                    height: "32px",
+                                                    borderRadius: "6px",
+                                                    fontSize: "13px",
+
+                                                    backgroundColor:
+                                                        row.curve_type?.toLowerCase() === "linear"
+                                                            ? "#e2e8f0"
+                                                            : "#fff",
+                                                },
+                                            }}
                                         />
 
                                         {/* 3 dots */}
@@ -1122,6 +1150,7 @@ export default function MarketEvents() {
                     setMarketEventMetricsData={
                         setMarketEventMetricsData
                     }
+                    showSnackbar={showSnackbar}
                 />
             </Paper>
         </Box >

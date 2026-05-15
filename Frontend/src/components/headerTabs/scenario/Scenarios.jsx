@@ -117,6 +117,7 @@ export default function Scenarios() {
 
         } catch (error) {
             console.error("Failed to fetch scenario filters", error);
+            showSnackbar("Failed to fetch scenario filters", "error");
         }
     };
 
@@ -144,7 +145,6 @@ export default function Scenarios() {
             setTableData(data.table);
             setIsDataLoaded(true);
             showSnackbar("Filters applied successfully", "success");
-
         } catch (error) {
             console.error("Apply filter failed", error);
             showSnackbar("Failed to apply filter", "error");

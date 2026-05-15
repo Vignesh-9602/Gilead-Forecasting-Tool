@@ -33,6 +33,7 @@ export default function MarketEventTable({
     selectedScenario,
     setMarketShareChartData,
     setMarketEventMetricsData,
+    showSnackbar
 }) {
 
     const [editable, setEditable] = useState(false);
@@ -65,6 +66,10 @@ export default function MarketEventTable({
         );
 
     }, [metricsData, selectedMetricView]);
+
+    const forecastStartIndex =
+        metricsData?.[selectedMetricView]
+            ?.chart?.forecast_start_index || 0;
 
     const [editableRows, setEditableRows] = useState([]);
 
@@ -370,12 +375,15 @@ export default function MarketEventTable({
                 JSON.parse(JSON.stringify(editableRows))
             );
 
+            showSnackbar("Market event saved successfully", "success");
+
         } catch (error) {
 
             console.error(
                 "Failed to save market event table",
                 error
             );
+            showSnackbar("Failet to save market event", "success");
         }
     };
 
@@ -499,22 +507,24 @@ export default function MarketEventTable({
                         Edit Changes
                     </Button>
 
-                    <Button
-                        variant="outlined"
-                        sx={{
-                            height: "35px",
-                            borderRadius: "10px",
-                            textTransform: "none",
-                        }}
-                        disabled={!hasTableData}
-                        onClick={handleNormalize}
-                    >
-                        Normalize
-                    </Button>
+                    {editable && (
+                        <Button
+                            variant="outlined"
+                            sx={{
+                                height: "35px",
+                                borderRadius: "10px",
+                                textTransform: "none",
+                            }}
+                            disabled={!hasTableData}
+                            onClick={handleNormalize}
+                        >
+                            Normalize
+                        </Button>
+                    )}
 
                     <Button
                         variant="outlined"
-                        color="error"
+                        // color="error"
                         onClick={handleCancel}
                         sx={{
                             height: "35px",
@@ -591,6 +601,10 @@ export default function MarketEventTable({
                                                 minWidth: 90,
                                                 borderRight:
                                                     "1px solid #E2E8F0",
+                                                // backgroundColor:
+                                                //     index < forecastStartIndex
+                                                //         ? "#f1f5f9"
+                                                //         : "#fff",
                                             }}
                                         >
                                             {month}
@@ -658,8 +672,18 @@ export default function MarketEventTable({
                                                             fontWeight: 700,
                                                             borderRight:
                                                                 "1px solid #E2E8F0",
-                                                            backgroundColor:
-                                                                "#f8fafc",
+                                                            // backgroundColor:
+                                                            //     index < forecastStartIndex
+                                                            //         ? "#e2e8f0"
+                                                            //         : "#fff",
+
+                                                            // backgroundColor:
+                                                            //     index < forecastStartIndex
+                                                            //         ? "#dbeafe"
+                                                            //         : "#bfdbfe",
+
+                                                            backgroundColor: "#f8fafc"
+                                                            // color: "#1e3a8a",
                                                         }}
                                                     >
                                                         {Number(value)}
@@ -714,8 +738,11 @@ export default function MarketEventTable({
                                                                     }
                                                                     align="center"
                                                                     sx={{
-                                                                        borderRight:
-                                                                            "1px solid #E2E8F0",
+                                                                        borderRight: "1px solid #E2E8F0",
+                                                                        backgroundColor:
+                                                                            valueIndex < forecastStartIndex
+                                                                                ? "#f1f5f9"
+                                                                                : "#fff",
                                                                     }}
                                                                 >
                                                                     {renderEditableCell(

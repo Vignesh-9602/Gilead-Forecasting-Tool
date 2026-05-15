@@ -98,7 +98,7 @@ export const runMarketEventCalculation = (payload) => {
 
 export const saveMarketEventTable = (payload) => {
   return httpClient.post(
-    "/api/market-event/market-event/save",
+    "/api/market-events/market-events/save",
     payload
   );
 };

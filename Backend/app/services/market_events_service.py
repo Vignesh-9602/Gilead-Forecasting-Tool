@@ -1,8 +1,9 @@
 import json
+
 from fastapi import HTTPException
 
 from app.db.connection import get_connection
-from app.services.market_events_calculation import generate_market_event_impact_percent
+from app.services.market_events_calculation import generate_market_event_impact_percent, generate_market_event_share_from_start_date
 
 
 def get_market_event_filters_service(ta_name: str):
@@ -126,6 +127,12 @@ def empty_market_event_apply_response(payload):
                 "table": []
             },
             "nps": {
+                
+                # frontend needs ONLY forecast_start_index inside chart
+                "chart": {
+                    "forecast_start_index": 0
+                },
+
                 "table": []
             }
         }
@@ -396,6 +403,7 @@ def apply_market_event_filters_service(payload):
 
             nps_table.append({
                 "lot": lot,
+                "forecast_start_index": forecast_start_index,
                 "total": nps_total_values,
                 "children": nps_children
             })
@@ -446,6 +454,11 @@ def apply_market_event_filters_service(payload):
             },
 
             "nps": {
+                
+                "chart": {
+                        "forecast_start_index": forecast_start_index
+                    },
+
                 "table": nps_table
             }
         }
@@ -464,10 +477,6 @@ def run_market_event_calculation_service(payload):
 
     try:
         selected_scenario = payload.scenario_name.strip()
-
-        # =====================================================
-        # 1. Resolve scenario per LOT
-        # =====================================================
 
         lot_scenario_map = {}
 
@@ -517,30 +526,22 @@ def run_market_event_calculation_service(payload):
                 "events_applied": 0,
                 "metrics_data": {
                     "market_share": {
-                        "chart": {
-                            "months": [],
-                            "forecast_start_index": 0,
-                            "series": []
-                        },
+                        "chart": {"months": [], "forecast_start_index": 0, "series": []},
                         "table": []
                     },
                     "nps": {
-                        "table": []
-                    }
+                        
+                        "chart": {
+                                "forecast_start_index": 0
+                            },
+
+                        "table": []}
                 }
             }
-
-        # =====================================================
-        # 2. Group events by LOT
-        # =====================================================
 
         events_by_lot = {}
         for event in payload.events:
             events_by_lot.setdefault(event.lot, []).append(event)
-
-        # =====================================================
-        # 3. Prepare response objects
-        # =====================================================
 
         chart_months = None
         forecast_start_index = 0
@@ -551,22 +552,10 @@ def run_market_event_calculation_service(payload):
 
         total_events_applied = 0
 
-        # =====================================================
-        # Helper: normalize product names
-        # =====================================================
-
         def _norm(s):
             return str(s).strip().lower() if s is not None else ""
 
-        # =====================================================
-        # 4. Process each LOT
-        # =====================================================
-
         for lot, scenario_name in lot_scenario_map.items():
-
-            # =====================================
-            # Fetch NPS row
-            # =====================================
 
             cursor.execute("""
                 SELECT chart
@@ -586,7 +575,6 @@ def run_market_event_calculation_service(payload):
 
             nps_row = cursor.fetchone()
 
-            # If this LOT doesn't have NPS, skip this LOT (no DB save either)
             if not nps_row or not nps_row[0]:
                 continue
 
@@ -602,10 +590,6 @@ def run_market_event_calculation_service(payload):
                 nps_chart.get("train_values", []) +
                 nps_chart.get("forecast_values", [])
             )
-
-            # =====================================
-            # Fetch Market Share rows
-            # =====================================
 
             cursor.execute("""
                 SELECT
@@ -639,13 +623,8 @@ def run_market_event_calculation_service(payload):
                 )
                 product_values_map[product] = [float(v) for v in values]
 
-            # If no market_share series exist for this LOT, skip this LOT (no DB save either)
             if not product_values_map:
                 continue
-
-            # =====================================
-            # Product lookup for normalized names
-            # =====================================
 
             product_lookup = {}
             for product in product_values_map.keys():
@@ -653,10 +632,6 @@ def run_market_event_calculation_service(payload):
 
             def resolve_product_name(name):
                 return product_lookup.get(_norm(name))
-
-            # =====================================================
-            # 5. Apply events sequentially for this LOT
-            # =====================================================
 
             lot_events = events_by_lot.get(lot, [])
             lot_events_applied = 0
@@ -674,16 +649,10 @@ def run_market_event_calculation_service(payload):
                 start_index = months.index(event_start_date)
                 forecast_periods = len(months) - start_index
 
-                impact_percents = generate_market_event_impact_percent(
-                    forecast_periods=forecast_periods,
-                    peak_percent=event.peak_percent,
-                    duration=event.duration_months,
-                    curve_type=event.curve_type,
-                    k=event.k_value
-                )
+                if forecast_periods <= 0:
+                    continue
 
                 resolved_source_percentages = {}
-
                 for source_product, source_pct in (event.source_percentages or {}).items():
 
                     if _norm(source_product) == _norm(event.target_product):
@@ -697,47 +666,238 @@ def run_market_event_calculation_service(payload):
                         continue
 
                     resolved_source_percentages[source_db_key] = (
-                        resolved_source_percentages.get(source_db_key, 0)
-                        + float(source_pct)
+                        resolved_source_percentages.get(source_db_key, 0.0) + float(source_pct)
                     )
 
-                source_total = sum(resolved_source_percentages.values())
-                if source_total <= 0:
+                source_total_weight = sum(resolved_source_percentages.values())
+                if source_total_weight <= 0:
                     continue
 
-                for offset, impact_percent in enumerate(impact_percents):
+                current_ms_series = []
+                for prod, vals in product_values_map.items():
+                    vals = [float(x) for x in vals]
+                    current_ms_series.append({
+                        "label": prod,
+                        "train_values": vals[:forecast_start_index],
+                        "forecast_values": vals[forecast_start_index:],
+                    })
 
-                    idx = start_index + offset
-                    if idx >= len(months):
-                        break
+                current_market_share_chart = {
+                    "months": months,
+                    "forecast_start_index": forecast_start_index,
+                    "series": current_ms_series
+                }
 
-                    # Target gain
-                    product_values_map[target_db_key][idx] = round(
-                        product_values_map[target_db_key][idx] + impact_percent,
-                        2
-                    )
+                desired_target_shares = generate_market_event_share_from_start_date(
+                    forecast_periods=forecast_periods,
+                    peak_percent=float(event.peak_percent),
+                    duration=int(event.duration_months),
+                    curve_type=str(event.curve_type),
+                    start_date=event_start_date,
+                    target_product=target_db_key,
+                    market_share_chart=current_market_share_chart,
+                    k=getattr(event, "k_value", None)
+                )
 
-                    # Source deductions
-                    for source_db_key, source_pct in resolved_source_percentages.items():
+                def _take_from_sources(idx: int, need: float):
+                    need = float(need)
+                    if need <= 0:
+                        return 0.0, {}
 
-                        deduction = impact_percent * (source_pct / source_total)
+                    active = {k for k in resolved_source_percentages.keys()}
+                    avail = {k: float(product_values_map[k][idx]) for k in active}
 
-                        product_values_map[source_db_key][idx] = round(
-                            product_values_map[source_db_key][idx] - deduction,
+                    total_w = sum(float(resolved_source_percentages[k]) for k in active)
+                    if total_w <= 0:
+                        return 0.0, {}
+
+                    weights = {k: float(resolved_source_percentages[k]) / total_w for k in active}
+
+                    taken = {k: 0.0 for k in active}
+                    remaining = need
+
+                    while remaining > 1e-9 and active:
+                        wsum = sum(weights[k] for k in active)
+                        if wsum <= 0:
+                            break
+
+                        allocation = {k: remaining * (weights[k] / wsum) for k in active}
+
+                        round_taken = 0.0
+                        exhausted = set()
+
+                        for k in active:
+                            can_take = avail[k] - taken[k]
+                            take_k = min(allocation[k], can_take)
+
+                            if take_k > 0:
+                                taken[k] += take_k
+                                round_taken += take_k
+
+                            if (avail[k] - taken[k]) <= 1e-9:
+                                exhausted.add(k)
+
+                        remaining -= round_taken
+
+                        for k in exhausted:
+                            active.remove(k)
+
+                        if round_taken <= 1e-12:
+                            break
+
+                    return sum(taken.values()), taken
+
+                def _give_to_sources_by_event_weights(idx: int, give: float):
+                    give = float(give)
+                    if give <= 0:
+                        return
+
+                    for s_key, w in resolved_source_percentages.items():
+                        weight = float(w) / source_total_weight
+                        product_values_map[s_key][idx] = (
+                            float(product_values_map[s_key][idx]) + (give * weight)
+                        )
+
+                def _normalize_month_to_100(idx: int):
+                    keys = list(product_values_map.keys())
+
+                    for k in keys:
+                        product_values_map[k][idx] = max(
+                            0.0,
+                            min(100.0, float(product_values_map[k][idx]))
+                        )
+
+                    total_now = sum(float(product_values_map[k][idx]) for k in keys)
+
+                    if abs(total_now - 100.0) < 1e-6:
+                        for k in keys:
+                            product_values_map[k][idx] = round(float(product_values_map[k][idx]), 2)
+                        return
+
+                    if total_now > 100.0:
+                        excess = total_now - 100.0
+
+                        reducible = [
+                            k for k in keys
+                            if k != target_db_key and float(product_values_map[k][idx]) > 0
+                        ]
+
+                        if not reducible:
+                            reducible = [
+                                k for k in keys
+                                if float(product_values_map[k][idx]) > 0
+                            ]
+
+                        while excess > 1e-9 and reducible:
+                            reducible_total = sum(
+                                float(product_values_map[k][idx])
+                                for k in reducible
+                            )
+
+                            if reducible_total <= 0:
+                                break
+
+                            reduced_total = 0.0
+
+                            for k in list(reducible):
+                                cur = float(product_values_map[k][idx])
+                                reduce_amt = excess * (cur / reducible_total)
+                                reduce_amt = min(reduce_amt, cur)
+
+                                product_values_map[k][idx] = cur - reduce_amt
+                                reduced_total += reduce_amt
+
+                                if float(product_values_map[k][idx]) <= 1e-9:
+                                    reducible.remove(k)
+
+                            excess -= reduced_total
+
+                            if reduced_total <= 1e-12:
+                                break
+
+                    else:
+                        remainder = 100.0 - total_now
+
+                        candidates = [
+                            k for k in keys
+                            if k != target_db_key
+                        ]
+
+                        if not candidates:
+                            candidates = keys
+
+                        candidate_total = sum(
+                            max(0.0, float(product_values_map[k][idx]))
+                            for k in candidates
+                        )
+
+                        if candidate_total > 0:
+                            for k in candidates:
+                                cur = float(product_values_map[k][idx])
+                                weight = cur / candidate_total
+                                product_values_map[k][idx] = cur + (remainder * weight)
+                        else:
+                            equal_add = remainder / len(candidates)
+                            for k in candidates:
+                                product_values_map[k][idx] = (
+                                    float(product_values_map[k][idx]) + equal_add
+                                )
+
+                    for k in keys:
+                        product_values_map[k][idx] = round(
+                            max(0.0, min(100.0, float(product_values_map[k][idx]))),
                             2
                         )
 
-                        product_values_map[source_db_key][idx] = max(
-                            product_values_map[source_db_key][idx],
-                            0
+                for offset, desired_target in enumerate(desired_target_shares):
+                    idx = start_index + offset
+
+                    if idx >= len(months):
+                        break
+
+                    desired_target = max(0.0, min(100.0, float(desired_target)))
+
+                    current_target = float(product_values_map[target_db_key][idx])
+                    current_target = max(0.0, min(100.0, current_target))
+
+                    delta = desired_target - current_target
+
+                    if abs(delta) < 1e-9:
+                        _normalize_month_to_100(idx)
+                        continue
+
+                    if delta > 0:
+                        taken_total, taken_by_source = _take_from_sources(
+                            idx,
+                            need=delta
                         )
+
+                        product_values_map[target_db_key][idx] = min(
+                            100.0,
+                            current_target + taken_total
+                        )
+
+                        for s_key, taken_amt in taken_by_source.items():
+                            product_values_map[s_key][idx] = max(
+                                0.0,
+                                float(product_values_map[s_key][idx]) - float(taken_amt)
+                            )
+
+                    else:
+                        give = -delta
+                        give = min(give, current_target)
+
+                        product_values_map[target_db_key][idx] = max(
+                            0.0,
+                            current_target - give
+                        )
+
+                        _give_to_sources_by_event_weights(idx, give)
+
+                    _normalize_month_to_100(idx)
 
                 lot_events_applied += 1
                 total_events_applied += 1
-
-            # =====================================================
-            # 6. Rebuild chart and table after all events for LOT
-            # =====================================================
 
             lot_market_share_series = []
             market_share_children = []
@@ -747,7 +907,6 @@ def run_market_event_calculation_service(payload):
             nps_total_values = [0] * len(months)
 
             for product, values in product_values_map.items():
-
                 values = [round(v, 2) for v in values]
 
                 train_values = values[:forecast_start_index]
@@ -796,16 +955,13 @@ def run_market_event_calculation_service(payload):
 
             lot_nps_table = {
                 "lot": lot,
+                "forecast_start_index": forecast_start_index,
                 "total": nps_total_values,
                 "children": nps_children
             }
 
             market_share_table.append(lot_market_share_table)
             nps_table.append(lot_nps_table)
-
-            # =====================================================
-            # 7. Save THIS LOT output to DB (moved inside LOT loop)
-            # =====================================================
 
             lot_market_share_chart = {
                 "months": months,
@@ -854,15 +1010,7 @@ def run_market_event_calculation_service(payload):
                 json.dumps(lot_nps_table)
             ))
 
-        # =====================================================
-        # 8. Commit after all LOTs are processed
-        # =====================================================
-
         conn.commit()
-
-        # =====================================================
-        # 9. Final response to frontend
-        # =====================================================
 
         return {
             "ta_name": payload.ta_name,
@@ -879,6 +1027,10 @@ def run_market_event_calculation_service(payload):
                     "table": market_share_table
                 },
                 "nps": {
+                    
+                    "chart": {
+                            "forecast_start_index": forecast_start_index
+                        },
                     "table": nps_table
                 }
             }
@@ -957,6 +1109,7 @@ def save_market_event_changes_service(payload):
 
             return {
                 "lot": ms_table["lot"],
+                "forecast_start_index": existing_nps_table.get("forecast_start_index", 0),
                 "total": nps_total,
                 "children": nps_children
             }
@@ -1055,6 +1208,7 @@ def save_market_event_changes_service(payload):
 
             updated_input_table = {
                 "lot": lot_group.lot,
+                "forecast_start_index": forecast_start_index,
                 "total": [round(float(v), 2) for v in lot_group.total],
                 "children": [
                     {
@@ -1180,6 +1334,11 @@ def save_market_event_changes_service(payload):
                     "table": all_market_share_table
                 },
                 "nps": {
+                    
+                    "chart": {
+                              "forecast_start_index": response_forecast_start_index
+                             },
+
                     "table": all_nps_table
                 }
             }
