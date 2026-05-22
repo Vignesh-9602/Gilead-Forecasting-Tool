@@ -874,7 +874,7 @@ export default function ModelInput() {
                             variant="contained"
                             disabled={!editable}
                             onClick={handleRecalculate}
-                            sx={{ height: "35px", mt: 3, textTransform: "none", backgroundColor: "#6b7280", borderRadius: "8px" }}>
+                            sx={{ height: "35px", mt: 3, textTransform: "none", backgroundColor: "#4F46E5", borderRadius: "8px" }}>
                             Recalculate
                         </Button>
                     </Box>

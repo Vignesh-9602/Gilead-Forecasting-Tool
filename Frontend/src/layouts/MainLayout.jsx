@@ -6,6 +6,7 @@ import SnackbarNotification from "../components/snackBar/SnackBar";
 import ModelInput from "../components/headerTabs/ModelInput";
 import Scenarios from "../components/headerTabs/scenario/Scenarios";
 import MarketEvents from "../components/headerTabs/marketEvents/MarketEvent";
+import VialCalculator from "../components/headerTabs/vialCalculator/VialCalculator";
 
 const tabs = [
     "Configurations",
@@ -38,6 +39,8 @@ export default function MainLayout() {
                 return <Scenarios />;
             case "Market Events":
                 return <MarketEvents />;
+            case "Vial Calculator":
+                return <VialCalculator />;
             default:
                 return (
                     <Box p={3}>

@@ -82,6 +82,10 @@ export const getMarketEventFilters = (taName) => {
   return httpClient.get(`/api/market-events/filters/${taName}`);
 };
 
+export const getPersistencyFilters = (taName) => {
+  return httpClient.get(`/api/persistency/filters/${taName}`);
+};
+
 export const applyMarketEventFilters = (payload) => {
   return httpClient.post(
     "/api/market-events/apply-filters",
@@ -99,6 +103,41 @@ export const runMarketEventCalculation = (payload) => {
 export const saveMarketEventTable = (payload) => {
   return httpClient.post(
     "/api/market-events/market-events/save",
+    payload
+  );
+};
+
+export const applyPersistencyFilters = (payload) => {
+  return httpClient.post(
+    "/api/persistency/apply",
+    payload
+  );
+};
+
+export const calculateApplyPersistencyCurve = (payload) => {
+  return httpClient.post(
+    "/api/persistency/calculate-apply",
+    payload
+  );
+};
+
+export const getPersistencyCurves = (taName) => {
+  return httpClient.get(`/api/persistency/curves/${taName}`);
+};
+
+export const getPersistencyCurveDetails = (curveName) => {
+  return httpClient.get(`/api/persistency/curve-details/${curveName}`);
+};
+
+export const deletePersistencyCurve = (curveName) => {
+  return httpClient.delete(`/api/persistency/delete-curve/${curveName}`);
+};
+
+export const applyPersistencyCurve = (
+  payload
+) => {
+  return httpClient.post(
+    "/api/persistency/apply-curve",
     payload
   );
 };
