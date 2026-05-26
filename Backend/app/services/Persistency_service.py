@@ -339,7 +339,8 @@ def apply_persistency_service(payload):
         indication=indication,
         brand=brand,
         lots=lots,
-        months=response_months or []
+        months=response_months or [],
+        use_assumptions=False
         )
         
         demand_vials_table = build_demand_vials_table(
@@ -1074,6 +1075,9 @@ def apply_persistency_curve_service(
         # ---------------------------------------------------
         # Fetch all LOT outputs from persistency_outputs
         # ---------------------------------------------------
+
+        response_lots = payload.lots
+
         cursor.execute("""
             SELECT
                 lot,
@@ -1086,11 +1090,13 @@ def apply_persistency_curve_service(
             WHERE ta_name = %s
               AND indication = %s
               AND brand = %s
+             AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
             indication,
-            brand
+            brand,
+            response_lots
         ))
 
         output_rows = cursor.fetchall()
@@ -1109,6 +1115,15 @@ def apply_persistency_curve_service(
 
             if response_months is None:
                 response_months = months
+
+
+            month_count = len(response_months)
+
+            months = months[:month_count]
+
+            new_patients = new_patients[:month_count]
+            continuing_patients = continuing_patients[:month_count]
+            total_patients = total_patients[:month_count]
 
             response_table.append({
                 "lot": lot,
@@ -1167,6 +1182,208 @@ def apply_persistency_curve_service(
             "demand_vials_table": demand_vials_table,
             "inventory_table": inventory_table
         }
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def save_avg_vials_per_dose_service(payload):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        ta_name = payload.ta_name
+        indication = payload.indication
+        brand = payload.brand
+        months = payload.months
+
+        # -----------------------------------------
+        # Save edited avg vials into same table
+        # compliance is preserved if already present
+        # else default 100
+        # -----------------------------------------
+        for lot_item in payload.avg_vials_per_dose_table:
+
+            lot = lot_item.lot
+            values = lot_item.values
+
+            if len(values) != len(months):
+                raise ValueError(
+                    f"Values length mismatch for lot {lot}"
+                )
+
+            for month_str, avg_vial_value in zip(months, values):
+
+                month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+                year = month_dt.year
+                month = month_dt.month
+
+                cursor.execute("""
+                    INSERT INTO raw.vials_assumptions (
+                        ta_name,
+                        indication,
+                        lot,
+                        brand,
+                        year,
+                        month,
+                        avg_vials_per_dose,
+                        compliance
+                    )
+                    VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s,
+                        %s,
+                        COALESCE(
+                            (
+                                SELECT compliance
+                                FROM raw.vials_assumptions
+                                WHERE ta_name = %s
+                                  AND indication = %s
+                                  AND lot = %s
+                                  AND brand = %s
+                                  AND year = %s
+                                  AND month = %s
+                            ),
+                            100
+                        )
+                    )
+                    ON CONFLICT (
+                        ta_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month
+                    )
+                    DO UPDATE SET
+                        avg_vials_per_dose = EXCLUDED.avg_vials_per_dose
+                """, (
+                    ta_name,
+                    indication,
+                    lot,
+                    brand,
+                    year,
+                    month,
+                    avg_vial_value,
+
+                    ta_name,
+                    indication,
+                    lot,
+                    brand,
+                    year,
+                    month
+                ))
+
+        # -----------------------------------------
+        # Fetch persistency output internally
+        # no need to return to frontend
+        # -----------------------------------------
+        cursor.execute("""
+            SELECT
+                lot,
+                curve_name,
+                months,
+                new_patients,
+                continuing_patients,
+                total_patients
+            FROM raw.persistency_outputs
+            WHERE ta_name = %s
+              AND indication = %s
+              AND brand = %s
+            ORDER BY lot
+        """, (
+            ta_name,
+            indication,
+            brand
+        ))
+
+        output_rows = cursor.fetchall()
+
+        if not output_rows:
+            raise ValueError(
+                "No persistency output found. Please run apply first."
+            )
+
+        persistency_table = []
+        response_months = months
+
+        for (
+            lot,
+            curve_name,
+            saved_months,
+            new_patients,
+            continuing_patients,
+            total_patients
+        ) in output_rows:
+
+            persistency_table.append({
+                "lot": lot,
+                "curve_name": curve_name,
+                "children": [
+                    {
+                        "label": "New Patients",
+                        "values": new_patients
+                    },
+                    {
+                        "label": "Continuing Patients",
+                        "values": continuing_patients
+                    },
+                    {
+                        "label": "Total Patients",
+                        "values": total_patients
+                    }
+                ]
+            })
+
+        lots = [
+            item["lot"]
+            for item in persistency_table
+        ]
+
+        avg_vials_table = build_avg_vials_per_dose_table(
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            lots=lots,
+            months=response_months,
+            use_assumptions=True
+        )
+
+        demand_vials_table = build_demand_vials_table(
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            lots=lots,
+            months=response_months,
+            persistency_table=persistency_table,
+            avg_vials_per_dose_table=avg_vials_table
+        )
+
+        inventory_table = build_inventory_table(
+            brand=brand,
+            demand_vials_table=demand_vials_table,
+            stock_percentage=1
+        )
+
+        conn.commit()
+
+        return {
+            "ta_name": ta_name,
+            "indication": indication,
+            "brand": brand,
+            "months": response_months,
+            "avg_vials_per_dose_table": avg_vials_table,
+            "demand_vials_table": demand_vials_table,
+            "inventory_table": inventory_table
+        }
+
+    except Exception:
+        conn.rollback()
+        raise
 
     finally:
         cursor.close()

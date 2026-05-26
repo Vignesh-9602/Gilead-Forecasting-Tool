@@ -35,6 +35,10 @@ const metricOptions = [
     },
 ];
 
+const vialCalculatorDateLocaleText = {
+    fieldMonthPlaceholder: () => "MM",
+};
+
 export default function VialCalculator() {
 
     const { favState } = useContext(GlobalContext);
@@ -460,6 +464,7 @@ export default function VialCalculator() {
 
                         <LocalizationProvider
                             dateAdapter={AdapterDayjs}
+                            localeText={vialCalculatorDateLocaleText}
                         >
 
                             <DatePicker
@@ -484,6 +489,7 @@ export default function VialCalculator() {
                                 slotProps={{
                                     textField: {
                                         size: "small",
+                                        placeholder: "DD-MMM-YYYY",
 
                                         sx: {
                                             ...inputStyle,
@@ -518,6 +524,7 @@ export default function VialCalculator() {
 
                         <LocalizationProvider
                             dateAdapter={AdapterDayjs}
+                            localeText={vialCalculatorDateLocaleText}
                         >
 
                             <DatePicker
@@ -542,6 +549,7 @@ export default function VialCalculator() {
                                 slotProps={{
                                     textField: {
                                         size: "small",
+                                        placeholder: "DD-MMM-YYYY",
 
                                         sx: {
                                             ...inputStyle,
@@ -597,6 +605,7 @@ export default function VialCalculator() {
                     brand={brand}
                     startDate={startDate}
                     endDate={endDate}
+                    lots={lots}
                 />
 
             </Paper>

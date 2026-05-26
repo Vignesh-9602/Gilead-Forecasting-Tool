@@ -141,6 +141,42 @@ export const applyPersistencyCurve = (
     payload
   );
 };
+
+export const saveAvgVials = (payload) => {
+  return httpClient.post(
+    "/api/persistency/avg-vials/save",
+    payload
+  );
+};
+
+export const saveDemandAdjustments = (payload) => {
+  return httpClient.post(
+    "/api/persistency/demand-adjustments/save",
+    payload
+  );
+};
+
+export const getComplianceConfiguration = (ta_name, indication, brand) => {
+  return httpClient.get("/api/persistency/compliance/configure",
+    {
+      params:
+        { ta_name, indication, brand, },
+    }
+  );
+};
+
+export const applyComplianceConfiguration = (payload) => {
+  return httpClient.post("/api/persistency/compliance/configure/apply", payload);
+};
+
+export const applyEditComplianceRowValues = (payload) => {
+  return httpClient.post("/api/persistency/edit-complinace-row-values/apply", payload);
+};
+
+export const applyInventoryStockPercentage = (payload) => {
+  return httpClient.post("/api/persistency/inventory/stock-percentage/apply", payload);
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

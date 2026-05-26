@@ -38,6 +38,7 @@ export default function PersistencyConfiguration({
     open,
     onClose,
     therapyArea,
+    onCurveUpdated,
 }) {
     const [curveRows, setCurveRows] = useState([]);
 
@@ -106,6 +107,8 @@ export default function PersistencyConfiguration({
             setCurveRows(
                 response?.data?.curve_list || []
             );
+
+            onCurveUpdated?.();
 
             // if currently opened curve deleted
             if (
@@ -240,6 +243,10 @@ export default function PersistencyConfiguration({
             setCurveRows(
                 response.data.curve_list
             );
+
+            // fetch the updated curve list
+            onCurveUpdated?.();
+
         } catch (error) {
             console.error(error);
         }

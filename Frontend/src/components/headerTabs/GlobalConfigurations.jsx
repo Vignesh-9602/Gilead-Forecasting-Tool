@@ -24,6 +24,10 @@ import dayjs from "dayjs";
 import { GlobalContext } from "../../context/Provider";
 import { useLoadingStore } from "../../stores";
 
+const globalConfigDateLocaleText = {
+    fieldMonthPlaceholder: () => "MM",
+};
+
 
 export default function GlobalConfiguration() {
     // const [therapyArea, setTherapyArea] = useState("");
@@ -276,7 +280,7 @@ export default function GlobalConfiguration() {
                             TRAIN START DATE
                         </Typography>
 
-                        <LocalizationProvider dateAdapter={AdapterDayjs}>
+                        <LocalizationProvider dateAdapter={AdapterDayjs} localeText={globalConfigDateLocaleText}>
                             <DatePicker
                                 value={trainStartDate ? dayjs(trainStartDate) : null}
                                 onChange={(newValue) =>
@@ -301,7 +305,7 @@ export default function GlobalConfiguration() {
                             TRAIN END DATE
                         </Typography>
 
-                        <LocalizationProvider dateAdapter={AdapterDayjs}>
+                        <LocalizationProvider dateAdapter={AdapterDayjs} localeText={globalConfigDateLocaleText}>
                             <DatePicker
                                 value={trainEndDate ? dayjs(trainEndDate) : null}
                                 onChange={(newValue) =>

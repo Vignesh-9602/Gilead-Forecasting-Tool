@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Box, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography, Select, MenuItem, FormControl, Button, Checkbox } from "@mui/material";
 import PersistencyConfiguration from "./PersistencyConfiguration";
-import { getPersistencyCurves, applyPersistencyCurve } from "../../../services/apiService";
+import { getPersistencyCurves, applyPersistencyCurve, saveAvgVials, saveDemandAdjustments, getComplianceConfiguration, applyComplianceConfiguration, applyEditComplianceRowValues, applyInventoryStockPercentage } from "../../../services/apiService";
+import ConfigureComplianceDialog from "./ConfigureComplianceDialog";
+import EditValuesDialog from "./EditValuesDialog";
 
 export default function PersistencyTable({
     persistencyData,
@@ -12,6 +14,7 @@ export default function PersistencyTable({
     brand,
     startDate,
     endDate,
+    lots
 }) {
     const formattedMonths =
         persistencyData?.months?.map(
@@ -25,20 +28,31 @@ export default function PersistencyTable({
                 )
         ) || [];
 
-    const [curveOptions, setCurveOptions] =
-        useState([]);
+    const [curveRefreshKey, setCurveRefreshKey] = useState(0);
 
-    const [selectedCurves, setSelectedCurves] =
-        useState({});
+    const [curveOptions, setCurveOptions] = useState([]);
 
-    const [selectedLots, setSelectedLots] =
-        useState([]);
+    const [selectedCurves, setSelectedCurves] = useState({});
 
-    const [avgVialsEditable, setAvgVialsEditable] =
-        useState(false);
+    const [selectedLots, setSelectedLots] = useState([]);
+    const [selectedDemandLots, setSelectedDemandLots] = useState([]);
 
-    const [demandVialsEditable, setDemandVialsEditable] =
-        useState(false);
+    const [avgVialsEditable, setAvgVialsEditable] = useState(false);
+
+    const [demandVialsEditable, setDemandVialsEditable] = useState(false);
+
+    const [inventoryEditable, setInventoryEditable] = useState(false);
+
+    const [inventoryStockPercentage, setInventoryStockPercentage] = useState(persistencyData?.inventory_table?.stock_percentage || 0);
+
+    const [originalInventoryStockPercentage, setOriginalInventoryStockPercentage,] = useState(persistencyData?.inventory_table?.stock_percentage || 0);
+
+    const [openComplianceDialog, setOpenComplianceDialog,] = useState(false);
+    const [complianceData, setComplianceData] = useState([]);
+
+    const [openEditValuesDialog, setOpenEditValuesDialog] = useState(false);
+
+    const isDataLoaded = true;
 
     const handleAvgVialsCellChange = (
         lotIndex,
@@ -72,14 +86,66 @@ export default function PersistencyTable({
         setAvgVialsEditable(false);
     };
 
-    const persistencyRows =
-        persistencyData?.persistency_table || [];
+    const handleSaveAvgVials = async () => {
+        try {
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                brand,
+                months: persistencyData?.months || [],
+                avg_vials_per_dose_table: avgVialsRows.map((row) => ({
+                    lot: row.lot,
+                    values: row.children?.[0]?.values || [],
+                })
+                ),
+            };
+            console.log("AVG VIALS SAVE PAYLOAD", payload);
+            const response = await saveAvgVials(payload);
+            console.log("AVG VIALS SAVE RESPONSE", response?.data);
 
-    const avgVialsRowsTable =
-        persistencyData?.avg_vials_per_dose_table || [];
+            const updatedData = response?.data;
 
-    const demandVialsRowsTable =
-        persistencyData?.demand_vials_table || [];
+            if (updatedData) {
+                setPersistencyData(
+                    (prev) => ({
+                        ...prev,
+
+                        avg_vials_per_dose_table: updatedData?.avg_vials_per_dose_table || prev.avg_vials_per_dose_table,
+
+                        demand_vials_table: updatedData?.demand_vials_table || prev.demand_vials_table,
+
+                        inventory_table: updatedData?.inventory_table || prev.inventory_table,
+                    })
+                );
+
+                setAvgVialsRows(updatedData.avg_vials_per_dose_table || []);
+
+                setOriginalAvgVialsRows(updatedData.avg_vials_per_dose_table || []);
+
+                // Demand Vials update
+                setDemandVialsRows(updatedData?.demand_vials_table || []);
+
+                setOriginalDemandVialsRows(updatedData?.demand_vials_table || []);
+
+                setInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
+
+                setOriginalInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
+            }
+
+            setAvgVialsEditable(false);
+
+        } catch (error) {
+            console.error("Failed saving avg vials", error);
+        }
+    };
+
+    const persistencyRows = persistencyData?.persistency_table || [];
+
+    const avgVialsRowsTable = persistencyData?.avg_vials_per_dose_table || [];
+
+    const demandVialsRowsTable = persistencyData?.demand_vials_table || [];
+
+    const inventoryTable = persistencyData?.inventory_table || {};
 
     const handleDemandVialsCellChange = (
         rowIndex,
@@ -115,11 +181,125 @@ export default function PersistencyTable({
         setDemandVialsEditable(false);
     };
 
+    const handleSaveDemandVials = async () => {
+
+        try {
+
+            const payload = {
+
+                ta_name: therapyArea,
+
+                indication,
+
+                brand,
+
+                months:
+                    persistencyData?.months || [],
+
+                demand_vials_table:
+                    demandVialsRows
+                        .filter(
+                            (row) =>
+                                row.lot !== "Total"
+                        )
+                        .map(
+                            (row) => ({
+
+                                lot: row.lot,
+
+                                children:
+                                    row.children
+                                        .filter(
+                                            (child) =>
+
+                                                child.label ===
+                                                "Compliance %" ||
+
+                                                child.label ===
+                                                "(+) Absolute Adjustment" ||
+
+                                                child.label ===
+                                                "(x) Adjustment %"
+                                        )
+                            })
+                        )
+            };
+
+            console.log(
+                "DEMAND SAVE PAYLOAD",
+                payload
+            );
+
+            const response =
+                await saveDemandAdjustments(
+                    payload
+                );
+
+            console.log(
+                "DEMAND SAVE RESPONSE",
+                response?.data
+            );
+
+            const updatedData =
+                response?.data;
+
+            if (updatedData) {
+
+                setPersistencyData(
+                    (prev) => ({
+                        ...prev,
+
+                        demand_vials_table:
+                            updatedData?.demand_vials_table ||
+
+                            prev.demand_vials_table,
+
+                        inventory_table:
+                            updatedData?.inventory_table ||
+
+                            prev.inventory_table,
+                    })
+                );
+
+                // Demand update
+                setDemandVialsRows(
+                    updatedData?.demand_vials_table ||
+                    []
+                );
+
+                setOriginalDemandVialsRows(
+                    updatedData?.demand_vials_table ||
+                    []
+                );
+
+                // Inventory update
+                setInventoryStockPercentage(
+                    updatedData?.inventory_table
+                        ?.stock_percentage || 0
+                );
+
+                setOriginalInventoryStockPercentage(
+                    updatedData?.inventory_table
+                        ?.stock_percentage || 0
+                );
+            }
+
+            setDemandVialsEditable(false);
+
+        } catch (error) {
+
+            console.error(
+                "Failed saving demand adjustments",
+                error
+            );
+        }
+    };
+
     useEffect(() => {
         if (therapyArea) {
             fetchCurveOptions();
         }
-    }, [therapyArea]);
+    }, [therapyArea, curveRefreshKey]);
 
     useEffect(() => {
 
@@ -167,6 +347,27 @@ export default function PersistencyTable({
 
     }, [demandVialsRowsTable]);
 
+    useEffect(() => {
+
+        if (
+            persistencyData?.inventory_table
+        ) {
+
+            setInventoryStockPercentage(
+                persistencyData
+                    ?.inventory_table
+                    ?.stock_percentage || 0
+            );
+
+            setOriginalInventoryStockPercentage(
+                persistencyData
+                    ?.inventory_table
+                    ?.stock_percentage || 0
+            );
+        }
+
+    }, [persistencyData?.inventory_table]);
+
     const [avgVialsRows, setAvgVialsRows] =
         useState([]);
 
@@ -195,17 +396,316 @@ export default function PersistencyTable({
 
     const fetchCurveOptions = async () => {
         try {
-            const response =
-                await getPersistencyCurves(
-                    therapyArea
-                );
-
-            setCurveOptions(
-                response?.data?.curve_list || []
-            );
+            const response = await getPersistencyCurves(therapyArea);
+            setCurveOptions(response?.data?.curve_list || []);
         } catch (error) {
             console.error(
                 "Failed to fetch curve options",
+                error
+            );
+        }
+    };
+
+    const fetchComplianceConfiguration = async () => {
+        try {
+            const response = await getComplianceConfiguration(therapyArea, indication, brand);
+
+            const formattedData =
+                response?.data?.compliance_configuration?.map(
+                    (item) => ({
+                        lot: item.lot,
+                        value: item.compliance_percentage,
+                    })
+                ) || [];
+
+            setComplianceData(formattedData);
+
+        } catch (error) {
+            console.error("Failed to fetch compliance config", error);
+        }
+    };
+
+    const handleApplyCompliance =
+        async (
+            updatedData
+        ) => {
+
+            try {
+
+                const payload = {
+
+                    ta_name:
+                        therapyArea,
+
+                    indication,
+
+                    brand,
+
+                    compliance_configuration:
+                        updatedData.map(
+                            (
+                                item
+                            ) => ({
+                                lot:
+                                    item.lot,
+
+                                compliance_percentage:
+                                    Number(
+                                        item.value
+                                    ),
+                            })
+                        ),
+                };
+
+                console.log(
+                    "COMPLIANCE APPLY PAYLOAD",
+                    payload
+                );
+
+                const response =
+                    await applyComplianceConfiguration(
+                        payload
+                    );
+
+                console.log(
+                    "COMPLIANCE APPLY RESPONSE",
+                    response?.data
+                );
+
+                const responseData =
+                    response?.data;
+
+                if (
+                    responseData
+                ) {
+
+                    setPersistencyData(
+                        (
+                            prev
+                        ) => ({
+                            ...prev,
+
+                            demand_vials_table:
+                                responseData?.demand_vials_table ||
+
+                                prev.demand_vials_table,
+
+                            inventory_table:
+                                responseData?.inventory_table ||
+
+                                prev.inventory_table,
+                        })
+                    );
+
+                    // Demand update
+                    setDemandVialsRows(
+                        responseData?.demand_vials_table ||
+                        []
+                    );
+
+                    setOriginalDemandVialsRows(
+                        responseData?.demand_vials_table ||
+                        []
+                    );
+
+                    // Inventory update
+                    setInventoryStockPercentage(
+                        responseData
+                            ?.inventory_table
+                            ?.stock_percentage || 0
+                    );
+
+                    setOriginalInventoryStockPercentage(
+                        responseData
+                            ?.inventory_table
+                            ?.stock_percentage || 0
+                    );
+                }
+
+            } catch (
+            error
+            ) {
+
+                console.error(
+                    "Failed applying compliance",
+                    error
+                );
+            }
+        };
+
+    const handleEditValuesApply =
+        async (data) => {
+
+            try {
+
+                const payload = {
+
+                    ta_name: therapyArea,
+
+                    indication,
+
+                    brand,
+
+                    edit_values_configuration: {
+
+                        selected_lots:
+                            selectedDemandLots,
+
+                        start_month:
+                            data.startMonth,
+
+                        percentage_change_per_month:
+                            Number(
+                                data.percentageChange
+                            ),
+
+                        number_of_months:
+                            Number(
+                                data.numberOfMonths
+                            )
+                    }
+                };
+
+                console.log(
+                    "EDIT VALUES PAYLOAD",
+                    payload
+                );
+
+                const response =
+                    await applyEditComplianceRowValues(
+                        payload
+                    );
+
+                console.log(
+                    "EDIT VALUES RESPONSE",
+                    response?.data
+                );
+
+                const updatedData =
+                    response?.data;
+
+                if (updatedData) {
+
+                    setPersistencyData(
+                        prev => ({
+
+                            ...prev,
+
+                            demand_vials_table:
+                                updatedData?.demand_vials_table ||
+
+                                prev.demand_vials_table,
+
+                            inventory_table:
+                                updatedData?.inventory_table ||
+
+                                prev.inventory_table
+                        })
+                    );
+
+                    setDemandVialsRows(
+                        updatedData?.demand_vials_table
+                        || []
+                    );
+
+                    setOriginalDemandVialsRows(
+                        updatedData?.demand_vials_table
+                        || []
+                    );
+
+                    setInventoryStockPercentage(
+                        updatedData
+                            ?.inventory_table
+                            ?.stock_percentage || 0
+                    );
+
+                    setOriginalInventoryStockPercentage(
+                        updatedData
+                            ?.inventory_table
+                            ?.stock_percentage || 0
+                    );
+
+                }
+
+            } catch (error) {
+
+                console.error(
+                    "Edit Values failed",
+                    error
+                );
+
+            }
+
+        };
+
+    const handleSaveInventory = async () => {
+
+        try {
+
+            const payload = {
+
+                ta_name: therapyArea,
+                indication,
+                brand,
+                months: persistencyData?.months || [],
+                stock_percentage: Number(inventoryStockPercentage),
+            };
+
+            console.log(
+                "INVENTORY SAVE PAYLOAD",
+                payload
+            );
+
+            const response =
+                await applyInventoryStockPercentage(
+                    payload
+                );
+
+            console.log(
+                "INVENTORY SAVE RESPONSE",
+                response?.data
+            );
+
+            const updatedData =
+                response?.data;
+
+            if (
+                updatedData
+            ) {
+
+                setPersistencyData(
+                    prev => ({
+
+                        ...prev,
+
+                        inventory_table:
+                            updatedData?.inventory_table ||
+
+                            prev.inventory_table
+                    })
+                );
+
+                setInventoryStockPercentage(
+                    updatedData
+                        ?.inventory_table
+                        ?.stock_percentage || 0
+                );
+
+                setOriginalInventoryStockPercentage(
+                    updatedData
+                        ?.inventory_table
+                        ?.stock_percentage || 0
+                );
+            }
+
+            setInventoryEditable(
+                false
+            );
+
+        } catch (error) {
+
+            console.error(
+                "Failed saving inventory",
                 error
             );
         }
@@ -236,6 +736,7 @@ export default function PersistencyTable({
                 brand,
                 start_date: startDate,
                 end_date: endDate,
+                lots: lots,
 
                 lot_curve_mapping:
                     lotCurveMapping,
@@ -278,6 +779,7 @@ export default function PersistencyTable({
                     <Button
                         variant="outlined"
                         onClick={() => setOpenPersistencyDialog(true)}
+                        disabled={!isDataLoaded}
                         sx={{ textTransform: "none", borderRadius: "8px", height: "38px" }}
                     >
                         Configure Persistency
@@ -286,6 +788,7 @@ export default function PersistencyTable({
                     <Button
                         variant="contained"
                         onClick={handleApplyCurve}
+                        disabled={!isDataLoaded}
                         sx={{ textTransform: "none", borderRadius: "8px", height: "38px", backgroundColor: "#4F46E5" }}
                     >
                         Apply Curve
@@ -483,7 +986,7 @@ export default function PersistencyTable({
                             onClick={() =>
                                 setAvgVialsEditable(true)
                             }
-                            // disabled={avgVialsEditable}
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Edit
@@ -491,24 +994,10 @@ export default function PersistencyTable({
 
                         <Button
                             variant="contained"
-                            onClick={() => {
-                                setOriginalAvgVialsRows(
-                                    JSON.parse(
-                                        JSON.stringify(
-                                            avgVialsRows
-                                        )
-                                    )
-                                );
-
-                                setPersistencyData((prev) => ({
-                                    ...prev,
-                                    avg_vials_per_dose_table:
-                                        avgVialsRows,
-                                }));
-
-                                setAvgVialsEditable(false);
-                            }}
-                            // disabled={!avgVialsEditable}
+                            onClick={
+                                handleSaveAvgVials
+                            }
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5", fontWeight: 700, }}
                         >
                             Apply
@@ -517,6 +1006,7 @@ export default function PersistencyTable({
                         <Button
                             variant="outlined"
                             onClick={handleCancelAvgVials}
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Cancel
@@ -533,82 +1023,96 @@ export default function PersistencyTable({
                         size="small"
                         sx={{ minWidth: "max-content", }}
                     >
-                        <TableHead>
-                            <TableRow>
-                                <TableCell
-                                    sx={{ fontWeight: 700, minWidth: 320, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 5, borderRight: "1px solid #CBD5E1", }}
-                                >
-                                    Metric
-                                </TableCell>
-                                {formattedMonths.map((month) => (
+                        {avgVialsRows.length > 0 && (
+                            <TableHead>
+                                <TableRow>
                                     <TableCell
-                                        key={month}
-                                        align="center"
-                                        sx={{
-                                            fontWeight: 700,
-                                            minWidth: 72,
-                                            fontSize: "13px",
-                                            height: "36px",
-                                            py: 0,
-                                            backgroundColor: "#f8fafc",
-                                            borderRight: "1px solid #CBD5E1",
-                                        }}
+                                        sx={{ fontWeight: 700, minWidth: 320, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 5, borderRight: "1px solid #CBD5E1", }}
                                     >
-                                        {month}
+                                        Metric
                                     </TableCell>
-                                ))}
-                            </TableRow>
-                        </TableHead>
+                                    {formattedMonths.map((month) => (
+                                        <TableCell
+                                            key={month}
+                                            align="center"
+                                            sx={{
+                                                fontWeight: 700,
+                                                minWidth: 72,
+                                                fontSize: "13px",
+                                                height: "36px",
+                                                py: 0,
+                                                backgroundColor: "#f8fafc",
+                                                borderRight: "1px solid #CBD5E1",
+                                            }}
+                                        >
+                                            {month}
+                                        </TableCell>
+                                    ))}
+                                </TableRow>
+                            </TableHead>
+                        )}
 
                         <TableBody>
-                            {avgVialsRows.map(
-                                (row, rowIndex) => (
-                                    <React.Fragment key={row.lot}>
-                                        {row.children.map((child, childIndex) => (
-                                            <TableRow key={child.label}>
-                                                <TableCell
-                                                    sx={{ pl: 2, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 3, borderRight: "1px solid #CBD5E1", fontWeight: 700, }}
-                                                >
-                                                    {child.label}
-                                                </TableCell>
-
-                                                {child.values.map((value, idx) => (
-
+                            {!avgVialsRows.length ? (
+                                <TableRow>
+                                    <TableCell
+                                        colSpan={formattedMonths.length + 1}
+                                        align="center"
+                                        sx={{ py: 5, color: "#94a3b8", fontWeight: 600 }}
+                                    >
+                                        No avg vials per dose data available. Please apply filters.
+                                    </TableCell>
+                                </TableRow>
+                            ) : (
+                                avgVialsRows.map(
+                                    (row, rowIndex) => (
+                                        <React.Fragment key={row.lot}>
+                                            {row.children.map((child, childIndex) => (
+                                                <TableRow key={child.label}>
                                                     <TableCell
-                                                        key={idx}
-                                                        align="center"
-                                                        sx={{ borderRight: "1px solid #CBD5E1", color: "#334155", fontSize: "13px", height: "36px", py: 0, }}
+                                                        sx={{ pl: 2, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 3, borderRight: "1px solid #CBD5E1", fontWeight: 700, }}
                                                     >
-                                                        <Box
-                                                            sx={{ width: "40px", height: "20px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto", fontSize: "13px", color: "#334155", lineHeight: 1, }}
-                                                        >
-                                                            {avgVialsEditable ? (
-                                                                <input
-                                                                    value={value}
-                                                                    onChange={(e) => {
-                                                                        const input = e.target.value;
-                                                                        if (/^\d*\.?\d*$/.test(input)) {
-                                                                            handleAvgVialsCellChange(
-                                                                                rowIndex,
-                                                                                childIndex,
-                                                                                idx,
-                                                                                input
-                                                                            );
-                                                                        }
-                                                                    }}
-                                                                    style={{ width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", textAlign: "center", fontSize: "13px", fontFamily: "inherit", color: "#334155", padding: 0, margin: 0, lineHeight: 1, }}
-                                                                />
-                                                            ) : (
-                                                                value
-                                                            )}
-                                                        </Box>
+                                                        {child.label}
                                                     </TableCell>
-                                                )
-                                                )}
-                                            </TableRow>
-                                        )
-                                        )}
-                                    </React.Fragment>
+
+                                                    {child.values.map((value, idx) => (
+
+                                                        <TableCell
+                                                            key={idx}
+                                                            align="center"
+                                                            sx={{ borderRight: "1px solid #CBD5E1", color: "#334155", fontSize: "13px", height: "36px", py: 0, }}
+                                                        >
+                                                            <Box
+                                                                sx={{ width: "40px", height: "20px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto", fontSize: "13px", color: "#334155", lineHeight: 1, }}
+                                                            >
+                                                                {avgVialsEditable ? (
+                                                                    <input
+                                                                        value={value}
+                                                                        onChange={(e) => {
+                                                                            const input = e.target.value;
+                                                                            if (/^\d*\.?\d*$/.test(input)) {
+                                                                                handleAvgVialsCellChange(
+                                                                                    rowIndex,
+                                                                                    childIndex,
+                                                                                    idx,
+                                                                                    input
+                                                                                );
+                                                                            }
+                                                                        }}
+                                                                        style={{ width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", textAlign: "center", fontSize: "13px", fontFamily: "inherit", color: "#334155", padding: 0, margin: 0, lineHeight: 1, }}
+                                                                    />
+                                                                ) : (
+                                                                    value
+                                                                )}
+                                                            </Box>
+                                                        </TableCell>
+                                                    )
+                                                    )}
+                                                </TableRow>
+                                            )
+                                            )}
+                                        </React.Fragment>
+                                    )
                                 )
                             )}
                         </TableBody>
@@ -632,18 +1136,23 @@ export default function PersistencyTable({
                     <Box sx={{ display: "flex", gap: 1.5 }}>
                         <Button
                             variant="outlined"
-                            // onClick={() =>
-                            //     setAvgVialsEditable(true)
-                            // }
+                            onClick={() =>
+                                setOpenEditValuesDialog(true)
+                            }
+                            disabled={!isDataLoaded || selectedDemandLots.length === 0}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Edit Values
                         </Button>
                         <Button
                             variant="outlined"
-                            // onClick={() =>
-                            //     setAvgVialsEditable(true)
-                            // }
+                            onClick={async () => {
+                                await fetchComplianceConfiguration();
+                                setOpenComplianceDialog(
+                                    true
+                                );
+                            }}
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Configure Compliance
@@ -653,7 +1162,7 @@ export default function PersistencyTable({
                             onClick={() =>
                                 setDemandVialsEditable(true)
                             }
-                            // disabled={demandVialsEditable}
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Edit
@@ -661,25 +1170,8 @@ export default function PersistencyTable({
 
                         <Button
                             variant="contained"
-                            onClick={() => {
-
-                                setOriginalDemandVialsRows(
-                                    JSON.parse(
-                                        JSON.stringify(
-                                            demandVialsRows
-                                        )
-                                    )
-                                );
-
-                                setPersistencyData((prev) => ({
-                                    ...prev,
-                                    demand_vials_table:
-                                        demandVialsRows,
-                                }));
-
-                                setDemandVialsEditable(false);
-                            }}
-                            // disabled={!demandVialsEditable}
+                            onClick={handleSaveDemandVials}
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5", fontWeight: 700, }}
                         >
                             Apply
@@ -690,6 +1182,7 @@ export default function PersistencyTable({
                             onClick={
                                 handleCancelDemandVials
                             }
+                            disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Cancel
@@ -698,6 +1191,638 @@ export default function PersistencyTable({
                     </Box>
                 </Box>
 
+                <TableContainer
+                    sx={{
+                        border: "1px solid #D8DEE8",
+                        borderRadius: "12px",
+                        overflowX: "auto",
+                    }}
+                >
+                    <Table
+                        size="small"
+                        sx={{
+                            minWidth: "max-content",
+                        }}
+                    >
+                        {demandVialsRows.length > 0 && (
+                            <TableHead>
+                                <TableRow>
+
+                                    <TableCell
+                                        sx={{
+                                            fontWeight: 700,
+                                            minWidth: 320,
+                                            position: "sticky",
+                                            left: 0,
+                                            backgroundColor: "#fff",
+                                            zIndex: 5,
+                                            borderRight:
+                                                "1px solid #CBD5E1",
+                                        }}
+                                    >
+                                        Metric
+                                    </TableCell>
+
+                                    {formattedMonths.map((month) => (
+                                        <TableCell
+                                            key={month}
+                                            align="center"
+                                            sx={{
+                                                fontWeight: 700,
+                                                minWidth: 72,
+                                                fontSize: "13px",
+                                                height: "36px",
+                                                py: 0,
+                                                backgroundColor:
+                                                    "#f8fafc",
+                                                borderRight:
+                                                    "1px solid #CBD5E1",
+                                            }}
+                                        >
+                                            {month}
+                                        </TableCell>
+                                    ))}
+                                </TableRow>
+                            </TableHead>
+                        )}
+
+                        <TableBody>
+                            {!demandVialsRows.length ? (
+                                <TableRow>
+                                    <TableCell
+                                        colSpan={formattedMonths.length + 1}
+                                        align="center"
+                                        sx={{ py: 5, color: "#94a3b8", fontWeight: 600 }}
+                                    >
+                                        No demand(vials) data available. Please apply filters.
+                                    </TableCell>
+                                </TableRow>
+                            ) : (
+                                demandVialsRows.map(
+                                    (row, rowIndex) => (
+
+                                        <React.Fragment
+                                            key={row.lot}
+                                        >
+
+                                            {row.children.map(
+                                                (child, childIndex) => (
+
+                                                    <TableRow
+                                                        key={
+                                                            child.label
+                                                        }
+                                                        sx={{
+                                                            backgroundColor:
+                                                                row.lot === "Total"
+                                                                    ? "#E2E8F0" // stronger highlight for total row
+                                                                    : child.label.includes("Vials")
+                                                                        ? "#F1F5F9"
+                                                                        : "#fff",
+                                                        }}
+                                                    >
+
+                                                        <TableCell
+                                                            sx={{
+                                                                pl:
+                                                                    row.lot !==
+                                                                        "Total" &&
+                                                                        child.label.includes(
+                                                                            "Vials"
+                                                                        )
+                                                                        ? 1
+                                                                        : 3,
+
+                                                                position:
+                                                                    "sticky",
+
+                                                                left: 0,
+
+                                                                backgroundColor:
+                                                                    row.lot === "Total"
+                                                                        ? "#E2E8F0"
+                                                                        : child.label.includes("Vials")
+                                                                            ? "#F1F5F9"
+                                                                            : "#fff",
+
+                                                                zIndex: 3,
+
+                                                                borderRight:
+                                                                    "1px solid #CBD5E1",
+
+                                                                fontWeight:
+                                                                    child.label.includes(
+                                                                        "Vials"
+                                                                    )
+                                                                        ? 700
+                                                                        : 400,
+                                                            }}
+                                                        >
+
+                                                            <Box
+                                                                sx={{
+                                                                    display:
+                                                                        "flex",
+
+                                                                    alignItems:
+                                                                        "center",
+
+                                                                    gap: 1.5,
+                                                                }}
+                                                            >
+
+                                                                {row.lot !==
+                                                                    "Total" &&
+                                                                    child.label.includes(
+                                                                        "Vials"
+                                                                    ) && (
+                                                                        <Checkbox
+                                                                            checked={
+                                                                                selectedDemandLots.includes(
+                                                                                    row.lot
+                                                                                )
+                                                                            }
+                                                                            onChange={(e) => {
+
+                                                                                if (
+                                                                                    e.target.checked
+                                                                                ) {
+
+                                                                                    setSelectedDemandLots(
+                                                                                        prev => [
+                                                                                            ...prev,
+                                                                                            row.lot
+                                                                                        ]
+                                                                                    );
+
+                                                                                } else {
+
+                                                                                    setSelectedDemandLots(
+                                                                                        prev =>
+                                                                                            prev.filter(
+                                                                                                item =>
+                                                                                                    item !== row.lot
+                                                                                            )
+                                                                                    );
+                                                                                }
+
+                                                                            }}
+                                                                        />
+                                                                    )}
+
+                                                                <Typography
+                                                                    sx={{
+                                                                        fontWeight:
+                                                                            child.label.includes(
+                                                                                "Vials"
+                                                                            )
+                                                                                ? 700
+                                                                                : 400,
+
+                                                                        fontSize:
+                                                                            "13px",
+
+                                                                        color:
+                                                                            "#334155",
+                                                                    }}
+                                                                >
+                                                                    {
+                                                                        child.label
+                                                                    }
+                                                                </Typography>
+                                                            </Box>
+                                                        </TableCell>
+
+                                                        {child.values.map(
+                                                            (
+                                                                value,
+                                                                idx
+                                                            ) => (
+
+                                                                <TableCell
+                                                                    key={idx}
+                                                                    align="center"
+                                                                    sx={{
+                                                                        borderRight:
+                                                                            "1px solid #CBD5E1",
+
+                                                                        color:
+                                                                            "#334155",
+
+                                                                        fontSize:
+                                                                            "13px",
+
+                                                                        height:
+                                                                            "36px",
+
+                                                                        py: 0,
+
+                                                                        // backgroundColor:
+                                                                        //     row.lot === "Total"
+                                                                        //         ? "#E2E8F0"
+                                                                        //         : "inherit",
+
+                                                                        fontWeight:
+                                                                            child.label.includes(
+                                                                                "Vials"
+                                                                            )
+                                                                                ? 700
+                                                                                : 400,
+                                                                    }}
+                                                                >
+                                                                    <Box
+                                                                        sx={{
+                                                                            width: "40px",
+                                                                            height: "20px",
+                                                                            display: "flex",
+                                                                            alignItems: "center",
+                                                                            justifyContent: "center",
+                                                                            margin: "0 auto",
+                                                                            fontSize: "13px",
+                                                                            color: "#334155",
+                                                                            lineHeight: 1,
+                                                                        }}
+                                                                    >
+
+                                                                        {demandVialsEditable &&
+                                                                            (
+                                                                                child.label ===
+                                                                                "Compliance %" ||
+
+                                                                                child.label ===
+                                                                                "(+) Absolute Adjustment" ||
+
+                                                                                child.label ===
+                                                                                "(x) Adjustment %"
+                                                                            ) ? (
+
+                                                                            <input
+                                                                                value={value}
+                                                                                onChange={(e) => {
+
+                                                                                    const input =
+                                                                                        e.target.value;
+
+                                                                                    if (
+                                                                                        /^\d*\.?\d*$/.test(
+                                                                                            input
+                                                                                        )
+                                                                                    ) {
+
+                                                                                        handleDemandVialsCellChange(
+                                                                                            rowIndex,
+                                                                                            childIndex,
+                                                                                            idx,
+                                                                                            input
+                                                                                        );
+                                                                                    }
+                                                                                }}
+                                                                                style={{
+                                                                                    width: "100%",
+                                                                                    height: "20px",
+                                                                                    display: "block",
+                                                                                    border: "none",
+                                                                                    outline: "none",
+                                                                                    background:
+                                                                                        "transparent",
+                                                                                    textAlign: "center",
+                                                                                    fontSize: "13px",
+                                                                                    fontFamily: "inherit",
+                                                                                    color: "#334155",
+                                                                                    padding: 0,
+                                                                                    margin: 0,
+                                                                                    lineHeight: 1,
+                                                                                }}
+                                                                            />
+
+                                                                        ) : (
+                                                                            value
+                                                                        )}
+                                                                    </Box>
+                                                                </TableCell>
+                                                            )
+                                                        )}
+                                                    </TableRow>
+                                                )
+                                            )}
+                                        </React.Fragment>
+                                    )
+                                )
+                            )}
+                        </TableBody>
+                    </Table>
+                </TableContainer>
+            </Box>
+
+            {/* =========================================
+            INVENTORY TABLE
+            ========================================= */}
+
+            <Box sx={{ mt: 5 }}>
+
+                {/* HEADER */}
+                <Box
+                    sx={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        mb: 1.5,
+                    }}
+                >
+
+                    <Typography
+                        sx={{
+                            fontSize: "18px",
+                            fontWeight: 700,
+                        }}
+                    >
+                        Inventory (Vials)
+                    </Typography>
+
+                    <Box
+                        sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1.5,
+
+                        }}
+                    >
+                        {inventoryTable?.children?.length > 0 && (
+                            <>
+                                <Typography
+                                    sx={{
+                                        fontWeight: 600,
+                                        color: "#64748B",
+                                        fontSize: "14px",
+                                    }}
+                                >
+                                    Stock %:
+                                </Typography>
+
+                                <input
+                                    value={
+                                        inventoryStockPercentage
+                                    }
+                                    disabled={!inventoryEditable}
+                                    onChange={(e) => {
+
+                                        const input =
+                                            e.target.value;
+
+                                        if (
+                                            /^\d*\.?\d*$/.test(
+                                                input
+                                            )
+                                        ) {
+
+                                            setInventoryStockPercentage(
+                                                input
+                                            );
+                                        }
+                                    }}
+                                    style={{
+                                        width: "70px",
+                                        height: "32px",
+                                        border:
+                                            "1px solid #CBD5E1",
+                                        borderRadius: "8px",
+                                        textAlign: "center",
+                                        outline: "none",
+                                        fontSize: "13px",
+                                        backgroundColor:
+                                            inventoryEditable
+                                                ? "#fff"
+                                                : "#F8FAFC",
+                                    }}
+                                />
+                            </>
+                        )}
+
+                        <Button
+                            variant="outlined"
+                            onClick={() => setInventoryEditable(true)}
+                            disabled={!isDataLoaded || inventoryEditable}
+                            sx={{
+                                height: "32px",
+                                minWidth: "80px",
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            Edit
+                        </Button>
+
+                        <Button
+                            variant="contained"
+                            disabled={!isDataLoaded}
+                            onClick={handleSaveInventory}
+                            sx={{
+                                height: "32px",
+                                minWidth: "80px",
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                backgroundColor: "#4F46E5",
+                                fontWeight: 700,
+                            }}
+                        >
+                            Apply
+                        </Button>
+
+                        {/* {inventoryEditable && ( */}
+                        <Button
+                            variant="outlined"
+                            onClick={() => {
+
+                                setInventoryStockPercentage(
+                                    originalInventoryStockPercentage
+                                );
+
+                                setInventoryEditable(
+                                    false
+                                );
+                            }}
+                            disabled={!isDataLoaded}
+                            sx={{
+                                height: "32px",
+                                minWidth: "80px",
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            Cancel
+                        </Button>
+                        {/* )} */}
+                    </Box>
+                </Box>
+
+                {/* TABLE */}
+                <TableContainer
+                    sx={{
+                        border:
+                            "1px solid #D8DEE8",
+                        borderRadius: "12px",
+                        overflowX: "auto",
+                    }}
+                >
+                    <Table
+                        size="small"
+                        sx={{
+                            minWidth: "max-content",
+                        }}
+                    >
+
+                        {inventoryTable?.children
+                            ?.length > 0 && (
+                                <TableHead>
+                                    <TableRow>
+
+                                        <TableCell
+                                            sx={{
+                                                fontWeight: 700,
+                                                minWidth: 320,
+                                                position:
+                                                    "sticky",
+                                                left: 0,
+                                                backgroundColor:
+                                                    "#fff",
+                                                zIndex: 5,
+                                                borderRight:
+                                                    "1px solid #CBD5E1",
+                                            }}
+                                        >
+                                            Metric
+                                        </TableCell>
+
+                                        {formattedMonths.map(
+                                            (month) => (
+                                                <TableCell
+                                                    key={
+                                                        month
+                                                    }
+                                                    align="center"
+                                                    sx={{
+                                                        fontWeight: 700,
+                                                        minWidth: 72,
+                                                        fontSize:
+                                                            "13px",
+                                                        height:
+                                                            "36px",
+                                                        py: 0,
+                                                        backgroundColor:
+                                                            "#f8fafc",
+                                                        borderRight:
+                                                            "1px solid #CBD5E1",
+                                                    }}
+                                                >
+                                                    {month}
+                                                </TableCell>
+                                            )
+                                        )}
+                                    </TableRow>
+                                </TableHead>
+                            )}
+
+                        <TableBody>
+
+                            {!inventoryTable
+                                ?.children
+                                ?.length ? (
+
+                                <TableRow>
+                                    <TableCell
+                                        colSpan={
+                                            formattedMonths.length +
+                                            1
+                                        }
+                                        align="center"
+                                        sx={{
+                                            py: 5,
+                                            color:
+                                                "#94a3b8",
+                                            fontWeight: 600,
+                                        }}
+                                    >
+                                        No inventory data
+                                        available.
+                                        Please apply
+                                        filters.
+                                    </TableCell>
+                                </TableRow>
+
+                            ) : (
+
+                                inventoryTable.children.map(
+                                    (child) => (
+
+                                        <TableRow
+                                            key={
+                                                child.label
+                                            }
+                                        >
+
+                                            <TableCell
+                                                sx={{
+                                                    pl: 2,
+                                                    position:
+                                                        "sticky",
+                                                    left: 0,
+                                                    backgroundColor:
+                                                        "#fff",
+                                                    zIndex: 3,
+                                                    borderRight:
+                                                        "1px solid #CBD5E1",
+                                                    fontWeight: 700,
+                                                }}
+                                            >
+                                                {
+                                                    child.label
+                                                }
+                                            </TableCell>
+
+                                            {child.values.map(
+                                                (
+                                                    value,
+                                                    idx
+                                                ) => (
+
+                                                    <TableCell
+                                                        key={
+                                                            idx
+                                                        }
+                                                        align="center"
+                                                        sx={{
+                                                            borderRight:
+                                                                "1px solid #CBD5E1",
+
+                                                            color:
+                                                                "#334155",
+
+                                                            fontSize:
+                                                                "13px",
+
+                                                            height:
+                                                                "36px",
+
+                                                            py: 0,
+
+                                                            fontWeight: 700,
+                                                        }}
+                                                    >
+                                                        {
+                                                            value
+                                                        }
+                                                    </TableCell>
+                                                )
+                                            )}
+                                        </TableRow>
+                                    )
+                                )
+                            )}
+                        </TableBody>
+                    </Table>
+                </TableContainer>
             </Box>
 
             {/* Persistency Dialog */}
@@ -707,6 +1832,34 @@ export default function PersistencyTable({
                     setOpenPersistencyDialog(false)
                 }
                 therapyArea={therapyArea}
+                onCurveUpdated={() =>
+                    setCurveRefreshKey(
+                        (prev) => prev + 1
+                    )
+                }
+            />
+            <ConfigureComplianceDialog
+                open={openComplianceDialog}
+                onClose={() =>
+                    setOpenComplianceDialog(false)
+                }
+                complianceData={
+                    complianceData
+                }
+                brand={brand}
+                onApply={async (updatedData) => {
+                    setComplianceData(updatedData);
+                    await handleApplyCompliance(updatedData);
+                }}
+            />
+
+            <EditValuesDialog
+                open={openEditValuesDialog}
+                onClose={() => setOpenEditValuesDialog(false)}
+                months={persistencyData?.months || []}
+                onApply={
+                    handleEditValuesApply
+                }
             />
         </Box >
     );

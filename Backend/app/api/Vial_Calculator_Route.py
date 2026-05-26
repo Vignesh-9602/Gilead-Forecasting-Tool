@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
-from app.schemas.Vial_Calculator_schema import DeletePersistencyCurveResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse
-from app.services.Persistency_service import apply_persistency_curve_service, apply_persistency_service, calculate_apply_persistency_service, delete_persistency_curve_service, get_persistency_curve_config_service, get_persistency_curve_names_service, get_persistency_filters_service
+from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse
+from app.services.Persistency_service import apply_persistency_curve_service, apply_persistency_service, calculate_apply_persistency_service, delete_persistency_curve_service, get_persistency_curve_config_service, get_persistency_curve_names_service, get_persistency_filters_service, save_avg_vials_per_dose_service
+from app.services.Vial_Calculator_functions import apply_compliance_configuration_service, apply_edit_row_values_service, get_compliance_configuration_service, save_demand_adjustments_service, update_inventory_stock_service
 
 
 
@@ -103,4 +104,90 @@ def apply_persistency_curve(
         raise HTTPException(
             status_code=500,
             detail=f"Error while applying persistency curve: {str(e)}"
+        )
+    
+@router.post("/avg-vials/save",response_model=AvgVialsSaveResponse)
+def save_avg_vials_per_dose_api(
+    payload: AvgVialsSaveRequest
+):
+    try:
+        return save_avg_vials_per_dose_service(payload)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while saving avg vials per dose: {str(e)}"
+        )
+    
+
+@router.post( "/edit-complinace-row-values/apply",response_model=EditRowValuesResponse)
+def apply_edit_row_values_api(
+    payload: EditRowValuesRequest
+):
+    try:
+        return apply_edit_row_values_service(payload)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while applying edit row values: {str(e)}"
+        )
+    
+@router.post( "/demand-adjustments/save", response_model=DemandAdjustmentsSaveResponse)
+def save_demand_adjustments_api(
+    payload: DemandAdjustmentsSaveRequest
+):
+    try:
+        return save_demand_adjustments_service(payload)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while saving demand adjustments: {str(e)}"
+        )
+    
+@router.get("/compliance/configure",response_model=ConfigureComplianceGetResponse)
+def get_compliance_configuration_api(
+    ta_name: str,
+    indication: str,
+    brand: str
+):
+    try:
+        return get_compliance_configuration_service(
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while fetching compliance configuration: {str(e)}"
+        )
+
+
+@router.post("/compliance/configure/apply",response_model=ConfigureComplianceApplyResponse)
+def apply_compliance_configuration_api(
+    payload: ConfigureComplianceApplyRequest
+):
+    try:
+        return apply_compliance_configuration_service(payload)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while applying compliance configuration: {str(e)}"
+        )
+    
+@router.post("/inventory/stock-percentage/apply",response_model=InventoryStockUpdateResponse)
+def update_inventory_stock_api(
+    payload: InventoryStockUpdateRequest
+):
+    try:
+        return update_inventory_stock_service(payload)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error while updating inventory stock percentage: {str(e)}"
         )

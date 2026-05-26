@@ -119,16 +119,12 @@ class PersistencyCurveDetails(BaseModel):
 
 
 class PersistencyCurvePreview(BaseModel):
-
     months: List[str]
-
     values: List[float]
 
 
 class PersistencyCurveConfigResponse(BaseModel):
-
     curve_details: PersistencyCurveDetails
-
     curve_preview: PersistencyCurvePreview
 
 class PersistencyCurveListItem(BaseModel):
@@ -151,6 +147,7 @@ class PersistencyApplyCurveRequest(BaseModel):
     brand: str
     start_date: str
     end_date: str
+    lots: List[str]
     lot_curve_mapping: List[PersistencyApplyCurveMapping]
 
 
@@ -173,4 +170,173 @@ class PersistencyApplyCurveResponse(BaseModel):
     persistency_table: List[PersistencyApplyCurveLotTable]
     avg_vials_per_dose_table: List[AvgVialsPerDoseLotTable]
     demand_vials_table: List[DemandVialsLotTable]
+    inventory_table: InventoryTable
+
+class AvgVialsEditRow(BaseModel):
+    lot: str
+    values: List[float]
+
+
+class AvgVialsSaveRequest(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+    avg_vials_per_dose_table: List[AvgVialsEditRow]
+
+class AvgVialsSaveResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+
+    avg_vials_per_dose_table: List[AvgVialsPerDoseLotTable]
+    demand_vials_table: List[DemandVialsLotTable]
+    inventory_table: InventoryTable
+
+class DemandEditChild(BaseModel):
+    label: str
+    values: List[float]
+
+
+class DemandEditLot(BaseModel):
+    lot: str
+    children: List[DemandEditChild]
+
+
+class DemandAdjustmentsSaveRequest(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+    demand_vials_table: List[DemandEditLot]
+
+
+class TableChild(BaseModel):
+    label: str
+    values: List[float]
+
+
+class LotTable(BaseModel):
+    lot: str
+    children: List[TableChild]
+
+
+class InventoryTable(BaseModel):
+    stock_percentage: float = 1
+    children: List[TableChild]
+
+
+class DemandAdjustmentsSaveResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+
+    demand_vials_table: List[LotTable]
+    inventory_table: InventoryTable
+
+
+class ComplianceConfiguration(BaseModel):
+    lot: str
+    compliance_percentage: float
+
+
+class ConfigureComplianceGetResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    compliance_configuration: List[ComplianceConfiguration]
+
+
+class ConfigureComplianceApplyRequest(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    compliance_configuration: List[ComplianceConfiguration]
+
+
+class TableChild(BaseModel):
+    label: str
+    values: List[float]
+
+
+class LotTable(BaseModel):
+    lot: str
+    children: List[TableChild]
+
+
+class InventoryTable(BaseModel):
+    stock_percentage: float = 1
+    children: List[TableChild]
+
+
+class ConfigureComplianceApplyResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+    demand_vials_table: List[LotTable]
+    inventory_table: InventoryTable
+
+class EditRowValuesConfiguration(BaseModel):
+    selected_lots: List[str]
+    start_month: str
+    percentage_change_per_month: float
+    number_of_months: int
+
+
+class EditRowValuesRequest(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    edit_values_configuration: EditRowValuesConfiguration
+
+
+class TableChild(BaseModel):
+    label: str
+    values: List[float]
+
+
+class LotTable(BaseModel):
+    lot: str
+    children: List[TableChild]
+
+
+class InventoryTable(BaseModel):
+    stock_percentage: float = 1
+    children: List[TableChild]
+
+
+class EditRowValuesResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+    demand_vials_table: List[LotTable]
+    inventory_table: InventoryTable
+
+class InventoryStockUpdateRequest(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
+    stock_percentage: float
+
+
+class TableChild(BaseModel):
+    label: str
+    values: List[float]
+
+
+class InventoryTable(BaseModel):
+    stock_percentage: float
+    children: List[TableChild]
+
+
+class InventoryStockUpdateResponse(BaseModel):
+    ta_name: str
+    indication: str
+    brand: str
+    months: List[str]
     inventory_table: InventoryTable
