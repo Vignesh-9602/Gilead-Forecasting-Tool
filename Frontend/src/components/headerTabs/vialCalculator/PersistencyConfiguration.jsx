@@ -322,7 +322,14 @@ export default function PersistencyConfiguration({
             }}
             maxWidth={false}
             PaperProps={{
-                sx: { width: "1100px", height: "600px", maxWidth: "1100px", maxHeight: "600px", borderRadius: "16px", overflow: "hidden", },
+                sx: {
+                    width: "1350px",
+                    height: "700px",
+                    maxWidth: "95vw",
+                    maxHeight: "90vh",
+                    borderRadius: "16px",
+                    overflow: "hidden",
+                },
             }}
         >
             <Box
@@ -352,8 +359,8 @@ export default function PersistencyConfiguration({
                         gridTemplateColumns:
                             persistencyConfig.method &&
                                 persistencyConfig.method !== "Linear"
-                                ? "130px 70px 70px 70px 70px 120px 90px 150px"
-                                : "130px 70px 70px 70px 70px 120px 150px",
+                                ? "180px 120px 120px 140px 140px 160px 120px 180px"
+                                : "180px 120px 120px 140px 140px 160px 180px",
                         gap: 1.5,
                         alignItems: "end",
                         mb: 4,
@@ -378,7 +385,7 @@ export default function PersistencyConfiguration({
                             // placeholder="Curve Name"
                             size="small"
                             sx={{
-                                width: "130px",
+                                width: "180px",
                                 "& .MuiOutlinedInput-root": {
                                     height: "35px",
                                     borderRadius: "10px",
@@ -412,7 +419,7 @@ export default function PersistencyConfiguration({
                             }
                             size="small"
                             sx={{
-                                width: "70px",
+                                width: "120px",
 
                                 "& .MuiOutlinedInput-root": {
                                     height: "35px",
@@ -447,7 +454,7 @@ export default function PersistencyConfiguration({
                             }
                             size="small"
                             sx={{
-                                width: "70px",
+                                width: "120px",
 
                                 "& .MuiOutlinedInput-root": {
                                     height: "35px",
@@ -482,7 +489,7 @@ export default function PersistencyConfiguration({
                             }
                             size="small"
                             sx={{
-                                width: "70px",
+                                width: "120px",
 
                                 "& .MuiOutlinedInput-root": {
                                     height: "35px",
@@ -517,7 +524,7 @@ export default function PersistencyConfiguration({
                             }
                             size="small"
                             sx={{
-                                width: "70px",
+                                width: "120px",
 
                                 "& .MuiOutlinedInput-root": {
                                     height: "35px",
@@ -552,7 +559,7 @@ export default function PersistencyConfiguration({
                                     })
                                 }
                                 sx={{
-                                    width: "120px",
+                                    width: "160px",
                                     height: "35px",
                                     borderRadius: "10px",
                                     backgroundColor: "#fff",
@@ -598,7 +605,7 @@ export default function PersistencyConfiguration({
                                     }
                                     size="small"
                                     sx={{
-                                        width: "90px",
+                                        width: "120px",
 
                                         "& .MuiOutlinedInput-root": {
                                             height: "35px",
@@ -616,7 +623,7 @@ export default function PersistencyConfiguration({
                         variant="contained"
                         onClick={handleCalculateApply}
                         sx={{
-                            width: "150px",
+                            width: "180px",
                             height: "35px",
                             borderRadius: "10px",
                             textTransform: "none",
