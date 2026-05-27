@@ -468,7 +468,10 @@ def save_demand_adjustments_service(payload):
                     absolute_adjustment,
                     adjustment_percent
                 ))
-
+        response_lots = [
+                item.lot
+                for item in payload.demand_vials_table
+            ]
         cursor.execute("""
             SELECT
                 lot,
@@ -481,11 +484,13 @@ def save_demand_adjustments_service(payload):
             WHERE ta_name = %s
               AND indication = %s
               AND brand = %s
+            AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
             indication,
-            brand
+            brand,
+            response_lots
         ))
 
         output_rows = cursor.fetchall()
@@ -627,7 +632,8 @@ def build_inventory_table(
 def get_compliance_configuration_service(
     ta_name: str,
     indication: str,
-    brand: str
+    brand: str,
+    lots: list
 ):
     conn = get_connection()
     cursor = conn.cursor()
@@ -641,11 +647,13 @@ def get_compliance_configuration_service(
             WHERE ta = %s
               AND indication = %s
               AND brand = %s
+              AND lot = ANY(%s)
             ORDER BY lot, year DESC, month DESC
         """, (
             ta_name,
             indication,
-            brand
+            brand,
+            lots
         ))
 
         rows = cursor.fetchall()
@@ -675,6 +683,7 @@ def get_compliance_configuration_service(
             "ta_name": ta_name,
             "indication": indication,
             "brand": brand,
+            "lots": lots,
             "compliance_configuration": compliance_configuration
         }
 
@@ -692,7 +701,10 @@ def apply_compliance_configuration_service(payload):
         ta_name = payload.ta_name
         indication = payload.indication
         brand = payload.brand
-
+        response_lots = [
+                config.lot
+                for config in payload.compliance_configuration
+            ]
         # Fetch current persistency output to get months
         cursor.execute("""
             SELECT
@@ -704,13 +716,15 @@ def apply_compliance_configuration_service(payload):
                 total_patients
             FROM raw.persistency_outputs
             WHERE ta_name = %s
-              AND indication = %s
-              AND brand = %s
+            AND indication = %s
+            AND brand = %s
+            AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
             indication,
-            brand
+            brand,
+            response_lots
         ))
 
         output_rows = cursor.fetchall()
@@ -957,7 +971,7 @@ def apply_edit_row_values_service(payload):
         start_month = config.start_month
         percentage_change_per_month = config.percentage_change_per_month
         number_of_months = config.number_of_months
-
+        response_lots = payload.lots
         cursor.execute("""
             SELECT
                 lot,
@@ -970,11 +984,13 @@ def apply_edit_row_values_service(payload):
             WHERE ta_name = %s
               AND indication = %s
               AND brand = %s
+            AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
             indication,
-            brand
+            brand,
+            response_lots
         ))
 
         output_rows = cursor.fetchall()
@@ -1091,7 +1107,7 @@ def apply_edit_row_values_service(payload):
                 )
 
             avg_vials = lot_avg_vials["children"][0]["values"]
-
+            
             cursor.execute("""
                 SELECT
                     year,
@@ -1146,9 +1162,9 @@ def apply_edit_row_values_service(payload):
                     percent_to_apply = percentage_change_per_month
 
                     updated_compliance = (
-                        float(base_compliance)
-                        * (1 + float(percent_to_apply) / 100)
-                    )
+                            float(base_compliance)
+                            + float(percent_to_apply)
+                        )
 
                 else:
                     updated_compliance = float(base_compliance)

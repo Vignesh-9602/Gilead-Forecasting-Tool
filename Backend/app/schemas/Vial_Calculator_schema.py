@@ -5,8 +5,8 @@ from pydantic import BaseModel
 # Persistency Schema 
 # =============================
 class PersistencyFiltersResponse(BaseModel):
-    ta_name: str
-    data: Dict[str, Dict[str, List[str]]]
+   ta_name: str
+   data: Dict[str, Dict[str, List[str]]]
 
 
 class PersistencyApplyRequest(BaseModel):
@@ -182,6 +182,7 @@ class AvgVialsSaveRequest(BaseModel):
     indication: str
     brand: str
     months: List[str]
+    lots: List[str]
     avg_vials_per_dose_table: List[AvgVialsEditRow]
 
 class AvgVialsSaveResponse(BaseModel):
@@ -241,7 +242,6 @@ class ComplianceConfiguration(BaseModel):
     lot: str
     compliance_percentage: float
 
-
 class ConfigureComplianceGetResponse(BaseModel):
     ta_name: str
     indication: str
@@ -290,6 +290,7 @@ class EditRowValuesRequest(BaseModel):
     ta_name: str
     indication: str
     brand: str
+    lots: List[str]
     edit_values_configuration: EditRowValuesConfiguration
 
 

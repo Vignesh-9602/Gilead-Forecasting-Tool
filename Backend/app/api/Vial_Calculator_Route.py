@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException, Query
 from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse
 from app.services.Persistency_service import apply_persistency_curve_service, apply_persistency_service, calculate_apply_persistency_service, delete_persistency_curve_service, get_persistency_curve_config_service, get_persistency_curve_names_service, get_persistency_filters_service, save_avg_vials_per_dose_service
 from app.services.Vial_Calculator_functions import apply_compliance_configuration_service, apply_edit_row_values_service, get_compliance_configuration_service, save_demand_adjustments_service, update_inventory_stock_service
@@ -150,13 +152,15 @@ def save_demand_adjustments_api(
 def get_compliance_configuration_api(
     ta_name: str,
     indication: str,
-    brand: str
+    brand: str,
+    lots: Optional[List[str]] = Query(default=None, alias="lots[]")
 ):
     try:
         return get_compliance_configuration_service(
             ta_name=ta_name,
             indication=indication,
-            brand=brand
+            brand=brand,
+            lots=lots
         )
 
     except Exception as e:

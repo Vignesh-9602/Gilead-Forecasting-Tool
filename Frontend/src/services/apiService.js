@@ -156,11 +156,11 @@ export const saveDemandAdjustments = (payload) => {
   );
 };
 
-export const getComplianceConfiguration = (ta_name, indication, brand) => {
+export const getComplianceConfiguration = (ta_name, indication, brand, lots) => {
   return httpClient.get("/api/persistency/compliance/configure",
     {
       params:
-        { ta_name, indication, brand, },
+        { ta_name, indication, brand, lots },
     }
   );
 };

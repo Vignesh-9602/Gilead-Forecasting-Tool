@@ -4,6 +4,8 @@ import PersistencyConfiguration from "./PersistencyConfiguration";
 import { getPersistencyCurves, applyPersistencyCurve, saveAvgVials, saveDemandAdjustments, getComplianceConfiguration, applyComplianceConfiguration, applyEditComplianceRowValues, applyInventoryStockPercentage } from "../../../services/apiService";
 import ConfigureComplianceDialog from "./ConfigureComplianceDialog";
 import EditValuesDialog from "./EditValuesDialog";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import Tooltip from "@mui/material/Tooltip";
 
 export default function PersistencyTable({
     persistencyData,
@@ -14,7 +16,8 @@ export default function PersistencyTable({
     brand,
     startDate,
     endDate,
-    lots
+    lots,
+    showSnackbar
 }) {
     const formattedMonths =
         persistencyData?.months?.map(
@@ -52,7 +55,12 @@ export default function PersistencyTable({
 
     const [openEditValuesDialog, setOpenEditValuesDialog] = useState(false);
 
-    const isDataLoaded = true;
+    const isDataLoaded = persistencyData?.months?.length > 0;
+
+    const isApplyCurveEnabled =
+        selectedLots.some(
+            (lot) => selectedCurves[lot]
+        );
 
     const handleAvgVialsCellChange = (
         lotIndex,
@@ -98,6 +106,7 @@ export default function PersistencyTable({
                     values: row.children?.[0]?.values || [],
                 })
                 ),
+                lots: lots,
             };
             console.log("AVG VIALS SAVE PAYLOAD", payload);
             const response = await saveAvgVials(payload);
@@ -134,8 +143,10 @@ export default function PersistencyTable({
 
             setAvgVialsEditable(false);
 
+            showSnackbar("Avg vials applied successfully", "success");
         } catch (error) {
             console.error("Failed saving avg vials", error);
+            showSnackbar("Failed saving avg vials", "error");
         }
     };
 
@@ -193,8 +204,7 @@ export default function PersistencyTable({
 
                 brand,
 
-                months:
-                    persistencyData?.months || [],
+                months: persistencyData?.months || [],
 
                 demand_vials_table:
                     demandVialsRows
@@ -285,13 +295,10 @@ export default function PersistencyTable({
             }
 
             setDemandVialsEditable(false);
-
+            showSnackbar("Demand vials applied successfully", "success");
         } catch (error) {
-
-            console.error(
-                "Failed saving demand adjustments",
-                error
-            );
+            console.error("Failed saving demand vials", error);
+            showSnackbar("Failed saving demand vials", "error");
         }
     };
 
@@ -399,16 +406,14 @@ export default function PersistencyTable({
             const response = await getPersistencyCurves(therapyArea);
             setCurveOptions(response?.data?.curve_list || []);
         } catch (error) {
-            console.error(
-                "Failed to fetch curve options",
-                error
-            );
+            console.error("Failed to fetch curve options", error);
+            showSnackbar("Failed to fetch the list of curves", "error");
         }
     };
 
     const fetchComplianceConfiguration = async () => {
         try {
-            const response = await getComplianceConfiguration(therapyArea, indication, brand);
+            const response = await getComplianceConfiguration(therapyArea, indication, brand, lots);
 
             const formattedData =
                 response?.data?.compliance_configuration?.map(
@@ -419,9 +424,9 @@ export default function PersistencyTable({
                 ) || [];
 
             setComplianceData(formattedData);
-
         } catch (error) {
             console.error("Failed to fetch compliance config", error);
+            showSnackbar("Failed to fetch compliance config", "error");
         }
     };
 
@@ -521,15 +526,10 @@ export default function PersistencyTable({
                             ?.stock_percentage || 0
                     );
                 }
-
-            } catch (
-            error
-            ) {
-
-                console.error(
-                    "Failed applying compliance",
-                    error
-                );
+                showSnackbar("Compliance configured successfully", "success");
+            } catch (error) {
+                console.error("Failed to configure compliance", error);
+                showSnackbar("Failed to configure compliance", "error");
             }
         };
 
@@ -545,6 +545,7 @@ export default function PersistencyTable({
                     indication,
 
                     brand,
+                    lots: lots,
 
                     edit_values_configuration: {
 
@@ -624,26 +625,17 @@ export default function PersistencyTable({
                             ?.inventory_table
                             ?.stock_percentage || 0
                     );
-
                 }
-
+                showSnackbar("Edited values applied successfully", "success");
             } catch (error) {
-
-                console.error(
-                    "Edit Values failed",
-                    error
-                );
-
+                console.error("Failed to apply edited values", error);
+                showSnackbar("Failed to apply edited values", "error");
             }
-
         };
 
     const handleSaveInventory = async () => {
-
         try {
-
             const payload = {
-
                 ta_name: therapyArea,
                 indication,
                 brand,
@@ -651,20 +643,10 @@ export default function PersistencyTable({
                 stock_percentage: Number(inventoryStockPercentage),
             };
 
-            console.log(
-                "INVENTORY SAVE PAYLOAD",
-                payload
-            );
-
             const response =
                 await applyInventoryStockPercentage(
                     payload
                 );
-
-            console.log(
-                "INVENTORY SAVE RESPONSE",
-                response?.data
-            );
 
             const updatedData =
                 response?.data;
@@ -697,17 +679,11 @@ export default function PersistencyTable({
                         ?.stock_percentage || 0
                 );
             }
-
-            setInventoryEditable(
-                false
-            );
-
+            setInventoryEditable(false);
+            showSnackbar("Inventory updated successfully", "success");
         } catch (error) {
-
-            console.error(
-                "Failed saving inventory",
-                error
-            );
+            console.error("Failed saving inventory", error);
+            showSnackbar("Failed to update inventory", "error");
         }
     };
 
@@ -742,28 +718,13 @@ export default function PersistencyTable({
                     lotCurveMapping,
             };
 
-            console.log(
-                "APPLY CURVE PAYLOAD",
-                payload
-            );
-
-            const response =
-                await applyPersistencyCurve(
-                    payload
-                );
-
-            console.log(
-                "APPLY CURVE RESPONSE",
-                response?.data
-            );
+            const response = await applyPersistencyCurve(payload);
 
             setPersistencyData(response?.data || null);
-
+            showSnackbar("Persistency curve applied successfully", "success");
         } catch (error) {
-            console.error(
-                "Failed to apply persistency curve",
-                error
-            );
+            console.error("Failed to apply persistency curve", error);
+            showSnackbar("Failed to apply persistency curve", "error");
         }
     };
 
@@ -788,7 +749,7 @@ export default function PersistencyTable({
                     <Button
                         variant="contained"
                         onClick={handleApplyCurve}
-                        disabled={!isDataLoaded}
+                        disabled={!isDataLoaded || !isApplyCurveEnabled}
                         sx={{ textTransform: "none", borderRadius: "8px", height: "38px", backgroundColor: "#4F46E5" }}
                     >
                         Apply Curve
@@ -872,7 +833,7 @@ export default function PersistencyTable({
                                                     }}
                                                 />
                                                 <Typography
-                                                    sx={{ fontWeight: 700, }} >
+                                                    sx={{ fontWeight: 600, fontSize: '15px' }} >
                                                     {persistencyData?.brand}{" "} - {row.lot}
                                                 </Typography>
 
@@ -939,7 +900,7 @@ export default function PersistencyTable({
                                                     sx={{ pl: 3, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 3, borderRight: "1px solid #CBD5E1" }}
                                                 >
 
-                                                    <Typography sx={{ color: "#506784", fontWeight: 500, }} >
+                                                    <Typography sx={{ color: "#334155", fontSize: '15px' }} >
                                                         {child.label}
                                                     </Typography>
                                                 </TableCell>
@@ -948,7 +909,7 @@ export default function PersistencyTable({
                                                     <TableCell
                                                         key={idx}
                                                         align="center"
-                                                        sx={{ borderRight: "1px solid #CBD5E1", color: "#506784", fontWeight: 500, fontSize: "13px", py: 1.2, }}
+                                                        sx={{ borderRight: "1px solid #CBD5E1", color: "#506784", fontSize: "14px", py: 1.2, }}
                                                     >
                                                         {value}
                                                     </TableCell>
@@ -983,10 +944,8 @@ export default function PersistencyTable({
                     <Box sx={{ display: "flex", gap: 1.5 }}>
                         <Button
                             variant="outlined"
-                            onClick={() =>
-                                setAvgVialsEditable(true)
-                            }
-                            disabled={!isDataLoaded}
+                            onClick={() => setAvgVialsEditable(true)}
+                            disabled={!isDataLoaded || avgVialsEditable}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Edit
@@ -994,9 +953,7 @@ export default function PersistencyTable({
 
                         <Button
                             variant="contained"
-                            onClick={
-                                handleSaveAvgVials
-                            }
+                            onClick={handleSaveAvgVials}
                             disabled={!isDataLoaded}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5", fontWeight: 700, }}
                         >
@@ -1064,55 +1021,74 @@ export default function PersistencyTable({
                                     </TableCell>
                                 </TableRow>
                             ) : (
-                                avgVialsRows.map(
-                                    (row, rowIndex) => (
-                                        <React.Fragment key={row.lot}>
-                                            {row.children.map((child, childIndex) => (
-                                                <TableRow key={child.label}>
+                                avgVialsRows.map((row, rowIndex) => (
+                                    <React.Fragment key={row.lot}>
+                                        {row.children.map((child, childIndex) => (
+                                            <TableRow key={child.label}>
+                                                <TableCell
+                                                    sx={{ pl: 2, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 3, borderRight: "1px solid #CBD5E1", color: "#334155", fontSize: '15px' }}
+                                                >
+                                                    {child.label}
+                                                </TableCell>
+
+                                                {child.values.map((value, idx) => (
                                                     <TableCell
-                                                        sx={{ pl: 2, position: "sticky", left: 0, backgroundColor: "#fff", zIndex: 3, borderRight: "1px solid #CBD5E1", fontWeight: 700, }}
+                                                        key={idx}
+                                                        align="center"
+                                                        sx={{ borderRight: "1px solid #CBD5E1", color: "#334155", height: "36px", py: 0, }}
                                                     >
-                                                        {child.label}
-                                                    </TableCell>
+                                                        <Box
+                                                            sx={{
+                                                                width: "40px", height: "20px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto", fontSize: "14px", color: "#506784", lineHeight: 1,
+                                                                // borderRadius: "6px",
 
-                                                    {child.values.map((value, idx) => (
+                                                                // backgroundColor:
+                                                                //     avgVialsEditable
+                                                                //         ? "#EEF2FF"
+                                                                //         : "transparent",
 
-                                                        <TableCell
-                                                            key={idx}
-                                                            align="center"
-                                                            sx={{ borderRight: "1px solid #CBD5E1", color: "#334155", fontSize: "13px", height: "36px", py: 0, }}
+                                                                // border:
+                                                                //     avgVialsEditable
+                                                                //         ? "1px solid #C7D2FE"
+                                                                //         : "1px solid transparent",
+
+                                                                // fontWeight:
+                                                                //     avgVialsEditable
+                                                                //         ? 700
+                                                                //         : 500,
+
+                                                                // transition:
+                                                                //     "all 0.2s ease",
+                                                            }}
                                                         >
-                                                            <Box
-                                                                sx={{ width: "40px", height: "20px", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto", fontSize: "13px", color: "#334155", lineHeight: 1, }}
-                                                            >
-                                                                {avgVialsEditable ? (
-                                                                    <input
-                                                                        value={value}
-                                                                        onChange={(e) => {
-                                                                            const input = e.target.value;
-                                                                            if (/^\d*\.?\d*$/.test(input)) {
-                                                                                handleAvgVialsCellChange(
-                                                                                    rowIndex,
-                                                                                    childIndex,
-                                                                                    idx,
-                                                                                    input
-                                                                                );
-                                                                            }
-                                                                        }}
-                                                                        style={{ width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", textAlign: "center", fontSize: "13px", fontFamily: "inherit", color: "#334155", padding: 0, margin: 0, lineHeight: 1, }}
-                                                                    />
-                                                                ) : (
-                                                                    value
-                                                                )}
-                                                            </Box>
-                                                        </TableCell>
-                                                    )
-                                                    )}
-                                                </TableRow>
-                                            )
-                                            )}
-                                        </React.Fragment>
-                                    )
+                                                            {avgVialsEditable ? (
+                                                                <input
+                                                                    value={value}
+                                                                    onChange={(e) => {
+                                                                        const input = e.target.value;
+                                                                        if (/^\d*\.?\d*$/.test(input)) {
+                                                                            handleAvgVialsCellChange(
+                                                                                rowIndex,
+                                                                                childIndex,
+                                                                                idx,
+                                                                                input
+                                                                            );
+                                                                        }
+                                                                    }}
+                                                                    style={{ width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", textAlign: "center", fontSize: "14px", fontFamily: "inherit", color: "#506784", padding: 0, margin: 0, lineHeight: 1, fontWeight: 500 }}
+                                                                />
+                                                            ) : (
+                                                                value
+                                                            )}
+                                                        </Box>
+                                                    </TableCell>
+                                                )
+                                                )}
+                                            </TableRow>
+                                        )
+                                        )}
+                                    </React.Fragment>
+                                )
                                 )
                             )}
                         </TableBody>
@@ -1133,17 +1109,49 @@ export default function PersistencyTable({
                         </Typography>
                     </Box>
 
-                    <Box sx={{ display: "flex", gap: 1.5 }}>
-                        <Button
-                            variant="outlined"
-                            onClick={() =>
-                                setOpenEditValuesDialog(true)
-                            }
-                            disabled={!isDataLoaded || selectedDemandLots.length === 0}
-                            sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
+                    <Box sx={{ display: "flex", gap: 1.5, alignItems: "center", }}>
+                        <Box
+                            sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.8,
+                            }}
                         >
-                            Edit Values
-                        </Button>
+                            {isDataLoaded && (
+                                <Tooltip
+                                    title="Select one or more checkboxes to enable Edit Values"
+                                    arrow
+                                    placement="top"
+                                >
+                                    <InfoOutlinedIcon
+                                        sx={{
+                                            fontSize: "18px",
+                                            color: "#64748B",
+                                            cursor: "pointer",
+                                        }}
+                                    />
+                                </Tooltip>
+                            )}
+                            <Button
+                                variant="outlined"
+                                onClick={() =>
+                                    setOpenEditValuesDialog(true)
+                                }
+                                disabled={
+                                    !isDataLoaded ||
+                                    selectedDemandLots.length === 0
+                                }
+                                sx={{
+                                    height: "32px",
+                                    minWidth: "80px",
+                                    textTransform: "none",
+                                    borderRadius: "8px",
+                                    fontWeight: 700,
+                                }}
+                            >
+                                Edit Values
+                            </Button>
+                        </Box>
                         <Button
                             variant="outlined"
                             onClick={async () => {
@@ -1152,17 +1160,15 @@ export default function PersistencyTable({
                                     true
                                 );
                             }}
-                            disabled={!isDataLoaded}
+                            disabled={!isDataLoaded || demandVialsEditable}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Configure Compliance
                         </Button>
                         <Button
                             variant="outlined"
-                            onClick={() =>
-                                setDemandVialsEditable(true)
-                            }
-                            disabled={!isDataLoaded}
+                            onClick={() => setDemandVialsEditable(true)}
+                            disabled={!isDataLoaded || demandVialsEditable}
                             sx={{ height: "32px", minWidth: "80px", textTransform: "none", borderRadius: "8px", fontWeight: 700, }}
                         >
                             Edit
@@ -1258,255 +1264,247 @@ export default function PersistencyTable({
                                     </TableCell>
                                 </TableRow>
                             ) : (
-                                demandVialsRows.map(
-                                    (row, rowIndex) => (
+                                demandVialsRows.map((row, rowIndex) => (
+                                    <React.Fragment
+                                        key={row.lot}
+                                    >
+                                        {row.children.map((child, childIndex) => (
+                                            <TableRow
+                                                key={
+                                                    child.label
+                                                }
+                                                sx={{
+                                                    backgroundColor:
+                                                        row.lot === "Total"
+                                                            ? "#E2E8F0" // stronger highlight for total row
+                                                            : child.label.includes("Vials")
+                                                                ? "#F1F5F9"
+                                                                : "#fff",
+                                                }}
+                                            >
 
-                                        <React.Fragment
-                                            key={row.lot}
-                                        >
+                                                <TableCell
+                                                    sx={{
+                                                        pl:
+                                                            row.lot !==
+                                                                "Total" &&
+                                                                child.label.includes(
+                                                                    "Vials"
+                                                                )
+                                                                ? 1
+                                                                : 3,
 
-                                            {row.children.map(
-                                                (child, childIndex) => (
+                                                        position:
+                                                            "sticky",
 
-                                                    <TableRow
-                                                        key={
-                                                            child.label
-                                                        }
-                                                        sx={{
-                                                            backgroundColor:
+                                                        left: 0,
+
+                                                        backgroundColor:
+                                                            row.lot === "Total"
+                                                                ? "#E2E8F0"
+                                                                : child.label.includes("Vials")
+                                                                    ? "#F1F5F9"
+                                                                    : "#fff",
+
+                                                        zIndex: 3,
+
+                                                        borderRight:
+                                                            "1px solid #CBD5E1",
+
+                                                        fontWeight:
+                                                            child.label.includes("Vials") ||
                                                                 row.lot === "Total"
-                                                                    ? "#E2E8F0" // stronger highlight for total row
-                                                                    : child.label.includes("Vials")
-                                                                        ? "#F1F5F9"
-                                                                        : "#fff",
+                                                                ? 700
+                                                                : 400,
+                                                    }}
+                                                >
+
+                                                    <Box
+                                                        sx={{
+                                                            display:
+                                                                "flex",
+
+                                                            alignItems:
+                                                                "center",
+
+                                                            gap: 1.5,
                                                         }}
                                                     >
 
-                                                        <TableCell
-                                                            sx={{
-                                                                pl:
-                                                                    row.lot !==
-                                                                        "Total" &&
-                                                                        child.label.includes(
-                                                                            "Vials"
+                                                        {row.lot !==
+                                                            "Total" &&
+                                                            child.label.includes(
+                                                                "Vials"
+                                                            ) && (
+                                                                <Checkbox
+                                                                    checked={
+                                                                        selectedDemandLots.includes(
+                                                                            row.lot
                                                                         )
-                                                                        ? 1
-                                                                        : 3,
+                                                                    }
+                                                                    onChange={(e) => {
 
-                                                                position:
-                                                                    "sticky",
+                                                                        if (
+                                                                            e.target.checked
+                                                                        ) {
 
-                                                                left: 0,
+                                                                            setSelectedDemandLots(
+                                                                                prev => [
+                                                                                    ...prev,
+                                                                                    row.lot
+                                                                                ]
+                                                                            );
 
-                                                                backgroundColor:
-                                                                    row.lot === "Total"
-                                                                        ? "#E2E8F0"
-                                                                        : child.label.includes("Vials")
-                                                                            ? "#F1F5F9"
-                                                                            : "#fff",
+                                                                        } else {
 
-                                                                zIndex: 3,
+                                                                            setSelectedDemandLots(
+                                                                                prev =>
+                                                                                    prev.filter(
+                                                                                        item =>
+                                                                                            item !== row.lot
+                                                                                    )
+                                                                            );
+                                                                        }
 
+                                                                    }}
+                                                                />
+                                                            )}
+
+                                                        <Typography
+                                                            sx={{
+                                                                fontWeight:
+                                                                    child.label.includes("Vials") ||
+                                                                        row.lot === "Total"
+                                                                        ? 700
+                                                                        : 400,
+
+                                                                fontSize:
+                                                                    "15px",
+
+                                                                color:
+                                                                    "#334155",
+                                                            }}
+                                                        >
+                                                            {
+                                                                child.label
+                                                            }
+                                                        </Typography>
+                                                    </Box>
+                                                </TableCell>
+
+                                                {child.values.map(
+                                                    (
+                                                        value,
+                                                        idx
+                                                    ) => (
+
+                                                        <TableCell
+                                                            key={idx}
+                                                            align="center"
+                                                            sx={{
                                                                 borderRight:
                                                                     "1px solid #CBD5E1",
 
+                                                                color:
+                                                                    "#334155",
+
+                                                                fontSize:
+                                                                    "14px",
+
+                                                                height:
+                                                                    "36px",
+
+                                                                py: 0,
+
+                                                                // backgroundColor:
+                                                                //     row.lot === "Total"
+                                                                //         ? "#E2E8F0"
+                                                                //         : "inherit",
+
                                                                 fontWeight:
-                                                                    child.label.includes(
-                                                                        "Vials"
-                                                                    )
+                                                                    child.label.includes("Vials") ||
+                                                                        row.lot === "Total"
                                                                         ? 700
                                                                         : 400,
                                                             }}
                                                         >
-
                                                             <Box
                                                                 sx={{
-                                                                    display:
-                                                                        "flex",
-
-                                                                    alignItems:
-                                                                        "center",
-
-                                                                    gap: 1.5,
+                                                                    width: "40px",
+                                                                    height: "20px",
+                                                                    display: "flex",
+                                                                    alignItems: "center",
+                                                                    justifyContent: "center",
+                                                                    margin: "0 auto",
+                                                                    fontSize: "13px",
+                                                                    color: "#506784",
+                                                                    lineHeight: 1,
                                                                 }}
                                                             >
 
-                                                                {row.lot !==
-                                                                    "Total" &&
-                                                                    child.label.includes(
-                                                                        "Vials"
-                                                                    ) && (
-                                                                        <Checkbox
-                                                                            checked={
-                                                                                selectedDemandLots.includes(
-                                                                                    row.lot
+                                                                {demandVialsEditable &&
+                                                                    (
+                                                                        child.label ===
+                                                                        "Compliance %" ||
+
+                                                                        child.label ===
+                                                                        "(+) Absolute Adjustment" ||
+
+                                                                        child.label ===
+                                                                        "(x) Adjustment %"
+                                                                    ) ? (
+
+                                                                    <input
+                                                                        value={value}
+                                                                        onChange={(e) => {
+
+                                                                            const input =
+                                                                                e.target.value;
+
+                                                                            if (
+                                                                                /^\d*\.?\d*$/.test(
+                                                                                    input
                                                                                 )
+                                                                            ) {
+
+                                                                                handleDemandVialsCellChange(
+                                                                                    rowIndex,
+                                                                                    childIndex,
+                                                                                    idx,
+                                                                                    input
+                                                                                );
                                                                             }
-                                                                            onChange={(e) => {
-
-                                                                                if (
-                                                                                    e.target.checked
-                                                                                ) {
-
-                                                                                    setSelectedDemandLots(
-                                                                                        prev => [
-                                                                                            ...prev,
-                                                                                            row.lot
-                                                                                        ]
-                                                                                    );
-
-                                                                                } else {
-
-                                                                                    setSelectedDemandLots(
-                                                                                        prev =>
-                                                                                            prev.filter(
-                                                                                                item =>
-                                                                                                    item !== row.lot
-                                                                                            )
-                                                                                    );
-                                                                                }
-
-                                                                            }}
-                                                                        />
-                                                                    )}
-
-                                                                <Typography
-                                                                    sx={{
-                                                                        fontWeight:
-                                                                            child.label.includes(
-                                                                                "Vials"
-                                                                            )
-                                                                                ? 700
-                                                                                : 400,
-
-                                                                        fontSize:
-                                                                            "13px",
-
-                                                                        color:
-                                                                            "#334155",
-                                                                    }}
-                                                                >
-                                                                    {
-                                                                        child.label
-                                                                    }
-                                                                </Typography>
+                                                                        }}
+                                                                        style={{
+                                                                            width: "100%",
+                                                                            // height: "20px",
+                                                                            // display: "block",
+                                                                            height: "100%",
+                                                                            border: "none",
+                                                                            outline: "none",
+                                                                            background: "transparent",
+                                                                            textAlign: "center",
+                                                                            fontSize: "13px",
+                                                                            fontFamily: "inherit",
+                                                                            color: "#506784",
+                                                                            padding: 0,
+                                                                            margin: 0,
+                                                                            lineHeight: 1,
+                                                                            fontWeight: 500
+                                                                        }}
+                                                                    />
+                                                                ) : (
+                                                                    value
+                                                                )}
                                                             </Box>
                                                         </TableCell>
-
-                                                        {child.values.map(
-                                                            (
-                                                                value,
-                                                                idx
-                                                            ) => (
-
-                                                                <TableCell
-                                                                    key={idx}
-                                                                    align="center"
-                                                                    sx={{
-                                                                        borderRight:
-                                                                            "1px solid #CBD5E1",
-
-                                                                        color:
-                                                                            "#334155",
-
-                                                                        fontSize:
-                                                                            "13px",
-
-                                                                        height:
-                                                                            "36px",
-
-                                                                        py: 0,
-
-                                                                        // backgroundColor:
-                                                                        //     row.lot === "Total"
-                                                                        //         ? "#E2E8F0"
-                                                                        //         : "inherit",
-
-                                                                        fontWeight:
-                                                                            child.label.includes(
-                                                                                "Vials"
-                                                                            )
-                                                                                ? 700
-                                                                                : 400,
-                                                                    }}
-                                                                >
-                                                                    <Box
-                                                                        sx={{
-                                                                            width: "40px",
-                                                                            height: "20px",
-                                                                            display: "flex",
-                                                                            alignItems: "center",
-                                                                            justifyContent: "center",
-                                                                            margin: "0 auto",
-                                                                            fontSize: "13px",
-                                                                            color: "#334155",
-                                                                            lineHeight: 1,
-                                                                        }}
-                                                                    >
-
-                                                                        {demandVialsEditable &&
-                                                                            (
-                                                                                child.label ===
-                                                                                "Compliance %" ||
-
-                                                                                child.label ===
-                                                                                "(+) Absolute Adjustment" ||
-
-                                                                                child.label ===
-                                                                                "(x) Adjustment %"
-                                                                            ) ? (
-
-                                                                            <input
-                                                                                value={value}
-                                                                                onChange={(e) => {
-
-                                                                                    const input =
-                                                                                        e.target.value;
-
-                                                                                    if (
-                                                                                        /^\d*\.?\d*$/.test(
-                                                                                            input
-                                                                                        )
-                                                                                    ) {
-
-                                                                                        handleDemandVialsCellChange(
-                                                                                            rowIndex,
-                                                                                            childIndex,
-                                                                                            idx,
-                                                                                            input
-                                                                                        );
-                                                                                    }
-                                                                                }}
-                                                                                style={{
-                                                                                    width: "100%",
-                                                                                    height: "20px",
-                                                                                    display: "block",
-                                                                                    border: "none",
-                                                                                    outline: "none",
-                                                                                    background:
-                                                                                        "transparent",
-                                                                                    textAlign: "center",
-                                                                                    fontSize: "13px",
-                                                                                    fontFamily: "inherit",
-                                                                                    color: "#334155",
-                                                                                    padding: 0,
-                                                                                    margin: 0,
-                                                                                    lineHeight: 1,
-                                                                                }}
-                                                                            />
-
-                                                                        ) : (
-                                                                            value
-                                                                        )}
-                                                                    </Box>
-                                                                </TableCell>
-                                                            )
-                                                        )}
-                                                    </TableRow>
-                                                )
-                                            )}
-                                        </React.Fragment>
-                                    )
+                                                    )
+                                                )}
+                                            </TableRow>
+                                        )
+                                        )}
+                                    </React.Fragment>
+                                )
                                 )
                             )}
                         </TableBody>
@@ -1726,10 +1724,7 @@ export default function PersistencyTable({
 
                         <TableBody>
 
-                            {!inventoryTable
-                                ?.children
-                                ?.length ? (
-
+                            {!inventoryTable?.children?.length ? (
                                 <TableRow>
                                     <TableCell
                                         colSpan={
@@ -1765,15 +1760,14 @@ export default function PersistencyTable({
                                             <TableCell
                                                 sx={{
                                                     pl: 2,
-                                                    position:
-                                                        "sticky",
+                                                    position: "sticky",
                                                     left: 0,
-                                                    backgroundColor:
-                                                        "#fff",
+                                                    backgroundColor: "#fff",
                                                     zIndex: 3,
-                                                    borderRight:
-                                                        "1px solid #CBD5E1",
-                                                    fontWeight: 700,
+                                                    borderRight: "1px solid #CBD5E1",
+                                                    color: "#334155",
+                                                    fontSize: "15px"
+                                                    // fontWeight: 500,
                                                 }}
                                             >
                                                 {
@@ -1788,31 +1782,17 @@ export default function PersistencyTable({
                                                 ) => (
 
                                                     <TableCell
-                                                        key={
-                                                            idx
-                                                        }
+                                                        key={idx}
                                                         align="center"
                                                         sx={{
-                                                            borderRight:
-                                                                "1px solid #CBD5E1",
-
-                                                            color:
-                                                                "#334155",
-
-                                                            fontSize:
-                                                                "13px",
-
-                                                            height:
-                                                                "36px",
-
+                                                            borderRight: "1px solid #CBD5E1",
+                                                            color: "#506784",
+                                                            fontSize: "14px",
+                                                            height: "36px",
                                                             py: 0,
-
-                                                            fontWeight: 700,
                                                         }}
                                                     >
-                                                        {
-                                                            value
-                                                        }
+                                                        {value}
                                                     </TableCell>
                                                 )
                                             )}
@@ -1837,6 +1817,7 @@ export default function PersistencyTable({
                         (prev) => prev + 1
                     )
                 }
+                showSnackbar={showSnackbar}
             />
             <ConfigureComplianceDialog
                 open={openComplianceDialog}

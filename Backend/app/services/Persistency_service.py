@@ -3,7 +3,7 @@ import math
 from datetime import datetime
 from app.db.connection import get_connection
 from app.schemas.Vial_Calculator_schema import PersistencyApplyCurveRequest, PersistencyCalculateApplyRequest
-from app.services.Vial_Calculator_functions import build_avg_vials_per_dose_table, build_demand_vials_table, build_inventory_table
+from app.services.Vial_Calculator_functions import build_avg_vials_per_dose_table, build_demand_vials_table, build_inventory_table, save_ex_factory_output
 
 def _extract_brands_from_market_share_table(
     market_share_table
@@ -359,6 +359,16 @@ def apply_persistency_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+        save_ex_factory_output(
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            months=response_months or [],
+            demand_vials_table=demand_vials_table,
+            stock_percentage=1
+        )
+        conn.commit()
 
         return {
             "ta_name": ta_name,
@@ -1280,25 +1290,30 @@ def save_avg_vials_per_dose_service(payload):
         # Fetch persistency output internally
         # no need to return to frontend
         # -----------------------------------------
+        response_lots = [
+                item.lot
+                for item in payload.avg_vials_per_dose_table
+            ]
         cursor.execute("""
-            SELECT
-                lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND indication = %s
-              AND brand = %s
-            ORDER BY lot
-        """, (
-            ta_name,
-            indication,
-            brand
-        ))
-
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
+                WHERE ta_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = ANY(%s)
+                ORDER BY lot
+            """, (
+                ta_name,
+                indication,
+                brand,
+                response_lots
+            ))
         output_rows = cursor.fetchall()
 
         if not output_rows:
@@ -1368,6 +1383,16 @@ def save_avg_vials_per_dose_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+        save_ex_factory_output(
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            months=response_months or [],
+            demand_vials_table=demand_vials_table,
+            stock_percentage=1
+        )
+      
 
         conn.commit()
 

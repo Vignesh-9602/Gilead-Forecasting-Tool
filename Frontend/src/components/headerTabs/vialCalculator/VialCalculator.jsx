@@ -23,6 +23,7 @@ import { GlobalContext } from "../../../context/Provider";
 import PersistencyTable from "./PersistencyTable";
 
 import { getPersistencyFilters, applyPersistencyFilters } from "../../../services/apiService";
+import { useSnackbarStore } from "../../../stores";
 
 const metricOptions = [
     {
@@ -58,6 +59,7 @@ export default function VialCalculator() {
     const [persistencyData, setPersistencyData] = useState(null);
 
     const [persistencyLoading, setPersistencyLoading] = useState(false);
+    const { showSnackbar } = useSnackbarStore();
 
     // ------------------------------------
     // FETCH FILTERS
@@ -69,24 +71,14 @@ export default function VialCalculator() {
     }, [therapyArea]);
 
     const fetchPersistencyFilters = async () => {
-
         try {
-
             setLoadingFilters(true);
-
             const response = await getPersistencyFilters(therapyArea);
-
             setMappingData(response?.data?.data || {});
-
         } catch (error) {
-
-            console.error(
-                "Failed to fetch persistency filters",
-                error
-            );
-
+            console.error("Failed to fetch persistency filters", error);
+            showSnackbar("Failed to fetch persistency filters", "error");
         } finally {
-
             setLoadingFilters(false);
         }
     };
@@ -186,12 +178,16 @@ export default function VialCalculator() {
                 response?.data || null
             );
 
+            showSnackbar("Filters applied successfully", "success");
+
         } catch (error) {
 
             console.error(
                 "Failed to apply persistency filters",
                 error
             );
+
+            showSnackbar("Failed to apply persistency filter", "error");
 
         } finally {
 
@@ -606,6 +602,7 @@ export default function VialCalculator() {
                     startDate={startDate}
                     endDate={endDate}
                     lots={lots}
+                    showSnackbar={showSnackbar}
                 />
 
             </Paper>

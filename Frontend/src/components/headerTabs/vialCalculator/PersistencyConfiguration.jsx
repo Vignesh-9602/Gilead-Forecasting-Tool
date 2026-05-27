@@ -39,6 +39,7 @@ export default function PersistencyConfiguration({
     onClose,
     therapyArea,
     onCurveUpdated,
+    showSnackbar
 }) {
     const [curveRows, setCurveRows] = useState([]);
 
@@ -121,11 +122,11 @@ export default function PersistencyConfiguration({
             setOpenDeleteDialog(false);
 
             setSelectedRowIndex(null);
+
+            showSnackbar("Curve was deleted successfully", "success");
         } catch (error) {
-            console.error(
-                "Failed to delete curve",
-                error
-            );
+            console.error("Failed to delete curve", error);
+            showSnackbar("Failed to delete the curve", "error");
         }
     };
 
@@ -141,17 +142,13 @@ export default function PersistencyConfiguration({
             setCurveRows(response?.data?.curve_list || []);
         } catch (error) {
             console.error("Failed to fetch persistency curves", error);
+            showSnackbar("Failed to fetch the list of curves", "error");
         }
     };
 
-    const handleConfigureCurve = async (
-        curveName
-    ) => {
+    const handleConfigureCurve = async (curveName) => {
         try {
-            const response =
-                await getPersistencyCurveDetails(
-                    curveName
-                );
+            const response = await getPersistencyCurveDetails(curveName);
 
             const curveDetails =
                 response?.data?.curve_details;
@@ -188,10 +185,8 @@ export default function PersistencyConfiguration({
                 }
             );
         } catch (error) {
-            console.error(
-                "Failed to fetch curve details",
-                error
-            );
+            console.error("Failed to fetch curve details", error);
+            showSnackbar("Failed to fetch curve details", "error");
         }
     };
 
@@ -231,10 +226,7 @@ export default function PersistencyConfiguration({
                         ),
             };
 
-            const response =
-                await calculateApplyPersistencyCurve(
-                    payload
-                );
+            const response = await calculateApplyPersistencyCurve(payload);
 
             setCurvePreview(
                 response.data.curve_preview
@@ -246,9 +238,10 @@ export default function PersistencyConfiguration({
 
             // fetch the updated curve list
             onCurveUpdated?.();
-
+            showSnackbar("New curve added successfully", "success");
         } catch (error) {
-            console.error(error);
+            console.error("Failed to add new curve", error);
+            showSnackbar("Failed to add new curve", "error");
         }
     };
 
@@ -323,7 +316,10 @@ export default function PersistencyConfiguration({
     return (
         <Dialog
             open={open}
-            onClose={onClose}
+            onClose={() => {
+                resetPersistencyForm();
+                onClose();
+            }}
             maxWidth={false}
             PaperProps={{
                 sx: { width: "1100px", height: "600px", maxWidth: "1100px", maxHeight: "600px", borderRadius: "16px", overflow: "hidden", },
@@ -336,7 +332,12 @@ export default function PersistencyConfiguration({
                     Persistency Management
                 </Typography>
 
-                <IconButton onClick={onClose}>
+                <IconButton
+                    onClick={() => {
+                        resetPersistencyForm();
+                        onClose();
+                    }}
+                >
                     <CloseIcon />
                 </IconButton>
             </Box>
