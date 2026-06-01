@@ -23,7 +23,7 @@ import { GlobalContext } from "../../../context/Provider";
 import PersistencyTable from "./PersistencyTable";
 
 import { getPersistencyFilters, applyPersistencyFilters } from "../../../services/apiService";
-import { useSnackbarStore } from "../../../stores";
+import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
 const metricOptions = [
     {
@@ -58,12 +58,17 @@ export default function VialCalculator() {
 
     const [persistencyData, setPersistencyData] = useState(null);
 
-    const [persistencyLoading, setPersistencyLoading] = useState(false);
     const { showSnackbar } = useSnackbarStore();
+    const { setLoading, isLoading } = useLoadingStore();
 
-    // ------------------------------------
-    // FETCH FILTERS
-    // ------------------------------------
+    const isApplyFilterEnabled =
+        !!therapyArea &&
+        !!indication &&
+        lots.length > 0 &&
+        !!brand &&
+        !!startDate &&
+        !!endDate;
+
     useEffect(() => {
         if (therapyArea) {
             fetchPersistencyFilters();
@@ -141,15 +146,9 @@ export default function VialCalculator() {
         color: "#64748b",
     };
 
-    // ------------------------------------
-    // APPLY FILTER
-    // ------------------------------------
     const handleApplyFilter = async () => {
-
         try {
-
-            setPersistencyLoading(true);
-
+            setLoading(true);
             const payload = {
                 ta_name: therapyArea,
                 indication,
@@ -158,42 +157,17 @@ export default function VialCalculator() {
                 start_date: startDate,
                 end_date: endDate,
             };
-
-            console.log(
-                "PERSISTENCY APPLY PAYLOAD",
-                payload
-            );
-
-            const response =
-                await applyPersistencyFilters(
-                    payload
-                );
-
-            console.log(
-                "PERSISTENCY APPLY RESPONSE",
-                response?.data
-            );
-
-            setPersistencyData(
-                response?.data || null
-            );
-
+            const response = await applyPersistencyFilters(payload);
+            setPersistencyData(response?.data || null);
             showSnackbar("Filters applied successfully", "success");
-
         } catch (error) {
-
-            console.error(
-                "Failed to apply persistency filters",
-                error
-            );
-
+            console.error("Failed to apply persistency filters", error);
             showSnackbar("Failed to apply persistency filter", "error");
-
         } finally {
-
-            setPersistencyLoading(false);
+            setLoading(false);
         }
     };
+
     return (
         <Box sx={{ p: 3 }}>
 
@@ -217,11 +191,9 @@ export default function VialCalculator() {
 
                     {/* THERAPY AREA */}
                     <Box>
-
                         <Typography sx={labelStyle}>
                             THERAPEUTIC AREA
                         </Typography>
-
                         <Box
                             sx={{
                                 height: 35,
@@ -252,11 +224,9 @@ export default function VialCalculator() {
 
                     {/* INDICATION */}
                     <Box>
-
                         <Typography sx={labelStyle}>
                             INDICATION
                         </Typography>
-
                         <FormControl sx={inputStyle}>
 
                             <Select
@@ -267,13 +237,11 @@ export default function VialCalculator() {
                                         e.target.value
                                     )
                                 }
-
                                 displayEmpty
                             >
                                 <MenuItem value="" disabled>
                                     Select Indication
                                 </MenuItem>
-
                                 {indicationOptions.map((item) => (
                                     <MenuItem
                                         key={item}
@@ -283,55 +251,9 @@ export default function VialCalculator() {
                                     </MenuItem>
                                 ))}
                             </Select>
-
                         </FormControl>
                     </Box>
 
-                    {/* METRIC */}
-                    {/* <Box>
-
-                        <Typography sx={labelStyle}>
-                            METRIC
-                        </Typography>
-
-                        <FormControl sx={inputStyle}>
-
-                            <Select
-                                value={metric}
-
-                                onChange={(e) => {
-
-                                    const val =
-                                        e.target.value;
-
-                                    setMetric(val);
-
-                                    if (
-                                        val !==
-                                        "market_share"
-                                    ) {
-                                        setBrand("");
-                                    }
-                                }}
-
-                                displayEmpty
-                            >
-                                <MenuItem value="" disabled>
-                                    Select Metric
-                                </MenuItem>
-
-                                {metricOptions.map((item) => (
-                                    <MenuItem
-                                        key={item.value}
-                                        value={item.value}
-                                    >
-                                        {item.label}
-                                    </MenuItem>
-                                ))}
-                            </Select>
-
-                        </FormControl>
-                    </Box> */}
 
                     {/* LOT */}
                     <Box>
@@ -403,26 +325,16 @@ export default function VialCalculator() {
                                     </MenuItem>
                                 ))}
                             </Select>
-
                         </FormControl>
                     </Box>
 
                     {/* PRODUCT */}
                     <Box>
-
                         <Typography sx={labelStyle}>
                             PRODUCT
                         </Typography>
 
-                        <FormControl
-                            sx={inputStyle}
-
-                        // disabled={
-                        //     metric !== "market_share" ||
-                        //     !indication
-                        // }
-                        >
-
+                        <FormControl sx={inputStyle} >
                             <Select
                                 value={brand}
 
@@ -431,7 +343,6 @@ export default function VialCalculator() {
                                         e.target.value
                                     )
                                 }
-
                                 displayEmpty
                             >
                                 <MenuItem value="" disabled>
@@ -447,29 +358,24 @@ export default function VialCalculator() {
                                     </MenuItem>
                                 ))}
                             </Select>
-
                         </FormControl>
                     </Box>
 
                     {/* START DATE */}
                     <Box sx={{ minWidth: "150px" }}>
-
                         <Typography sx={labelStyle}>
                             START DATE
                         </Typography>
-
                         <LocalizationProvider
                             dateAdapter={AdapterDayjs}
                             localeText={vialCalculatorDateLocaleText}
                         >
-
                             <DatePicker
                                 value={
                                     startDate
                                         ? dayjs(startDate)
                                         : null
                                 }
-
                                 onChange={(newValue) =>
                                     setStartDate(
                                         newValue
@@ -479,19 +385,14 @@ export default function VialCalculator() {
                                             : ""
                                     )
                                 }
-
                                 format="DD-MMM-YYYY"
-
                                 slotProps={{
                                     textField: {
                                         size: "small",
                                         placeholder: "DD-MMM-YYYY",
-
                                         sx: {
                                             ...inputStyle,
-
                                             width: "140px",
-
                                             "& .MuiInputBase-input": {
                                                 color:
                                                     startDate
@@ -502,34 +403,28 @@ export default function VialCalculator() {
                                                     "transparent",
                                             },
                                         },
-
                                         fullWidth: true,
                                     },
                                 }}
                             />
-
                         </LocalizationProvider>
                     </Box>
 
                     {/* END DATE */}
                     <Box sx={{ minWidth: "150px" }}>
-
                         <Typography sx={labelStyle}>
                             END DATE
                         </Typography>
-
                         <LocalizationProvider
                             dateAdapter={AdapterDayjs}
                             localeText={vialCalculatorDateLocaleText}
                         >
-
                             <DatePicker
                                 value={
                                     endDate
                                         ? dayjs(endDate)
                                         : null
                                 }
-
                                 onChange={(newValue) =>
                                     setEndDate(
                                         newValue
@@ -539,19 +434,14 @@ export default function VialCalculator() {
                                             : ""
                                     )
                                 }
-
                                 format="DD-MMM-YYYY"
-
                                 slotProps={{
                                     textField: {
                                         size: "small",
                                         placeholder: "DD-MMM-YYYY",
-
                                         sx: {
                                             ...inputStyle,
-
                                             width: "140px",
-
                                             "& .MuiInputBase-input": {
                                                 color:
                                                     endDate
@@ -574,18 +464,10 @@ export default function VialCalculator() {
                     {/* APPLY FILTER */}
                     <Button
                         variant="contained"
-
                         onClick={handleApplyFilter}
-
-                        disabled={loadingFilters}
-
-                        sx={{
-                            height: "40px",
-                            px: 3,
-                            borderRadius: "8px",
-                            textTransform: "none",
-                            backgroundColor: "#4F46E5",
-                        }}
+                        // disabled={loadingFilters}
+                        disabled={!isApplyFilterEnabled}
+                        sx={{ height: "40px", px: 3, borderRadius: "8px", textTransform: "none", backgroundColor: "#4F46E5" }}
                     >
                         Apply Filter
                     </Button>
@@ -595,7 +477,7 @@ export default function VialCalculator() {
                 <PersistencyTable
                     persistencyData={persistencyData}
                     setPersistencyData={setPersistencyData}
-                    loading={persistencyLoading}
+                    loading={isLoading}
                     therapyArea={therapyArea}
                     indication={indication}
                     brand={brand}
@@ -605,7 +487,7 @@ export default function VialCalculator() {
                     showSnackbar={showSnackbar}
                 />
 
-            </Paper>
-        </Box>
+            </Paper >
+        </Box >
     );
 }

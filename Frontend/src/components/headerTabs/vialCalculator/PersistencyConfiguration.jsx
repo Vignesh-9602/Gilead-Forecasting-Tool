@@ -1,34 +1,12 @@
 import React, { useState, useEffect } from "react";
-
-import {
-    Box,
-    Typography,
-    Dialog,
-    IconButton,
-    Button,
-    TextField,
-    FormControl,
-    Select,
-    MenuItem,
-    Table,
-    TableBody,
-    TableCell,
-    TableContainer,
-    TableHead,
-    TableRow,
-    DialogTitle,
-    DialogContent,
-    DialogContentText,
-    DialogActions,
-    Menu,
-    MenuItem as DropdownMenuItem,
-} from "@mui/material";
+import { Box, Typography, Dialog, IconButton, Button, TextField, FormControl, Select, MenuItem, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, DialogTitle, DialogContent, DialogContentText, DialogActions, Menu, MenuItem as DropdownMenuItem } from "@mui/material";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
-
+import Tooltip from "@mui/material/Tooltip";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import Plot from "react-plotly.js";
-
 import CloseIcon from "@mui/icons-material/Close";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import { useLoadingStore } from "../../../stores";
 
 import { calculateApplyPersistencyCurve, getPersistencyCurves, getPersistencyCurveDetails, deletePersistencyCurve } from "../../../services/apiService";
 
@@ -93,22 +71,16 @@ export default function PersistencyConfiguration({
         });
     };
 
+    const { setLoading, isLoading } = useLoadingStore();
+
     const handleDeleteCurve = async () => {
         try {
-            const selectedCurve =
-                curveRows[selectedRowIndex];
-
+            // setLoading(true);
+            const selectedCurve = curveRows[selectedRowIndex];
             if (!selectedCurve) return;
 
-            const response =
-                await deletePersistencyCurve(
-                    selectedCurve.curve_name
-                );
-
-            setCurveRows(
-                response?.data?.curve_list || []
-            );
-
+            const response = await deletePersistencyCurve(selectedCurve.curve_name);
+            setCurveRows(response?.data?.curve_list || []);
             onCurveUpdated?.();
 
             // if currently opened curve deleted
@@ -118,16 +90,16 @@ export default function PersistencyConfiguration({
             ) {
                 resetPersistencyForm();
             }
-
             setOpenDeleteDialog(false);
-
             setSelectedRowIndex(null);
-
             showSnackbar("Curve was deleted successfully", "success");
         } catch (error) {
             console.error("Failed to delete curve", error);
             showSnackbar("Failed to delete the curve", "error");
         }
+        // finally {
+        //     setLoading(false);
+        // }
     };
 
     useEffect(() => {
@@ -149,33 +121,19 @@ export default function PersistencyConfiguration({
     const handleConfigureCurve = async (curveName) => {
         try {
             const response = await getPersistencyCurveDetails(curveName);
-
-            const curveDetails =
-                response?.data?.curve_details;
+            const curveDetails = response?.data?.curve_details;
 
             setPersistencyConfig({
-                curve_name:
-                    curveDetails?.curve_name || "",
-
-                start_month:
-                    curveDetails?.start_month || "",
-
-                end_month:
-                    curveDetails?.end_month || "",
-
-                start_value:
-                    curveDetails?.start_value || "",
-
-                end_value:
-                    curveDetails?.end_value || "",
-
+                curve_name: curveDetails?.curve_name || "",
+                start_month: curveDetails?.start_month || "",
+                end_month: curveDetails?.end_month || "",
+                start_value: curveDetails?.start_value || "",
+                end_value: curveDetails?.end_value || "",
                 method:
                     methodLabelMapping[
                     curveDetails?.method
                     ] || "",
-
-                k_value:
-                    curveDetails?.k_factor ?? "",
+                k_value: curveDetails?.k_factor ?? "",
             });
 
             setCurvePreview(
@@ -192,31 +150,15 @@ export default function PersistencyConfiguration({
 
     const handleCalculateApply = async () => {
         try {
+            // setLoading(true);
             const payload = {
                 ta_name: therapyArea,
-
-                curve_name:
-                    persistencyConfig.curve_name,
-
-                start_month: Number(
-                    persistencyConfig.start_month
-                ),
-
-                end_month: Number(
-                    persistencyConfig.end_month
-                ),
-
-                start_value: Number(
-                    persistencyConfig.start_value
-                ),
-
-                end_value: Number(
-                    persistencyConfig.end_value
-                ),
-
-                method:
-                    persistencyConfig.method.toLowerCase(),
-
+                curve_name: persistencyConfig.curve_name,
+                start_month: Number(persistencyConfig.start_month),
+                end_month: Number(persistencyConfig.end_month),
+                start_value: Number(persistencyConfig.start_value),
+                end_value: Number(persistencyConfig.end_value),
+                method: persistencyConfig.method.toLowerCase(),
                 k_factor:
                     persistencyConfig.method ===
                         "Linear"
@@ -225,16 +167,9 @@ export default function PersistencyConfiguration({
                             persistencyConfig.k_value
                         ),
             };
-
             const response = await calculateApplyPersistencyCurve(payload);
-
-            setCurvePreview(
-                response.data.curve_preview
-            );
-
-            setCurveRows(
-                response.data.curve_list
-            );
+            setCurvePreview(response.data.curve_preview);
+            setCurveRows(response.data.curve_list);
 
             // fetch the updated curve list
             onCurveUpdated?.();
@@ -243,6 +178,9 @@ export default function PersistencyConfiguration({
             console.error("Failed to add new curve", error);
             showSnackbar("Failed to add new curve", "error");
         }
+        // finally {
+        //     setLoading(false);
+        // }
     };
 
     const handleOpenMenu = (
@@ -259,41 +197,22 @@ export default function PersistencyConfiguration({
 
     const handleDuplicateCurve = async () => {
         try {
-            const selectedCurve =
-                curveRows[selectedRowIndex];
-
+            const selectedCurve = curveRows[selectedRowIndex];
             if (!selectedCurve) return;
-
-            const response =
-                await getPersistencyCurveDetails(
-                    selectedCurve.curve_name
-                );
-
-            const curveDetails =
-                response?.data?.curve_details;
+            const response = await getPersistencyCurveDetails(selectedCurve.curve_name);
+            const curveDetails = response?.data?.curve_details;
 
             setPersistencyConfig({
                 curve_name: `${curveDetails?.curve_name}_duplicate`,
-
-                start_month:
-                    curveDetails?.start_month || "",
-
-                end_month:
-                    curveDetails?.end_month || "",
-
-                start_value:
-                    curveDetails?.start_value || "",
-
-                end_value:
-                    curveDetails?.end_value || "",
-
+                start_month: curveDetails?.start_month || "",
+                end_month: curveDetails?.end_month || "",
+                start_value: curveDetails?.start_value || "",
+                end_value: curveDetails?.end_value || "",
                 method:
                     methodLabelMapping[
                     curveDetails?.method
                     ] || "",
-
-                k_value:
-                    curveDetails?.k_factor ?? "",
+                k_value: curveDetails?.k_factor ?? "",
             });
 
             setCurvePreview(
@@ -302,14 +221,9 @@ export default function PersistencyConfiguration({
                     values: [],
                 }
             );
-
             handleCloseMenu();
-
         } catch (error) {
-            console.error(
-                "Failed to duplicate curve",
-                error
-            );
+            console.error("Failed to duplicate curve", error);
         }
     };
 
@@ -368,11 +282,41 @@ export default function PersistencyConfiguration({
                 >
                     {/* Curve Name */}
                     <Box>
-                        <Typography
-                            sx={{ mb: 1, fontSize: "13px", fontWeight: 700, color: "#64748b", }}
+                        <Box
+                            sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
+                                mb: 1,
+                            }}
                         >
-                            CURVE NAME
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                CURVE NAME
+                            </Typography>
+
+                            <Tooltip
+                                title="Provide a unique name for the persistency curve (e.g. Linear)"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
 
                         <TextField
                             value={persistencyConfig.curve_name || ""}
@@ -398,16 +342,41 @@ export default function PersistencyConfiguration({
 
                     {/* Start Month */}
                     <Box>
-                        <Typography
+                        <Box
                             sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
                                 mb: 1,
-                                fontSize: "13px",
-                                fontWeight: 700,
-                                color: "#64748b",
                             }}
                         >
-                            START MONTH
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                START MONTH
+                            </Typography>
+
+                            <Tooltip
+                                title="Starting month for the persistency calculation (e.g. 1)"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
 
                         <TextField
                             value={persistencyConfig.start_month}
@@ -433,16 +402,41 @@ export default function PersistencyConfiguration({
 
                     {/* End Month */}
                     <Box>
-                        <Typography
+                        <Box
                             sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
                                 mb: 1,
-                                fontSize: "13px",
-                                fontWeight: 700,
-                                color: "#64748b",
                             }}
                         >
-                            END MONTH
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                END MONTH
+                            </Typography>
+
+                            <Tooltip
+                                title="Ending month for the persistency calculation (e.g. 24)"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
 
                         <TextField
                             value={persistencyConfig.end_month}
@@ -468,16 +462,41 @@ export default function PersistencyConfiguration({
 
                     {/* Start Value */}
                     <Box>
-                        <Typography
+                        <Box
                             sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
                                 mb: 1,
-                                fontSize: "13px",
-                                fontWeight: 700,
-                                color: "#64748b",
                             }}
                         >
-                            START VALUE (%)
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                START VALUE (%)
+                            </Typography>
+
+                            <Tooltip
+                                title="Persistency percentage at the starting month (e.g. 100)"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
 
                         <TextField
                             value={persistencyConfig.start_value}
@@ -503,16 +522,41 @@ export default function PersistencyConfiguration({
 
                     {/* End Value */}
                     <Box>
-                        <Typography
+                        <Box
                             sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
                                 mb: 1,
-                                fontSize: "13px",
-                                fontWeight: 700,
-                                color: "#64748b",
                             }}
                         >
-                            END VALUE (%)
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                END VALUE (%)
+                            </Typography>
+
+                            <Tooltip
+                                title="Persistency percentage at the ending month (e.g. 40)"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
 
                         <TextField
                             value={persistencyConfig.end_value}
@@ -538,17 +582,41 @@ export default function PersistencyConfiguration({
 
                     {/* Method */}
                     <Box>
-                        <Typography
+                        <Box
                             sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.5,
                                 mb: 1,
-                                fontSize: "13px",
-                                fontWeight: 700,
-                                color: "#64748b",
                             }}
                         >
-                            METHOD
-                        </Typography>
+                            <Typography
+                                sx={{
+                                    fontSize: "13px",
+                                    fontWeight: 700,
+                                    color: "#64748b",
+                                    lineHeight: 1,
+                                }}
+                            >
+                                METHOD
+                            </Typography>
 
+                            <Tooltip
+                                title="Select the calculation method for generating the curve"
+                                arrow
+                                placement="top"
+                            >
+                                <InfoOutlinedIcon
+                                    sx={{
+                                        fontSize: "14px",
+                                        color: "#94A3B8",
+                                        cursor: "pointer",
+                                        display: "flex",
+                                        alignSelf: "center",
+                                    }}
+                                />
+                            </Tooltip>
+                        </Box>
                         <FormControl size="small">
                             <Select
                                 value={persistencyConfig.method}
@@ -584,16 +652,41 @@ export default function PersistencyConfiguration({
                     {persistencyConfig.method &&
                         persistencyConfig.method !== "Linear" && (
                             <Box>
-                                <Typography
+                                <Box
                                     sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 0.5,
                                         mb: 1,
-                                        fontSize: "13px",
-                                        fontWeight: 700,
-                                        color: "#64748b",
                                     }}
                                 >
-                                    K VALUE
-                                </Typography>
+                                    <Typography
+                                        sx={{
+                                            fontSize: "13px",
+                                            fontWeight: 700,
+                                            color: "#64748b",
+                                            lineHeight: 1,
+                                        }}
+                                    >
+                                        K VALUE
+                                    </Typography>
+
+                                    <Tooltip
+                                        title="Controls the curve intensity for non-linear methods (e.g. 1)"
+                                        arrow
+                                        placement="top"
+                                    >
+                                        <InfoOutlinedIcon
+                                            sx={{
+                                                fontSize: "14px",
+                                                color: "#94A3B8",
+                                                cursor: "pointer",
+                                                display: "flex",
+                                                alignSelf: "center",
+                                            }}
+                                        />
+                                    </Tooltip>
+                                </Box>
 
                                 <TextField
                                     value={persistencyConfig.k_value}
@@ -647,7 +740,7 @@ export default function PersistencyConfiguration({
                     }}
                 >
                     {/* LEFT SIDE */}
-                    <Box sx={{ width: "400px", flexShrink: 0 }}>
+                    <Box sx={{ width: "450px", flexShrink: 0 }}>
                         {/* Header */}
                         <Box
                             sx={{

@@ -6,6 +6,7 @@ import ConfigureComplianceDialog from "./ConfigureComplianceDialog";
 import EditValuesDialog from "./EditValuesDialog";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import Tooltip from "@mui/material/Tooltip";
+import { useLoadingStore } from "../../../stores";
 
 export default function PersistencyTable({
     persistencyData,
@@ -30,6 +31,8 @@ export default function PersistencyTable({
                     }
                 )
         ) || [];
+
+    const { setLoading, isLoading } = useLoadingStore();
 
     const [curveRefreshKey, setCurveRefreshKey] = useState(0);
 
@@ -96,6 +99,7 @@ export default function PersistencyTable({
 
     const handleSaveAvgVials = async () => {
         try {
+            setLoading(true);
             const payload = {
                 ta_name: therapyArea,
                 indication,
@@ -108,9 +112,7 @@ export default function PersistencyTable({
                 ),
                 lots: lots,
             };
-            console.log("AVG VIALS SAVE PAYLOAD", payload);
             const response = await saveAvgVials(payload);
-            console.log("AVG VIALS SAVE RESPONSE", response?.data);
 
             const updatedData = response?.data;
 
@@ -128,25 +130,20 @@ export default function PersistencyTable({
                 );
 
                 setAvgVialsRows(updatedData.avg_vials_per_dose_table || []);
-
                 setOriginalAvgVialsRows(updatedData.avg_vials_per_dose_table || []);
-
                 // Demand Vials update
                 setDemandVialsRows(updatedData?.demand_vials_table || []);
-
                 setOriginalDemandVialsRows(updatedData?.demand_vials_table || []);
-
                 setInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
-
                 setOriginalInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
             }
-
             setAvgVialsEditable(false);
-
             showSnackbar("Avg vials applied successfully", "success");
         } catch (error) {
             console.error("Failed saving avg vials", error);
             showSnackbar("Failed saving avg vials", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -193,105 +190,56 @@ export default function PersistencyTable({
     };
 
     const handleSaveDemandVials = async () => {
-
         try {
-
+            setLoading(true);
             const payload = {
-
                 ta_name: therapyArea,
-
                 indication,
-
                 brand,
-
                 months: persistencyData?.months || [],
-
                 demand_vials_table:
                     demandVialsRows
-                        .filter(
-                            (row) =>
-                                row.lot !== "Total"
+                        .filter((row) =>
+                            row.lot !== "Total"
                         )
-                        .map(
-                            (row) => ({
-
-                                lot: row.lot,
-
-                                children:
-                                    row.children
-                                        .filter(
-                                            (child) =>
-
-                                                child.label ===
-                                                "Compliance %" ||
-
-                                                child.label ===
-                                                "(+) Absolute Adjustment" ||
-
-                                                child.label ===
-                                                "(x) Adjustment %"
-                                        )
-                            })
+                        .map((row) => ({
+                            lot: row.lot,
+                            children:
+                                row.children
+                                    .filter(
+                                        (child) =>
+                                            child.label === "Compliance %" ||
+                                            child.label === "(+) Absolute Adjustment" ||
+                                            child.label === "(x) Adjustment %"
+                                    )
+                        })
                         )
             };
 
-            console.log(
-                "DEMAND SAVE PAYLOAD",
-                payload
-            );
+            console.log("payload----=>", payload)
 
-            const response =
-                await saveDemandAdjustments(
-                    payload
-                );
+            const response = await saveDemandAdjustments(payload);
 
-            console.log(
-                "DEMAND SAVE RESPONSE",
-                response?.data
-            );
-
-            const updatedData =
-                response?.data;
-
+            const updatedData = response?.data;
             if (updatedData) {
-
                 setPersistencyData(
                     (prev) => ({
                         ...prev,
 
-                        demand_vials_table:
-                            updatedData?.demand_vials_table ||
-
-                            prev.demand_vials_table,
-
-                        inventory_table:
-                            updatedData?.inventory_table ||
-
-                            prev.inventory_table,
+                        demand_vials_table: updatedData?.demand_vials_table || prev.demand_vials_table,
+                        inventory_table: updatedData?.inventory_table || prev.inventory_table,
                     })
                 );
 
                 // Demand update
-                setDemandVialsRows(
-                    updatedData?.demand_vials_table ||
-                    []
-                );
+                setDemandVialsRows(updatedData?.demand_vials_table || []);
 
-                setOriginalDemandVialsRows(
-                    updatedData?.demand_vials_table ||
-                    []
-                );
+                setOriginalDemandVialsRows(updatedData?.demand_vials_table || []);
 
                 // Inventory update
-                setInventoryStockPercentage(
-                    updatedData?.inventory_table
-                        ?.stock_percentage || 0
-                );
+                setInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
 
-                setOriginalInventoryStockPercentage(
-                    updatedData?.inventory_table
-                        ?.stock_percentage || 0
-                );
+                setOriginalInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
             }
 
             setDemandVialsEditable(false);
@@ -299,6 +247,8 @@ export default function PersistencyTable({
         } catch (error) {
             console.error("Failed saving demand vials", error);
             showSnackbar("Failed saving demand vials", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -430,211 +380,122 @@ export default function PersistencyTable({
         }
     };
 
-    const handleApplyCompliance =
-        async (
-            updatedData
-        ) => {
+    const handleApplyCompliance = async (updatedData) => {
+        try {
+            setLoading(true);
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                brand,
+                compliance_configuration:
+                    updatedData.map(
+                        (item) => ({
+                            lot: item.lot,
+                            compliance_percentage: Number(item.value),
+                        })
+                    ),
+            };
 
-            try {
+            const response = await applyComplianceConfiguration(payload);
 
-                const payload = {
+            const responseData = response?.data;
+            if (responseData) {
+                setPersistencyData(
+                    (
+                        prev
+                    ) => ({
+                        ...prev,
 
-                    ta_name:
-                        therapyArea,
+                        demand_vials_table:
+                            responseData?.demand_vials_table ||
 
-                    indication,
+                            prev.demand_vials_table,
 
-                    brand,
+                        inventory_table:
+                            responseData?.inventory_table ||
 
-                    compliance_configuration:
-                        updatedData.map(
-                            (
-                                item
-                            ) => ({
-                                lot:
-                                    item.lot,
-
-                                compliance_percentage:
-                                    Number(
-                                        item.value
-                                    ),
-                            })
-                        ),
-                };
-
-                console.log(
-                    "COMPLIANCE APPLY PAYLOAD",
-                    payload
+                            prev.inventory_table,
+                    })
                 );
 
-                const response =
-                    await applyComplianceConfiguration(
-                        payload
-                    );
-
-                console.log(
-                    "COMPLIANCE APPLY RESPONSE",
-                    response?.data
+                // Demand update
+                setDemandVialsRows(
+                    responseData?.demand_vials_table ||
+                    []
                 );
 
-                const responseData =
-                    response?.data;
+                setOriginalDemandVialsRows(
+                    responseData?.demand_vials_table ||
+                    []
+                );
 
-                if (
+                // Inventory update
+                setInventoryStockPercentage(
                     responseData
-                ) {
-
-                    setPersistencyData(
-                        (
-                            prev
-                        ) => ({
-                            ...prev,
-
-                            demand_vials_table:
-                                responseData?.demand_vials_table ||
-
-                                prev.demand_vials_table,
-
-                            inventory_table:
-                                responseData?.inventory_table ||
-
-                                prev.inventory_table,
-                        })
-                    );
-
-                    // Demand update
-                    setDemandVialsRows(
-                        responseData?.demand_vials_table ||
-                        []
-                    );
-
-                    setOriginalDemandVialsRows(
-                        responseData?.demand_vials_table ||
-                        []
-                    );
-
-                    // Inventory update
-                    setInventoryStockPercentage(
-                        responseData
-                            ?.inventory_table
-                            ?.stock_percentage || 0
-                    );
-
-                    setOriginalInventoryStockPercentage(
-                        responseData
-                            ?.inventory_table
-                            ?.stock_percentage || 0
-                    );
-                }
-                showSnackbar("Compliance configured successfully", "success");
-            } catch (error) {
-                console.error("Failed to configure compliance", error);
-                showSnackbar("Failed to configure compliance", "error");
-            }
-        };
-
-    const handleEditValuesApply =
-        async (data) => {
-
-            try {
-
-                const payload = {
-
-                    ta_name: therapyArea,
-
-                    indication,
-
-                    brand,
-                    lots: lots,
-
-                    edit_values_configuration: {
-
-                        selected_lots:
-                            selectedDemandLots,
-
-                        start_month:
-                            data.startMonth,
-
-                        percentage_change_per_month:
-                            Number(
-                                data.percentageChange
-                            ),
-
-                        number_of_months:
-                            Number(
-                                data.numberOfMonths
-                            )
-                    }
-                };
-
-                console.log(
-                    "EDIT VALUES PAYLOAD",
-                    payload
+                        ?.inventory_table
+                        ?.stock_percentage || 0
                 );
 
-                const response =
-                    await applyEditComplianceRowValues(
-                        payload
-                    );
+                setOriginalInventoryStockPercentage(
+                    responseData
+                        ?.inventory_table
+                        ?.stock_percentage || 0
+                );
+            }
+            showSnackbar("Compliance configured successfully", "success");
+        } catch (error) {
+            console.error("Failed to configure compliance", error);
+            showSnackbar("Failed to configure compliance", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
 
-                console.log(
-                    "EDIT VALUES RESPONSE",
-                    response?.data
+    const handleEditValuesApply = async (data) => {
+        try {
+            setLoading(true);
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                brand,
+                lots: lots,
+                edit_values_configuration: {
+                    selected_lots: selectedDemandLots,
+                    start_month: data.startMonth,
+                    percentage_change_per_month: Number(data.percentageChange),
+                    number_of_months: Number(data.numberOfMonths)
+                }
+            };
+
+            const response = await applyEditComplianceRowValues(payload);
+
+            const updatedData = response?.data;
+            if (updatedData) {
+                setPersistencyData(
+                    prev => ({
+                        ...prev,
+                        demand_vials_table: updatedData?.demand_vials_table || prev.demand_vials_table,
+                        inventory_table: updatedData?.inventory_table || prev.inventory_table
+                    })
                 );
 
-                const updatedData =
-                    response?.data;
-
-                if (updatedData) {
-
-                    setPersistencyData(
-                        prev => ({
-
-                            ...prev,
-
-                            demand_vials_table:
-                                updatedData?.demand_vials_table ||
-
-                                prev.demand_vials_table,
-
-                            inventory_table:
-                                updatedData?.inventory_table ||
-
-                                prev.inventory_table
-                        })
-                    );
-
-                    setDemandVialsRows(
-                        updatedData?.demand_vials_table
-                        || []
-                    );
-
-                    setOriginalDemandVialsRows(
-                        updatedData?.demand_vials_table
-                        || []
-                    );
-
-                    setInventoryStockPercentage(
-                        updatedData
-                            ?.inventory_table
-                            ?.stock_percentage || 0
-                    );
-
-                    setOriginalInventoryStockPercentage(
-                        updatedData
-                            ?.inventory_table
-                            ?.stock_percentage || 0
-                    );
-                }
-                showSnackbar("Edited values applied successfully", "success");
-            } catch (error) {
-                console.error("Failed to apply edited values", error);
-                showSnackbar("Failed to apply edited values", "error");
+                setDemandVialsRows(updatedData?.demand_vials_table || []);
+                setOriginalDemandVialsRows(updatedData?.demand_vials_table || []);
+                setInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
+                setOriginalInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
             }
-        };
+            showSnackbar("Edited values applied successfully", "success");
+        } catch (error) {
+            console.error("Failed to apply edited values", error);
+            showSnackbar("Failed to apply edited values", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
 
     const handleSaveInventory = async () => {
         try {
+            setLoading(true);
             const payload = {
                 ta_name: therapyArea,
                 indication,
@@ -643,52 +504,32 @@ export default function PersistencyTable({
                 stock_percentage: Number(inventoryStockPercentage),
             };
 
-            const response =
-                await applyInventoryStockPercentage(
-                    payload
-                );
+            const response = await applyInventoryStockPercentage(payload);
 
-            const updatedData =
-                response?.data;
-
-            if (
-                updatedData
-            ) {
-
+            const updatedData = response?.data;
+            if (updatedData) {
                 setPersistencyData(
                     prev => ({
-
                         ...prev,
-
-                        inventory_table:
-                            updatedData?.inventory_table ||
-
-                            prev.inventory_table
+                        inventory_table: updatedData?.inventory_table || prev.inventory_table
                     })
                 );
-
-                setInventoryStockPercentage(
-                    updatedData
-                        ?.inventory_table
-                        ?.stock_percentage || 0
-                );
-
-                setOriginalInventoryStockPercentage(
-                    updatedData
-                        ?.inventory_table
-                        ?.stock_percentage || 0
-                );
+                setInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
+                setOriginalInventoryStockPercentage(updatedData?.inventory_table?.stock_percentage || 0);
             }
             setInventoryEditable(false);
             showSnackbar("Inventory updated successfully", "success");
         } catch (error) {
             console.error("Failed saving inventory", error);
             showSnackbar("Failed to update inventory", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
     const handleApplyCurve = async () => {
         try {
+            setLoading(true);
             const lotCurveMapping =
                 selectedLots
                     .filter(
@@ -707,24 +548,22 @@ export default function PersistencyTable({
 
             const payload = {
                 ta_name: therapyArea,
-
                 indication,
                 brand,
                 start_date: startDate,
                 end_date: endDate,
                 lots: lots,
-
-                lot_curve_mapping:
-                    lotCurveMapping,
+                lot_curve_mapping: lotCurveMapping,
             };
 
             const response = await applyPersistencyCurve(payload);
-
             setPersistencyData(response?.data || null);
             showSnackbar("Persistency curve applied successfully", "success");
         } catch (error) {
             console.error("Failed to apply persistency curve", error);
             showSnackbar("Failed to apply persistency curve", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -1671,56 +1510,54 @@ export default function PersistencyTable({
                         }}
                     >
 
-                        {inventoryTable?.children
-                            ?.length > 0 && (
-                                <TableHead>
-                                    <TableRow>
+                        {inventoryTable?.children?.length > 0 && (
+                            <TableHead>
+                                <TableRow>
+                                    <TableCell
+                                        sx={{
+                                            fontWeight: 700,
+                                            minWidth: 320,
+                                            position:
+                                                "sticky",
+                                            left: 0,
+                                            backgroundColor:
+                                                "#fff",
+                                            zIndex: 5,
+                                            borderRight:
+                                                "1px solid #CBD5E1",
+                                        }}
+                                    >
+                                        Metric
+                                    </TableCell>
 
-                                        <TableCell
-                                            sx={{
-                                                fontWeight: 700,
-                                                minWidth: 320,
-                                                position:
-                                                    "sticky",
-                                                left: 0,
-                                                backgroundColor:
-                                                    "#fff",
-                                                zIndex: 5,
-                                                borderRight:
-                                                    "1px solid #CBD5E1",
-                                            }}
-                                        >
-                                            Metric
-                                        </TableCell>
-
-                                        {formattedMonths.map(
-                                            (month) => (
-                                                <TableCell
-                                                    key={
-                                                        month
-                                                    }
-                                                    align="center"
-                                                    sx={{
-                                                        fontWeight: 700,
-                                                        minWidth: 72,
-                                                        fontSize:
-                                                            "13px",
-                                                        height:
-                                                            "36px",
-                                                        py: 0,
-                                                        backgroundColor:
-                                                            "#f8fafc",
-                                                        borderRight:
-                                                            "1px solid #CBD5E1",
-                                                    }}
-                                                >
-                                                    {month}
-                                                </TableCell>
-                                            )
-                                        )}
-                                    </TableRow>
-                                </TableHead>
-                            )}
+                                    {formattedMonths.map(
+                                        (month) => (
+                                            <TableCell
+                                                key={
+                                                    month
+                                                }
+                                                align="center"
+                                                sx={{
+                                                    fontWeight: 700,
+                                                    minWidth: 72,
+                                                    fontSize:
+                                                        "13px",
+                                                    height:
+                                                        "36px",
+                                                    py: 0,
+                                                    backgroundColor:
+                                                        "#f8fafc",
+                                                    borderRight:
+                                                        "1px solid #CBD5E1",
+                                                }}
+                                            >
+                                                {month}
+                                            </TableCell>
+                                        )
+                                    )}
+                                </TableRow>
+                            </TableHead>
+                        )}
 
                         <TableBody>
 
