@@ -125,8 +125,8 @@ def apply_metrics(payload: MetricSelectionRequest):
             nps_series.append({
                 "lot": lot,
                 "label": "NPS",
-                "train_values": chart["train_values"],
-                "forecast_values": chart["forecast_values"],
+                "train_values": [round(v) for v in chart["train_values"]],
+                "forecast_values": [round(v) for v in chart["forecast_values"]],
             })
 
             nps_table.setdefault(lot, {
@@ -135,7 +135,10 @@ def apply_metrics(payload: MetricSelectionRequest):
                 "children": []
             })["children"].append({
                 "label": "NPS",
-                "values": chart["train_values"] + chart["forecast_values"]
+                "values": [
+                    round(v)
+                    for v in (chart["train_values"] + chart["forecast_values"])
+                ]
             })
 
         # =====================================================
@@ -148,9 +151,9 @@ def apply_metrics(payload: MetricSelectionRequest):
                 im.brand_name
             FROM raw.forecast_scenarios fs
             JOIN raw.indication_master im
-              ON im.ta = fs.ta_name
-             AND LOWER(im.indications) = LOWER(fs.indication)
-             AND LOWER(im.brand_name) = LOWER(fs.product)
+            ON im.ta = fs.ta_name
+            AND LOWER(im.indications) = LOWER(fs.indication)
+            AND LOWER(im.brand_name) = LOWER(fs.product)
             WHERE
                 fs.ta_name = %s
                 AND fs.scenario_name = %s
@@ -164,27 +167,72 @@ def apply_metrics(payload: MetricSelectionRequest):
         ms_series = []
         ms_table = {}
 
+        # =====================================================
+        # STEP 1 → GROUP DATA LOT WISE
+        # =====================================================
+        lot_product_values = {}
+
         for lot, chart, product in ms_rows:
 
-            #   CHART → selected LOT only
-            if lot.lower() == selected_lot_code:
-                ms_series.append({
-                    "lot": lot,
-                    "label": product,
-                    "train_values": chart["train_values"],
-                    "forecast_values": chart["forecast_values"],
-                })
+            values = chart["train_values"] + chart["forecast_values"]
 
-            #   TABLE → all LOTs + all products
-            ms_table.setdefault(lot, {
-                "lot": lot,
-                "total": [100.0] * len(months),
-                "children": []
-            })["children"].append({
-                "label": product,
-                "values": chart["train_values"] + chart["forecast_values"]
+            lot_product_values.setdefault(lot, []).append({
+                "product": product,
+                "values": values,
+                "train_values": chart["train_values"],
+                "forecast_values": chart["forecast_values"]
             })
 
+        # =====================================================
+        # STEP 2 → NORMALIZE TO 100
+        # =====================================================
+        for lot, products_data in lot_product_values.items():
+
+            total_months = max(len(item["values"]) for item in products_data)
+
+            monthly_totals = [0.0] * total_months
+
+            for item in products_data:
+                for idx, val in enumerate(item["values"]):
+                    if idx < total_months:
+                        monthly_totals[idx] += float(val or 0)
+
+            ms_table[lot] = {
+                "lot": lot,
+                "total": [100.0] * total_months,
+                "children": []
+            }
+
+            for item in products_data:
+
+                normalized_values = []
+
+                for idx in range(total_months):
+                    val = item["values"][idx] if idx < len(item["values"]) else 0
+                    total = monthly_totals[idx]
+
+                    normalized_val = (
+                        round((float(val or 0) / total) * 100, 2)
+                        if total > 0 else 0
+                    )
+
+                    normalized_values.append(normalized_val)
+
+                if lot.lower() == selected_lot_code:
+
+                    train_len = len(item["train_values"])
+
+                    ms_series.append({
+                        "lot": lot,
+                        "label": item["product"],
+                        "train_values": normalized_values[:train_len],
+                        "forecast_values": normalized_values[train_len:],
+                    })
+
+                ms_table[lot]["children"].append({
+                    "label": item["product"],
+                    "values": normalized_values
+                })
         # =====================================================
         # MARKET SHARE FACTORS (SELECTED PRODUCT)
         # =====================================================
@@ -425,8 +473,16 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         series_entry = {
             "lot": lot,
             "label": product if metric_l == "market_share" else "NPS",
-            "train_values": list(row["train_values"]),
-            "forecast_values": list(row["forecast_values"])
+            "train_values": (
+                    [round(v) for v in row["train_values"]]
+                    if metric_l == "nps"
+                    else list(row["train_values"])
+                ),
+                "forecast_values": (
+                    [round(v) for v in row["forecast_values"]]
+                    if metric_l == "nps"
+                    else list(row["forecast_values"])
+                )
         }
 
         if metric_l == "nps":
@@ -462,15 +518,52 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
             "values": list(s["train_values"]) + list(s["forecast_values"])
         })
 
+    # Normalize market share values lot-wise, month-wise to total 100
+    ms_grouped = {}
+
     for s in ms_table_series:
-        ms_table.setdefault(s["lot"], {
-            "lot": s["lot"],
-            "total": [100.0] * num_months,
+        ms_grouped.setdefault(s["lot"], []).append(s)
+
+    for lot, series_list in ms_grouped.items():
+
+        total_months = max(
+            len(list(s["train_values"]) + list(s["forecast_values"]))
+            for s in series_list
+        )
+
+        monthly_totals = [0.0] * total_months
+
+        for s in series_list:
+            values = list(s["train_values"]) + list(s["forecast_values"])
+
+            for idx, val in enumerate(values):
+                if idx < total_months:
+                    monthly_totals[idx] += float(val or 0)
+
+        ms_table[lot] = {
+            "lot": lot,
+            "total": [100.0] * total_months,
             "children": []
-        })["children"].append({
-            "label": s["label"],
-            "values": list(s["train_values"]) + list(s["forecast_values"])
-        })
+        }
+
+        for s in series_list:
+            values = list(s["train_values"]) + list(s["forecast_values"])
+
+            normalized_values = []
+
+            for idx in range(total_months):
+                val = values[idx] if idx < len(values) else 0
+                total = monthly_totals[idx]
+
+                normalized_values.append(
+                    round((float(val or 0) / total) * 100, 2)
+                    if total > 0 else 0
+                )
+
+            ms_table[lot]["children"].append({
+                "label": s["label"],
+                "values": normalized_values
+            })
 
     # -----------------------------------------------------
     # BUILD RESPONSE FACTORS

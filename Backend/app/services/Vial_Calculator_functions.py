@@ -11,7 +11,8 @@ def build_avg_vials_per_dose_table(
     brand: str,
     lots: list,
     months: list,
-    use_assumptions: bool = False
+    use_assumptions: bool = False,
+    scenario_name: str = None
 ):
     avg_vials_table = []
 
@@ -25,12 +26,14 @@ def build_avg_vials_per_dose_table(
                     avg_vials_per_dose
                 FROM raw.vials_assumptions
                 WHERE ta_name = %s
+                  AND scenario_name = %s
                   AND indication = %s
                   AND brand = %s
                   AND lot = %s
                 ORDER BY year, month
             """, (
                 ta_name,
+                scenario_name,
                 indication,
                 brand,
                 lot
@@ -91,6 +94,21 @@ def build_avg_vials_per_dose_table(
 
     return avg_vials_table
 
+def validate_compliance_value(compliance):
+    try:
+        compliance = float(compliance)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "Compliance must be a valid number"
+        )
+
+    if compliance < 0 or compliance > 100:
+        raise ValueError(
+            "Compliance must be between 0 and 100"
+        )
+
+    return compliance
+
 def build_demand_vials_table(
     cursor,
     ta_name: str,
@@ -100,7 +118,8 @@ def build_demand_vials_table(
     months: list,
     persistency_table: list,
     avg_vials_per_dose_table: list,
-    use_assumptions: bool = False
+    use_assumptions: bool = False,
+    scenario_name: str = None
 ):
     demand_vials_table = []
     ex_factory_total = [0] * len(months)
@@ -148,12 +167,14 @@ def build_demand_vials_table(
                 FROM raw.vials_assumptions
                 WHERE ta_name = %s
                   AND indication = %s
+                  AND scenario_name = %s
                   AND brand = %s
                   AND lot = %s
                 ORDER BY year, month
             """, (
                 ta_name,
                 indication,
+                scenario_name,
                 brand,
                 lot
             ))
@@ -325,6 +346,9 @@ def save_demand_adjustments_service(payload):
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
+
         indication = payload.indication
         brand = payload.brand
         months = payload.months
@@ -382,13 +406,70 @@ def save_demand_adjustments_service(payload):
                 adjustment_percent_values
             ):
 
-                month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+                month_dt = datetime.strptime(
+                    month_str,
+                    "%Y-%m-%d"
+                )
                 year = month_dt.year
                 month = month_dt.month
 
                 cursor.execute("""
+                    SELECT avg_vials_per_dose
+                    FROM raw.vials_assumptions
+                    WHERE ta_name = %s
+                      AND scenario_name = %s
+                      AND indication = %s
+                      AND brand = %s
+                      AND lot = %s
+                      AND year = %s
+                      AND month = %s
+                    LIMIT 1
+                """, (
+                    ta_name,
+                    base_scenario_name,
+                    indication,
+                    brand,
+                    lot,
+                    year,
+                    month
+                ))
+
+                assumption_row = cursor.fetchone()
+
+                if assumption_row:
+                    avg_vials_value = assumption_row[0]
+                else:
+                    cursor.execute("""
+                        SELECT avg_vials_per_dose
+                        FROM raw.fact_vials_compliance
+                        WHERE ta = %s
+                          AND indication = %s
+                          AND brand = %s
+                          AND lot = %s
+                          AND year = %s
+                          AND month = %s
+                        LIMIT 1
+                    """, (
+                        ta_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month
+                    ))
+
+                    fact_row = cursor.fetchone()
+
+                    avg_vials_value = (
+                        fact_row[0]
+                        if fact_row
+                        else 0
+                    )
+
+                cursor.execute("""
                     INSERT INTO raw.vials_assumptions (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -400,37 +481,13 @@ def save_demand_adjustments_service(payload):
                         adjustment_percent
                     )
                     VALUES (
-                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
                         %s, %s,
-                        COALESCE(
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.fact_vials_compliance
-                                WHERE ta = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            0
-                        ),
-                        %s,
-                        %s,
-                        %s
+                        %s, %s, %s, %s
                     )
                     ON CONFLICT (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -444,34 +501,23 @@ def save_demand_adjustments_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
+                    base_scenario_name,
                     indication,
                     brand,
                     lot,
                     year,
                     month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
+                    avg_vials_value,
                     compliance,
                     absolute_adjustment,
                     adjustment_percent
                 ))
+
         response_lots = [
-                item.lot
-                for item in payload.demand_vials_table
-            ]
+            item.lot
+            for item in payload.demand_vials_table
+        ]
+
         cursor.execute("""
             SELECT
                 lot,
@@ -482,12 +528,14 @@ def save_demand_adjustments_service(payload):
                 total_patients
             FROM raw.persistency_outputs
             WHERE ta_name = %s
+              AND scenario_name = %s
               AND indication = %s
               AND brand = %s
-            AND lot = ANY(%s)
+              AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
+            base_scenario_name,
             indication,
             brand,
             response_lots
@@ -538,6 +586,7 @@ def save_demand_adjustments_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -548,6 +597,7 @@ def save_demand_adjustments_service(payload):
         demand_vials_table = build_demand_vials_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -562,19 +612,23 @@ def save_demand_adjustments_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         conn.commit()
 
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -699,13 +753,17 @@ def apply_compliance_configuration_service(payload):
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
+
         indication = payload.indication
         brand = payload.brand
+
         response_lots = [
-                config.lot
-                for config in payload.compliance_configuration
-            ]
-        # Fetch current persistency output to get months
+            config.lot
+            for config in payload.compliance_configuration
+        ]
+
         cursor.execute("""
             SELECT
                 lot,
@@ -716,12 +774,14 @@ def apply_compliance_configuration_service(payload):
                 total_patients
             FROM raw.persistency_outputs
             WHERE ta_name = %s
-            AND indication = %s
-            AND brand = %s
-            AND lot = ANY(%s)
+              AND scenario_name = %s
+              AND indication = %s
+              AND brand = %s
+              AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
+            base_scenario_name,
             indication,
             brand,
             response_lots
@@ -768,20 +828,85 @@ def apply_compliance_configuration_service(payload):
                 ]
             })
 
-        # Save same compliance % to all months for each lot
         for config in payload.compliance_configuration:
 
             lot = config.lot
             compliance_value = config.compliance_percentage
 
             for month_str in months:
-                month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+
+                month_dt = datetime.strptime(
+                    month_str,
+                    "%Y-%m-%d"
+                )
                 year = month_dt.year
                 month = month_dt.month
 
                 cursor.execute("""
+                    SELECT
+                        avg_vials_per_dose,
+                        absolute_adjustment,
+                        adjustment_percent
+                    FROM raw.vials_assumptions
+                    WHERE ta_name = %s
+                      AND scenario_name = %s
+                      AND indication = %s
+                      AND brand = %s
+                      AND lot = %s
+                      AND year = %s
+                      AND month = %s
+                    LIMIT 1
+                """, (
+                    ta_name,
+                    base_scenario_name,
+                    indication,
+                    brand,
+                    lot,
+                    year,
+                    month
+                ))
+
+                assumption_row = cursor.fetchone()
+
+                if assumption_row:
+                    avg_vials_value = assumption_row[0]
+                    absolute_adjustment_value = assumption_row[1] or 0
+                    adjustment_percent_value = assumption_row[2] or 0
+                else:
+                    cursor.execute("""
+                        SELECT avg_vials_per_dose
+                        FROM raw.fact_vials_compliance
+                        WHERE ta = %s
+                          AND indication = %s
+                          AND brand = %s
+                          AND lot = %s
+                          AND year = %s
+                          AND month = %s
+                        LIMIT 1
+                    """, (
+                        ta_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month
+                    ))
+
+                    fact_row = cursor.fetchone()
+
+                    avg_vials_value = (
+                        fact_row[0]
+                        if fact_row
+                        else 0
+                    )
+
+                    absolute_adjustment_value = 0
+                    adjustment_percent_value = 0
+
+                cursor.execute("""
                     INSERT INTO raw.vials_assumptions (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -793,61 +918,13 @@ def apply_compliance_configuration_service(payload):
                         adjustment_percent
                     )
                     VALUES (
-                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
                         %s, %s,
-                        COALESCE(
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.fact_vials_compliance
-                                WHERE ta = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            0
-                        ),
-                        %s,
-                        COALESCE(
-                            (
-                                SELECT absolute_adjustment
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            0
-                        ),
-                        COALESCE(
-                            (
-                                SELECT adjustment_percent
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            0
-                        )
+                        %s, %s, %s, %s
                     )
                     ON CONFLICT (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -859,41 +936,16 @@ def apply_compliance_configuration_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
+                    base_scenario_name,
                     indication,
                     brand,
                     lot,
                     year,
                     month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
+                    avg_vials_value,
                     compliance_value,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month
+                    absolute_adjustment_value,
+                    adjustment_percent_value
                 ))
 
         lots = [
@@ -904,6 +956,7 @@ def apply_compliance_configuration_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -914,6 +967,7 @@ def apply_compliance_configuration_service(payload):
         demand_vials_table = build_demand_vials_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -928,19 +982,23 @@ def apply_compliance_configuration_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         conn.commit()
 
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -956,6 +1014,12 @@ def apply_compliance_configuration_service(payload):
         cursor.close()
         conn.close()
 
+def clean_scenario_name(scenario_name: str) -> str:
+    return (
+        scenario_name
+        .replace(" (Finalised)", "")
+        .strip()
+    )
 def apply_edit_row_values_service(payload):
 
     conn = get_connection()
@@ -963,6 +1027,9 @@ def apply_edit_row_values_service(payload):
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
+
         indication = payload.indication
         brand = payload.brand
 
@@ -972,6 +1039,7 @@ def apply_edit_row_values_service(payload):
         percentage_change_per_month = config.percentage_change_per_month
         number_of_months = config.number_of_months
         response_lots = payload.lots
+
         cursor.execute("""
             SELECT
                 lot,
@@ -982,12 +1050,14 @@ def apply_edit_row_values_service(payload):
                 total_patients
             FROM raw.persistency_outputs
             WHERE ta_name = %s
+              AND scenario_name = %s
               AND indication = %s
               AND brand = %s
-            AND lot = ANY(%s)
+              AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
+            base_scenario_name,
             indication,
             brand,
             response_lots
@@ -1054,6 +1124,7 @@ def apply_edit_row_values_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1107,26 +1178,50 @@ def apply_edit_row_values_service(payload):
                 )
 
             avg_vials = lot_avg_vials["children"][0]["values"]
-            
+
             cursor.execute("""
                 SELECT
                     year,
                     month,
                     compliance
-                FROM raw.fact_vials_compliance
-                WHERE ta = %s
-                  AND indication = %s
-                  AND brand = %s
-                  AND lot = %s
+                FROM raw.vials_assumptions
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
                 ORDER BY year, month
             """, (
                 ta_name,
+                base_scenario_name,
                 indication,
                 brand,
                 lot
             ))
 
             compliance_rows = cursor.fetchall()
+
+            if not compliance_rows:
+                cursor.execute("""
+                    SELECT
+                        year,
+                        month,
+                        compliance
+                    FROM raw.fact_vials_compliance
+                    WHERE ta = %s
+                    AND indication = %s
+                    AND brand = %s
+                    AND lot = %s
+                    ORDER BY year, month
+                """, (
+                    ta_name,
+                    indication,
+                    brand,
+                    lot
+                ))
+
+
+                compliance_rows = cursor.fetchall()
 
             if not compliance_rows:
                 raise ValueError(
@@ -1159,13 +1254,10 @@ def apply_edit_row_values_service(payload):
                     lot in selected_lots
                     and start_idx <= idx < end_idx
                 ):
-                    percent_to_apply = percentage_change_per_month
-
                     updated_compliance = (
-                            float(base_compliance)
-                            + float(percent_to_apply)
-                        )
-
+                        float(base_compliance)
+                        + float(percentage_change_per_month)
+                    )
                 else:
                     updated_compliance = float(base_compliance)
 
@@ -1187,8 +1279,62 @@ def apply_edit_row_values_service(payload):
                 month = month_dt.month
 
                 cursor.execute("""
+                    SELECT avg_vials_per_dose
+                    FROM raw.vials_assumptions
+                    WHERE ta_name = %s
+                      AND scenario_name = %s
+                      AND indication = %s
+                      AND brand = %s
+                      AND lot = %s
+                      AND year = %s
+                      AND month = %s
+                    LIMIT 1
+                """, (
+                    ta_name,
+                    base_scenario_name,
+                    indication,
+                    brand,
+                    lot,
+                    year,
+                    month
+                ))
+
+                assumption_row = cursor.fetchone()
+
+                if assumption_row:
+                    avg_vials_value = assumption_row[0]
+                else:
+                    cursor.execute("""
+                        SELECT avg_vials_per_dose
+                        FROM raw.fact_vials_compliance
+                        WHERE ta = %s
+                          AND indication = %s
+                          AND brand = %s
+                          AND lot = %s
+                          AND year = %s
+                          AND month = %s
+                        LIMIT 1
+                    """, (
+                        ta_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month
+                    ))
+
+                    fact_row = cursor.fetchone()
+
+                    avg_vials_value = (
+                        fact_row[0]
+                        if fact_row
+                        else 0
+                    )
+
+                cursor.execute("""
                     INSERT INTO raw.vials_assumptions (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -1200,37 +1346,14 @@ def apply_edit_row_values_service(payload):
                         adjustment_percent
                     )
                     VALUES (
-                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
                         %s, %s,
-                        COALESCE(
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            (
-                                SELECT avg_vials_per_dose
-                                FROM raw.fact_vials_compliance
-                                WHERE ta = %s
-                                  AND indication = %s
-                                  AND brand = %s
-                                  AND lot = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            0
-                        ),
-                        %s,
-                        0,
-                        0
+                        %s, %s,
+                        0, 0
                     )
                     ON CONFLICT (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -1242,26 +1365,13 @@ def apply_edit_row_values_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
+                    base_scenario_name,
                     indication,
                     brand,
                     lot,
                     year,
                     month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
-                    ta_name,
-                    indication,
-                    brand,
-                    lot,
-                    year,
-                    month,
-
+                    avg_vials_value,
                     compliance_value
                 ))
 
@@ -1334,9 +1444,11 @@ def apply_edit_row_values_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
@@ -1348,6 +1460,7 @@ def apply_edit_row_values_service(payload):
 
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -1363,10 +1476,10 @@ def apply_edit_row_values_service(payload):
         cursor.close()
         conn.close()
 
-
 def save_ex_factory_output(
     cursor,
     ta_name: str,
+    scenario_name: str,
     indication: str,
     brand: str,
     months: list,
@@ -1414,6 +1527,7 @@ def save_ex_factory_output(
         cursor.execute("""
             INSERT INTO raw.vials_outputs (
                 ta_name,
+                scenario_name,
                 indication,
                 brand,
                 year,
@@ -1423,12 +1537,13 @@ def save_ex_factory_output(
                 inventory_vials
             )
             VALUES (
-                %s, %s, %s,
+                %s, %s, %s, %s,
                 %s, %s,
                 %s, %s, %s
             )
             ON CONFLICT (
                 ta_name,
+                scenario_name,
                 indication,
                 brand,
                 year,
@@ -1441,6 +1556,7 @@ def save_ex_factory_output(
                 updated_at = CURRENT_TIMESTAMP
         """, (
             ta_name,
+            scenario_name,
             indication,
             brand,
             year,
@@ -1458,6 +1574,9 @@ def update_inventory_stock_service(payload):
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
+
         indication = payload.indication
         brand = payload.brand
         months = payload.months
@@ -1480,12 +1599,14 @@ def update_inventory_stock_service(payload):
                     ex_factory_demand
                 FROM raw.vials_outputs
                 WHERE ta_name = %s
+                  AND scenario_name = %s
                   AND indication = %s
                   AND brand = %s
                   AND year = %s
                   AND month = %s
             """, (
                 ta_name,
+                base_scenario_name,
                 indication,
                 brand,
                 year,
@@ -1516,6 +1637,7 @@ def update_inventory_stock_service(payload):
                     inventory_vials = %s,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE ta_name = %s
+                  AND scenario_name = %s
                   AND indication = %s
                   AND brand = %s
                   AND year = %s
@@ -1524,6 +1646,7 @@ def update_inventory_stock_service(payload):
                 stock_percentage,
                 inventory_value,
                 ta_name,
+                base_scenario_name,
                 indication,
                 brand,
                 year,
@@ -1534,6 +1657,7 @@ def update_inventory_stock_service(payload):
 
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,

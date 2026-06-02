@@ -18,7 +18,9 @@ export default function PersistencyTable({
     startDate,
     endDate,
     lots,
-    showSnackbar
+    showSnackbar,
+    scenarioSelector,
+    filterApplyVersion
 }) {
     const formattedMonths =
         persistencyData?.months?.map(
@@ -64,6 +66,12 @@ export default function PersistencyTable({
         selectedLots.some(
             (lot) => selectedCurves[lot]
         );
+
+    useEffect(() => {
+        setSelectedLots([]);
+        setSelectedDemandLots([]);
+        setSelectedCurves({});
+    }, [filterApplyVersion]);
 
     const handleAvgVialsCellChange = (
         lotIndex,
@@ -111,6 +119,7 @@ export default function PersistencyTable({
                 })
                 ),
                 lots: lots,
+                scenario_name: scenarioSelector,
             };
             const response = await saveAvgVials(payload);
 
@@ -197,6 +206,7 @@ export default function PersistencyTable({
                 indication,
                 brand,
                 months: persistencyData?.months || [],
+                scenario_name: scenarioSelector,
                 demand_vials_table:
                     demandVialsRows
                         .filter((row) =>
@@ -387,6 +397,7 @@ export default function PersistencyTable({
                 ta_name: therapyArea,
                 indication,
                 brand,
+                scenario_name: scenarioSelector,
                 compliance_configuration:
                     updatedData.map(
                         (item) => ({
@@ -459,6 +470,7 @@ export default function PersistencyTable({
                 indication,
                 brand,
                 lots: lots,
+                scenario_name: scenarioSelector,
                 edit_values_configuration: {
                     selected_lots: selectedDemandLots,
                     start_month: data.startMonth,
@@ -502,6 +514,7 @@ export default function PersistencyTable({
                 brand,
                 months: persistencyData?.months || [],
                 stock_percentage: Number(inventoryStockPercentage),
+                scenario_name: scenarioSelector,
             };
 
             const response = await applyInventoryStockPercentage(payload);
@@ -553,6 +566,7 @@ export default function PersistencyTable({
                 start_date: startDate,
                 end_date: endDate,
                 lots: lots,
+                scenario_name: scenarioSelector,
                 lot_curve_mapping: lotCurveMapping,
             };
 

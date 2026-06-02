@@ -54,6 +54,13 @@ export default function VialCalculator() {
     const [endDate, setEndDate] = useState("");
 
     const [mappingData, setMappingData] = useState({});
+    const [scenarioSelector, setScenarioSelector] = useState("");
+
+    const [filterOptions, setFilterOptions] = useState({
+        scenario_names: [],
+        indications: [],
+    });
+
     const [loadingFilters, setLoadingFilters] = useState(false);
 
     const [persistencyData, setPersistencyData] = useState(null);
@@ -61,8 +68,11 @@ export default function VialCalculator() {
     const { showSnackbar } = useSnackbarStore();
     const { setLoading, isLoading } = useLoadingStore();
 
+    const [filterApplyVersion, setFilterApplyVersion] = useState(0);
+
     const isApplyFilterEnabled =
         !!therapyArea &&
+        !!scenarioSelector &&
         !!indication &&
         lots.length > 0 &&
         !!brand &&
@@ -79,7 +89,20 @@ export default function VialCalculator() {
         try {
             setLoadingFilters(true);
             const response = await getPersistencyFilters(therapyArea);
-            setMappingData(response?.data?.data || {});
+
+            const resData = response?.data;
+
+            setMappingData(resData?.data || {});
+
+            setFilterOptions({
+                scenario_names: resData?.scenario_names || [],
+                indications: [],
+            });
+
+            setScenarioSelector("");
+            setIndication("");
+            setLots([]);
+            setBrand("");
         } catch (error) {
             console.error("Failed to fetch persistency filters", error);
             showSnackbar("Failed to fetch persistency filters", "error");
@@ -92,19 +115,25 @@ export default function VialCalculator() {
     // DYNAMIC OPTIONS
     // ------------------------------------
     const indicationOptions =
-        Object.keys(mappingData || {});
+        scenarioSelector
+            ? Object.keys(
+                mappingData?.[scenarioSelector] || {}
+            )
+            : [];
 
     const lotOptions =
-        indication
-            ? Object.keys(mappingData?.[indication] || {})
+        scenarioSelector && indication
+            ? Object.keys(
+                mappingData?.[scenarioSelector]?.[indication] || {}
+            )
             : [];
 
     const brandOptions =
-        indication
+        scenarioSelector && indication
             ? [
                 ...new Set(
                     Object.values(
-                        mappingData?.[indication] || {}
+                        mappingData?.[scenarioSelector]?.[indication] || {}
                     ).flat()
                 ),
             ]
@@ -113,6 +142,12 @@ export default function VialCalculator() {
     // ------------------------------------
     // RESET DEPENDENCIES
     // ------------------------------------
+    useEffect(() => {
+        setIndication("");
+        setLots([]);
+        setBrand("");
+    }, [scenarioSelector]);
+
     useEffect(() => {
         setLots([]);
         setBrand("");
@@ -151,6 +186,7 @@ export default function VialCalculator() {
             setLoading(true);
             const payload = {
                 ta_name: therapyArea,
+                scenario_name: scenarioSelector,
                 indication,
                 lots,
                 brand,
@@ -159,6 +195,7 @@ export default function VialCalculator() {
             };
             const response = await applyPersistencyFilters(payload);
             setPersistencyData(response?.data || null);
+            setFilterApplyVersion(prev => prev + 1);
             showSnackbar("Filters applied successfully", "success");
         } catch (error) {
             console.error("Failed to apply persistency filters", error);
@@ -222,6 +259,49 @@ export default function VialCalculator() {
                         </Box>
                     </Box>
 
+                    {/* SCENARIO */}
+                    <Box>
+                        <Typography sx={labelStyle}>
+                            SCENARIO
+                        </Typography>
+
+                        <FormControl sx={inputStyle}>
+                            <Select
+                                value={scenarioSelector}
+                                onChange={(e) => {
+                                    const selectedScenario = e.target.value;
+
+                                    setScenarioSelector(selectedScenario);
+
+                                    setIndication("");
+                                    setLots([]);
+                                    setBrand("");
+
+                                    setFilterOptions((prev) => ({
+                                        ...prev,
+                                        indications: Object.keys(
+                                            mappingData?.[selectedScenario] || {}
+                                        ),
+                                    }));
+                                }}
+                                displayEmpty
+                            >
+                                <MenuItem value="" disabled>
+                                    Select Scenario
+                                </MenuItem>
+
+                                {filterOptions.scenario_names.map((scenario) => (
+                                    <MenuItem
+                                        key={scenario}
+                                        value={scenario}
+                                    >
+                                        {scenario}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    </Box>
+
                     {/* INDICATION */}
                     <Box>
                         <Typography sx={labelStyle}>
@@ -231,7 +311,7 @@ export default function VialCalculator() {
 
                             <Select
                                 value={indication}
-
+                                disabled={!scenarioSelector}
                                 onChange={(e) =>
                                     setIndication(
                                         e.target.value
@@ -242,7 +322,7 @@ export default function VialCalculator() {
                                 <MenuItem value="" disabled>
                                     Select Indication
                                 </MenuItem>
-                                {indicationOptions.map((item) => (
+                                {filterOptions.indications.map((item) => (
                                     <MenuItem
                                         key={item}
                                         value={item}
@@ -337,7 +417,7 @@ export default function VialCalculator() {
                         <FormControl sx={inputStyle} >
                             <Select
                                 value={brand}
-
+                                // disabled={!lots}
                                 onChange={(e) =>
                                     setBrand(
                                         e.target.value
@@ -484,7 +564,9 @@ export default function VialCalculator() {
                     startDate={startDate}
                     endDate={endDate}
                     lots={lots}
+                    scenarioSelector={scenarioSelector}
                     showSnackbar={showSnackbar}
+                    filterApplyVersion={filterApplyVersion}
                 />
 
             </Paper >

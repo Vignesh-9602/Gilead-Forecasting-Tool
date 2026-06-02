@@ -308,7 +308,7 @@ def process_forecast(
         elif model_type_l == "logarithmic":
             forecast_values = forecast_logarithmic(base_value, forecast_periods, total_growth_pct, duration, k, metric)
 
-        elif model_type_l in ("s_curve", "s-curve", "scurve"):
+        elif model_type_l in ("scurve"):
             forecast_values = forecast_s_curve(base_value, forecast_periods, total_growth_pct, duration, k, metric)
 
         else:
@@ -321,7 +321,7 @@ def process_forecast(
             "k": None if k is None else float(k)
         }
 
-    # ✅ Apply to forecast AFTER model
+    #   Apply to forecast AFTER model
     if apply_to_forecast:
         forecast_values = apply_multiplier(forecast_values, multiplier, metric)
 

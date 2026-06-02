@@ -5,12 +5,13 @@ from pydantic import BaseModel
 # Persistency Schema 
 # =============================
 class PersistencyFiltersResponse(BaseModel):
-   ta_name: str
-   data: Dict[str, Dict[str, List[str]]]
-
+    ta_name: str
+    scenario_names: List[str]
+    data: Dict[str, Dict[str, Dict[str, List[str]]]]
 
 class PersistencyApplyRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     lots: List[str]
     brand: str
@@ -143,6 +144,7 @@ class PersistencyApplyCurveMapping(BaseModel):
 
 class PersistencyApplyCurveRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     start_date: str
@@ -164,6 +166,7 @@ class PersistencyApplyCurveLotTable(BaseModel):
 
 class PersistencyApplyCurveResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -179,6 +182,7 @@ class AvgVialsEditRow(BaseModel):
 
 class AvgVialsSaveRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -187,10 +191,10 @@ class AvgVialsSaveRequest(BaseModel):
 
 class AvgVialsSaveResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
-
     avg_vials_per_dose_table: List[AvgVialsPerDoseLotTable]
     demand_vials_table: List[DemandVialsLotTable]
     inventory_table: InventoryTable
@@ -207,6 +211,7 @@ class DemandEditLot(BaseModel):
 
 class DemandAdjustmentsSaveRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -230,6 +235,7 @@ class InventoryTable(BaseModel):
 
 class DemandAdjustmentsSaveResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -251,6 +257,7 @@ class ConfigureComplianceGetResponse(BaseModel):
 
 class ConfigureComplianceApplyRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     compliance_configuration: List[ComplianceConfiguration]
@@ -273,6 +280,7 @@ class InventoryTable(BaseModel):
 
 class ConfigureComplianceApplyResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -288,6 +296,7 @@ class EditRowValuesConfiguration(BaseModel):
 
 class EditRowValuesRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     lots: List[str]
@@ -311,6 +320,7 @@ class InventoryTable(BaseModel):
 
 class EditRowValuesResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -319,6 +329,7 @@ class EditRowValuesResponse(BaseModel):
 
 class InventoryStockUpdateRequest(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]
@@ -337,6 +348,7 @@ class InventoryTable(BaseModel):
 
 class InventoryStockUpdateResponse(BaseModel):
     ta_name: str
+    scenario_name: str
     indication: str
     brand: str
     months: List[str]

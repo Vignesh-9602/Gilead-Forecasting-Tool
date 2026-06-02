@@ -7,6 +7,7 @@ import ModelInput from "../components/headerTabs/ModelInput";
 import Scenarios from "../components/headerTabs/scenario/Scenarios";
 import MarketEvents from "../components/headerTabs/marketEvents/MarketEvent";
 import VialCalculator from "../components/headerTabs/vialCalculator/VialCalculator";
+import Output from "../components/headerTabs/output/Output";
 
 const tabs = [
     "Configurations",
@@ -14,7 +15,6 @@ const tabs = [
     "Scenarios",
     "Market Events",
     "Vial Calculator",
-    "Pricing & WAC",
     "Output",
     "Monte Carlo Simulation",
 ];
@@ -41,6 +41,8 @@ export default function MainLayout() {
                 return <MarketEvents />;
             case "Vial Calculator":
                 return <VialCalculator />;
+            case "Output":
+                return <Output />;
             default:
                 return (
                     <Box p={3}>

@@ -1,18 +1,21 @@
 import React, { useState, useEffect, useContext } from "react";
 import { Box, Paper, Typography, FormControl, Select, MenuItem, TextField, Button, Divider, } from "@mui/material";
-import Slider from "@mui/material/Slider";
 import { GlobalContext } from "../../context/Provider";
 import ForecastTrendChart from "./ForecastTrendChart";
 import { getMetricFilters, applyMetricFilters, recalculateMetrics, saveScenario, updateScenario } from "../../services/apiService";
 import { useSnackbarStore } from "../../stores";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import Tooltip from "@mui/material/Tooltip";
 
 export default function ModelInput() {
     const { showSnackbar } = useSnackbarStore();
     const [scenarioSelector, setScenarioSelector] = useState("");
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
+    const [appliedLot, setAppliedLot] = useState(""); // last applied
     const [metric, setMetric] = useState("");
     const [brand, setBrand] = useState("");
+    const [appliedBrand, setAppliedBrand] = useState("");
     // const [scenarioName, setScenarioName] = useState("");
     const [editable, setEditable] = useState(false);
 
@@ -120,6 +123,9 @@ export default function ModelInput() {
         try {
             const response = await applyMetricFilters(payload);
             const data = response?.data;
+
+            setAppliedLot(lot);
+            setAppliedBrand(brand);
 
             const factors = data?.factors || {};
             const activeModel = factors?.active_model || "ets";
@@ -310,15 +316,20 @@ export default function ModelInput() {
         },
     };
 
-    // const trajectoryMonthOptions =
-    //     chartData?.months?.slice(chartData?.forecast_start_index) || [];
+    const recalculateInputStyle = {
+        bgcolor: "#fcfcfd",
+        borderRadius: "8px",
+        minWidth: "100px",
+        "& .MuiOutlinedInput-root": {
+            borderRadius: "8px",
+            height: "35px",
+            backgroundColor: "#fcfcfd",
+        },
+    };
 
     const trajectoryMonthOptions =
-        chartData?.months?.map((month) =>
-            new Date(month).toLocaleDateString("en-US", {
-                month: "short",
-                year: "2-digit",
-            })
+        chartData?.months?.slice(
+            chartData?.forecast_start_index
         ) || [];
 
     const handleUpdateScenario = async () => {
@@ -525,74 +536,90 @@ export default function ModelInput() {
         }
     };
 
-    const TrajectoryControls = ({ showKValue }) => (
-        <>
-            <Box sx={{ width: 160 }}>
-                <Typography>
-                    Total Growth % <b>{totalGrowth.toFixed(1)}%</b>
-                </Typography>
-                <Slider
-                    value={totalGrowth}
-                    min={0}
-                    max={100}
-                    step={0.1}
-                    disabled={!editable}
-                    onChange={(e, val) => setTotalGrowth(val)}
-                />
-            </Box>
+    // const TrajectoryControls = ({ showKValue }) => (
+    //     <>
+    //         <Box>
+    //             <Typography sx={{ mb: 1, fontSize: "14px" }}>
+    //                 TOTAL GROWTH %
+    //             </Typography>
 
-            <Box sx={{ width: 160 }}>
-                <Typography>
-                    Duration (Mos) <b>{duration}</b>
-                </Typography>
-                <Slider
-                    value={duration}
-                    min={0}
-                    max={24}
-                    step={1}
-                    disabled={!editable}
-                    onChange={(e, val) => setDuration(val)}
-                />
-            </Box>
+    //             <TextField
+    //                 type="number"
+    //                 value={totalGrowth}
+    //                 disabled={!editable}
+    //                 onChange={(e) => setTotalGrowth(Number(e.target.value))}
+    //                 inputProps={{
+    //                     min: 0,
+    //                     max: 100,
+    //                     step: 0.1,
+    //                 }}
+    //                 sx={recalculateInputStyle}
+    //             />
+    //         </Box>
 
-            {showKValue && (
-                <Box sx={{ width: 160 }}>
-                    <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700 }}>
-                        K Value
-                    </Typography>
-                    <TextField
-                        placeholder="e.g. 1"
-                        value={kValue}
-                        onChange={(e) => setKValue(e.target.value)}
-                        sx={inputStyle}
-                    />
-                </Box>
-            )}
+    //         <Box>
+    //             <Typography sx={{ mb: 1, fontSize: "14px" }}>
+    //                 DURATION (MOS)
+    //             </Typography>
 
-            <Box>
-                <Typography sx={{ mb: 1, fontSize: "13px", fontWeight: 700 }}>
-                    TRAJECTORY START
-                </Typography>
+    //             <TextField
+    //                 type="number"
+    //                 value={duration}
+    //                 disabled={!editable}
+    //                 onChange={(e) => setDuration(Number(e.target.value))}
+    //                 inputProps={{
+    //                     min: 0,
+    //                     max: 100,
+    //                     step: 1,
+    //                 }}
+    //                 sx={recalculateInputStyle}
+    //             />
+    //         </Box>
 
-                <FormControl sx={inputStyle}>
-                    <Select
-                        value={trajectoryStart}
-                        onChange={(e) => setTrajectoryStart(e.target.value)}
-                        disabled={!editable}
-                    >
-                        {chartData?.months?.map((month) => (
-                            <MenuItem key={month} value={month}>
-                                {new Date(month).toLocaleDateString("en-US", {
-                                    month: "short",
-                                    year: "2-digit",
-                                })}
-                            </MenuItem>
-                        ))}
-                    </Select>
-                </FormControl>
-            </Box>
-        </>
-    );
+    //         {showKValue && (
+    //             <Box>
+    //                 <Typography sx={{ mb: 1, fontSize: "14px" }}>
+    //                     K Value
+    //                 </Typography>
+    //                 <TextField
+    //                     type="number"
+    //                     // placeholder="e.g. 1"
+    //                     value={kValue}
+    //                     onChange={(e) => setKValue(e.target.value)}
+    //                     inputProps={{
+    //                         min: 0,
+    //                         max: 1,
+    //                         step: 0.01,
+    //                     }}
+    //                     sx={recalculateInputStyle}
+    //                 />
+    //             </Box>
+    //         )}
+
+    //         <Box>
+    //             <Typography sx={{ mb: 1, fontSize: "14px" }}>
+    //                 TRAJECTORY START
+    //             </Typography>
+
+    //             <FormControl sx={recalculateInputStyle}>
+    //                 <Select
+    //                     value={trajectoryStart}
+    //                     onChange={(e) => setTrajectoryStart(e.target.value)}
+    //                     disabled={!editable}
+    //                 >
+    //                     {chartData?.months?.map((month) => (
+    //                         <MenuItem key={month} value={month}>
+    //                             {new Date(month).toLocaleDateString("en-US", {
+    //                                 month: "short",
+    //                                 year: "2-digit",
+    //                             })}
+    //                         </MenuItem>
+    //                     ))}
+    //                 </Select>
+    //             </FormControl>
+    //         </Box>
+    //     </>
+    // );
 
     return (
         <Box sx={{ p: 3 }}>
@@ -760,7 +787,6 @@ export default function ModelInput() {
                     </Box> */}
                 </Box>
 
-                {/* slider */}
                 <Paper
                     sx={{ mt: 3, p: 3, borderRadius: "16px", border: "1px solid #D8DEE8", boxShadow: "none", backgroundColor: editable ? "#fff" : "#eff6ff", }} >
                     <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
@@ -780,7 +806,7 @@ export default function ModelInput() {
                         </Box>
                     </Box>
 
-                    <Box sx={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+                    <Box sx={{ display: "flex", gap: 3, flexWrap: "wrap", alignItems: "center" }}>
                         {/* MODEL SELECTION */}
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}> BASE MODEL </Typography>
@@ -802,53 +828,248 @@ export default function ModelInput() {
                         {/* ETS BLOCK */}
                         {modelSelection === "ets" && (
                             <>
-                                {[
-                                    // { label: "MULTIPLIER", value: multiplier, setValue: setMultiplier, min: 0, max: 3, },
-                                    { label: "LEVEL (α)", value: alpha, setValue: setAlpha, min: 0, max: 1, },
-                                    { label: "TREND (β)", value: beta, setValue: setBeta, min: 0, max: 1, },
-                                    { label: "DAMPING (φ)", value: gamma, setValue: setGamma, min: 0, max: 1, },
-
-                                ].map((item, index) => (
-                                    <Box key={index} sx={{ width: 160 }}>
-                                        <Typography sx={{ fontSize: "14px", mb: 1 }}>
-                                            {item.label}{" "}
-                                            <span style={{ fontWeight: 700 }}>{item.value.toFixed(2)}</span>
+                                <Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                        <Typography sx={{ fontSize: "14px" }}>
+                                            LEVEL (α)
                                         </Typography>
 
-                                        <Slider
-                                            value={item.value}
-                                            min={item.min}
-                                            max={item.max}
-                                            step={0.01}
-                                            disabled={!editable}
-                                            onChange={(e, val) => item.setValue(val)}
-                                        />
+                                        <Tooltip title="Please enter value from 0 to 1" arrow placement="top">
+                                            <InfoOutlinedIcon
+                                                sx={{
+                                                    fontSize: 16,
+                                                    color: "#64748b",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </Tooltip>
                                     </Box>
-                                ))}
+                                    <TextField
+                                        type="number"
+                                        value={alpha}
+                                        disabled={!editable}
+                                        onChange={(e) => setAlpha(Number(e.target.value))}
+                                        inputProps={{
+                                            min: 0,
+                                            max: 1,
+                                            step: 0.01,
+                                        }}
+                                        sx={recalculateInputStyle}
+                                    />
+                                </Box>
+
+                                <Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                        <Typography sx={{ fontSize: "14px" }}>
+                                            TREND (β)
+                                        </Typography>
+
+                                        <Tooltip title="Please enter value from 0 to 1" arrow placement="top">
+                                            <InfoOutlinedIcon
+                                                sx={{
+                                                    fontSize: 16,
+                                                    color: "#64748b",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </Tooltip>
+                                    </Box>
+                                    <TextField
+                                        type="number"
+                                        value={beta}
+                                        disabled={!editable}
+                                        onChange={(e) => setBeta(Number(e.target.value))}
+                                        inputProps={{
+                                            min: 0,
+                                            max: 1,
+                                            step: 0.01,
+                                        }}
+                                        sx={recalculateInputStyle}
+                                    />
+                                </Box>
+
+                                <Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                        <Typography sx={{ fontSize: "14px" }}>
+                                            DAMPING (φ)
+                                        </Typography>
+                                        <Tooltip title="Please enter value from 0 to 1" arrow placement="top">
+                                            <InfoOutlinedIcon
+                                                sx={{
+                                                    fontSize: 16,
+                                                    color: "#64748b",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </Tooltip>
+                                    </Box>
+                                    <TextField
+                                        type="number"
+                                        value={gamma}
+                                        disabled={!editable}
+                                        onChange={(e) => setGamma(Number(e.target.value))}
+                                        inputProps={{
+                                            min: 0,
+                                            max: 1,
+                                            step: 0.01,
+                                        }}
+                                        sx={recalculateInputStyle}
+                                    />
+                                </Box>
                             </>
                         )}
 
                         {["linear", "exponential", "logarithmic", "scurve"].includes(modelSelection) && (
-                            <TrajectoryControls
-                                showKValue={modelSelection !== "linear"}
-                            />
+                            <>
+                                <Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                        <Typography sx={{ fontSize: "14px" }}>
+                                            GROWTH %
+                                        </Typography>
+                                        <Tooltip title="Please enter value from 0 to 100" arrow placement="top">
+                                            <InfoOutlinedIcon
+                                                sx={{
+                                                    fontSize: 16,
+                                                    color: "#64748b",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </Tooltip>
+                                    </Box>
+                                    <TextField
+                                        type="number"
+                                        value={totalGrowth}
+                                        disabled={!editable}
+                                        onChange={(e) => setTotalGrowth(Number(e.target.value))}
+                                        inputProps={{
+                                            min: 0,
+                                            max: 100,
+                                            step: 0.1,
+                                        }}
+                                        sx={recalculateInputStyle}
+                                    />
+                                </Box>
+
+                                <Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                        <Typography sx={{ fontSize: "14px" }}>
+                                            DURATION
+                                        </Typography>
+                                        <Tooltip title="Please enter the months" arrow placement="top">
+                                            <InfoOutlinedIcon
+                                                sx={{
+                                                    fontSize: 16,
+                                                    color: "#64748b",
+                                                    cursor: "pointer",
+                                                }}
+                                            />
+                                        </Tooltip>
+                                    </Box>
+
+                                    <TextField
+                                        type="number"
+                                        value={duration}
+                                        disabled={!editable}
+                                        onChange={(e) => setDuration(Number(e.target.value))}
+                                        inputProps={{
+                                            min: 0,
+                                            max: 100,
+                                            step: 1,
+                                        }}
+                                        sx={recalculateInputStyle}
+                                    />
+                                </Box>
+
+                                {modelSelection !== "linear" && (
+                                    <Box>
+                                        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                            <Typography sx={{ fontSize: "14px" }}>
+                                                K VALUE
+                                            </Typography>
+                                            <Tooltip title="Please enter value from 0 to 1" arrow placement="top">
+                                                <InfoOutlinedIcon
+                                                    sx={{
+                                                        fontSize: 16,
+                                                        color: "#64748b",
+                                                        cursor: "pointer",
+                                                    }}
+                                                />
+                                            </Tooltip>
+                                        </Box>
+
+                                        <TextField
+                                            type="number"
+                                            value={kValue}
+                                            disabled={!editable}
+                                            onChange={(e) => setKValue(Number(e.target.value))}
+                                            inputProps={{
+                                                min: 0,
+                                                max: 1,
+                                                step: 0.01,
+                                            }}
+                                            sx={recalculateInputStyle}
+                                        />
+                                    </Box>
+                                )}
+
+                                <Box>
+                                    <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                                        TRAJECTORY START
+                                    </Typography>
+
+                                    <FormControl sx={recalculateInputStyle}>
+                                        <Select
+                                            value={trajectoryStart}
+                                            onChange={(e) => setTrajectoryStart(e.target.value)}
+                                            disabled={!editable}
+                                        >
+                                            {trajectoryMonthOptions.map((month) => (
+                                                <MenuItem
+                                                    key={month}
+                                                    value={month}
+                                                >
+                                                    {new Date(month).toLocaleDateString(
+                                                        "en-US",
+                                                        {
+                                                            month: "short",
+                                                            year: "2-digit",
+                                                        }
+                                                    )}
+                                                </MenuItem>
+                                            ))}
+                                        </Select>
+                                    </FormControl>
+                                </Box>
+                            </>
                         )}
 
-                        <Box sx={{ width: 160 }}>
-                            <Typography sx={{ mb: 1, fontSize: "14px" }}>
-                                MULTIPLIER{" "}
-                                <span style={{ fontWeight: 700 }}>
-                                    {multiplier.toFixed(2)}
-                                </span>
-                            </Typography>
+                        <Box>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                                <Typography sx={{ fontSize: "14px" }}>
+                                    MULTIPLIER
+                                </Typography>
+                                <Tooltip title="Please enter value from 1 to 3" arrow placement="top">
+                                    <InfoOutlinedIcon
+                                        sx={{
+                                            fontSize: 16,
+                                            color: "#64748b",
+                                            cursor: "pointer",
+                                        }}
+                                    />
+                                </Tooltip>
+                            </Box>
 
-                            <Slider
+                            <TextField
+                                type="number"
                                 value={multiplier}
-                                min={0}
-                                max={3}
-                                step={0.01}
                                 disabled={!editable}
-                                onChange={(e, val) => setMultiplier(val)}
+                                onChange={(e) => setMultiplier(Number(e.target.value))}
+                                inputProps={{
+                                    min: 0,
+                                    max: 2,
+                                    step: 0.01,
+                                }}
+                                sx={recalculateInputStyle}
                             />
                         </Box>
                         <Box>
@@ -893,6 +1114,8 @@ export default function ModelInput() {
                     onUpdateScenario={handleUpdateScenario}
                     onSaveScenario={handleSaveScenario}
                     scenarioSelector={scenarioSelector}
+                    selectedProduct={appliedBrand}
+                    selectedLot={appliedLot}
                 // scenarioName={scenarioName}
                 // setScenarioName={setScenarioName}
                 />

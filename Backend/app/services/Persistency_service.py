@@ -11,6 +11,14 @@ def _extract_brands_from_market_share_table(
     if not market_share_table:
         return []
 
+    # Handle list response
+    if isinstance(market_share_table, list):
+
+        if not market_share_table:
+            return []
+
+        market_share_table = market_share_table[0]
+
     children = market_share_table.get(
         "children",
         []
@@ -28,56 +36,203 @@ def _extract_brands_from_market_share_table(
     return brands
 
 
-def get_persistency_filters_service(
-    ta_name: str
-):
+def get_persistency_filters_service(ta_name: str):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     try:
-
         cursor.execute("""
-            SELECT DISTINCT ON (
+            WITH event_scenarios AS (
+                SELECT DISTINCT
+                    scenario_name
+                FROM raw.market_event_scenarios
+                WHERE ta_name = %s
+                  AND scenario_name IS NOT NULL
+            ),
+
+            finalized AS (
+                SELECT DISTINCT
+                    selected_scenario_name AS scenario_name
+                FROM raw.forecast_finalized_selections
+                WHERE ta_name = %s
+                  AND selected_scenario_name IS NOT NULL
+            ),
+
+            scenario_filters AS (
+
+                -- 1. Highest priority: market event scenarios
+                SELECT DISTINCT
+                    es.scenario_name,
+                    es.scenario_name AS display_scenario_name,
+                    1 AS priority
+                FROM event_scenarios es
+
+                UNION ALL
+
+                -- 2. Finalised scenarios only if not already present in market events
+                SELECT DISTINCT
+                    f.scenario_name,
+                    f.scenario_name AS display_scenario_name,
+                    2 AS priority
+                FROM finalized f
+                WHERE f.scenario_name NOT IN (
+                    SELECT scenario_name
+                    FROM event_scenarios
+                )
+
+                UNION ALL
+
+                -- 3. Forecast scenarios only if not already present in events/finalised
+                SELECT DISTINCT
+                    fs.scenario_name,
+                    fs.scenario_name AS display_scenario_name,
+                    3 AS priority
+                FROM raw.forecast_scenarios fs
+                WHERE fs.ta_name = %s
+                  AND fs.scenario_name IS NOT NULL
+                  AND fs.scenario_name NOT IN (
+                        SELECT scenario_name
+                        FROM event_scenarios
+                  )
+                  AND fs.scenario_name NOT IN (
+                        SELECT scenario_name
+                        FROM finalized
+                  )
+            ),
+
+            latest_event_data AS (
+                SELECT DISTINCT ON (
+                    sf.display_scenario_name,
+                    mes.indication,
+                    mes.lot
+                )
+                    sf.display_scenario_name AS scenario_name,
+                    mes.indication,
+                    mes.lot,
+                    mes.nps_table
+                FROM scenario_filters sf
+                JOIN raw.market_event_scenarios mes
+                  ON mes.ta_name = %s
+                 AND mes.scenario_name = sf.scenario_name
+                WHERE sf.priority = 1
+                  AND mes.nps_table IS NOT NULL
+                ORDER BY
+                    sf.display_scenario_name,
+                    mes.indication,
+                    mes.lot,
+                    mes.updated_at DESC
+            ),
+
+            latest_finalized_data AS (
+                SELECT DISTINCT ON (
+                    sf.display_scenario_name,
+                    ffs.indication,
+                    ffs.lot
+                )
+                    sf.display_scenario_name AS scenario_name,
+                    ffs.indication,
+                    ffs.lot,
+                    ffs.table_data AS nps_table
+                FROM scenario_filters sf
+                JOIN raw.forecast_finalized_selections ffs
+                  ON ffs.ta_name = %s
+                 AND ffs.selected_scenario_name = sf.scenario_name
+                WHERE sf.priority = 2
+                  AND LOWER(ffs.metric) = 'nps'
+                  AND ffs.table_data IS NOT NULL
+                ORDER BY
+                    sf.display_scenario_name,
+                    ffs.indication,
+                    ffs.lot,
+                    ffs.updated_at DESC
+            ),
+
+            latest_forecast_data AS (
+                SELECT DISTINCT ON (
+                    sf.display_scenario_name,
+                    fs.indication,
+                    fs.lot
+                )
+                    sf.display_scenario_name AS scenario_name,
+                    fs.indication,
+                    fs.lot,
+                    fs.table_data AS nps_table
+                FROM scenario_filters sf
+                JOIN raw.forecast_scenarios fs
+                  ON fs.ta_name = %s
+                 AND fs.scenario_name = sf.scenario_name
+                WHERE sf.priority = 3
+                  AND LOWER(fs.metric) = 'nps'
+                  AND fs.table_data IS NOT NULL
+                ORDER BY
+                    sf.display_scenario_name,
+                    fs.indication,
+                    fs.lot,
+                    fs.updated_at DESC
+            ),
+
+            latest_lot_data AS (
+                SELECT * FROM latest_event_data
+                UNION ALL
+                SELECT * FROM latest_finalized_data
+                UNION ALL
+                SELECT * FROM latest_forecast_data
+            )
+
+            SELECT
+                (
+                    SELECT jsonb_agg(
+                        display_scenario_name
+                        ORDER BY priority, display_scenario_name
+                    )
+                    FROM scenario_filters
+                ) AS scenario_names,
+                scenario_name,
+                indication,
+                lot,
+                nps_table
+            FROM latest_lot_data
+            ORDER BY
+                scenario_name,
                 indication,
                 lot
-            )
-                indication,
-                lot,
-                market_share_table
-            FROM raw.market_event_scenarios
-            WHERE ta_name = %s
-            ORDER BY
-                indication,
-                lot,
-                updated_at DESC
-        """, (ta_name,))
+        """, (
+            ta_name,
+            ta_name,
+            ta_name,
+            ta_name,
+            ta_name,
+            ta_name
+        ))
 
         rows = cursor.fetchall()
 
         data = {}
+        scenario_names = []
 
         for (
+            scenario_name_list,
+            scenario_name,
             indication,
             lot,
-            market_share_table
+            nps_table
         ) in rows:
 
-            brands = (
-                _extract_brands_from_market_share_table(
-                    market_share_table
-                )
+            if scenario_name_list:
+                scenario_names = scenario_name_list
+
+            brands = _extract_brands_from_market_share_table(
+                nps_table
             )
 
-            data.setdefault(
-                indication,
-                {}
-            )
-
-            data[indication][lot] = brands
+            data.setdefault(scenario_name, {})
+            data[scenario_name].setdefault(indication, {})
+            data[scenario_name][indication][lot] = brands
 
         return {
             "ta_name": ta_name,
+            "scenario_names": scenario_names,
             "data": data
         }
 
@@ -85,10 +240,258 @@ def get_persistency_filters_service(
         cursor.close()
         conn.close()
 
-
 def normalize_to_month_start(date_str: str) -> str:
     dt = datetime.strptime(str(date_str), "%Y-%m-%d")
     return dt.strftime("%Y-%m-01")
+
+
+def clean_scenario_name(scenario_name: str) -> str:
+    return (
+        scenario_name
+        .replace(" (Finalised)", "")
+        .strip()
+    )
+
+
+def _to_dict(value):
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        return json.loads(value)
+
+    return value
+
+
+def _get_chart_values(chart):
+    chart = _to_dict(chart)
+
+    if not chart:
+        return [], []
+
+    months = chart.get("months", [])
+
+    if "train_values" in chart or "forecast_values" in chart:
+        values = (
+            chart.get("train_values", [])
+            + chart.get("forecast_values", [])
+        )
+        return months, values
+
+    series = chart.get("series", [])
+
+    if series:
+        selected_series = None
+
+        for item in series:
+            if str(item.get("label", "")).lower() == "total":
+                selected_series = item
+                break
+
+        if selected_series is None:
+            selected_series = series[0]
+
+        values = (
+            selected_series.get("train_values", [])
+            + selected_series.get("forecast_values", [])
+        )
+
+        return months, values
+
+    return months, []
+
+
+def _normalize_nps_table(nps_table):
+    nps_table = _to_dict(nps_table)
+
+    if isinstance(nps_table, list):
+        if not nps_table:
+            return None
+
+        return nps_table[0]
+
+    return nps_table
+
+
+def fetch_scenario_data(
+    cursor,
+    ta_name: str,
+    scenario_name: str,
+    indication: str,
+    lot: str,
+    brand: str
+):
+    base_scenario_name = clean_scenario_name(scenario_name)
+
+    # ---------------------------------------------------
+    # Priority 1: market_event_scenarios
+    # Directly use nps_table
+    # ---------------------------------------------------
+    cursor.execute("""
+        SELECT
+            market_share_chart,
+            nps_table
+        FROM raw.market_event_scenarios
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND indication = %s
+          AND lot = %s
+          AND nps_table IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        base_scenario_name,
+        indication,
+        lot
+    ))
+
+    row = cursor.fetchone()
+
+    if row:
+        chart, nps_table = row
+
+        return {
+            "source": "market_events",
+            "chart": _to_dict(chart),
+            "nps_table": _normalize_nps_table(nps_table)
+        }
+
+    # ---------------------------------------------------
+    # Priority 2: finalized scenario
+    # Directly use table_data
+    # ---------------------------------------------------
+    cursor.execute("""
+        SELECT
+            chart,
+            table_data
+        FROM raw.forecast_finalized_selections
+        WHERE ta_name = %s
+          AND selected_scenario_name = %s
+          AND indication = %s
+          AND lot = %s
+          AND LOWER(metric) = 'nps'
+          AND table_data IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        base_scenario_name,
+        indication,
+        lot
+    ))
+
+    row = cursor.fetchone()
+
+    if row:
+        chart, table_data = row
+
+        return {
+            "source": "finalized",
+            "chart": _to_dict(chart),
+            "nps_table": _normalize_nps_table(table_data)
+        }
+
+    # ---------------------------------------------------
+    # Priority 3: forecast_scenarios
+    # Calculate product NPS:
+    # total NPS * product market share / 100
+    # ---------------------------------------------------
+
+    # 3A. Get total NPS
+    cursor.execute("""
+        SELECT
+            chart
+        FROM raw.forecast_scenarios
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND indication = %s
+          AND lot = %s
+          AND LOWER(metric) = 'nps'
+          AND chart IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        base_scenario_name,
+        indication,
+        lot
+    ))
+
+    nps_row = cursor.fetchone()
+
+    if not nps_row:
+        return None
+
+    nps_chart = _to_dict(nps_row[0])
+    nps_months, total_nps_values = _get_chart_values(nps_chart)
+
+    # 3B. Get selected brand market share
+    cursor.execute("""
+        SELECT
+            chart
+        FROM raw.forecast_scenarios
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND indication = %s
+          AND lot = %s
+          AND LOWER(metric) = 'market_share'
+          AND LOWER(product) = LOWER(%s)
+          AND chart IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        base_scenario_name,
+        indication,
+        lot,
+        brand
+    ))
+
+    market_share_row = cursor.fetchone()
+
+    if not market_share_row:
+        raise ValueError(
+            f"No market share data found for brand {brand}, scenario {scenario_name}, lot {lot}"
+        )
+
+    market_share_chart = _to_dict(market_share_row[0])
+    ms_months, market_share_values = _get_chart_values(market_share_chart)
+
+    if nps_months != ms_months:
+        raise ValueError(
+            f"Month mismatch between NPS and market share for scenario {scenario_name}, lot {lot}"
+        )
+
+    brand_nps_values = [
+        round(
+            float(total_nps) * float(ms_value) / 100
+        )
+        for total_nps, ms_value in zip(
+            total_nps_values,
+            market_share_values
+        )
+    ]
+
+    calculated_nps_table = {
+        "lot": lot,
+        "total": total_nps_values,
+        "children": [
+            {
+                "label": brand,
+                "values": brand_nps_values
+            }
+        ],
+        "scenario": base_scenario_name
+    }
+
+    return {
+        "source": "forecast_scenarios",
+        "chart": {
+            "months": nps_months
+        },
+        "nps_table": calculated_nps_table
+    }
 
 
 def apply_persistency_service(payload):
@@ -98,6 +501,9 @@ def apply_persistency_service(payload):
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
+
         indication = payload.indication
         lots = payload.lots
         brand = payload.brand
@@ -110,36 +516,28 @@ def apply_persistency_service(payload):
 
         for lot in lots:
 
-            cursor.execute("""
-                SELECT
-                    market_share_chart,
-                    nps_table
-                FROM raw.market_event_scenarios
-                WHERE ta_name = %s
-                  AND indication = %s
-                  AND lot = %s
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                ta_name,
-                indication,
-                lot
-            ))
+            scenario_data = fetch_scenario_data(
+                cursor=cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                indication=indication,
+                lot=lot,
+                brand=brand
+            )
 
-            row = cursor.fetchone()
-
-            if not row:
+            if not scenario_data:
                 raise ValueError(
-                    f"No market event data found for lot {lot}"
+                    f"No data found for scenario {scenario_name}, indication {indication}, lot {lot}"
                 )
 
-            market_share_chart, nps_table = row
+            chart = scenario_data["chart"]
+            nps_table = scenario_data["nps_table"]
 
-            months = market_share_chart.get("months", [])
+            months = chart.get("months", [])
 
             if not months:
                 raise ValueError(
-                    f"No months available for lot {lot}"
+                    f"No months available for scenario {scenario_name}, lot {lot}"
                 )
 
             available_start_date = min(months)
@@ -192,7 +590,7 @@ def apply_persistency_service(payload):
 
             if brand_values is None:
                 raise ValueError(
-                    f"Brand {brand} not found in NPS table for lot {lot}"
+                    f"Brand {brand} not found in NPS table for scenario {scenario_name}, lot {lot}"
                 )
 
             new_patients = [
@@ -222,10 +620,17 @@ def apply_persistency_service(payload):
                     f"No persistency curve found for lot {lot}"
                 )
 
-            persistency_map = {
-                int(month): float(persistency)
-                for month, persistency in persistency_rows
-            }
+            persistency_map = {}
+
+            current_value = 100
+
+            for month_num in range(1, 25):
+                persistency_map[month_num] = current_value
+
+                current_value = max(
+                    0,
+                    current_value - 5
+                )
 
             continuing_patients = []
 
@@ -265,12 +670,10 @@ def apply_persistency_service(payload):
                 )
             ]
 
-            # ---------------------------------------------------
-            # Save / Update Persistency Output for Vial Calculation
-            # ---------------------------------------------------
             cursor.execute("""
                 INSERT INTO raw.persistency_outputs (
                     ta_name,
+                    scenario_name,
                     indication,
                     brand,
                     lot,
@@ -281,7 +684,7 @@ def apply_persistency_service(payload):
                     total_patients
                 )
                 VALUES (
-                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
                     %s,
                     %s::jsonb,
                     %s::jsonb,
@@ -290,6 +693,7 @@ def apply_persistency_service(payload):
                 )
                 ON CONFLICT (
                     ta_name,
+                    scenario_name,
                     indication,
                     brand,
                     lot
@@ -303,6 +707,7 @@ def apply_persistency_service(payload):
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
+                base_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -312,9 +717,10 @@ def apply_persistency_service(payload):
                 json.dumps(continuing_patients),
                 json.dumps(total_patients)
             ))
-
+            
             response_table.append({
                 "lot": lot,
+                "source": scenario_data["source"],
                 "children": [
                     {
                         "label": "New Patients",
@@ -332,6 +738,7 @@ def apply_persistency_service(payload):
             })
 
         conn.commit()
+        
         ############ avg_vials_per_dose helper fucnction ###############
         avg_vials_table = build_avg_vials_per_dose_table(
         cursor=cursor,
@@ -342,7 +749,9 @@ def apply_persistency_service(payload):
         months=response_months or [],
         use_assumptions=False
         )
-        
+
+
+        ############ ex factory demand helper fucnction ###############    
         demand_vials_table = build_demand_vials_table(
         cursor=cursor,
         ta_name=ta_name,
@@ -353,6 +762,131 @@ def apply_persistency_service(payload):
         persistency_table=response_table,
         avg_vials_per_dose_table=avg_vials_table
         )
+
+        ############ save avg vials + compliance into raw.vials_assumptions ###############
+
+        for lot_data in avg_vials_table:
+
+            lot = lot_data.get("lot")
+
+            avg_vials_values = []
+
+            # Get Avg Vials from avg_vials_table
+            for child in lot_data.get("children", []):
+                label = str(child.get("label", "")).strip().lower()
+
+                if "avg" in label and "vial" in label:
+                    avg_vials_values = child.get("values", [])
+                    break
+
+            # Get Compliance from demand_vials_table
+            compliance_values = []
+            absolute_adjustment_values = []
+            adjustment_percent_values = []
+
+            demand_lot_data = next(
+                (
+                    item for item in demand_vials_table
+                    if item.get("lot") == lot
+                ),
+                None
+            )
+
+            if demand_lot_data:
+                for child in demand_lot_data.get("children", []):
+                    label = str(child.get("label", "")).strip().lower()
+
+                    if "compliance" in label:
+                        compliance_values = child.get("values", [])
+
+                    elif "absolute adjustment" in label:
+                        absolute_adjustment_values = child.get("values", [])
+
+                    elif "adjustment %" in label:
+                        adjustment_percent_values = child.get("values", [])
+
+            for idx, month_str in enumerate(response_months or []):
+
+                month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+                year = month_dt.year
+                month = month_dt.month
+
+                avg_vials_value = (
+                    avg_vials_values[idx]
+                    if idx < len(avg_vials_values)
+                    and avg_vials_values[idx] is not None
+                    else 0
+                )
+
+                compliance_value = (
+                    compliance_values[idx]
+                    if idx < len(compliance_values)
+                    and compliance_values[idx] is not None
+                    else 0
+                )
+
+                absolute_adjustment_value = (
+                    absolute_adjustment_values[idx]
+                    if idx < len(absolute_adjustment_values)
+                    and absolute_adjustment_values[idx] is not None
+                    else 0
+                )
+
+                adjustment_percent_value = (
+                    adjustment_percent_values[idx]
+                    if idx < len(adjustment_percent_values)
+                    and adjustment_percent_values[idx] is not None
+                    else 0
+                )
+
+                cursor.execute("""
+                    INSERT INTO raw.vials_assumptions (
+                        ta_name,
+                        scenario_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month,
+                        avg_vials_per_dose,
+                        compliance,
+                        absolute_adjustment,
+                        adjustment_percent
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    ON CONFLICT (
+                        ta_name,
+                        scenario_name,
+                        indication,
+                        brand,
+                        lot,
+                        year,
+                        month
+                    )
+                    DO UPDATE SET
+                        avg_vials_per_dose = EXCLUDED.avg_vials_per_dose,
+                        compliance = EXCLUDED.compliance,
+                        absolute_adjustment = EXCLUDED.absolute_adjustment,
+                        adjustment_percent = EXCLUDED.adjustment_percent,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (
+                    ta_name,
+                    base_scenario_name,
+                    indication,
+                    brand,
+                    lot,
+                    year,
+                    month,
+                    avg_vials_value,
+                    compliance_value,
+                    absolute_adjustment_value,
+                    adjustment_percent_value
+                ))
+
         ############ inventory table ###############
         inventory_table = build_inventory_table(
             brand=brand,
@@ -362,12 +896,15 @@ def apply_persistency_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=scenario_name,
             indication=indication,
             brand=brand,
             months=response_months or [],
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
+        
         conn.commit()
 
         return {
@@ -782,6 +1319,11 @@ def apply_persistency_curve_service(
 
     try:
         ta_name = payload.ta_name
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(
+            scenario_name
+        )
+
         indication = payload.indication
         brand = payload.brand
 
@@ -800,50 +1342,36 @@ def apply_persistency_curve_service(
             lot = lot_curve.lot
             curve_name = lot_curve.curve_name
 
-            # ---------------------------------------------------
-            # Fetch latest market event data for LOT
-            # ---------------------------------------------------
-            cursor.execute("""
-                SELECT
-                    market_share_chart,
-                    nps_table
-                FROM raw.market_event_scenarios
-                WHERE ta_name = %s
-                  AND indication = %s
-                  AND lot = %s
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                ta_name,
-                indication,
-                lot
-            ))
+            scenario_data = fetch_scenario_data(
+                cursor=cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                indication=indication,
+                lot=lot,
+                brand=brand
+            )
 
-            row = cursor.fetchone()
-
-            if not row:
+            if not scenario_data:
                 raise ValueError(
-                    f"No market event data found for lot {lot}"
+                    f"No data found for scenario {scenario_name}, indication {indication}, lot {lot}"
                 )
 
-            market_share_chart, nps_table = row
+            chart = scenario_data["chart"]
+            nps_table = scenario_data["nps_table"]
 
-            months = market_share_chart.get(
+            months = chart.get(
                 "months",
                 []
             )
 
             if not months:
                 raise ValueError(
-                    f"No months available for lot {lot}"
+                    f"No months available for scenario {scenario_name}, lot {lot}"
                 )
 
             available_start_date = min(months)
             available_end_date = max(months)
 
-            # ---------------------------------------------------
-            # Validate dates
-            # ---------------------------------------------------
             if start_date not in months:
                 raise ValueError(
                     f"Invalid start_date: {start_date}. "
@@ -877,9 +1405,6 @@ def apply_persistency_curve_service(
             if response_months is None:
                 response_months = filtered_months
 
-            # ---------------------------------------------------
-            # Extract NPS / New Patients for selected brand
-            # ---------------------------------------------------
             children = nps_table.get(
                 "children",
                 []
@@ -905,7 +1430,7 @@ def apply_persistency_curve_service(
 
             if brand_values is None:
                 raise ValueError(
-                    f"Brand {brand} not found in NPS table for lot {lot}"
+                    f"Brand {brand} not found in NPS table for scenario {scenario_name}, lot {lot}"
                 )
 
             new_patients = [
@@ -915,9 +1440,6 @@ def apply_persistency_curve_service(
                 ]
             ]
 
-            # ---------------------------------------------------
-            # Fetch saved persistency curve from DB
-            # ---------------------------------------------------
             cursor.execute("""
                 SELECT
                     curve_values
@@ -956,10 +1478,6 @@ def apply_persistency_curve_service(
                 )
             }
 
-            # ---------------------------------------------------
-            # Continuing Patients
-            # Same existing logic
-            # ---------------------------------------------------
             continuing_patients = []
 
             for current_month_idx in range(
@@ -968,12 +1486,10 @@ def apply_persistency_curve_service(
 
                 continuing = 0.0
 
-                # previous cohorts only
                 for cohort_idx in range(
                     current_month_idx
                 ):
 
-                    # previous month uses persistency month 1
                     persist_month = max(
                         1,
                         current_month_idx - cohort_idx
@@ -998,10 +1514,6 @@ def apply_persistency_curve_service(
                     round(continuing)
                 )
 
-            # ---------------------------------------------------
-            # Total Patients
-            # Same existing logic
-            # ---------------------------------------------------
             total_patients = [
                 round(new_val + cont_val)
                 for new_val, cont_val in zip(
@@ -1010,12 +1522,10 @@ def apply_persistency_curve_service(
                 )
             ]
 
-            # ---------------------------------------------------
-            # Save / Update Persistency Output for Vial Calculation
-            # ---------------------------------------------------
             cursor.execute("""
                 INSERT INTO raw.persistency_outputs (
                     ta_name,
+                    scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1026,7 +1536,7 @@ def apply_persistency_curve_service(
                     total_patients
                 )
                 VALUES (
-                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
                     %s,
                     %s::jsonb,
                     %s::jsonb,
@@ -1035,6 +1545,7 @@ def apply_persistency_curve_service(
                 )
                 ON CONFLICT (
                     ta_name,
+                    scenario_name,
                     indication,
                     brand,
                     lot
@@ -1048,6 +1559,7 @@ def apply_persistency_curve_service(
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
+                base_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -1058,33 +1570,7 @@ def apply_persistency_curve_service(
                 json.dumps(total_patients)
             ))
 
-            # ---------------------------------------------------
-            # LOT table
-            # ---------------------------------------------------
-            response_table.append({
-                "lot": lot,
-                "curve_name": curve_name,
-                "children": [
-                    {
-                        "label": "New Patients",
-                        "values": new_patients
-                    },
-                    {
-                        "label": "Continuing Patients",
-                        "values": continuing_patients
-                    },
-                    {
-                        "label": "Total Patients",
-                        "values": total_patients
-                    }
-                ]
-            })
-
         conn.commit()
-
-        # ---------------------------------------------------
-        # Fetch all LOT outputs from persistency_outputs
-        # ---------------------------------------------------
 
         response_lots = payload.lots
 
@@ -1098,12 +1584,14 @@ def apply_persistency_curve_service(
                 total_patients
             FROM raw.persistency_outputs
             WHERE ta_name = %s
+              AND scenario_name = %s
               AND indication = %s
               AND brand = %s
-             AND lot = ANY(%s)
+              AND lot = ANY(%s)
             ORDER BY lot
         """, (
             ta_name,
+            base_scenario_name,
             indication,
             brand,
             response_lots
@@ -1126,11 +1614,9 @@ def apply_persistency_curve_service(
             if response_months is None:
                 response_months = months
 
-
             month_count = len(response_months)
 
             months = months[:month_count]
-
             new_patients = new_patients[:month_count]
             continuing_patients = continuing_patients[:month_count]
             total_patients = total_patients[:month_count]
@@ -1153,13 +1639,16 @@ def apply_persistency_curve_service(
                     }
                 ]
             })
+
         lots = [
-                item["lot"]
-                for item in response_table
-            ]
+            item["lot"]
+            for item in response_table
+        ]
+
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1182,8 +1671,10 @@ def apply_persistency_curve_service(
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": response_months or [],
@@ -1208,12 +1699,9 @@ def save_avg_vials_per_dose_service(payload):
         indication = payload.indication
         brand = payload.brand
         months = payload.months
+        scenario_name = payload.scenario_name
+        base_scenario_name = clean_scenario_name(scenario_name)
 
-        # -----------------------------------------
-        # Save edited avg vials into same table
-        # compliance is preserved if already present
-        # else default 100
-        # -----------------------------------------
         for lot_item in payload.avg_vials_per_dose_table:
 
             lot = lot_item.lot
@@ -1231,8 +1719,38 @@ def save_avg_vials_per_dose_service(payload):
                 month = month_dt.month
 
                 cursor.execute("""
+                    SELECT compliance
+                    FROM raw.vials_assumptions
+                    WHERE ta_name = %s
+                      AND scenario_name = %s
+                      AND indication = %s
+                      AND lot = %s
+                      AND brand = %s
+                      AND year = %s
+                      AND month = %s
+                    LIMIT 1
+                """, (
+                    ta_name,
+                    base_scenario_name,
+                    indication,
+                    lot,
+                    brand,
+                    year,
+                    month
+                ))
+
+                compliance_row = cursor.fetchone()
+
+                compliance_value = (
+                    compliance_row[0]
+                    if compliance_row
+                    else 100
+                )
+
+                cursor.execute("""
                     INSERT INTO raw.vials_assumptions (
                         ta_name,
+                        scenario_name,
                         indication,
                         lot,
                         brand,
@@ -1242,25 +1760,12 @@ def save_avg_vials_per_dose_service(payload):
                         compliance
                     )
                     VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s,
-                        %s,
-                        COALESCE(
-                            (
-                                SELECT compliance
-                                FROM raw.vials_assumptions
-                                WHERE ta_name = %s
-                                  AND indication = %s
-                                  AND lot = %s
-                                  AND brand = %s
-                                  AND year = %s
-                                  AND month = %s
-                            ),
-                            100
-                        )
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
                     )
                     ON CONFLICT (
                         ta_name,
+                        scenario_name,
                         indication,
                         brand,
                         lot,
@@ -1271,49 +1776,44 @@ def save_avg_vials_per_dose_service(payload):
                         avg_vials_per_dose = EXCLUDED.avg_vials_per_dose
                 """, (
                     ta_name,
+                    base_scenario_name,
                     indication,
                     lot,
                     brand,
                     year,
                     month,
                     avg_vial_value,
-
-                    ta_name,
-                    indication,
-                    lot,
-                    brand,
-                    year,
-                    month
+                    compliance_value
                 ))
 
-        # -----------------------------------------
-        # Fetch persistency output internally
-        # no need to return to frontend
-        # -----------------------------------------
         response_lots = [
-                item.lot
-                for item in payload.avg_vials_per_dose_table
-            ]
+            item.lot
+            for item in payload.avg_vials_per_dose_table
+        ]
+
         cursor.execute("""
-                SELECT
-                    lot,
-                    curve_name,
-                    months,
-                    new_patients,
-                    continuing_patients,
-                    total_patients
-                FROM raw.persistency_outputs
-                WHERE ta_name = %s
-                AND indication = %s
-                AND brand = %s
-                AND lot = ANY(%s)
-                ORDER BY lot
-            """, (
-                ta_name,
-                indication,
-                brand,
-                response_lots
-            ))
+            SELECT
+                lot,
+                curve_name,
+                months,
+                new_patients,
+                continuing_patients,
+                total_patients
+            FROM raw.persistency_outputs
+            WHERE ta_name = %s
+              AND scenario_name = %s
+              AND indication = %s
+              AND brand = %s
+              AND lot = ANY(%s)
+            ORDER BY lot
+        """, (
+            ta_name,
+            base_scenario_name,
+            indication,
+            brand,
+            response_lots
+        ))
+
         output_rows = cursor.fetchall()
 
         if not output_rows:
@@ -1360,6 +1860,7 @@ def save_avg_vials_per_dose_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1383,21 +1884,23 @@ def save_avg_vials_per_dose_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
+            scenario_name=base_scenario_name,
             indication=indication,
             brand=brand,
             months=response_months or [],
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
-      
 
         conn.commit()
 
         return {
             "ta_name": ta_name,
+            "scenario_name": scenario_name,
             "indication": indication,
             "brand": brand,
             "months": response_months,
