@@ -106,18 +106,57 @@ export default function Scenarios() {
             const response = await getScenarioFilters(therapyArea);
             const resData = response?.data;
 
-            // full mapping
             setMappingData(resData?.data || {});
 
-            // indications (top-level keys)
+            const defaultFilter = resData?.default_filter;
+
             setFilterOptions({
                 indications: Object.keys(resData?.data || {}),
                 metric_filters: resData?.metric_filters || [],
             });
 
+            if (defaultFilter) {
+                setIndication(defaultFilter.indication);
+                setLot(defaultFilter.lot);
+
+                // Auto Apply Filter
+                const scenarioNames =
+                    resData?.data?.[
+                        defaultFilter.indication
+                    ]?.[
+                        defaultFilter.lot
+                    ]?.available_scenarios?.map(
+                        sc => sc.scenario_name
+                    ) || [];
+
+                const payload = {
+                    ta_name: therapyArea,
+                    indication: defaultFilter.indication,
+                    lot: defaultFilter.lot,
+                    metric: "nps",
+                    scenario_names: scenarioNames,
+                };
+
+                const applyResponse =
+                    await applyScenarioFilters(payload);
+
+                const data = applyResponse?.data;
+
+                setChartData(data?.chart || null);
+                setTableData(data?.table || {});
+                setIsDataLoaded(true);
+            }
+
         } catch (error) {
-            console.error("Failed to fetch scenario filters", error);
-            showSnackbar("Failed to fetch scenario filters", "error");
+            console.error(
+                "Failed to fetch scenario filters",
+                error
+            );
+
+            showSnackbar(
+                "Failed to fetch scenario filters",
+                "error"
+            );
         }
     };
 

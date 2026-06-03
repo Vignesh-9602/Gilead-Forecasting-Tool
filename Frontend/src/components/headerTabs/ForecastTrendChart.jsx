@@ -26,6 +26,10 @@ import DialogTitle from "@mui/material/DialogTitle";
 import DialogContent from "@mui/material/DialogContent";
 import DialogActions from "@mui/material/DialogActions";
 import { useSnackbarStore } from "../../stores";
+import DownloadIcon from "@mui/icons-material/Download";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
+import { useLoadingStore } from "../../stores";
 
 const PlotComponent = Plot.default || Plot;
 
@@ -64,6 +68,7 @@ export default function ForecastTrendChart({
     const [lastEditedCell, setLastEditedCell] = useState(null);
     const [openDialog, setOpenDialog] = useState(false);
     const [scenarioName, setScenarioName] = useState("");
+    const { setLoading, isLoading } = useLoadingStore();
 
     useEffect(() => {
         if (tableData?.length) {
@@ -310,6 +315,8 @@ export default function ForecastTrendChart({
 
     const handleRefresh = async () => {
         try {
+            setLoading(true);
+
             const payload = {
                 therapy_area: therapyArea,
                 indication: indication,
@@ -351,6 +358,8 @@ export default function ForecastTrendChart({
         } catch (error) {
             console.error("Save Changes API failed:", error);
             showSnackbar("Failed to refresh data", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -422,6 +431,123 @@ export default function ForecastTrendChart({
             showgrid: false,
             range: [0, yMax],  // for NPS
         };
+
+    const handleDownloadExcel = async () => {
+        if (!tableRows.length) return;
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet("Forecast Data");
+
+        // ======================
+        // Filter Information
+        // ======================
+        worksheet.addRow(["Scenario", scenarioSelector]);
+        worksheet.addRow(["Indication", indication]);
+        worksheet.addRow(["LOT", selectedLot]);
+        worksheet.addRow([
+            "Metric",
+            metric === "market_share" ? "Market Share" : metric
+        ]);
+        worksheet.addRow(["Product", selectedProduct || "-"]);
+        worksheet.addRow([]);
+
+        // ======================
+        // Table Header
+        // ======================
+        const headerRowNumber = worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Product / LOT",
+            ...allMonths
+        ]);
+
+        // ======================
+        // Table Data
+        // ======================
+        if (metric === "market_share") {
+            tableRows.forEach((lotGroup) => {
+                const lotRow = worksheet.addRow([
+                    lotGroup.lot,
+                    ...(lotGroup.total || [])
+                ]);
+
+                lotRow.font = { bold: true };
+
+                lotGroup.children.forEach((row) => {
+                    worksheet.addRow([
+                        row.label,
+                        ...row.values
+                    ]);
+                });
+            });
+        } else {
+            tableRows.forEach((row) => {
+                const child = row.children?.[0];
+
+                worksheet.addRow([
+                    row.lot,
+                    ...(child?.values || [])
+                ]);
+            });
+        }
+
+        // ======================
+        // Styling
+        // ======================
+
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal: "center",
+                    vertical: "middle"
+                };
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    bottom: { style: "thin" },
+                    right: { style: "thin" }
+                };
+            });
+        });
+
+        // Header row styling
+        worksheet.getRow(headerRowNumber).font = {
+            bold: true
+        };
+
+        // Metadata styling
+        // for (let i = 1; i <= 5; i++) {
+        //     worksheet.getRow(i).font = {
+        //         bold: true
+        //     };
+        // }
+
+        // Column widths
+        worksheet.getColumn(1).width = 25;
+
+        for (let i = 2; i <= allMonths.length + 1; i++) {
+            worksheet.getColumn(i).width = 12;
+        }
+
+        // Freeze header row
+        // worksheet.views = [
+        //     {
+        //         state: "frozen",
+        //         ySplit: headerRowNumber
+        //     }
+        // ];
+
+        // ======================
+        // Download
+        // ======================
+        const buffer = await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `${scenarioSelector}_${indication}_${metric}_${selectedLot}.xlsx`
+        );
+    };
 
     return (
         <>
@@ -533,6 +659,11 @@ export default function ForecastTrendChart({
 
                 {/* RIGHT SIDE BUTTONS */}
                 <Box sx={{ display: "flex", gap: 2 }}>
+                    <Tooltip title="Download Table">
+                        <IconButton onClick={handleDownloadExcel} disabled={!tableRows.length}>
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
                     <Button
                         variant="contained"
                         sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}

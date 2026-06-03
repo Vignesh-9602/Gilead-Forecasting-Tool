@@ -60,8 +60,6 @@ def get_persistency_filters_service(ta_name: str):
             ),
 
             scenario_filters AS (
-
-                -- 1. Highest priority: market event scenarios
                 SELECT DISTINCT
                     es.scenario_name,
                     es.scenario_name AS display_scenario_name,
@@ -70,20 +68,17 @@ def get_persistency_filters_service(ta_name: str):
 
                 UNION ALL
 
-                -- 2. Finalised scenarios only if not already present in market events
                 SELECT DISTINCT
                     f.scenario_name,
                     f.scenario_name AS display_scenario_name,
                     2 AS priority
                 FROM finalized f
                 WHERE f.scenario_name NOT IN (
-                    SELECT scenario_name
-                    FROM event_scenarios
+                    SELECT scenario_name FROM event_scenarios
                 )
 
                 UNION ALL
 
-                -- 3. Forecast scenarios only if not already present in events/finalised
                 SELECT DISTINCT
                     fs.scenario_name,
                     fs.scenario_name AS display_scenario_name,
@@ -92,12 +87,10 @@ def get_persistency_filters_service(ta_name: str):
                 WHERE fs.ta_name = %s
                   AND fs.scenario_name IS NOT NULL
                   AND fs.scenario_name NOT IN (
-                        SELECT scenario_name
-                        FROM event_scenarios
+                        SELECT scenario_name FROM event_scenarios
                   )
                   AND fs.scenario_name NOT IN (
-                        SELECT scenario_name
-                        FROM finalized
+                        SELECT scenario_name FROM finalized
                   )
             ),
 
@@ -193,6 +186,25 @@ def get_persistency_filters_service(ta_name: str):
                 lot,
                 nps_table
             FROM latest_lot_data
+
+            UNION ALL
+
+            SELECT
+                (
+                    SELECT jsonb_agg(
+                        display_scenario_name
+                        ORDER BY priority, display_scenario_name
+                    )
+                    FROM scenario_filters
+                ) AS scenario_names,
+                NULL AS scenario_name,
+                NULL AS indication,
+                NULL AS lot,
+                NULL AS nps_table
+            WHERE NOT EXISTS (
+                SELECT 1 FROM latest_lot_data
+            )
+
             ORDER BY
                 scenario_name,
                 indication,
@@ -222,6 +234,9 @@ def get_persistency_filters_service(ta_name: str):
             if scenario_name_list:
                 scenario_names = scenario_name_list
 
+            if not scenario_name or not indication or not lot or not nps_table:
+                continue
+
             brands = _extract_brands_from_market_share_table(
                 nps_table
             )
@@ -230,10 +245,92 @@ def get_persistency_filters_service(ta_name: str):
             data[scenario_name].setdefault(indication, {})
             data[scenario_name][indication][lot] = brands
 
+        # -----------------------------------------------------
+        # Default filter
+        # -----------------------------------------------------
+
+        default_scenario_name = ""
+        default_indication = ""
+        default_lots = []
+        default_brand = ""
+        default_start_date = ""
+        default_end_date = ""
+
+        if scenario_names:
+
+            default_scenario_name = (
+                "finalized"
+                if "finalized" in scenario_names
+                else scenario_names[0]
+            )
+
+        if default_scenario_name in data and data[default_scenario_name]:
+
+            default_indication = sorted(
+                data[default_scenario_name].keys()
+            )[0]
+
+            lots_map = data[default_scenario_name][default_indication]
+
+            default_lots = sorted(
+                lots_map.keys(),
+                key=lambda x: {
+                    "1L": 1,
+                    "2L": 2,
+                    "3L+": 3,
+                    "3L": 3,
+                    "4L": 4,
+                    "4L+":4,
+                    "5L+": 5
+                }.get(x, 99)
+            )
+
+            if default_lots:
+                first_lot = default_lots[0]
+                brands = lots_map.get(first_lot, [])
+
+                default_brand = (
+                    "TPC"
+                    if "TPC" in brands
+                    else brands[0] if brands else ""
+                )
+
+        # -----------------------------------------------------
+        # Get latest one-year date range from market_event_scenarios
+        # -----------------------------------------------------
+
+        cursor.execute("""
+                    SELECT
+                MAX(month_date)::date AS end_date,
+                (MAX(month_date)::date - INTERVAL '1 year')::date AS start_date
+            FROM (
+                SELECT
+                    jsonb_array_elements_text(
+                        market_share_chart->'months'
+                    )::date AS month_date
+                FROM raw.market_event_scenarios
+                WHERE ta_name = %s
+            ) t
+        """, (ta_name,))
+
+        date_row = cursor.fetchone()
+
+        if date_row and date_row[0]:
+
+            default_end_date = date_row[0].strftime("%Y-%m-%d")
+            default_start_date = date_row[1].strftime("%Y-%m-%d")
         return {
             "ta_name": ta_name,
             "scenario_names": scenario_names,
-            "data": data
+            "data": data,
+            "default_filter": {
+                    "scenario_name": default_scenario_name,
+                    "indication": default_indication,
+                    "lots": default_lots,
+                    "brand": default_brand,
+                    "start_date": default_start_date,
+                    "end_date": default_end_date
+                }
         }
 
     finally:

@@ -455,7 +455,8 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                     multiplier_horizon=multiplier_horizon,
                     total_growth_pct=growth.get("total_growth", 0),
                     duration=growth.get("duration", forecast_periods),
-                    k=growth.get("k_value")
+                    k=growth.get("k_value"),
+                    trajectory_start=growth.get("trajectory_start")   
                 )
 
         else:
@@ -614,9 +615,10 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     }
 
     # -----------------------------------------------------
-    # OVERRIDE ONLY CURRENT RECALCULATED MODEL FACTORS
+    # OVERRIDE GROWTH FACTORS FOR ALL CURVE TYPES
     # -----------------------------------------------------
     if model_type == "ets":
+
         response_factors["ets"] = {
             "alpha": ets.get("alpha"),
             "beta": ets.get("beta"),
@@ -624,16 +626,31 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         }
 
     else:
-        existing_model_factors = response_factors.get(model_type, {})
 
-        response_factors[model_type] = {
+        shared_growth_factors = {
             "total_growth": growth.get("total_growth"),
             "duration": growth.get("duration"),
-            "trajectory_start": existing_model_factors.get("trajectory_start")
+            "trajectory_start": growth.get("trajectory_start")
         }
 
-        if model_type != "linear":
-            response_factors[model_type]["k_value"] = growth.get("k_value")
+        response_factors["linear"] = {
+            **shared_growth_factors
+        }
+
+        response_factors["exponential"] = {
+            **shared_growth_factors,
+            "k_value": growth.get("k_value")
+        }
+
+        response_factors["logarithmic"] = {
+            **shared_growth_factors,
+            "k_value": growth.get("k_value")
+        }
+
+        response_factors["scurve"] = {
+            **shared_growth_factors,
+            "k_value": growth.get("k_value")
+        }
 
     return {
         "therapy_area": ta,

@@ -5,11 +5,15 @@ from pydantic import BaseModel
 class MarketEventIndicationData(BaseModel):
     scenarios: List[str]
 
+class MarketEventDefaultFilter(BaseModel):
+    indication: str
+    scenario_name: str
 
 class MarketEventFiltersResponse(BaseModel):
     ta_name: str
     # indications: List[str]
     data: Dict[str, MarketEventIndicationData]
+    default_filter: MarketEventDefaultFilter
 
 class MarketEventApplyFilterRequest(BaseModel):
     ta_name: str

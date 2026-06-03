@@ -83,9 +83,105 @@ export default function MarketEvents() {
                 indications: Object.keys(resData?.data || {}),
             });
 
+            const defaultFilter =
+                resData?.default_filter;
+
+            if (defaultFilter) {
+                setIndication(
+                    defaultFilter.indication
+                );
+
+                setSelectedScenario(
+                    defaultFilter.scenario_name
+                );
+
+                // Auto Apply Filter
+                const payload = {
+                    ta_name: therapyArea,
+                    indication:
+                        defaultFilter.indication,
+                    scenario_name:
+                        defaultFilter.scenario_name,
+                };
+
+                setLoading(true);
+
+                const applyResponse =
+                    await applyMarketEventFilters(
+                        payload
+                    );
+
+                const data =
+                    applyResponse?.data;
+
+                setLots(data?.lots || []);
+
+                setTargetProducts(
+                    data?.target_products || []
+                );
+
+                setSourceOptions(
+                    data?.source_products || []
+                );
+
+                setCurveTypes(
+                    data?.curve_types || []
+                );
+
+                setForecastStartDate(
+                    data?.forecast_start_date || ""
+                );
+
+                setMarketShareChartData(
+                    data?.metrics_data?.market_share
+                        ?.chart || null
+                );
+
+                setMarketEventMetricsData(
+                    data?.metrics_data || null
+                );
+
+                setEventRows([
+                    {
+                        event_name: "",
+                        lot: data?.lots?.[0] || "",
+                        target_product:
+                            data?.target_products?.[0] ||
+                            "",
+                        start_date:
+                            data?.forecast_start_date ||
+                            "",
+                        curve_type:
+                            data?.curve_types?.[0] || "",
+                        peak_percent: "",
+                        months: "",
+                        factor: "",
+                        source_percentages:
+                            (
+                                data?.source_products ||
+                                []
+                            ).reduce(
+                                (acc, item) => {
+                                    acc[item] = "";
+                                    return acc;
+                                },
+                                {}
+                            ),
+                    },
+                ]);
+            }
         } catch (error) {
-            console.error("Failed to fetch market event filters", error);
-            showSnackbar("Failed to fetch market event filters", "error");
+            console.error(
+                "Failed to fetch market event filters",
+                error
+            );
+
+            showSnackbar(
+                "Failed to fetch market event filters",
+                "error"
+            );
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -177,6 +273,11 @@ export default function MarketEvents() {
         indication
             ? mappingData?.[indication]?.scenarios || []
             : [];
+
+    const startDateOptions =
+        marketShareChartData?.months?.slice(
+            marketShareChartData?.forecast_start_index
+        ) || [];
 
     const inputStyle = {
         bgcolor: "#fcfcfd",

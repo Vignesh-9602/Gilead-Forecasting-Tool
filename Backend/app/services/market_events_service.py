@@ -69,11 +69,33 @@ def get_market_event_filters_service(ta_name: str):
 
             if display_name not in data[indication]["scenarios"]:
                 data[indication]["scenarios"].append(display_name)
+        # -----------------------------------------------------
+        # Default filter
+        # -----------------------------------------------------
 
+        default_indication = ""
+        default_scenario_name = ""
+
+        if data:
+
+            default_indication = sorted(
+                data.keys()
+            )[0]
+
+            indication_data = data.get(default_indication, {})
+
+            scenarios = indication_data.get("scenarios", [])
+
+            if scenarios:
+                default_scenario_name = sorted(scenarios)[0]
         return {
             "ta_name": ta_name,
             "indications": list(data.keys()),
-            "data": data
+            "data": data,
+             "default_filter": {
+                    "indication": default_indication,
+                    "scenario_name": default_scenario_name
+                }
         }
 
     finally:
@@ -147,10 +169,6 @@ def apply_market_event_filters_service(payload):
     try:
         selected_scenario = payload.scenario_name.strip()
 
-        # =====================================================
-        # 1. Resolve scenario per LOT
-        # =====================================================
-
         lot_scenario_map = {}
 
         if selected_scenario.lower() == "finalized":
@@ -201,10 +219,6 @@ def apply_market_event_filters_service(payload):
 
         lots = list(lot_scenario_map.keys())
 
-        # =====================================================
-        # 2. Fetch products
-        # =====================================================
-
         products = set()
 
         for lot, scenario_name in lot_scenario_map.items():
@@ -234,10 +248,6 @@ def apply_market_event_filters_service(payload):
 
         products = sorted(list(products))
 
-        # =====================================================
-        # 3. Build combined chart and table data
-        # =====================================================
-
         chart_months = None
         forecast_start_index = 0
         global_forecast_start_date = None
@@ -248,10 +258,6 @@ def apply_market_event_filters_service(payload):
         market_share_table = []
 
         for lot, scenario_name in lot_scenario_map.items():
-
-            # =====================================
-            # Fetch NPS row
-            # =====================================
 
             cursor.execute("""
                 SELECT
@@ -303,10 +309,6 @@ def apply_market_event_filters_service(payload):
                 nps_chart.get("forecast_values", [])
             )
 
-            # =====================================
-            # Fetch Market Share rows
-            # =====================================
-
             cursor.execute("""
                 SELECT
                     product,
@@ -334,25 +336,85 @@ def apply_market_event_filters_service(payload):
             market_share_children = []
             market_share_total_values = None
 
+            # =====================================================
+            # 1st pass: collect raw market share values
+            # =====================================================
+
+            all_market_share_data = []
+
             for product, ms_chart in ms_rows:
 
                 if not ms_chart:
                     continue
 
                 ms_train_values = [
-                    round(v, 2)
+                    float(v or 0)
                     for v in ms_chart.get("train_values", [])
                 ]
 
                 ms_forecast_values = [
-                    round(v, 2)
+                    float(v or 0)
                     for v in ms_chart.get("forecast_values", [])
                 ]
 
-                market_share_values = (
+                raw_market_share_values = (
                     ms_train_values +
                     ms_forecast_values
                 )
+
+                all_market_share_data.append({
+                    "product": product,
+                    "values": raw_market_share_values
+                })
+
+            if not all_market_share_data:
+                continue
+
+            value_length = len(all_market_share_data[0]["values"])
+
+            # =====================================================
+            # Month-wise total before normalization
+            # =====================================================
+
+            month_totals = []
+
+            for idx in range(value_length):
+
+                total = sum(
+                    item["values"][idx]
+                    for item in all_market_share_data
+                    if idx < len(item["values"])
+                )
+
+                month_totals.append(total)
+
+            # =====================================================
+            # 2nd pass: normalize values month-wise
+            # =====================================================
+
+            for item in all_market_share_data:
+
+                product = item["product"]
+                raw_values = item["values"]
+
+                market_share_values = []
+
+                for idx, val in enumerate(raw_values):
+
+                    total = month_totals[idx]
+
+                    if total == 0:
+                        normalized_val = 0
+                    else:
+                        normalized_val = round(
+                            (val / total) * 100,
+                            2
+                        )
+
+                    market_share_values.append(normalized_val)
+                
+                ms_train_values = market_share_values[:forecast_start_index]
+                ms_forecast_values = market_share_values[forecast_start_index:]
 
                 brand_nps_values = [
                     round((ms / 100.0) * nps, 0)
@@ -393,13 +455,17 @@ def apply_market_event_filters_service(payload):
                     "values": market_share_values
                 })
 
-                # Chart should be flat and only for market_share
                 market_share_chart_series.append({
                     "lot": lot,
                     "label": product,
                     "train_values": ms_train_values,
                     "forecast_values": ms_forecast_values
                 })
+
+            market_share_total_values = [
+                round(v, 2)
+                for v in market_share_total_values
+            ]
 
             nps_table.append({
                 "lot": lot,
@@ -415,61 +481,57 @@ def apply_market_event_filters_service(payload):
             })
 
         return {
-        "ta_name": payload.ta_name,
-        "indication": payload.indication,
-        "scenario_name": payload.scenario_name,
+            "ta_name": payload.ta_name,
+            "indication": payload.indication,
+            "scenario_name": payload.scenario_name,
 
-        "lots": lots,
-        "target_products": products,
-        "source_products": products,
+            "lots": lots,
+            "target_products": products,
+            "source_products": products,
 
-        "metric_filters": [
-            {
-                "label": "Market Share",
-                "value": "market_share"
-            },
-            {
-                "label": "Overall Market Volume",
-                "value": "nps"
-            }
-        ],
-
-        "curve_types": [
-            "Linear",
-            "Exponential",
-            "Logarithmic",
-            "scurve"
-        ],
-
-        "forecast_start_date": global_forecast_start_date,
-
-        "metrics_data": {
-            "market_share": {
-                "chart": {
-                    "months": chart_months or [],
-                    "forecast_start_index": forecast_start_index,
-                    "series": market_share_chart_series
+            "metric_filters": [
+                {
+                    "label": "Market Share",
+                    "value": "market_share"
                 },
-                "table": market_share_table
-            },
+                {
+                    "label": "Overall Market Volume",
+                    "value": "nps"
+                }
+            ],
 
-            "nps": {
-                
-                "chart": {
+            "curve_types": [
+                "Linear",
+                "Exponential",
+                "Logarithmic",
+                "scurve"
+            ],
+
+            "forecast_start_date": global_forecast_start_date,
+
+            "metrics_data": {
+                "market_share": {
+                    "chart": {
+                        "months": chart_months or [],
+                        "forecast_start_index": forecast_start_index,
+                        "series": market_share_chart_series
+                    },
+                    "table": market_share_table
+                },
+
+                "nps": {
+                    "chart": {
                         "forecast_start_index": forecast_start_index
                     },
-
-                "table": nps_table
+                    "table": nps_table
+                }
             }
         }
-    }
 
     finally:
         cursor.close()
         conn.close()
-
-
-
+        
 def run_market_event_calculation_service(payload):
 
     conn = get_connection()
@@ -613,15 +675,69 @@ def run_market_event_calculation_service(payload):
             ms_rows = cursor.fetchall()
 
             product_values_map = {}
+            # =====================================
+            # First pass -> collect all market share values
+            # =====================================
+
+            all_market_share_data = []
+
             for product, ms_chart in ms_rows:
+
                 if not ms_chart:
                     continue
 
-                values = (
-                    ms_chart.get("train_values", []) +
-                    ms_chart.get("forecast_values", [])
+                ms_train_values = [
+                    float(v or 0)
+                    for v in ms_chart.get("train_values", [])
+                ]
+
+                ms_forecast_values = [
+                    float(v or 0)
+                    for v in ms_chart.get("forecast_values", [])
+                ]
+
+                market_share_values = (
+                    ms_train_values +
+                    ms_forecast_values
                 )
-                product_values_map[product] = [float(v) for v in values]
+
+                all_market_share_data.append({
+                    "product": product,
+                    "values": market_share_values
+                })
+
+            # =====================================
+            # Normalize month-wise totals to 100
+            # =====================================
+
+            month_totals = [
+                sum(
+                    item["values"][idx]
+                    for item in all_market_share_data
+                )
+                for idx in range(len(all_market_share_data[0]["values"]))
+            ]
+
+
+            for item in all_market_share_data:
+
+                product = item["product"]
+
+                market_share_values = []
+
+                for idx, val in enumerate(item["values"]):
+
+                    total = month_totals[idx]
+
+                    if total == 0:
+                        normalized_val = 0
+                    else:
+                        normalized_val = round((val / total) * 100, 2)
+
+                    market_share_values.append(normalized_val)
+
+                product_values_map[product] = market_share_values
+
 
             if not product_values_map:
                 continue

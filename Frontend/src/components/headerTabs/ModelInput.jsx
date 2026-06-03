@@ -3,12 +3,13 @@ import { Box, Paper, Typography, FormControl, Select, MenuItem, TextField, Butto
 import { GlobalContext } from "../../context/Provider";
 import ForecastTrendChart from "./ForecastTrendChart";
 import { getMetricFilters, applyMetricFilters, recalculateMetrics, saveScenario, updateScenario } from "../../services/apiService";
-import { useSnackbarStore } from "../../stores";
+import { useSnackbarStore, useLoadingStore } from "../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import Tooltip from "@mui/material/Tooltip";
 
 export default function ModelInput() {
     const { showSnackbar } = useSnackbarStore();
+    const { setLoading, isLoading } = useLoadingStore();
     const [scenarioSelector, setScenarioSelector] = useState("");
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
@@ -85,28 +86,110 @@ export default function ModelInput() {
 
     const fetchMetricFilters = async () => {
         try {
+            setLoading(true);
             const response = await getMetricFilters(therapyArea);
             const resData = response?.data;
 
             setMappingData(resData?.data || {});
 
-            setFilterOptions({
-                indications: [],
-                metric_filters: resData?.metric_filters || [],
-                scenario_names: resData?.scenario_names || [],
-            });
+            const defaultFilter = resData?.default_filter;
 
-            // no default selection
-            setScenarioSelector("");
+            if (defaultFilter) {
+                setScenarioSelector(defaultFilter.scenario_name);
+                setIndication(defaultFilter.indication);
+                setLot(defaultFilter.lot);
+                setMetric(defaultFilter.metric);
+                setBrand(defaultFilter.product || "");
 
-            // reset dependent fields
-            setIndication("");
-            setLot("");
-            setMetric("");
-            setBrand("");
+                setFilterOptions({
+                    indications: Object.keys(
+                        resData?.data?.[
+                        defaultFilter.scenario_name
+                        ] || {}
+                    ),
+                    metric_filters: resData?.metric_filters || [],
+                    scenario_names: resData?.scenario_names || [],
+                });
+
+                // Auto apply filter with default values
+                const payload = {
+                    ta_name: therapyArea,
+                    scenario_name: defaultFilter.scenario_name,
+                    indications: [defaultFilter.indication],
+                    lots: [defaultFilter.lot],
+                    metric_filter: defaultFilter.metric,
+                    product:
+                        defaultFilter.metric === "market_share"
+                            ? defaultFilter.product || ""
+                            : "",
+                };
+
+                const applyResponse = await applyMetricFilters(payload);
+                const data = applyResponse?.data;
+
+                setAppliedLot(defaultFilter.lot);
+                setAppliedBrand(defaultFilter.product || "");
+
+                const factors = data?.factors || {};
+                const activeModel = factors?.active_model || "ets";
+
+                setModelSelection(activeModel);
+                setAllFactors(factors);
+
+                setMultiplier(factors?.multiplier ?? 1);
+                setMultiplierHorizon(
+                    factors?.multiplier_horizon ?? "Forecast"
+                );
+
+                const ets = factors?.ets || {};
+                setAlpha(ets?.alpha ?? 0);
+                setBeta(ets?.beta ?? 0);
+                setGamma(ets?.gamma ?? 0);
+
+                if (activeModel !== "ets") {
+                    const traj =
+                        factors?.growth ||
+                        factors?.[activeModel] ||
+                        {};
+
+                    setTotalGrowth(
+                        traj?.total_growth ??
+                        traj?.total_growth_pct ??
+                        0
+                    );
+
+                    setDuration(traj?.duration ?? 12);
+
+                    setTrajectoryStart(
+                        traj?.trajectory_start || ""
+                    );
+
+                    setKValue(
+                        traj?.k_value ??
+                        traj?.k ??
+                        1
+                    );
+                }
+
+                setAllMetricsData(data?.metrics_data || {});
+
+                const selectedMetricData =
+                    data?.metrics_data?.[defaultFilter.metric];
+
+                setChartData(selectedMetricData?.chart || null);
+                setTableData(selectedMetricData?.table || []);
+            } else {
+                setFilterOptions({
+                    indications: [],
+                    metric_filters: resData?.metric_filters || [],
+                    scenario_names: resData?.scenario_names || [],
+                });
+            }
         } catch (error) {
             console.error("Failed to fetch metric filters", error);
             showSnackbar("Failed to fetch metric filters", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -121,6 +204,7 @@ export default function ModelInput() {
         };
 
         try {
+            setLoading(true);
             const response = await applyMetricFilters(payload);
             const data = response?.data;
 
@@ -188,6 +272,8 @@ export default function ModelInput() {
         } catch (error) {
             console.error("Failed to apply metric filters", error);
             showSnackbar("Failed to apply metric filters", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -235,6 +321,7 @@ export default function ModelInput() {
         };
 
         try {
+            setLoading(true);
             const response = await recalculateMetrics(payload);
             const data = response?.data;
 
@@ -290,6 +377,8 @@ export default function ModelInput() {
         } catch (error) {
             console.error("Failed to recalculate metrics", error);
             showSnackbar("Failed to recalculate metrics", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -395,6 +484,7 @@ export default function ModelInput() {
         };
 
         try {
+            setLoading(true);
             const res = await updateScenario(payload);
             const data = res?.data;
 
@@ -441,6 +531,8 @@ export default function ModelInput() {
         } catch (error) {
             console.error("Update scenario failed", error);
             showSnackbar("Failed to update scenario", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -502,6 +594,7 @@ export default function ModelInput() {
         };
 
         try {
+            setLoading(true);
             const res = await saveScenario(payload);
             console.log("Scenario saved:", res.data);
             showSnackbar("Scenario created successfully", "success");
@@ -533,6 +626,8 @@ export default function ModelInput() {
             console.error("Save scenario failed", err);
             showSnackbar("Failed to save scenario", "error");
             // alert("Failed to save scenario");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -848,7 +943,16 @@ export default function ModelInput() {
                                         type="number"
                                         value={alpha}
                                         disabled={!editable}
-                                        onChange={(e) => setAlpha(Number(e.target.value))}
+                                        onChange={(e) => {
+                                            const value = e.target.value;
+
+                                            if (
+                                                value === "" ||
+                                                (Number(value) >= 0 && Number(value) <= 1)
+                                            ) {
+                                                setAlpha(value);
+                                            }
+                                        }}
                                         inputProps={{
                                             min: 0,
                                             max: 1,
@@ -878,7 +982,16 @@ export default function ModelInput() {
                                         type="number"
                                         value={beta}
                                         disabled={!editable}
-                                        onChange={(e) => setBeta(Number(e.target.value))}
+                                        onChange={(e) => {
+                                            const value = e.target.value;
+
+                                            if (
+                                                value === "" ||
+                                                (Number(value) >= 0 && Number(value) <= 1)
+                                            ) {
+                                                setBeta(value);
+                                            }
+                                        }}
                                         inputProps={{
                                             min: 0,
                                             max: 1,
@@ -907,7 +1020,16 @@ export default function ModelInput() {
                                         type="number"
                                         value={gamma}
                                         disabled={!editable}
-                                        onChange={(e) => setGamma(Number(e.target.value))}
+                                        onChange={(e) => {
+                                            const value = e.target.value;
+
+                                            if (
+                                                value === "" ||
+                                                (Number(value) >= 0 && Number(value) <= 1)
+                                            ) {
+                                                setGamma(value);
+                                            }
+                                        }}
                                         inputProps={{
                                             min: 0,
                                             max: 1,
@@ -926,7 +1048,7 @@ export default function ModelInput() {
                                         <Typography sx={{ fontSize: "14px" }}>
                                             GROWTH %
                                         </Typography>
-                                        <Tooltip title="Please enter value from 0 to 100" arrow placement="top">
+                                        <Tooltip title="Please enter the total growth%" arrow placement="top">
                                             <InfoOutlinedIcon
                                                 sx={{
                                                     fontSize: 16,
@@ -940,7 +1062,16 @@ export default function ModelInput() {
                                         type="number"
                                         value={totalGrowth}
                                         disabled={!editable}
-                                        onChange={(e) => setTotalGrowth(Number(e.target.value))}
+                                        onChange={(e) => {
+                                            const value = e.target.value;
+
+                                            if (
+                                                value === "" ||
+                                                (Number(value) >= -100 && Number(value) <= 100)
+                                            ) {
+                                                setTotalGrowth(value);
+                                            }
+                                        }}
                                         inputProps={{
                                             min: 0,
                                             max: 100,
@@ -986,7 +1117,7 @@ export default function ModelInput() {
                                             <Typography sx={{ fontSize: "14px" }}>
                                                 K VALUE
                                             </Typography>
-                                            <Tooltip title="Please enter value from 0 to 1" arrow placement="top">
+                                            <Tooltip title="Please enter value from 0 to 3" arrow placement="top">
                                                 <InfoOutlinedIcon
                                                     sx={{
                                                         fontSize: 16,
@@ -1001,10 +1132,19 @@ export default function ModelInput() {
                                             type="number"
                                             value={kValue}
                                             disabled={!editable}
-                                            onChange={(e) => setKValue(Number(e.target.value))}
+                                            onChange={(e) => {
+                                                const value = e.target.value;
+
+                                                if (
+                                                    value === "" ||
+                                                    (Number(value) >= 0 && Number(value) <= 3)
+                                                ) {
+                                                    setKValue(value);
+                                                }
+                                            }}
                                             inputProps={{
                                                 min: 0,
-                                                max: 1,
+                                                max: 3,
                                                 step: 0.01,
                                             }}
                                             sx={recalculateInputStyle}
@@ -1048,7 +1188,7 @@ export default function ModelInput() {
                                 <Typography sx={{ fontSize: "14px" }}>
                                     MULTIPLIER
                                 </Typography>
-                                <Tooltip title="Please enter value from 1 to 3" arrow placement="top">
+                                <Tooltip title="Please enter value from 1 to 5" arrow placement="top">
                                     <InfoOutlinedIcon
                                         sx={{
                                             fontSize: 16,
@@ -1063,7 +1203,16 @@ export default function ModelInput() {
                                 type="number"
                                 value={multiplier}
                                 disabled={!editable}
-                                onChange={(e) => setMultiplier(Number(e.target.value))}
+                                onChange={(e) => {
+                                    const value = e.target.value;
+
+                                    if (
+                                        value === "" ||
+                                        (Number(value) >= 0 && Number(value) <= 5)
+                                    ) {
+                                        setMultiplier(value);
+                                    }
+                                }}
                                 inputProps={{
                                     min: 0,
                                     max: 2,

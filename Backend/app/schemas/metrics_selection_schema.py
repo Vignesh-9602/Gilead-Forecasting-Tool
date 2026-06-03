@@ -34,6 +34,7 @@ class GrowthFactors(BaseModel):
     total_growth: float
     duration: int
     k_value: Optional[float] = None  # required for exp/log/s_curve; not allowed for linear
+    trajectory_start: Optional[str] = None
 
 class RecalculateFactors(BaseModel):
     multiplier: float = 1.0

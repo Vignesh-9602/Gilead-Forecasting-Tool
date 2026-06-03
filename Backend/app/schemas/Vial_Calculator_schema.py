@@ -4,10 +4,19 @@ from pydantic import BaseModel
 # =============================
 # Persistency Schema 
 # =============================
+class PersistencyDefaultFilter(BaseModel):
+    scenario_name: str
+    indication: str
+    lots: List[str]
+    brand: str
+    start_date: str
+    end_date: str
+
 class PersistencyFiltersResponse(BaseModel):
     ta_name: str
     scenario_names: List[str]
     data: Dict[str, Dict[str, Dict[str, List[str]]]]
+    default_filter: PersistencyDefaultFilter
 
 class PersistencyApplyRequest(BaseModel):
     ta_name: str

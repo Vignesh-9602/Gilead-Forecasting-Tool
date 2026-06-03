@@ -418,10 +418,16 @@ def get_metrics_filters(ta_name: str):
                 "ta_name": ta_name,
                 "scenario_names": [],
                 "data": {},
-                "metric_filters": []
+                "metric_filters": [],
+                "default_filter": {
+                    "scenario_name": "",
+                    "indication": "",
+                    "lot": "",
+                    "metric": "nps",
+                    "product": ""
+                }
             }
 
-        # Get all brands from indication_master for each scenario + indication + lot
         cur.execute("""
             WITH scenario_lots AS (
                 SELECT DISTINCT
@@ -465,6 +471,31 @@ def get_metrics_filters(ta_name: str):
         if product and product not in lot_products:
             lot_products.append(product)
 
+    # -----------------------------------------------------
+    # Default filter for FE initial page load
+    # -----------------------------------------------------
+
+    default_scenario = "BASE" if "BASE" in scenario_names else scenario_names[0]
+
+    default_indication = ""
+    default_lot = ""
+    default_product = ""
+
+    if default_scenario in data and data[default_scenario]:
+
+        default_indication = sorted(
+            data[default_scenario].keys()
+        )[0]
+
+        if default_indication and data[default_scenario][default_indication]:
+
+            default_lot = sorted(
+                data[default_scenario][default_indication].keys()
+            )[0]
+
+            # For nps, product should be blank
+            default_product = ""
+
     return {
         "ta_name": ta_name,
         "scenario_names": scenario_names,
@@ -472,5 +503,12 @@ def get_metrics_filters(ta_name: str):
         "metric_filters": [
             {"label": "Market Share", "value": "market_share"},
             {"label": "Overall Market Volume", "value": "nps"}
-        ]
+        ],
+        "default_filter": {
+            "scenario_name": default_scenario,
+            "indication": default_indication,
+            "lot": default_lot,
+            "metric": "nps",
+            "product": default_product
+        }
     }

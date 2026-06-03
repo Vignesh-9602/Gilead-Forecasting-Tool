@@ -52,6 +52,7 @@ export default function GlobalConfiguration() {
 
     const fetchConfigurationByTA = async (taName) => {
         try {
+            setLoading(true);
             const response = await getConfigurationByTherapyArea(taName);
 
             const config = response?.data?.config;
@@ -69,6 +70,8 @@ export default function GlobalConfiguration() {
             setTrainEndDate("");
             setModelGranularity("");
             setForecastPeriods("");
+        } finally {
+            setLoading(false);
         }
     };
 

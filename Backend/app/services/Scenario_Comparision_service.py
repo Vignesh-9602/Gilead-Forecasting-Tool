@@ -74,11 +74,35 @@ def get_filter_data(ta_name: str):
             }
             for metric in sorted(metrics)
         ]
+        # -----------------------------------------------------
+        # Default filter
+        # -----------------------------------------------------
+
+        default_indication = ""
+        default_lot = ""
+
+        if final_data:
+
+            default_indication = sorted(
+                final_data.keys()
+            )[0]
+
+            indication_lots = final_data.get(default_indication, {})
+
+            if indication_lots:
+
+                default_lot = sorted(
+                    indication_lots.keys()
+                )[0]
 
         return {
             "ta_name": ta_name,
             "data": final_data,
-            "metric_filters": metric_filters
+            "metric_filters": metric_filters,
+            "default_filter": {
+                    "indication": default_indication,
+                    "lot": default_lot
+                }
         }
 
     finally:

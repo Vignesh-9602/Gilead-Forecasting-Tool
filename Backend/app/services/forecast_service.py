@@ -241,7 +241,9 @@ def process_forecast(
     k=None,
     multiplier=1.0,
     multiplier_horizon="Forecast",
-    alpha=None, beta=None, gamma=None
+    alpha=None, beta=None, gamma=None,
+    trajectory_start=None
+
 ):
     train_start = parse_month(train_start_date)
     train_end = parse_month(train_end_date)
@@ -299,20 +301,63 @@ def process_forecast(
         base_value = train_values[-1]
         duration = forecast_periods if duration is None else max(1, int(duration))
 
+        trajectory_start_idx = 0
+
+        if trajectory_start:
+            trajectory_start_month = parse_month(trajectory_start)
+
+            if trajectory_start_month in [parse_month(m) for m in forecast_months]:
+                trajectory_start_idx = [
+                    parse_month(m) for m in forecast_months
+                ].index(trajectory_start_month)
+
+        pre_trajectory_values = [base_value] * trajectory_start_idx
+
+        remaining_periods = forecast_periods - trajectory_start_idx
+
         if model_type_l == "linear":
-            forecast_values = forecast_linear(base_value, forecast_periods, total_growth_pct, duration, metric)
+            growth_values = forecast_linear(
+                base_value,
+                remaining_periods,
+                total_growth_pct,
+                duration,
+                metric
+            )
 
         elif model_type_l == "exponential":
-            forecast_values = forecast_exponential(base_value, forecast_periods, total_growth_pct, duration, k, metric)
+            growth_values = forecast_exponential(
+                base_value,
+                remaining_periods,
+                total_growth_pct,
+                duration,
+                k,
+                metric
+            )
 
         elif model_type_l == "logarithmic":
-            forecast_values = forecast_logarithmic(base_value, forecast_periods, total_growth_pct, duration, k, metric)
+            growth_values = forecast_logarithmic(
+                base_value,
+                remaining_periods,
+                total_growth_pct,
+                duration,
+                k,
+                metric
+            )
 
         elif model_type_l in ("scurve"):
-            forecast_values = forecast_s_curve(base_value, forecast_periods, total_growth_pct, duration, k, metric)
+            growth_values = forecast_s_curve(
+                base_value,
+                remaining_periods,
+                total_growth_pct,
+                duration,
+                k,
+                metric
+            )
 
         else:
             raise ValueError("Invalid model_type")
+
+        forecast_values = pre_trajectory_values + growth_values
 
         factors = {
             "model_type": model_type_l,

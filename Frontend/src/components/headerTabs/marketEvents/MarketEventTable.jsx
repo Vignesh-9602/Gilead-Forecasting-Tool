@@ -383,7 +383,7 @@ export default function MarketEventTable({
                 "Failed to save market event table",
                 error
             );
-            showSnackbar("Failet to save market event", "success");
+            showSnackbar("Failet to save market event", "error");
         }
     };
 

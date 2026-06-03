@@ -87,27 +87,117 @@ export default function VialCalculator() {
 
     const fetchPersistencyFilters = async () => {
         try {
-            setLoadingFilters(true);
-            const response = await getPersistencyFilters(therapyArea);
+            setLoading(true);
+
+            const response = await getPersistencyFilters(
+                therapyArea
+            );
 
             const resData = response?.data;
 
             setMappingData(resData?.data || {});
 
-            setFilterOptions({
-                scenario_names: resData?.scenario_names || [],
-                indications: [],
-            });
+            const defaultFilter =
+                resData?.default_filter;
 
-            setScenarioSelector("");
-            setIndication("");
-            setLots([]);
-            setBrand("");
+            if (defaultFilter) {
+                setScenarioSelector(
+                    defaultFilter.scenario_name
+                );
+
+                setIndication(
+                    defaultFilter.indication
+                );
+
+                setLots(
+                    defaultFilter.lots || []
+                );
+
+                setBrand(
+                    defaultFilter.brand || ""
+                );
+
+                setStartDate(
+                    defaultFilter.start_date || ""
+                );
+
+                setEndDate(
+                    defaultFilter.end_date || ""
+                );
+
+                setFilterOptions({
+                    scenario_names:
+                        resData?.scenario_names || [],
+
+                    indications: Object.keys(
+                        resData?.data?.[
+                        defaultFilter.scenario_name
+                        ] || {}
+                    ),
+                });
+
+                setTimeout(() => {
+                    setBrand(
+                        defaultFilter.brand || ""
+                    );
+                }, 0);
+
+                // Auto Apply Filter
+                const payload = {
+                    ta_name: therapyArea,
+                    scenario_name:
+                        defaultFilter.scenario_name,
+                    indication:
+                        defaultFilter.indication,
+                    lots:
+                        defaultFilter.lots || [],
+                    brand:
+                        defaultFilter.brand || "",
+                    start_date:
+                        defaultFilter.start_date,
+                    end_date:
+                        defaultFilter.end_date,
+                };
+
+                // setLoading(true);
+
+                const applyResponse =
+                    await applyPersistencyFilters(
+                        payload
+                    );
+
+                setPersistencyData(
+                    applyResponse?.data || null
+                );
+
+                setFilterApplyVersion(
+                    (prev) => prev + 1
+                );
+
+                // showSnackbar(
+                //     "Filters applied successfully",
+                //     "success"
+                // );
+            } else {
+                setFilterOptions({
+                    scenario_names:
+                        resData?.scenario_names || [],
+                    indications: [],
+                });
+            }
         } catch (error) {
-            console.error("Failed to fetch persistency filters", error);
-            showSnackbar("Failed to fetch persistency filters", "error");
+            console.error(
+                "Failed to fetch persistency filters",
+                error
+            );
+
+            showSnackbar(
+                "Failed to fetch persistency filters",
+                "error"
+            );
         } finally {
-            setLoadingFilters(false);
+            // setLoadingFilters(false);
+            setLoading(false);
         }
     };
 
