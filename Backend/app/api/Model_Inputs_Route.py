@@ -681,6 +681,22 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
 # POST: SAVE CHANGES (UNCHANGED)
 # =====================================================
 # =====================================================
+def build_patient_metrics(nps_values, market_share_values):
+    return {
+        "final_nps": [
+            round(float(x or 0), 2)
+            for x in nps_values
+        ],
+        "final_market_share": [
+            round(float(x or 0), 2)
+            for x in market_share_values
+        ],
+        "final_patient_share": [
+            round(float(nps or 0) * (float(ms or 0) / 100), 2)
+            for nps, ms in zip(nps_values, market_share_values)
+        ]
+    }
+
 @router.post("/metrics/refresh",tags=["Model_Input"])
 def refresh_changes(payload: Refreshchangerequest):
 
@@ -916,7 +932,86 @@ def refresh_changes(payload: Refreshchangerequest):
             "market_share": updated_metric_block,
             "nps": other_metric_block
         }
+    # --------------------------------------------------
+    # Save patient_metrics based on latest edited values
+    # --------------------------------------------------
 
+    nps_table = metrics_data["nps"]["table"]
+    market_share_table = metrics_data["market_share"]["table"]
+
+    nps_by_lot = {}
+
+    for lot_group in nps_table:
+        lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+        children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+
+        if children:
+            child = children[0]
+            values = child["values"] if isinstance(child, dict) else child.values
+            nps_by_lot[lot] = values
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        for lot_group in market_share_table:
+
+            lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+            children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+
+            nps_values = nps_by_lot.get(lot)
+
+            if not nps_values:
+                continue
+
+            for child in children:
+
+                product = child["label"] if isinstance(child, dict) else child.label
+                ms_values = child["values"] if isinstance(child, dict) else child.values
+
+                patient_metrics = {
+                    "final_nps": [
+                        round(float(x or 0), 2)
+                        for x in nps_values
+                    ],
+                    "final_market_share": [
+                        round(float(x or 0), 2)
+                        for x in ms_values
+                    ],
+                    "final_patient_share": [
+                        round(
+                            float(nps or 0)
+                            * (float(ms or 0) / 100),
+                            2
+                        )
+                        for nps, ms in zip(nps_values, ms_values)
+                    ]
+                }
+
+                cur.execute("""
+                    UPDATE raw.forecast_scenarios
+                    SET
+                        patient_metrics = %s::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE scenario_name = 'BASE'
+                    AND ta_name = %s
+                    AND LOWER(indication) = LOWER(%s)
+                    AND LOWER(lot) = LOWER(%s)
+                    AND LOWER(metric) = 'market_share'
+                    AND LOWER(product) = LOWER(%s)
+                """, (
+                    json.dumps(patient_metrics),
+                    payload.therapy_area,
+                    payload.indication,
+                    lot,
+                    product
+                ))
+
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
     return {
         "therapy_area": payload.therapy_area,
         "indication": payload.indication,
@@ -1029,7 +1124,22 @@ def save_scenario(payload: SaveScenarioRequest):
                 ))
 
                 saved_ids.append(cur.fetchone()[0])
+        # --------------------------------------------------
+        # Prepare NPS values by LOT for patient_metrics
+        # --------------------------------------------------
+        nps_by_lot = {}
 
+        if nps_block:
+            nps_table = nps_block.get("table", []) or []
+
+            for lot_group in nps_table:
+                lot = lot_group.get("lot")
+                children = lot_group.get("children", []) or []
+
+                if lot and children:
+                    nps_by_lot[
+                        str(lot).lower().strip()
+                    ] = children[0].get("values", []) or []
         # ==================================================
         # SAVE MARKET SHARE - ONE ROW PER LOT + PRODUCT
         # ==================================================
@@ -1056,7 +1166,35 @@ def save_scenario(payload: SaveScenarioRequest):
 
                     if not product:
                         continue
+                    nps_values = nps_by_lot.get(
+                            str(lot).lower().strip(),
+                            []
+                        )
 
+                    patient_metrics = None
+
+                    if (
+                        nps_values
+                        and values
+                        and len(nps_values) == len(values)
+                    ):
+                        patient_metrics = {
+                            "final_nps": [
+                                round(float(x or 0), 2)
+                                for x in nps_values
+                            ],
+                            "final_market_share": [
+                                round(float(x or 0), 2)
+                                for x in values
+                            ],
+                            "final_patient_share": [
+                                round(
+                                    float(nps or 0) * (float(ms or 0) / 100),
+                                    2
+                                )
+                                for nps, ms in zip(nps_values, values)
+                            ]
+                        }
                     row_chart = {
                         "months": months,
                         "forecast_start_index": forecast_start_index,
@@ -1071,34 +1209,36 @@ def save_scenario(payload: SaveScenarioRequest):
                     }]
 
                     cur.execute("""
-                        INSERT INTO raw.forecast_scenarios (
-                            scenario_name,
-                            user_id,
-                            ta_name,
-                            indication,
+                            INSERT INTO raw.forecast_scenarios (
+                                scenario_name,
+                                user_id,
+                                ta_name,
+                                indication,
+                                lot,
+                                metric,
+                                product,
+                                model_type,
+                                factors,
+                                chart,
+                                table_data,
+                                patient_metrics
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        """, (
+                            payload.scenario_name,
+                            payload.user_id,
+                            payload.ta_name,
+                            payload.indication,
                             lot,
-                            metric,
+                            "market_share",
                             product,
-                            model_type,
-                            factors,
-                            chart,
-                            table_data
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (
-                        payload.scenario_name,
-                        payload.user_id,
-                        payload.ta_name,
-                        payload.indication,
-                        lot,
-                        "market_share",
-                        product,
-                        payload.model_type,
-                        json.dumps(payload.factors),
-                        json.dumps(row_chart),
-                        json.dumps(row_table),
-                    ))
+                            payload.model_type,
+                            json.dumps(payload.factors),
+                            json.dumps(row_chart),
+                            json.dumps(row_table),
+                            json.dumps(patient_metrics) if patient_metrics else None,
+                        ))
 
                     saved_ids.append(cur.fetchone()[0])
 
@@ -1249,7 +1389,22 @@ def update_scenario(payload: UpdateScenarioRequest):
                 ))
 
                 saved_ids.append(cur.fetchone()[0])
+        # --------------------------------------------------
+        # Prepare NPS values by LOT for patient_metrics
+        # --------------------------------------------------
+        nps_by_lot = {}
 
+        if nps_block:
+            nps_table = nps_block.get("table", []) or []
+
+            for lot_group in nps_table:
+                lot = lot_group.get("lot")
+                children = lot_group.get("children", []) or []
+
+                if lot and children:
+                    nps_by_lot[
+                        str(lot).lower().strip()
+                    ] = children[0].get("values", []) or []
         # ==================================================
         # INSERT MARKET SHARE - ONE ROW PER LOT + PRODUCT
         # ==================================================
@@ -1276,7 +1431,42 @@ def update_scenario(payload: UpdateScenarioRequest):
 
                     if not product:
                         continue
+                    nps_values = nps_by_lot.get(
+                        str(lot).lower().strip(),
+                        []
+                    )
 
+                    patient_metrics = None
+
+                    if (
+                        nps_values
+                        and values
+                        and len(nps_values) == len(values)
+                    ):
+
+                        patient_metrics = {
+                            "final_nps": [
+                                round(float(x or 0), 2)
+                                for x in nps_values
+                            ],
+
+                            "final_market_share": [
+                                round(float(x or 0), 2)
+                                for x in values
+                            ],
+
+                            "final_patient_share": [
+                                round(
+                                    float(nps or 0)
+                                    * (float(ms or 0) / 100),
+                                    2
+                                )
+                                for nps, ms in zip(
+                                    nps_values,
+                                    values
+                                )
+                            ]
+                        }
                     row_chart = {
                         "months": months,
                         "forecast_start_index": forecast_start_index,
@@ -1301,9 +1491,10 @@ def update_scenario(payload: UpdateScenarioRequest):
                             model_type,
                             factors,
                             chart,
-                            table_data
+                            table_data,
+                            patient_metrics
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)
                         RETURNING id
                     """, (
                         payload.scenario_name,
@@ -1316,6 +1507,8 @@ def update_scenario(payload: UpdateScenarioRequest):
                         json.dumps(payload.factors),
                         json.dumps(row_chart),
                         json.dumps(row_table),
+                        json.dumps(patient_metrics)
+                            if patient_metrics else None,
                     ))
 
                     saved_ids.append(cur.fetchone()[0])

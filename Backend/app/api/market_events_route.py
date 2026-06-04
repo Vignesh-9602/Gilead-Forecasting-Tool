@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.market_events_schema import MarketEventApplyFilterRequest, MarketEventApplyFilterResponse, MarketEventFiltersResponse, MarketEventRunCalculationRequest, MarketEventRunCalculationResponse, MarketEventSaveRequest
-from app.services.market_events_service import apply_market_event_filters_service, get_market_event_filters_service, run_market_event_calculation_service, save_market_event_changes_service
+from app.schemas.market_events_schema import DeleteMarketEventRequest, MarketEventApplyFilterRequest, MarketEventApplyFilterResponse, MarketEventFiltersResponse, MarketEventRunCalculationRequest, MarketEventRunCalculationResponse, MarketEventSaveRequest
+from app.services.market_events_service import apply_market_event_filters_service, delete_market_event_service, get_market_event_filters_service, run_market_event_calculation_service, save_market_event_changes_service
 
 
 
@@ -53,3 +53,7 @@ def save_market_event_changes(payload: MarketEventSaveRequest):
             status_code=500,
             detail=f"Error while saving market event changes: {str(e)}"
         )
+    
+@router.post("/market-events/delete-event", tags=["Market Events"])
+def delete_market_event(payload: DeleteMarketEventRequest):
+    return delete_market_event_service(payload)

@@ -319,6 +319,7 @@ export default function ModelInput() {
                 ...modelFactors
             }
         };
+        // console.log("growthhhh", payload)
 
         try {
             setLoading(true);

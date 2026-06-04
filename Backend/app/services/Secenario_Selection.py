@@ -1,3 +1,5 @@
+from fastapi import HTTPException
+
 from app.db.connection import get_connection
 from app.repository.Scenario_selection import (
     upsert_scenario_selection,
@@ -53,7 +55,8 @@ def save_base_scenario( ta: str,
     metric: str,
     product: str | None,
     chart: dict,
-    factors: dict
+    factors: dict,
+    patient_metrics=None
 ):
     conn = get_connection()
     cur = conn.cursor()
@@ -75,7 +78,8 @@ def save_base_scenario( ta: str,
                 product,
                 model_type,
                 factors,
-                chart
+                chart,
+                patient_metrics
             )
             VALUES (
                 'BASE',
@@ -86,6 +90,7 @@ def save_base_scenario( ta: str,
                 %s,
                 %s,
                 'ETS',
+                %s,
                 %s,
                 %s
             )
@@ -109,7 +114,8 @@ def save_base_scenario( ta: str,
             metric,
             product_db,
             json.dumps(factors),
-            json.dumps(chart)
+            json.dumps(chart),
+            json.dumps(patient_metrics) if patient_metrics else None
         ))
 
         conn.commit()
@@ -329,18 +335,18 @@ def save_scenario_comparision(payload):
         scenario_name = payload.scenario_name.strip()
 
         # =============================
-        # 1. Check existing saved scenario for same LOT
+        # 1. Check existing finalized scenario for same LOT
         # =============================
         cursor.execute("""
-            SELECT selected_scenario_name
-            FROM raw.forecast_finalized_selections
-            WHERE user_id = %s
-              AND ta_name = %s
+            SELECT DISTINCT scenario_name
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
               AND indication = %s
               AND lot = %s
               AND metric = %s
+              AND is_finalized = TRUE
+            LIMIT 1
         """, (
-            DEFAULT_USER_ID,
             payload.ta_name,
             payload.indication,
             payload.lot,
@@ -350,27 +356,70 @@ def save_scenario_comparision(payload):
         existing = cursor.fetchone()
 
         # =============================
-        # 2. Build chart + table from backend
+        # 2. Reset finalized flag for same LOT + metric
         # =============================
-        output = build_scenario_chart_table(conn, payload)
+        cursor.execute("""
+            UPDATE raw.forecast_scenarios
+            SET
+                is_finalized = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
+              AND indication = %s
+              AND lot = %s
+              AND metric = %s
+        """, (
+            payload.ta_name,
+            payload.indication,
+            payload.lot,
+            metric
+        ))
 
-        chart = output["chart"]
-        table_data = output["table_data"]
+        # =============================
+        # 3. Mark selected scenario as finalized
+        # =============================
+        cursor.execute("""
+            UPDATE raw.forecast_scenarios
+            SET
+                is_finalized = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
+              AND indication = %s
+              AND lot = %s
+              AND metric = %s
+              AND scenario_name = %s
+        """, (
+            payload.ta_name,
+            payload.indication,
+            payload.lot,
+            metric,
+            scenario_name
+        ))
+
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Selected scenario not found for this LOT and metric."
+            )
 
         # =============================
-        # 3. Save / overwrite selection
+        # 4. Fetch finalized selections
         # =============================
-        upsert_finalized_selection(
-            conn=conn,
-            payload=payload,
-            chart=chart,
-            table_data=table_data
-        )
+        cursor.execute("""
+            SELECT DISTINCT
+                lot,
+                scenario_name
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
+              AND indication = %s
+              AND metric = %s
+              AND is_finalized = TRUE
+        """, (
+            payload.ta_name,
+            payload.indication,
+            metric
+        ))
 
-        # =============================
-        # 4. Fetch saved selections
-        # =============================
-        rows = get_saved_selections(conn, payload)
+        rows = cursor.fetchall()
 
         selected_map = {
             row[0]: row[1]
@@ -410,9 +459,6 @@ def save_scenario_comparision(payload):
 
         conn.commit()
 
-        # =============================
-        # 6. Message
-        # =============================
         if existing and existing[0] != scenario_name:
             message = "Scenario selection updated successfully"
         else:
@@ -556,6 +602,7 @@ def finalize_scenarios(payload):
         cursor.close()
         conn.close()
 
+
 def get_scenario_status(payload):
 
     conn = get_connection()
@@ -580,20 +627,24 @@ def get_scenario_status(payload):
             metric
         ))
 
-        all_lots = [row[0] for row in cursor.fetchall()]
+        all_lots = [
+            row[0]
+            for row in cursor.fetchall()
+        ]
 
         # =============================
-        # 2. Get saved selections
+        # 2. Get finalized selections
         # =============================
         cursor.execute("""
-            SELECT lot, selected_scenario_name
-            FROM raw.forecast_finalized_selections
-            WHERE user_id = %s
-              AND ta_name = %s
+            SELECT DISTINCT
+                lot,
+                scenario_name
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
               AND indication = %s
               AND metric = %s
+              AND is_finalized = TRUE
         """, (
-            DEFAULT_USER_ID,
             payload.ta_name,
             payload.indication,
             metric
@@ -634,6 +685,9 @@ def get_scenario_status(payload):
         cursor.close()
         conn.close()
 
+
+
+
 def clear_scenario_selections(payload):
 
     conn = get_connection()
@@ -658,19 +712,23 @@ def clear_scenario_selections(payload):
             metric
         ))
 
-        all_lots = [row[0] for row in cursor.fetchall()]
+        all_lots = [
+            row[0]
+            for row in cursor.fetchall()
+        ]
 
         # =============================
-        # 2. Clear only selected TA + indication + metric
+        # 2. Reset finalized flag
         # =============================
         cursor.execute("""
-            DELETE FROM raw.forecast_finalized_selections
-            WHERE user_id = %s
-              AND ta_name = %s
+            UPDATE raw.forecast_scenarios
+            SET
+                is_finalized = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
               AND indication = %s
               AND metric = %s
         """, (
-            DEFAULT_USER_ID,
             payload.ta_name,
             payload.indication,
             metric
@@ -703,3 +761,4 @@ def clear_scenario_selections(payload):
     finally:
         cursor.close()
         conn.close()
+

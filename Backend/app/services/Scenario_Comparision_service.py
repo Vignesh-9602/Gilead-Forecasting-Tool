@@ -186,7 +186,8 @@ def apply_filters(payload):
             SELECT 
                 scenario_name,
                 product,
-                chart
+                chart,
+                patient_metrics
             FROM raw.forecast_scenarios
             WHERE ta_name = %s
               AND indication = %s
@@ -205,10 +206,11 @@ def apply_filters(payload):
 
         market_share_map = {}
 
-        for scenario_name, product, chart_json in ms_rows:
+        for scenario_name, product, chart_json, patient_metrics in ms_rows:
             market_share_map.setdefault(scenario_name, []).append({
                 "product": product,
-                "chart": chart_json
+                "chart": chart_json,
+                "patient_metrics": patient_metrics
             })
 
         chart_months = None
@@ -263,9 +265,11 @@ def apply_filters(payload):
                 market_share_values = ms_train_values + ms_forecast_values
 
                 # Brand NPS = Overall NPS * Market Share / 100
+                patient_metrics = product_row.get("patient_metrics") or {}
+
                 brand_nps_values = [
-                    round((ms / 100.0) * nps, 0)
-                    for ms, nps in zip(market_share_values, overall_nps_values)
+                    round(float(v or 0), 0)
+                    for v in patient_metrics.get("final_patient_share", [])
                 ]
 
                 nps_total_values = [

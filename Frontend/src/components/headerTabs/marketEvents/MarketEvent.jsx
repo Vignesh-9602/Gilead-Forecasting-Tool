@@ -29,7 +29,7 @@ import AccordionDetails from "@mui/material/AccordionDetails";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 
 import { GlobalContext } from "../../../context/Provider";
-import { getMarketEventFilters, applyMarketEventFilters, runMarketEventCalculation } from "../../../services/apiService";
+import { getMarketEventFilters, applyMarketEventFilters, runMarketEventCalculation, deleteMarketEvent } from "../../../services/apiService";
 import MarketEventChart from "./MarketEventChart";
 import MarketEventOutputTable from "./MarketEventTable";
 import { useSnackbarStore } from "../../../stores";
@@ -41,6 +41,8 @@ export default function MarketEvents() {
     const { showSnackbar } = useSnackbarStore();
     const [indication, setIndication] = useState("");
     const [selectedScenario, setSelectedScenario] = useState("");
+    const [startDate, setStartDate] = useState("");
+    const [endDate, setEndDate] = useState("");
     const [mappingData, setMappingData] = useState({});
     const [filterOptions, setFilterOptions] = useState({
         indications: [],
@@ -71,8 +73,14 @@ export default function MarketEvents() {
         }
     }, [therapyArea]);
 
+    const marketEventDateLocaleText = {
+        fieldMonthPlaceholder: () => "MM",
+        fieldYearPlaceholder: () => "YYYY",
+    };
+
     const fetchFilters = async () => {
         try {
+            setLoading(true);
             const response = await getMarketEventFilters(therapyArea);
 
             const resData = response?.data;
@@ -103,8 +111,6 @@ export default function MarketEvents() {
                     scenario_name:
                         defaultFilter.scenario_name,
                 };
-
-                setLoading(true);
 
                 const applyResponse =
                     await applyMarketEventFilters(
@@ -141,34 +147,56 @@ export default function MarketEvents() {
                     data?.metrics_data || null
                 );
 
-                setEventRows([
-                    {
-                        event_name: "",
-                        lot: data?.lots?.[0] || "",
-                        target_product:
-                            data?.target_products?.[0] ||
-                            "",
-                        start_date:
-                            data?.forecast_start_date ||
-                            "",
-                        curve_type:
-                            data?.curve_types?.[0] || "",
-                        peak_percent: "",
-                        months: "",
-                        factor: "",
-                        source_percentages:
-                            (
-                                data?.source_products ||
-                                []
-                            ).reduce(
-                                (acc, item) => {
-                                    acc[item] = "";
-                                    return acc;
-                                },
-                                {}
-                            ),
-                    },
-                ]);
+                if (data?.saved_events?.length > 0) {
+                    setEventRows(
+                        data.saved_events.map((event) => ({
+                            event_id: event.event_id,
+
+                            event_name: event.event_name,
+
+                            lot: event.lot,
+
+                            target_product: event.target_product,
+
+                            source_percentages:
+                                event.source_percentages || {},
+
+                            start_date: event.start_date,
+
+                            curve_type: event.curve_type,
+
+                            peak_percent: event.peak_percent,
+
+                            months: event.duration_months,
+
+                            factor: event.k_value ?? "",
+                        }))
+                    );
+                } else {
+                    setEventRows([
+                        {
+                            event_name: "",
+                            lot: data?.lots?.[0] || "",
+                            target_product:
+                                data?.target_products?.[0] || "",
+                            start_date:
+                                data?.forecast_start_date || "",
+                            curve_type:
+                                data?.curve_types?.[0] || "",
+                            peak_percent: "",
+                            months: "",
+                            factor: "",
+                            source_percentages:
+                                (data?.source_products || []).reduce(
+                                    (acc, item) => {
+                                        acc[item] = "";
+                                        return acc;
+                                    },
+                                    {}
+                                ),
+                        },
+                    ]);
+                }
             }
         } catch (error) {
             console.error(
@@ -194,7 +222,9 @@ export default function MarketEvents() {
             ta_name: therapyArea,
             indication,
             scenario_name: selectedScenario,
+            startDate
         };
+        // console.log("starttttt", startDate)
 
         try {
             setLoading(true);
@@ -231,35 +261,56 @@ export default function MarketEvents() {
             );
 
             // create first default row dynamically
-            setEventRows([
-                {
-                    event_name: "",
+            if (data?.saved_events?.length > 0) {
+                setEventRows(
+                    data.saved_events.map((event) => ({
+                        event_id: event.event_id,
 
-                    lot: data?.lots?.[0] || "",
+                        event_name: event.event_name,
 
-                    target_product:
-                        data?.target_products?.[0] || "",
+                        lot: event.lot,
 
-                    start_date:
-                        data?.forecast_start_date || "",
+                        target_product: event.target_product,
 
-                    curve_type:
-                        data?.curve_types?.[0] || "",
+                        source_percentages:
+                            event.source_percentages || {},
 
-                    peak_percent: "",
-                    months: "",
-                    factor: "",
+                        start_date: event.start_date,
 
-                    source_percentages:
-                        (data?.source_products || []).reduce(
-                            (acc, item) => {
-                                acc[item] = "";
-                                return acc;
-                            },
-                            {}
-                        ),
-                },
-            ]);
+                        curve_type: event.curve_type,
+
+                        peak_percent: event.peak_percent,
+
+                        months: event.duration_months,
+
+                        factor: event.k_value ?? "",
+                    }))
+                );
+            } else {
+                setEventRows([
+                    {
+                        event_name: "",
+                        lot: data?.lots?.[0] || "",
+                        target_product:
+                            data?.target_products?.[0] || "",
+                        start_date:
+                            data?.forecast_start_date || "",
+                        curve_type:
+                            data?.curve_types?.[0] || "",
+                        peak_percent: "",
+                        months: "",
+                        factor: "",
+                        source_percentages:
+                            (data?.source_products || []).reduce(
+                                (acc, item) => {
+                                    acc[item] = "";
+                                    return acc;
+                                },
+                                {}
+                            ),
+                    },
+                ]);
+            }
             showSnackbar("Filters applied successfully", "success");
         } catch (error) {
             console.error("Failed to apply market event filters", error);
@@ -334,6 +385,8 @@ export default function MarketEvents() {
         const duplicatedRow = {
             ...selectedRow,
 
+            event_id: undefined,
+
             source_percentages: {
                 ...selectedRow.source_percentages,
             },
@@ -352,16 +405,100 @@ export default function MarketEvents() {
         handleCloseMenu();
     };
 
-    const handleDeleteRow = () => {
-        const updatedRows = eventRows.filter(
-            (_, index) => index !== selectedRowIndex
-        );
+    const handleDeleteRow = async () => {
+        try {
+            setLoading(true);
+            const selectedRow =
+                eventRows[selectedRowIndex];
 
-        setEventRows(updatedRows);
+            // Unsaved row
+            if (!selectedRow?.event_id) {
+                const updatedRows = eventRows.filter(
+                    (_, index) =>
+                        index !== selectedRowIndex
+                );
 
-        setOpenDeleteDialog(false);
+                setEventRows(updatedRows);
 
-        handleCloseMenu();
+                setOpenDeleteDialog(false);
+                handleCloseMenu();
+
+                // showSnackbar(
+                //     "Event removed",
+                //     "success"
+                // );
+
+                return;
+            }
+
+            // Saved row
+            const payload = {
+                ta_name: therapyArea,
+                indication,
+                scenario_name: selectedScenario,
+                event_id: selectedRow.event_id,
+            };
+
+            const response =
+                await deleteMarketEvent(payload);
+
+            const data = response?.data;
+
+            if (data?.saved_events?.length > 0) {
+                setEventRows(
+                    data.saved_events.map((event) => ({
+                        event_id: event.event_id,
+
+                        event_name: event.event_name,
+
+                        lot: event.lot,
+
+                        target_product:
+                            event.target_product,
+
+                        source_percentages:
+                            event.source_percentages || {},
+
+                        start_date:
+                            event.start_date,
+
+                        curve_type:
+                            event.curve_type,
+
+                        peak_percent:
+                            event.peak_percent,
+
+                        months:
+                            event.duration_months,
+
+                        factor:
+                            event.k_value ?? "",
+                    }))
+                );
+            } else {
+                setEventRows([]);
+            }
+
+            showSnackbar(
+                "Event deleted successfully",
+                "success"
+            );
+
+            setOpenDeleteDialog(false);
+            handleCloseMenu();
+        } catch (error) {
+            console.error(
+                "Failed to delete event",
+                error
+            );
+
+            showSnackbar(
+                "Failed to delete event",
+                "error"
+            );
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleOpenSourceDialog = (index) => {
@@ -401,10 +538,37 @@ export default function MarketEvents() {
     ) => {
         const updatedRows = [...eventRows];
 
-        updatedRows[index] = {
-            ...updatedRows[index],
-            [field]: value,
-        };
+        if (field === "target_product") {
+            const previousTarget =
+                updatedRows[index].target_product;
+
+            const sourcePercentages = {
+                ...updatedRows[index]
+                    .source_percentages,
+            };
+
+            // Clear old target product
+            if (previousTarget) {
+                sourcePercentages[
+                    previousTarget
+                ] = 0;
+            }
+
+            // Ensure new target product is 0
+            sourcePercentages[value] = 0;
+
+            updatedRows[index] = {
+                ...updatedRows[index],
+                target_product: value,
+                source_percentages:
+                    sourcePercentages,
+            };
+        } else {
+            updatedRows[index] = {
+                ...updatedRows[index],
+                [field]: value,
+            };
+        }
 
         setEventRows(updatedRows);
     };
@@ -443,16 +607,32 @@ export default function MarketEvents() {
             })),
         };
 
-        // console.log("========== RUN CALCULATION PAYLOAD ==========");
-        // console.log(payload);
-
         // console.log(
         //     "Payload JSON:",
         //     JSON.stringify(payload, null, 2)
         // );
         try {
+            setLoading(true);
             const response = await runMarketEventCalculation(payload);
             const data = response?.data;
+
+            if (data?.saved_events) {
+                setEventRows(
+                    data.saved_events.map((event) => ({
+                        event_id: event.event_id,
+                        event_name: event.event_name,
+                        lot: event.lot,
+                        target_product: event.target_product,
+                        source_percentages:
+                            event.source_percentages || {},
+                        start_date: event.start_date,
+                        curve_type: event.curve_type,
+                        peak_percent: event.peak_percent,
+                        months: event.duration_months,
+                        factor: event.k_value ?? "",
+                    }))
+                );
+            }
 
             console.log("RUN CALCULATION RESPONSE", data);
 
@@ -467,6 +647,8 @@ export default function MarketEvents() {
         } catch (error) {
             console.error("Run calculation failed", error);
             showSnackbar("Failed to run calculation", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -476,6 +658,10 @@ export default function MarketEvents() {
             return acc;
         }, {});
     };
+
+    const targetProduct =
+        eventRows[selectedSourceRowIndex]
+            ?.target_product;
 
     return (
         <Box sx={{ p: 3 }}>
@@ -617,6 +803,93 @@ export default function MarketEvents() {
                             </Select>
                         </FormControl>
                     </Box>
+                    <Box>
+                        <Typography
+                            sx={{
+                                mb: 1,
+                                fontSize: "14px",
+                                fontWeight: 700,
+                                color: "#64748b",
+                            }}
+                        >
+                            START DATE
+                        </Typography>
+
+                        <LocalizationProvider dateAdapter={AdapterDayjs} localeText={marketEventDateLocaleText}>
+                            <DatePicker
+                                views={["year", "month"]}
+                                value={startDate ? dayjs(startDate) : null}
+                                onChange={(newValue) =>
+                                    setStartDate(
+                                        newValue
+                                            ? newValue
+                                                .startOf("month")
+                                                .format("YYYY-MM-DD")
+                                            : ""
+                                    )
+                                }
+                                format="MMM YY"
+                                slotProps={{
+                                    textField: {
+                                        size: "small",
+                                        sx: {
+                                            // ...inputStyle,
+                                            maxWidth: "150px",
+                                            "& .MuiOutlinedInput-root": {
+                                                borderRadius: "8px",
+                                                height: "35px",
+                                                backgroundColor: "#fcfcfd",
+                                            },
+                                        },
+                                    },
+                                }}
+                            />
+                        </LocalizationProvider>
+                    </Box>
+
+                    <Box>
+                        <Typography
+                            sx={{
+                                mb: 1,
+                                fontSize: "14px",
+                                fontWeight: 700,
+                                color: "#64748b",
+                            }}
+                        >
+                            END DATE
+                        </Typography>
+
+                        <LocalizationProvider dateAdapter={AdapterDayjs} localeText={marketEventDateLocaleText}>
+                            <DatePicker
+                                views={["year", "month"]}
+                                value={endDate ? dayjs(endDate) : null}
+                                onChange={(newValue) =>
+                                    setEndDate(
+                                        newValue
+                                            ? newValue
+                                                .startOf("month")
+                                                .format("YYYY-MM-DD")
+                                            : ""
+                                    )
+                                }
+                                format="MMM YY"
+                                slotProps={{
+                                    textField: {
+                                        size: "small",
+                                        sx: {
+                                            // ...inputStyle,
+                                            maxWidth: "150px",
+                                            "& .MuiOutlinedInput-root": {
+                                                borderRadius: "8px",
+                                                height: "35px",
+                                                backgroundColor: "#fcfcfd",
+                                            },
+                                        },
+                                    },
+                                }}
+                            />
+                        </LocalizationProvider>
+                    </Box>
 
                     {/* Apply Filter */}
                     <Box sx={{ ml: 2 }}>
@@ -750,7 +1023,7 @@ export default function MarketEvents() {
                                 sx={{
                                     display: "grid",
                                     gridTemplateColumns:
-                                        "0.65fr 0.3fr 0.55fr 0.45fr 0.55fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
+                                        "0.65fr 0.3fr 0.55fr 0.45fr 0.35fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
                                     gap: 2,
                                     px: 2,
                                     py: 1.5,
@@ -802,7 +1075,7 @@ export default function MarketEvents() {
                                         sx={{
                                             display: "grid",
                                             gridTemplateColumns:
-                                                "0.65fr 0.3fr 0.55fr 0.45fr 0.55fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
+                                                "0.65fr 0.3fr 0.55fr 0.45fr 0.35fr 0.28fr 0.28fr 0.4fr 0.3fr 40px",
                                             gap: 2,
                                             px: 2,
                                             py: 1.5,
@@ -897,31 +1170,38 @@ export default function MarketEvents() {
                                         </Button>
 
                                         {/* Start Date */}
-                                        <LocalizationProvider dateAdapter={AdapterDayjs}>
-                                            <DatePicker
-                                                value={
-                                                    row.start_date
-                                                        ? dayjs(row.start_date)
-                                                        : null
-                                                }
-                                                onChange={(newValue) =>
+                                        <FormControl size="small">
+                                            <Select
+                                                value={row.start_date}
+                                                onChange={(e) =>
                                                     handleRowChange(
                                                         index,
                                                         "start_date",
-                                                        newValue
-                                                            ? newValue.format("YYYY-MM-DD")
-                                                            : ""
+                                                        e.target.value
                                                     )
                                                 }
-                                                format="DD-MM-YYYY"
-                                                slotProps={{
-                                                    textField: {
-                                                        size: "small",
-                                                        sx: tableInputStyle,
-                                                    },
+                                                sx={{
+                                                    borderRadius: "6px",
+                                                    height: "32px",
+                                                    fontSize: "13px",
                                                 }}
-                                            />
-                                        </LocalizationProvider>
+                                            >
+                                                {startDateOptions.map((month) => (
+                                                    <MenuItem
+                                                        key={month}
+                                                        value={month}
+                                                    >
+                                                        {new Date(month).toLocaleDateString(
+                                                            "en-US",
+                                                            {
+                                                                month: "short",
+                                                                year: "2-digit",
+                                                            }
+                                                        )}
+                                                    </MenuItem>
+                                                ))}
+                                            </Select>
+                                        </FormControl>
 
                                         {/* Peak % */}
                                         <TextField
@@ -1152,13 +1432,20 @@ export default function MarketEvents() {
                                                         gap: 9,
                                                     }}
                                                 >
-                                                    <Typography sx={{ fontSize: '14px', width: '120px', flexShrink: 0 }}>
+                                                    <Typography sx={{
+                                                        fontSize: '14px', width: '120px', flexShrink: 0,
+                                                        color:
+                                                            product === targetProduct
+                                                                ? "#94a3b8"
+                                                                : "inherit",
+                                                    }}>
                                                         {product}
                                                     </Typography>
 
                                                     <TextField
                                                         type="number"
                                                         value={value}
+                                                        disabled={product === targetProduct}
                                                         onChange={(e) =>
                                                             handleSourcePercentageChange(
                                                                 product,
@@ -1172,7 +1459,19 @@ export default function MarketEvents() {
                                                             "& .MuiOutlinedInput-root": {
                                                                 height: "30px",
                                                                 fontSize: "13px",
+                                                                backgroundColor:
+                                                                    product === targetProduct
+                                                                        ? "#e2e8f0"
+                                                                        : "#fff",
                                                             },
+
+                                                            // "& .MuiInputBase-input.Mui-disabled": {
+                                                            //     WebkitTextFillColor: "#94a3b8",
+                                                            // },
+
+                                                            // "& .MuiOutlinedInput-root.Mui-disabled": {
+                                                            //     backgroundColor: "#e2e8f0",
+                                                            // },
 
                                                             "& input": {
                                                                 padding: "6px 8px",

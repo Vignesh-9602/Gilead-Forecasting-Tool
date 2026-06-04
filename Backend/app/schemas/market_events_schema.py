@@ -33,7 +33,7 @@ class MarketEventApplyFilterResponse(BaseModel):
     metric_filters: List[Dict[str, str]]
     curve_types: List[str]
     forecast_start_date: Optional[str]
-
+    saved_events: List[Dict[str, Any]] = []
     metrics_data: Dict[str, Any]
 
 class MarketEventRunEvent(BaseModel):
@@ -60,6 +60,7 @@ class MarketEventRunCalculationResponse(BaseModel):
     indication: str
     scenario_name: str
     events_applied: int
+    saved_events: List[Dict[str, Any]] = []
     metrics_data: Dict[str, Any]
 
 class MarketEventChildRow(BaseModel):
@@ -79,3 +80,9 @@ class MarketEventSaveRequest(BaseModel):
     scenario_name: str
     metric: str
     table: List[MarketEventLotGroup]
+
+class DeleteMarketEventRequest(BaseModel):
+    ta_name: str
+    indication: str
+    scenario_name: str
+    event_id: int

@@ -12,6 +12,7 @@ from app.schemas.config_schema import (
 from app.repository.metrics_repo import build_metrics_filter_data, build_metrics_hierarchy, get_oncology_metrics
 from app.services.Secenario_Selection import save_base_scenario
 from app.services.forecast_service import generate_full_base_forecast
+from app.services.scenario_service import get_scenario_filters
 
 router = APIRouter(prefix="/api")
 
@@ -274,6 +275,8 @@ def save_configuration(payload: SaveConfigRequest):
         factors = nps_base["factors_map"][(indication, lot)]
         # ↑ NO .get(), crash loudly if mismatched
 
+
+
         save_base_scenario(
             ta=ta,
             indication=indication,
@@ -287,6 +290,7 @@ def save_configuration(payload: SaveConfigRequest):
                 "forecast_values": s["forecast_values"],
             },
             factors=factors
+        
         )
 
     # ---------- MARKET SHARE BASE ----------
@@ -305,7 +309,65 @@ def save_configuration(payload: SaveConfigRequest):
 
         factors = ms_base["factors_map"][(indication, lot, product)]
         # ↑ NO .get()
+        # -----------------------------------------------------
+        # Build patient metrics
+        # -----------------------------------------------------
 
+        nps_series = next(
+            (
+                x for x in nps_base["series"]
+                if (
+                    x["display"]["indication"] == indication
+                    and
+                    x["display"]["lot"] == lot
+                )
+            ),
+            None
+        )
+
+        patient_metrics = None
+
+        if nps_series:
+
+            nps_values = (
+                nps_series["train_values"]
+                + nps_series["forecast_values"]
+            )
+
+            market_share_values = (
+                s["train_values"]
+                + s["forecast_values"]
+            )
+
+            final_patient_share = []
+
+            for nps, share in zip(
+                nps_values,
+                market_share_values
+            ):
+
+                patient_count = round(
+                    float(nps or 0)
+                    * (float(share or 0) / 100),
+                    2
+                )
+
+                final_patient_share.append(patient_count)
+
+            patient_metrics = {
+                "final_nps": [
+                    round(float(x or 0), 2)
+                    for x in nps_values
+                ],
+
+                "final_market_share": [
+                    round(float(x or 0), 2)
+                    for x in market_share_values
+                ],
+
+                "final_patient_share":
+                    final_patient_share
+            }
         save_base_scenario(
             ta=ta,
             indication=indication,
@@ -318,7 +380,8 @@ def save_configuration(payload: SaveConfigRequest):
                 "train_values": s["train_values"],
                 "forecast_values": s["forecast_values"],
             },
-            factors=factors
+            factors=factors,
+            patient_metrics=patient_metrics
         )
 
 
@@ -396,119 +459,49 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
         cur.close()
         conn.close()
 
-@router.get("/metrics/filters/{ta_name}", tags=["Model_Input"])
+
+
+@router.get( "/metrics/filters/{ta_name}", tags=["Model_Input"])
 def get_metrics_filters(ta_name: str):
 
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        # Scenario names
-        cur.execute("""
-            SELECT DISTINCT scenario_name
-            FROM raw.forecast_scenarios
-            WHERE ta_name = %s
-            ORDER BY scenario_name
-        """, (ta_name,))
 
-        scenario_names = [r[0] for r in cur.fetchall()]
+        filter_data = get_scenario_filters(
+            cur,
+            ta_name
+        )
 
-        if not scenario_names:
-            return {
-                "ta_name": ta_name,
-                "scenario_names": [],
-                "data": {},
-                "metric_filters": [],
-                "default_filter": {
-                    "scenario_name": "",
-                    "indication": "",
-                    "lot": "",
-                    "metric": "nps",
-                    "product": ""
+        return {
+            "ta_name": ta_name,
+
+            "scenario_names":
+                filter_data["scenario_names"],
+
+            "data":
+                filter_data["data"],
+
+            "metric_filters": [
+                {
+                    "label": "Market Share",
+                    "value": "market_share"
+                },
+                {
+                    "label": "Overall Market Volume",
+                    "value": "nps"
                 }
+            ],
+
+            "default_filter": {
+                **filter_data["default_filter"],
+                "metric": "nps",
+                "product": ""
             }
-
-        cur.execute("""
-            WITH scenario_lots AS (
-                SELECT DISTINCT
-                    scenario_name,
-                    ta_name,
-                    indication,
-                    lot
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-            )
-            SELECT
-                sl.scenario_name,
-                im.indications AS indication,
-                sl.lot,
-                im.brand_name AS product
-            FROM scenario_lots sl
-            JOIN raw.indication_master im
-              ON im.ta = sl.ta_name
-             AND LOWER(im.indications) = LOWER(sl.indication)
-            WHERE im.brand_name IS NOT NULL
-            ORDER BY
-                sl.scenario_name,
-                im.indications,
-                sl.lot,
-                im.brand_name
-        """, (ta_name,))
-
-        rows = cur.fetchall()
+        }
 
     finally:
         cur.close()
         conn.close()
 
-    data = {}
-
-    for scenario, indication, lot, product in rows:
-        scenario_map = data.setdefault(scenario, {})
-        indication_map = scenario_map.setdefault(indication, {})
-        lot_products = indication_map.setdefault(lot, [])
-
-        if product and product not in lot_products:
-            lot_products.append(product)
-
-    # -----------------------------------------------------
-    # Default filter for FE initial page load
-    # -----------------------------------------------------
-
-    default_scenario = "BASE" if "BASE" in scenario_names else scenario_names[0]
-
-    default_indication = ""
-    default_lot = ""
-    default_product = ""
-
-    if default_scenario in data and data[default_scenario]:
-
-        default_indication = sorted(
-            data[default_scenario].keys()
-        )[0]
-
-        if default_indication and data[default_scenario][default_indication]:
-
-            default_lot = sorted(
-                data[default_scenario][default_indication].keys()
-            )[0]
-
-            # For nps, product should be blank
-            default_product = ""
-
-    return {
-        "ta_name": ta_name,
-        "scenario_names": scenario_names,
-        "data": data,
-        "metric_filters": [
-            {"label": "Market Share", "value": "market_share"},
-            {"label": "Overall Market Volume", "value": "nps"}
-        ],
-        "default_filter": {
-            "scenario_name": default_scenario,
-            "indication": default_indication,
-            "lot": default_lot,
-            "metric": "nps",
-            "product": default_product
-        }
-    }

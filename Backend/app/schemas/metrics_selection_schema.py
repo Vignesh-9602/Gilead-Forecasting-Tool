@@ -139,3 +139,4 @@ class UpdateScenarioRequest(BaseModel):
     model_type: str
     factors: Dict[str, Any]
     metrics_data: Dict[str, Any]
+

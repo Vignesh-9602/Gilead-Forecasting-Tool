@@ -24,6 +24,7 @@ import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import { saveMarketEventTable } from "../../../services/apiService";
+import { useLoadingStore } from "../../../stores";
 
 export default function MarketEventTable({
     metricsData,
@@ -39,6 +40,7 @@ export default function MarketEventTable({
     const [editable, setEditable] = useState(false);
     const [selectedMetricView, setSelectedMetricView] = useState("nps");
     const [editedCell, setEditedCell] = useState(null);
+    const { setLoading, isLoading } = useLoadingStore();
 
     const formattedMonths = useMemo(() => {
         return (
@@ -309,7 +311,7 @@ export default function MarketEventTable({
     const handleSave = async () => {
 
         try {
-
+            setLoading(true);
             const payload = {
                 ta_name: therapyArea,
 
@@ -378,12 +380,10 @@ export default function MarketEventTable({
             showSnackbar("Market event saved successfully", "success");
 
         } catch (error) {
-
-            console.error(
-                "Failed to save market event table",
-                error
-            );
+            console.error("Failed to save market event table", error);
             showSnackbar("Failet to save market event", "error");
+        } finally {
+            setLoading(false);
         }
     };
 

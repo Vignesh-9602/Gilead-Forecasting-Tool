@@ -177,6 +177,13 @@ export const applyInventoryStockPercentage = (payload) => {
   return httpClient.post("/api/persistency/inventory/stock-percentage/apply", payload);
 };
 
+export const deleteMarketEvent = (payload) => {
+  return httpClient.post(
+    "/api/market-events/market-events/delete-event",
+    payload
+  );
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };
