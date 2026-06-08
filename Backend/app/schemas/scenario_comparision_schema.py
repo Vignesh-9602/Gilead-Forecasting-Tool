@@ -12,7 +12,7 @@ class ScenarioOption(BaseModel):
     scenario_id: str
     scenario_name: str
 
-class DefaultFilter(BaseModel):
+class SelectedFilter(BaseModel):
     indication: str
     lot: str
 
@@ -25,7 +25,7 @@ class FilterResponse(BaseModel):
     ta_name: str
     data: Dict[str, Dict[str, LotFilterData]]
     metric_filters: List[MetricFilterOption]
-    default_filter: DefaultFilter
+    selected_filter: SelectedFilter
 
 class ApplyFilterRequest(BaseModel):
     ta_name: str

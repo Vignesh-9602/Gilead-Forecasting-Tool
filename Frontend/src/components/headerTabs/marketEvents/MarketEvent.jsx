@@ -92,7 +92,7 @@ export default function MarketEvents() {
             });
 
             const defaultFilter =
-                resData?.default_filter;
+                resData?.selected_filter;
 
             if (defaultFilter) {
                 setIndication(
@@ -103,6 +103,9 @@ export default function MarketEvents() {
                     defaultFilter.scenario_name
                 );
 
+                setStartDate(defaultFilter.start_date || "");
+                setEndDate(defaultFilter.end_date || "");
+
                 // Auto Apply Filter
                 const payload = {
                     ta_name: therapyArea,
@@ -110,6 +113,8 @@ export default function MarketEvents() {
                         defaultFilter.indication,
                     scenario_name:
                         defaultFilter.scenario_name,
+                    start_date: defaultFilter.start_date,
+                    end_date: defaultFilter.end_date
                 };
 
                 const applyResponse =
@@ -222,7 +227,8 @@ export default function MarketEvents() {
             ta_name: therapyArea,
             indication,
             scenario_name: selectedScenario,
-            startDate
+            start_date: startDate,
+            end_date: endDate
         };
         // console.log("starttttt", startDate)
 
@@ -1551,6 +1557,10 @@ export default function MarketEvents() {
                         setMarketEventMetricsData
                     }
                     showSnackbar={showSnackbar}
+                    indication={indication}
+                    // selectedScenario={selectedScenario}
+                    startDate={startDate}
+                    endDate={endDate}
                 />
             </Paper>
         </Box >

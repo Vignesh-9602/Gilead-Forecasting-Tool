@@ -1,6 +1,7 @@
 # service.py
 from collections import defaultdict
 from app.db.connection import get_connection
+from app.services.Retaining_Filters import get_saved_user_filter, save_user_filter
 
 
 def get_filter_data(ta_name: str):
@@ -94,15 +95,28 @@ def get_filter_data(ta_name: str):
                 default_lot = sorted(
                     indication_lots.keys()
                 )[0]
+                user_id = "system"
+
+        saved_filter = get_saved_user_filter(
+            cursor,
+            user_id,
+            ta_name
+        )
+
+        default_filter = {
+            "indication": default_indication,
+            "lot": default_lot,
+            "metric": "nps",
+            "product": ""
+        }
+
+        selected_filter = saved_filter if saved_filter else default_filter
 
         return {
             "ta_name": ta_name,
             "data": final_data,
             "metric_filters": metric_filters,
-            "default_filter": {
-                    "indication": default_indication,
-                    "lot": default_lot
-                }
+           "selected_filter": selected_filter
         }
 
     finally:
@@ -327,7 +341,18 @@ def apply_filters(payload):
                 "total": market_share_total_values or [],
                 "children": market_share_children
             })
+            save_user_filter(
+                    cur=cursor,
+                    user_id="system",
+                    ta_name=payload.ta_name,
+                    scenario_name=scenario_names[0],
+                    indication=payload.indication,
+                    lot=payload.lot,
+                    metric="nps",
+                    product=""
+                )
 
+        conn.commit()
         return {
             "therapy_area": payload.ta_name,
             "indication": payload.indication,

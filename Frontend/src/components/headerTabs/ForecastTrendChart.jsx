@@ -46,7 +46,8 @@ export default function ForecastTrendChart({
     updateAllMetricsData,
     onUpdateScenario,
     onSaveScenario,
-    scenarioSelector
+    scenarioSelector,
+    metricUnit
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -69,6 +70,16 @@ export default function ForecastTrendChart({
     const [openDialog, setOpenDialog] = useState(false);
     const [scenarioName, setScenarioName] = useState("");
     const { setLoading, isLoading } = useLoadingStore();
+
+    const formatValue = (value) => {
+        if (value === null || value === undefined) return "-";
+
+        if (metric === "market_share") {
+            return `${parseFloat(value)}%`;
+        }
+
+        return value;
+    };
 
     useEffect(() => {
         if (tableData?.length) {
@@ -323,7 +334,8 @@ export default function ForecastTrendChart({
                 metric,
                 product: selectedProduct,
                 lot: selectedLot,
-                table: tableRows, // directly send nested structure
+                table: tableRows, // directly send nested structure,
+                scenario_name: scenarioSelector,
             };
 
             const res = await saveChanges(payload);
@@ -346,6 +358,7 @@ export default function ForecastTrendChart({
                     updateAllMetricsData(prev => ({
                         ...prev,
                         [metric]: {
+                            unit: updatedMetricData.unit || "",
                             chart: updatedMetricData.chart || null,
                             table: updatedMetricData.table || []
                         }
@@ -398,7 +411,7 @@ export default function ForecastTrendChart({
                     fontWeight: highlight ? 700 : 400,
                 }}
             >
-                {value}
+                {editable ? value : formatValue(value)}
             </Box>
         );
     };
@@ -768,7 +781,7 @@ export default function ForecastTrendChart({
 
                                             {(lotGroup.total || []).map((value, i) => (
                                                 <TableCell key={i} align="center" sx={{ fontWeight: 700, borderRight: "1px solid #E2E8F0", }}>
-                                                    {value}
+                                                    {formatValue(value)}
                                                 </TableCell>
                                             ))}
                                         </TableRow>

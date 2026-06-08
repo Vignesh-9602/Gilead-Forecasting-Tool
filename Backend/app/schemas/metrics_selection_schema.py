@@ -108,6 +108,7 @@ class Refreshchangerequest(BaseModel):
     product: str
     lot: str
     table: List[LotGroup]
+    scenario_name: str
 
 # ------------------------------------
 # save scenario

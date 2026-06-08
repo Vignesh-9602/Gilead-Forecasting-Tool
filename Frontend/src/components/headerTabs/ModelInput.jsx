@@ -57,6 +57,10 @@ export default function ModelInput() {
 
     const { favState } = useContext(GlobalContext);
     const therapyArea = favState?.selectedTherapyArea;
+    // const [metricUnit, setMetricUnit] = useState("");
+
+    const metricUnit =
+        allMetricsData?.[metric]?.unit || "";
 
     useEffect(() => {
         if (therapyArea) {
@@ -92,7 +96,8 @@ export default function ModelInput() {
 
             setMappingData(resData?.data || {});
 
-            const defaultFilter = resData?.default_filter;
+            // default filter : first time default filter, and last applied filters will be populated for next
+            const defaultFilter = resData?.selected_filter;
 
             if (defaultFilter) {
                 setScenarioSelector(defaultFilter.scenario_name);
@@ -178,6 +183,7 @@ export default function ModelInput() {
 
                 setChartData(selectedMetricData?.chart || null);
                 setTableData(selectedMetricData?.table || []);
+                // setMetricUnit(selectedMetricData?.unit || "");
             } else {
                 setFilterOptions({
                     indications: [],
@@ -259,6 +265,7 @@ export default function ModelInput() {
 
             setChartData(selectedMetricData?.chart || null);
             setTableData(selectedMetricData?.table || []);
+            // setMetricUnit(selectedMetricData?.unit || "");
 
             // setTrajectoryStart(
             //     trajectory?.trajectory_start ||
@@ -372,6 +379,7 @@ export default function ModelInput() {
 
             setChartData(selectedMetricData?.chart || null);
             setTableData(selectedMetricData?.table || []);
+            // setMetricUnit(selectedMetricData?.unit || "");
 
             // setEditable(false);
             showSnackbar("Metrics recalculated successfully", "success");
@@ -539,7 +547,7 @@ export default function ModelInput() {
 
     const handleSaveScenario = async (scenarioNameFromDialog) => {
         if (!scenarioNameFromDialog) {
-            alert("Please enter scenario name");
+            showSnackbar("Please enter the scenario name", "error");
             return;
         }
 
@@ -1266,6 +1274,7 @@ export default function ModelInput() {
                     scenarioSelector={scenarioSelector}
                     selectedProduct={appliedBrand}
                     selectedLot={appliedLot}
+                    metricUnit={metricUnit}
                 // scenarioName={scenarioName}
                 // setScenarioName={setScenarioName}
                 />

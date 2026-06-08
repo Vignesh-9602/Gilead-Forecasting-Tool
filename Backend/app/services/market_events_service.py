@@ -1,10 +1,73 @@
 import json
-
 from fastapi import HTTPException
-
 from app.db.connection import get_connection
 from app.schemas.market_events_schema import DeleteMarketEventRequest
+from app.services.Retaining_Filters import get_saved_user_filter, save_user_filter
 from app.services.market_events_calculation import generate_market_event_impact_percent, generate_market_event_share_from_start_date
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
+
+def clean_scenario_name(scenario_name: str):
+    if not scenario_name:
+        return ""
+
+    scenario_name = scenario_name.strip()
+
+    if scenario_name.lower().endswith("_finalised"):
+        scenario_name = scenario_name[:-10]
+
+    return scenario_name
+
+
+def get_display_scenario_name(cur, ta_name: str, indication: str, scenario_name: str):
+    base_scenario_name = clean_scenario_name(scenario_name)
+
+    cur.execute("""
+        SELECT BOOL_OR(is_finalized = TRUE)
+        FROM raw.forecast_scenarios
+        WHERE ta_name = %s
+          AND indication = %s
+          AND scenario_name = %s
+    """, (
+        ta_name,
+        indication,
+        base_scenario_name
+    ))
+
+    row = cur.fetchone()
+    is_finalized = row[0] if row else False
+
+    return (
+        f"{base_scenario_name}_Finalised"
+        if is_finalized
+        else base_scenario_name
+    )
+
+
+def get_default_date_range(cur, ta_name: str):
+    cur.execute("""
+        SELECT
+            MAX(month_date)::date AS end_date,
+            (MAX(month_date)::date - INTERVAL '1 year')::date AS start_date
+        FROM (
+            SELECT
+                jsonb_array_elements_text(chart->'months')::date AS month_date
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
+              AND chart IS NOT NULL
+              AND chart ? 'months'
+        ) t
+    """, (ta_name,))
+
+    date_row = cur.fetchone()
+
+    if date_row and date_row[0]:
+        return (
+            date_row[1].strftime("%Y-%m-%d"),
+            date_row[0].strftime("%Y-%m-%d")
+        )
+
+    return "", ""
 
 
 def get_market_event_filters_service(ta_name: str):
@@ -19,7 +82,8 @@ def get_market_event_filters_service(ta_name: str):
                 BOOL_OR(is_finalized = TRUE) AS is_finalized
             FROM raw.forecast_scenarios
             WHERE ta_name = %s
-            AND scenario_name IS NOT NULL
+              AND scenario_name IS NOT NULL
+              AND indication IS NOT NULL
             GROUP BY indication, scenario_name
             ORDER BY indication, scenario_name
         """, (ta_name,))
@@ -36,10 +100,7 @@ def get_market_event_filters_service(ta_name: str):
                 else scenario_name
             )
 
-            if indication not in data:
-                data[indication] = {
-                    "scenarios": []
-                }
+            data.setdefault(indication, {"scenarios": []})
 
             if display_name not in data[indication]["scenarios"]:
                 data[indication]["scenarios"].append(display_name)
@@ -49,24 +110,63 @@ def get_market_event_filters_service(ta_name: str):
 
         if data:
             default_indication = sorted(data.keys())[0]
-
             scenarios = data[default_indication].get("scenarios", [])
 
             if scenarios:
                 default_scenario_name = (
-                    "BASE"
+                    "BASE_Finalised"
+                    if "BASE_Finalised" in scenarios
+                    else "BASE"
                     if "BASE" in scenarios
                     else sorted(scenarios)[0]
                 )
+
+        default_start_date, default_end_date = get_default_date_range(
+            cur,
+            ta_name
+        )
+
+        default_filter = {
+            "scenario_name": default_scenario_name,
+            "indication": default_indication,
+            "lot": "",
+            "metric": "",
+            "product": "",
+            "start_date": default_start_date,
+            "end_date": default_end_date
+        }
+
+        user_id = "system"
+
+        saved_filter = get_saved_user_filter(
+            cur,
+            user_id,
+            ta_name
+        )
+
+        if saved_filter:
+            selected_filter = {
+                "scenario_name": get_display_scenario_name(
+                    cur,
+                    ta_name,
+                    saved_filter.get("indication", ""),
+                    saved_filter.get("scenario_name", "")
+                ),
+                "indication": saved_filter.get("indication", ""),
+                "lot": saved_filter.get("lot", ""),
+                "metric": saved_filter.get("metric", ""),
+                "product": saved_filter.get("product", ""),
+                "start_date": saved_filter.get("start_date") or default_start_date,
+                "end_date": saved_filter.get("end_date") or default_end_date
+            }
+        else:
+            selected_filter = default_filter
 
         return {
             "ta_name": ta_name,
             "indications": list(data.keys()),
             "data": data,
-            "default_filter": {
-                "indication": default_indication,
-                "scenario_name": default_scenario_name
-            }
+            "selected_filter": selected_filter
         }
 
     finally:
@@ -85,7 +185,8 @@ def empty_market_event_apply_response(payload):
         "ta_name": payload.ta_name,
         "indication": payload.indication,
         "scenario_name": payload.scenario_name,
-
+        "start_date": payload.start_date,
+        "end_date": payload.end_date,
         "lots": [],
         "target_products": [],
         "source_products": [],
@@ -132,27 +233,84 @@ def empty_market_event_apply_response(payload):
     }
 
 
+def clean_scenario_name(scenario_name: str):
+    if not scenario_name:
+        return ""
+
+    scenario_name = scenario_name.strip()
+
+    if scenario_name.lower().endswith("_finalised"):
+        scenario_name = scenario_name[:-10]
+
+    return scenario_name
+
+
+def get_filtered_indices(months, start_date, end_date):
+    if not months:
+        return []
+
+    if not start_date or not end_date:
+        return list(range(len(months)))
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    indices = []
+
+    for idx, month in enumerate(months):
+        month_dt = datetime.strptime(month, "%Y-%m-%d").date()
+
+        if start_dt <= month_dt <= end_dt:
+            indices.append(idx)
+
+    return indices
+
+
+def filter_values_by_indices(values, indices):
+    return [
+        values[idx]
+        for idx in indices
+        if idx < len(values)
+    ]
+
+
+def get_new_forecast_start_index(filtered_months, global_forecast_start_date):
+    if not filtered_months or not global_forecast_start_date:
+        return 0
+
+    forecast_dt = datetime.strptime(
+        global_forecast_start_date,
+        "%Y-%m-%d"
+    ).date()
+
+    count = 0
+
+    for month in filtered_months:
+        month_dt = datetime.strptime(month, "%Y-%m-%d").date()
+
+        if month_dt < forecast_dt:
+            count += 1
+
+    return count
+
+
 def apply_market_event_filters_service(payload):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     try:
-        selected_scenario = payload.scenario_name.strip()
-
-        if selected_scenario.lower().endswith("_finalised"):
-            selected_scenario = selected_scenario[:-10]
+        selected_scenario = clean_scenario_name(payload.scenario_name)
 
         lot_scenario_map = {}
-
 
         cursor.execute("""
             SELECT DISTINCT
                 lot
             FROM raw.forecast_scenarios
             WHERE ta_name = %s
-            AND LOWER(indication) = LOWER(%s)
-            AND LOWER(scenario_name) = LOWER(%s)
+              AND LOWER(indication) = LOWER(%s)
+              AND LOWER(scenario_name) = LOWER(%s)
             ORDER BY lot
         """, (
             payload.ta_name,
@@ -174,15 +332,17 @@ def apply_market_event_filters_service(payload):
         products = set()
         saved_events = []
         event_id = 1
+
         for lot, scenario_name in lot_scenario_map.items():
+
             cursor.execute("""
                 SELECT event_payload
                 FROM raw.forecast_scenarios
                 WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND lot = %s
-                AND LOWER(scenario_name) = LOWER(%s)
-                AND event_payload IS NOT NULL
+                  AND LOWER(indication) = LOWER(%s)
+                  AND lot = %s
+                  AND LOWER(scenario_name) = LOWER(%s)
+                  AND event_payload IS NOT NULL
                 LIMIT 1
             """, (
                 payload.ta_name,
@@ -194,15 +354,13 @@ def apply_market_event_filters_service(payload):
             event_row = cursor.fetchone()
 
             if event_row and event_row[0]:
-
                 event_payload = event_row[0]
 
                 for event in event_payload:
-
                     event["event_id"] = event_id
                     saved_events.append(event)
-
                     event_id += 1
+
             cursor.execute("""
                 SELECT DISTINCT
                     product
@@ -229,6 +387,7 @@ def apply_market_event_filters_service(payload):
         products = sorted(list(products))
 
         chart_months = None
+        filtered_months = []
         forecast_start_index = 0
         global_forecast_start_date = None
 
@@ -240,8 +399,7 @@ def apply_market_event_filters_service(payload):
         for lot, scenario_name in lot_scenario_map.items():
 
             cursor.execute("""
-                SELECT
-                    chart
+                SELECT chart
                 FROM raw.forecast_scenarios
                 WHERE ta_name = %s
                   AND LOWER(indication) = LOWER(%s)
@@ -266,27 +424,47 @@ def apply_market_event_filters_service(payload):
             if not nps_chart:
                 continue
 
+            original_months = nps_chart.get("months", [])
+            original_forecast_start_index = nps_chart.get(
+                "forecast_start_index",
+                0
+            )
+
+            if (
+                original_months
+                and original_forecast_start_index is not None
+                and 0 <= int(original_forecast_start_index) < len(original_months)
+            ):
+                global_forecast_start_date = original_months[
+                    int(original_forecast_start_index)
+                ]
+
+            selected_indices = get_filtered_indices(
+                original_months,
+                payload.start_date,
+                payload.end_date
+            )
+
             if chart_months is None:
-
-                chart_months = nps_chart.get("months", [])
-
-                forecast_start_index = nps_chart.get(
-                    "forecast_start_index",
-                    0
+                chart_months = original_months
+                filtered_months = filter_values_by_indices(
+                    original_months,
+                    selected_indices
                 )
 
-                if (
-                    chart_months
-                    and forecast_start_index is not None
-                    and 0 <= int(forecast_start_index) < len(chart_months)
-                ):
-                    global_forecast_start_date = (
-                        chart_months[int(forecast_start_index)]
-                    )
+                forecast_start_index = get_new_forecast_start_index(
+                    filtered_months,
+                    global_forecast_start_date
+                )
 
             overall_nps_values = (
                 nps_chart.get("train_values", []) +
                 nps_chart.get("forecast_values", [])
+            )
+
+            overall_nps_values = filter_values_by_indices(
+                overall_nps_values,
+                selected_indices
             )
 
             cursor.execute("""
@@ -317,13 +495,9 @@ def apply_market_event_filters_service(payload):
             market_share_children = []
             market_share_total_values = None
 
-            # =====================================================
-            # 1st pass: collect raw market share values
-            # =====================================================
-
             all_market_share_data = []
 
-            for product, ms_chart, patient_metrics  in ms_rows:
+            for product, ms_chart, patient_metrics in ms_rows:
 
                 if not ms_chart:
                     continue
@@ -343,10 +517,30 @@ def apply_market_event_filters_service(payload):
                     ms_forecast_values
                 )
 
+                raw_market_share_values = filter_values_by_indices(
+                    raw_market_share_values,
+                    selected_indices
+                )
+
+                patient_metrics = patient_metrics or {}
+
+                raw_brand_nps_values = [
+                    round(float(v or 0), 0)
+                    for v in patient_metrics.get("final_patient_share", [])
+                ]
+
+                brand_nps_values = filter_values_by_indices(
+                    raw_brand_nps_values,
+                    selected_indices
+                )
+
+                if not brand_nps_values:
+                    brand_nps_values = [0] * len(raw_market_share_values)
+
                 all_market_share_data.append({
                     "product": product,
                     "values": raw_market_share_values,
-                    "patient_metrics": patient_metrics or {}
+                    "brand_nps_values": brand_nps_values
                 })
 
             if not all_market_share_data:
@@ -354,14 +548,9 @@ def apply_market_event_filters_service(payload):
 
             value_length = len(all_market_share_data[0]["values"])
 
-            # =====================================================
-            # Month-wise total before normalization
-            # =====================================================
-
             month_totals = []
 
             for idx in range(value_length):
-
                 total = sum(
                     item["values"][idx]
                     for item in all_market_share_data
@@ -370,14 +559,11 @@ def apply_market_event_filters_service(payload):
 
                 month_totals.append(total)
 
-            # =====================================================
-            # 2nd pass: normalize values month-wise
-            # =====================================================
-
             for item in all_market_share_data:
 
                 product = item["product"]
                 raw_values = item["values"]
+                brand_nps_values = item["brand_nps_values"]
 
                 market_share_values = []
 
@@ -394,19 +580,9 @@ def apply_market_event_filters_service(payload):
                         )
 
                     market_share_values.append(normalized_val)
-                
+
                 ms_train_values = market_share_values[:forecast_start_index]
                 ms_forecast_values = market_share_values[forecast_start_index:]
-
-                patient_metrics = item.get("patient_metrics") or {}
-
-                brand_nps_values = [
-                    round(float(v or 0), 0)
-                    for v in patient_metrics.get("final_patient_share", [])
-                ]
-
-                if not brand_nps_values:
-                    brand_nps_values = [0] * len(market_share_values)
 
                 nps_total_values = [
                     round(a + b, 0)
@@ -422,9 +598,7 @@ def apply_market_event_filters_service(payload):
                 })
 
                 if market_share_total_values is None:
-                    market_share_total_values = (
-                        [0] * len(market_share_values)
-                    )
+                    market_share_total_values = [0] * len(market_share_values)
 
                 market_share_total_values = [
                     round(a + b, 2)
@@ -464,10 +638,27 @@ def apply_market_event_filters_service(payload):
                 "children": market_share_children
             })
 
+        save_user_filter(
+            cur=cursor,
+            user_id="system",
+            ta_name=payload.ta_name,
+            scenario_name=selected_scenario,
+            indication=payload.indication,
+            lot=lots[0] if lots else "",
+            metric="nps",
+            product="",
+            start_date=payload.start_date,
+            end_date=payload.end_date
+        )
+
+        conn.commit()
+
         return {
             "ta_name": payload.ta_name,
             "indication": payload.indication,
             "scenario_name": payload.scenario_name,
+            "start_date": payload.start_date,
+            "end_date": payload.end_date,
 
             "lots": lots,
             "target_products": products,
@@ -493,10 +684,11 @@ def apply_market_event_filters_service(payload):
 
             "forecast_start_date": global_forecast_start_date,
             "saved_events": saved_events,
+
             "metrics_data": {
                 "market_share": {
                     "chart": {
-                        "months": chart_months or [],
+                        "months": filtered_months,
                         "forecast_start_index": forecast_start_index,
                         "series": market_share_chart_series
                     },
@@ -505,6 +697,7 @@ def apply_market_event_filters_service(payload):
 
                 "nps": {
                     "chart": {
+                        "months": filtered_months,
                         "forecast_start_index": forecast_start_index
                     },
                     "table": nps_table
@@ -588,7 +781,9 @@ def run_market_event_calculation_service(payload):
             events_by_lot.setdefault(event.lot, []).append(event)
 
         chart_months = None
+        filtered_months = []
         forecast_start_index = 0
+        global_forecast_start_date = None
 
         market_share_chart_series = []
         market_share_table = []
@@ -625,11 +820,38 @@ def run_market_event_calculation_service(payload):
 
             nps_chart = nps_row[0]
 
-            if chart_months is None:
-                chart_months = nps_chart.get("months", [])
-                forecast_start_index = nps_chart.get("forecast_start_index", 0)
+            original_months = nps_chart.get("months", [])
+            original_forecast_start_index = nps_chart.get("forecast_start_index", 0)
 
-            months = nps_chart.get("months", [])
+            if (
+                original_months
+                and original_forecast_start_index is not None
+                and 0 <= int(original_forecast_start_index) < len(original_months)
+            ):
+                global_forecast_start_date = original_months[int(original_forecast_start_index)]
+
+            selected_indices = get_filtered_indices(
+                original_months,
+                payload.start_date,
+                payload.end_date
+            )
+
+            months = original_months
+
+            if chart_months is None:
+                chart_months = original_months
+
+                filtered_months = filter_values_by_indices(
+                    original_months,
+                    selected_indices
+                )
+
+                forecast_start_index = get_new_forecast_start_index(
+                    filtered_months,
+                    global_forecast_start_date
+                )
+
+            original_forecast_start_index = nps_chart.get("forecast_start_index", 0)
 
             overall_nps_values = (
                 nps_chart.get("train_values", []) +
@@ -1028,8 +1250,8 @@ def run_market_event_calculation_service(payload):
             market_share_children = []
             nps_children = []
 
-            market_share_total_values = [0] * len(months)
-            nps_total_values = [0] * len(months)
+            market_share_total_values = [0] * len(filtered_months)
+            nps_total_values = [0] * len(filtered_months)
 
             lot_events_payload = [
                 event.model_dump()
@@ -1048,10 +1270,10 @@ def run_market_event_calculation_service(payload):
                     round(float(v or 0), 2)
                     for v in values
                 ]
-
+                values = filter_values_by_indices(values, selected_indices)
                 train_values = values[:forecast_start_index]
                 forecast_values = values[forecast_start_index:]
-
+                
                 brand_nps_values = [
                     round((ms / 100.0) * nps, 0)
                     for ms, nps in zip(values, overall_nps_values)
@@ -1216,6 +1438,15 @@ def run_market_event_calculation_service(payload):
         cursor.close()
         conn.close()
 
+def merge_selected_values(full_values, selected_values, selected_indices):
+    full_values = list(full_values)
+
+    for pos, idx in enumerate(selected_indices):
+        if pos < len(selected_values) and idx < len(full_values):
+            full_values[idx] = selected_values[pos]
+
+    return full_values
+
 def save_market_event_changes_service(payload):
 
     metric = payload.metric.lower().strip()
@@ -1234,6 +1465,22 @@ def save_market_event_changes_service(payload):
 
         if scenario_name.lower().endswith("_finalised"):
             scenario_name = scenario_name[:-10]
+        
+        saved_filter = get_saved_user_filter(
+            cursor,
+            "system",
+            payload.ta_name
+        )
+
+        start_date = payload.start_date or (
+            saved_filter.get("start_date", "")
+            if saved_filter else ""
+        )
+
+        end_date = payload.end_date or (
+            saved_filter.get("end_date", "")
+            if saved_filter else ""
+        )
 
         updated_lots = [lot_group.lot for lot_group in payload.table]
 
@@ -1652,6 +1899,19 @@ def save_market_event_changes_service(payload):
                     lot_group.lot
                 ))
 
+        save_user_filter(
+            cur=cursor,
+            user_id="system",
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+            indication=payload.indication,
+            lot=updated_lots[0] if updated_lots else "",
+            metric=metric,
+            product="",
+            start_date=start_date,
+            end_date=end_date
+            )
+        
         conn.commit()
 
         # =====================================================
@@ -1686,7 +1946,10 @@ def save_market_event_changes_service(payload):
         nps_table_map = {}
 
         response_months = []
+        filtered_response_months = []
+        selected_indices = []
         response_forecast_start_index = 0
+        
 
         saved_events = []
         event_id = 1
@@ -1695,11 +1958,25 @@ def save_market_event_changes_service(payload):
 
             if chart and not response_months:
                 response_months = chart.get("months", [])
-                response_forecast_start_index = chart.get(
-                    "forecast_start_index",
-                    0
+                original_forecast_start_index = chart.get("forecast_start_index", 0)
+
+                selected_indices = get_filtered_indices(
+                    response_months,
+                    start_date,
+                    end_date
                 )
 
+                filtered_response_months = filter_values_by_indices(
+                    response_months,
+                    selected_indices
+                )
+
+                response_forecast_start_index = get_new_forecast_start_index(
+                    filtered_response_months,
+                    response_months[original_forecast_start_index]
+                    if original_forecast_start_index < len(response_months)
+                    else None
+                )
             if event_payload:
                 for event in event_payload:
                     event_copy = dict(event)
@@ -1709,20 +1986,24 @@ def save_market_event_changes_service(payload):
 
             if row_metric.lower() == "market_share":
 
-                if chart:
-                    market_share_series.append({
-                        "lot": lot,
-                        "label": product,
-                        "train_values": chart.get("train_values", []),
-                        "forecast_values": chart.get("forecast_values", [])
-                    })
-
                 values = []
                 if chart:
                     values = (
                         chart.get("train_values", []) +
                         chart.get("forecast_values", [])
                     )
+
+                    values = filter_values_by_indices(
+                        values,
+                        selected_indices
+                    )
+
+                    market_share_series.append({
+                        "lot": lot,
+                        "label": product,
+                        "train_values": values[:response_forecast_start_index],
+                        "forecast_values": values[response_forecast_start_index:]
+                    })
 
                 market_share_table_map.setdefault(lot, {
                     "lot": lot,
@@ -1743,6 +2024,10 @@ def save_market_event_changes_service(payload):
                             []
                         )
                     ]
+                    brand_values = filter_values_by_indices(
+                            brand_values,
+                            selected_indices
+                        )
 
                     nps_table_map.setdefault(lot, {
                         "lot": lot,
@@ -1769,11 +2054,13 @@ def save_market_event_changes_service(payload):
             "indication": payload.indication,
             "scenario_name": payload.scenario_name,
             "metric": metric,
+            "start_date": start_date,
+            "end_date": end_date,
             "saved_events": saved_events,
             "metrics_data": {
                 "market_share": {
                     "chart": {
-                        "months": response_months,
+                        "months": filtered_response_months,
                         "forecast_start_index": response_forecast_start_index,
                         "series": market_share_series
                     },

@@ -25,6 +25,9 @@ import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import { saveMarketEventTable } from "../../../services/apiService";
 import { useLoadingStore } from "../../../stores";
+import DownloadIcon from "@mui/icons-material/Download";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 
 export default function MarketEventTable({
     metricsData,
@@ -34,7 +37,9 @@ export default function MarketEventTable({
     selectedScenario,
     setMarketShareChartData,
     setMarketEventMetricsData,
-    showSnackbar
+    showSnackbar,
+    startDate,
+    endDate,
 }) {
 
     const [editable, setEditable] = useState(false);
@@ -162,6 +167,16 @@ export default function MarketEventTable({
         }));
     };
 
+    const formatValue = (value) => {
+        if (value === null || value === undefined) return "-";
+
+        if (selectedMetricView === "market_share") {
+            return `${parseFloat(value)}%`;
+        }
+
+        return Number(value);
+    };
+
     const renderEditableCell = (
         value,
         lotIndex,
@@ -196,17 +211,20 @@ export default function MarketEventTable({
                         })
                     }
                 }}
-
                 style={{
-                    width: "100%",
-                    maxWidth: "50px",
-                    border: "none",
+                    width: "48px",
+                    height: "24px",
+                    boxSizing: "border-box",
+                    display: "inline-block",
+                    border: "1px solid #93c5fd",
+                    borderRadius: "4px",
                     outline: "none",
-                    background: "transparent",
+                    background: "#eff6ff",
+                    color: "#1e293b",
                     textAlign: "center",
                     fontSize: "13px",
-                    padding: 0,
-                    color: "#334155",
+                    lineHeight: "20px",
+                    padding: "1px 4px",
                 }}
             />
 
@@ -216,9 +234,13 @@ export default function MarketEventTable({
                 sx={{
                     color: "#334155",
                     fontSize: "13px",
+                    minHeight: "24px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                 }}
             >
-                {Number(value)}
+                {formatValue(value)}
             </Box>
         );
     };
@@ -387,6 +409,94 @@ export default function MarketEventTable({
         }
     };
 
+    const handleDownloadExcel = async () => {
+        if (!editableRows.length) return;
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet("Market Event");
+
+        worksheet.addRow(["Indication", indication]);
+        worksheet.addRow(["Scenario", selectedScenario]);
+        worksheet.addRow([
+            "Metric",
+            selectedMetricView === "market_share"
+                ? "Market Share"
+                : "Overall Market Volume"
+        ]);
+        worksheet.addRow([
+            "Start Date",
+            new Date(startDate).toLocaleDateString("en-US", {
+                month: "short",
+                year: "2-digit",
+            })
+        ]);
+        worksheet.addRow([
+            "End Date",
+            new Date(endDate).toLocaleDateString("en-US", {
+                month: "short",
+                year: "2-digit",
+            })
+        ]);
+
+        worksheet.addRow([]);
+
+        const headerRowNumber = worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Product / LOT",
+            ...formattedMonths
+        ]);
+
+        editableRows.forEach((lotGroup) => {
+            const lotRow = worksheet.addRow([
+                lotGroup.lot,
+                ...(lotGroup.total || [])
+            ]);
+
+            lotRow.font = { bold: true };
+
+            lotGroup.children.forEach((child) => {
+                worksheet.addRow([
+                    child.label,
+                    ...(child.values || [])
+                ]);
+            });
+        });
+
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal: "center",
+                    vertical: "middle"
+                };
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    bottom: { style: "thin" },
+                    right: { style: "thin" }
+                };
+            });
+        });
+
+        worksheet.getRow(headerRowNumber).font = {
+            bold: true
+        };
+
+        worksheet.getColumn(1).width = 25;
+
+        for (let i = 2; i <= formattedMonths.length + 1; i++) {
+            worksheet.getColumn(i).width = 12;
+        }
+
+        const buffer = await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `Market_Event_${selectedScenario}_${indication}.xlsx`
+        );
+    };
+
     return (
         <Paper
             sx={{
@@ -446,7 +556,14 @@ export default function MarketEventTable({
                         flexWrap: "wrap",
                     }}
                 >
-
+                    <Tooltip title="Download Table">
+                        <IconButton
+                            onClick={handleDownloadExcel}
+                            disabled={!hasTableData}
+                        >
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
                     {/* METRIC SELECT */}
                     <FormControl
                         size="small"
@@ -504,7 +621,7 @@ export default function MarketEventTable({
                         }}
                         disabled={!hasTableData}
                     >
-                        Edit Changes
+                        {editable ? "Editing..." : "Edit Changes"}
                     </Button>
 
                     {editable && (
@@ -686,7 +803,7 @@ export default function MarketEventTable({
                                                             // color: "#1e3a8a",
                                                         }}
                                                     >
-                                                        {Number(value)}
+                                                        {formatValue(value)}
                                                     </TableCell>
                                                 )
                                             )}
@@ -739,9 +856,13 @@ export default function MarketEventTable({
                                                                     align="center"
                                                                     sx={{
                                                                         borderRight: "1px solid #E2E8F0",
+                                                                        py: "4px",
+                                                                        px: 1,
                                                                         backgroundColor:
                                                                             valueIndex < forecastStartIndex
                                                                                 ? "#f1f5f9"
+                                                                                // : editable
+                                                                                //     ? "#f8fbff"
                                                                                 : "#fff",
                                                                     }}
                                                                 >

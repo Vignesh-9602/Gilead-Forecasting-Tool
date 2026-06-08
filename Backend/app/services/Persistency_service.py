@@ -1,8 +1,10 @@
 import json
 import math
+import re
 from datetime import datetime
 from app.db.connection import get_connection
 from app.schemas.Vial_Calculator_schema import PersistencyApplyCurveRequest, PersistencyCalculateApplyRequest
+from app.services.Retaining_Filters import get_saved_user_filter, save_user_filter
 from app.services.Vial_Calculator_functions import build_avg_vials_per_dose_table, build_demand_vials_table, build_inventory_table, save_ex_factory_output
 
 def _extract_brands_from_market_share_table(
@@ -36,6 +38,14 @@ def _extract_brands_from_market_share_table(
     return brands
 
 
+
+
+
+def sort_lot_key(lot):
+    match = re.search(r"\d+", str(lot))
+    return int(match.group()) if match else 999
+
+
 def get_persistency_filters_service(ta_name: str):
 
     conn = get_connection()
@@ -43,207 +53,55 @@ def get_persistency_filters_service(ta_name: str):
 
     try:
         cursor.execute("""
-            WITH event_scenarios AS (
-                SELECT DISTINCT
-                    scenario_name
-                FROM raw.market_event_scenarios
-                WHERE ta_name = %s
-                  AND scenario_name IS NOT NULL
-            ),
-
-            finalized AS (
-                SELECT DISTINCT
-                    selected_scenario_name AS scenario_name
-                FROM raw.forecast_finalized_selections
-                WHERE ta_name = %s
-                  AND selected_scenario_name IS NOT NULL
-            ),
-
-            scenario_filters AS (
-                SELECT DISTINCT
-                    es.scenario_name,
-                    es.scenario_name AS display_scenario_name,
-                    1 AS priority
-                FROM event_scenarios es
-
-                UNION ALL
-
-                SELECT DISTINCT
-                    f.scenario_name,
-                    f.scenario_name AS display_scenario_name,
-                    2 AS priority
-                FROM finalized f
-                WHERE f.scenario_name NOT IN (
-                    SELECT scenario_name FROM event_scenarios
-                )
-
-                UNION ALL
-
-                SELECT DISTINCT
-                    fs.scenario_name,
-                    fs.scenario_name AS display_scenario_name,
-                    3 AS priority
-                FROM raw.forecast_scenarios fs
-                WHERE fs.ta_name = %s
-                  AND fs.scenario_name IS NOT NULL
-                  AND fs.scenario_name NOT IN (
-                        SELECT scenario_name FROM event_scenarios
-                  )
-                  AND fs.scenario_name NOT IN (
-                        SELECT scenario_name FROM finalized
-                  )
-            ),
-
-            latest_event_data AS (
-                SELECT DISTINCT ON (
-                    sf.display_scenario_name,
-                    mes.indication,
-                    mes.lot
-                )
-                    sf.display_scenario_name AS scenario_name,
-                    mes.indication,
-                    mes.lot,
-                    mes.nps_table
-                FROM scenario_filters sf
-                JOIN raw.market_event_scenarios mes
-                  ON mes.ta_name = %s
-                 AND mes.scenario_name = sf.scenario_name
-                WHERE sf.priority = 1
-                  AND mes.nps_table IS NOT NULL
-                ORDER BY
-                    sf.display_scenario_name,
-                    mes.indication,
-                    mes.lot,
-                    mes.updated_at DESC
-            ),
-
-            latest_finalized_data AS (
-                SELECT DISTINCT ON (
-                    sf.display_scenario_name,
-                    ffs.indication,
-                    ffs.lot
-                )
-                    sf.display_scenario_name AS scenario_name,
-                    ffs.indication,
-                    ffs.lot,
-                    ffs.table_data AS nps_table
-                FROM scenario_filters sf
-                JOIN raw.forecast_finalized_selections ffs
-                  ON ffs.ta_name = %s
-                 AND ffs.selected_scenario_name = sf.scenario_name
-                WHERE sf.priority = 2
-                  AND LOWER(ffs.metric) = 'nps'
-                  AND ffs.table_data IS NOT NULL
-                ORDER BY
-                    sf.display_scenario_name,
-                    ffs.indication,
-                    ffs.lot,
-                    ffs.updated_at DESC
-            ),
-
-            latest_forecast_data AS (
-                SELECT DISTINCT ON (
-                    sf.display_scenario_name,
-                    fs.indication,
-                    fs.lot
-                )
-                    sf.display_scenario_name AS scenario_name,
-                    fs.indication,
-                    fs.lot,
-                    fs.table_data AS nps_table
-                FROM scenario_filters sf
-                JOIN raw.forecast_scenarios fs
-                  ON fs.ta_name = %s
-                 AND fs.scenario_name = sf.scenario_name
-                WHERE sf.priority = 3
-                  AND LOWER(fs.metric) = 'nps'
-                  AND fs.table_data IS NOT NULL
-                ORDER BY
-                    sf.display_scenario_name,
-                    fs.indication,
-                    fs.lot,
-                    fs.updated_at DESC
-            ),
-
-            latest_lot_data AS (
-                SELECT * FROM latest_event_data
-                UNION ALL
-                SELECT * FROM latest_finalized_data
-                UNION ALL
-                SELECT * FROM latest_forecast_data
-            )
-
-            SELECT
-                (
-                    SELECT jsonb_agg(
-                        display_scenario_name
-                        ORDER BY priority, display_scenario_name
-                    )
-                    FROM scenario_filters
-                ) AS scenario_names,
-                scenario_name,
+            SELECT DISTINCT
                 indication,
                 lot,
-                nps_table
-            FROM latest_lot_data
-
-            UNION ALL
-
-            SELECT
-                (
-                    SELECT jsonb_agg(
-                        display_scenario_name
-                        ORDER BY priority, display_scenario_name
-                    )
-                    FROM scenario_filters
-                ) AS scenario_names,
-                NULL AS scenario_name,
-                NULL AS indication,
-                NULL AS lot,
-                NULL AS nps_table
-            WHERE NOT EXISTS (
-                SELECT 1 FROM latest_lot_data
-            )
-
-            ORDER BY
+                product,
                 scenario_name,
+                BOOL_OR(is_finalized = TRUE) OVER (
+                    PARTITION BY indication, scenario_name
+                ) AS is_finalized
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
+              AND LOWER(metric) = 'market_share'
+              AND product IS NOT NULL
+              AND scenario_name IS NOT NULL
+            ORDER BY
                 indication,
-                lot
-        """, (
-            ta_name,
-            ta_name,
-            ta_name,
-            ta_name,
-            ta_name,
-            ta_name
-        ))
+                lot,
+                product,
+                scenario_name
+        """, (ta_name,))
 
         rows = cursor.fetchall()
 
         data = {}
-        scenario_names = []
+        scenario_names_set = set()
 
-        for (
-            scenario_name_list,
-            scenario_name,
-            indication,
-            lot,
-            nps_table
-        ) in rows:
+        for indication, lot, product, scenario_name, is_finalized in rows:
 
-            if scenario_name_list:
-                scenario_names = scenario_name_list
-
-            if not scenario_name or not indication or not lot or not nps_table:
-                continue
-
-            brands = _extract_brands_from_market_share_table(
-                nps_table
+            display_scenario_name = (
+                f"{scenario_name}_Finalised"
+                if is_finalized
+                else scenario_name
             )
 
-            data.setdefault(scenario_name, {})
-            data[scenario_name].setdefault(indication, {})
-            data[scenario_name][indication][lot] = brands
+            scenario_names_set.add(display_scenario_name)
+
+            data.setdefault(display_scenario_name, {})
+            data[display_scenario_name].setdefault(indication, {})
+            data[display_scenario_name][indication].setdefault(lot, [])
+
+            if product not in data[display_scenario_name][indication][lot]:
+                data[display_scenario_name][indication][lot].append(product)
+
+        scenario_names = sorted(
+            list(scenario_names_set),
+            key=lambda x: (
+                0 if x == "BASE" else 1,
+                x
+            )
+        )
 
         # -----------------------------------------------------
         # Default filter
@@ -257,10 +115,11 @@ def get_persistency_filters_service(ta_name: str):
         default_end_date = ""
 
         if scenario_names:
-
             default_scenario_name = (
-                "finalized"
-                if "finalized" in scenario_names
+                "BASE_Finalised"
+                if "BASE_Finalised" in scenario_names
+                else "BASE"
+                if "BASE" in scenario_names
                 else scenario_names[0]
             )
 
@@ -274,15 +133,7 @@ def get_persistency_filters_service(ta_name: str):
 
             default_lots = sorted(
                 lots_map.keys(),
-                key=lambda x: {
-                    "1L": 1,
-                    "2L": 2,
-                    "3L+": 3,
-                    "3L": 3,
-                    "4L": 4,
-                    "4L+":4,
-                    "5L+": 5
-                }.get(x, 99)
+                key=sort_lot_key
             )
 
             if default_lots:
@@ -290,47 +141,85 @@ def get_persistency_filters_service(ta_name: str):
                 brands = lots_map.get(first_lot, [])
 
                 default_brand = (
-                    "TPC"
-                    if "TPC" in brands
+                    "Trodelvy"
+                    if "Trodelvy" in brands
                     else brands[0] if brands else ""
                 )
 
         # -----------------------------------------------------
-        # Get latest one-year date range from market_event_scenarios
+        # Date range from forecast_scenarios chart months
+        # latest month - 1 year
         # -----------------------------------------------------
 
         cursor.execute("""
-                    SELECT
+            SELECT
                 MAX(month_date)::date AS end_date,
                 (MAX(month_date)::date - INTERVAL '1 year')::date AS start_date
             FROM (
                 SELECT
-                    jsonb_array_elements_text(
-                        market_share_chart->'months'
-                    )::date AS month_date
-                FROM raw.market_event_scenarios
+                    jsonb_array_elements_text(chart->'months')::date AS month_date
+                FROM raw.forecast_scenarios
                 WHERE ta_name = %s
+                  AND chart IS NOT NULL
+                  AND chart ? 'months'
             ) t
         """, (ta_name,))
 
         date_row = cursor.fetchone()
 
         if date_row and date_row[0]:
-
             default_end_date = date_row[0].strftime("%Y-%m-%d")
             default_start_date = date_row[1].strftime("%Y-%m-%d")
+
+        user_id = "system"
+
+        saved_filter = get_saved_user_filter(
+            cursor,
+            user_id,
+            ta_name
+        )
+
+        default_filter = {
+            "scenario_name": default_scenario_name,
+            "indication": default_indication,
+            "lots": default_lots,
+            "brand": default_brand,
+            "start_date": default_start_date,
+            "end_date": default_end_date
+        }
+
+        if saved_filter:
+            selected_scenario = saved_filter.get("scenario_name") or default_scenario_name
+            selected_indication = saved_filter.get("indication") or default_indication
+
+            selected_lots_map = (
+                data
+                .get(selected_scenario, {})
+                .get(selected_indication, {})
+            )
+
+            selected_lots = sorted(
+                selected_lots_map.keys(),
+                key=sort_lot_key
+            )
+
+            selected_filter = {
+                "scenario_name": selected_scenario,
+                "indication": selected_indication,
+                "lots": selected_lots,
+                "brand": saved_filter.get("product") or default_brand,
+                "start_date": saved_filter.get("start_date") or default_start_date,
+                "end_date": saved_filter.get("end_date") or default_end_date
+            }
+        else:
+            selected_filter = default_filter
+
         return {
             "ta_name": ta_name,
             "scenario_names": scenario_names,
             "data": data,
-            "default_filter": {
-                    "scenario_name": default_scenario_name,
-                    "indication": default_indication,
-                    "lots": default_lots,
-                    "brand": default_brand,
-                    "start_date": default_start_date,
-                    "end_date": default_end_date
-                }
+            "selected_filter": selected_filter
+
         }
 
     finally:
@@ -420,118 +309,23 @@ def fetch_scenario_data(
 ):
     base_scenario_name = clean_scenario_name(scenario_name)
 
-    # ---------------------------------------------------
-    # Priority 1: market_event_scenarios
-    # Directly use nps_table
-    # ---------------------------------------------------
-    cursor.execute("""
-        SELECT
-            market_share_chart,
-            nps_table
-        FROM raw.market_event_scenarios
-        WHERE ta_name = %s
-          AND scenario_name = %s
-          AND indication = %s
-          AND lot = %s
-          AND nps_table IS NOT NULL
-        ORDER BY updated_at DESC
-        LIMIT 1
-    """, (
-        ta_name,
-        base_scenario_name,
-        indication,
-        lot
-    ))
-
-    row = cursor.fetchone()
-
-    if row:
-        chart, nps_table = row
-
-        return {
-            "source": "market_events",
-            "chart": _to_dict(chart),
-            "nps_table": _normalize_nps_table(nps_table)
-        }
+    if base_scenario_name.lower().endswith("_finalised"):
+        base_scenario_name = base_scenario_name[:-10]
 
     # ---------------------------------------------------
-    # Priority 2: finalized scenario
-    # Directly use table_data
+    # Single source: forecast_scenarios
+    # Get selected brand market share + patient metrics
     # ---------------------------------------------------
     cursor.execute("""
         SELECT
             chart,
-            table_data
-        FROM raw.forecast_finalized_selections
-        WHERE ta_name = %s
-          AND selected_scenario_name = %s
-          AND indication = %s
-          AND lot = %s
-          AND LOWER(metric) = 'nps'
-          AND table_data IS NOT NULL
-        ORDER BY updated_at DESC
-        LIMIT 1
-    """, (
-        ta_name,
-        base_scenario_name,
-        indication,
-        lot
-    ))
-
-    row = cursor.fetchone()
-
-    if row:
-        chart, table_data = row
-
-        return {
-            "source": "finalized",
-            "chart": _to_dict(chart),
-            "nps_table": _normalize_nps_table(table_data)
-        }
-
-    # ---------------------------------------------------
-    # Priority 3: forecast_scenarios
-    # Calculate product NPS:
-    # total NPS * product market share / 100
-    # ---------------------------------------------------
-
-    # 3A. Get total NPS
-    cursor.execute("""
-        SELECT
-            chart
+            table_data,
+            patient_metrics
         FROM raw.forecast_scenarios
         WHERE ta_name = %s
-          AND scenario_name = %s
-          AND indication = %s
-          AND lot = %s
-          AND LOWER(metric) = 'nps'
-          AND chart IS NOT NULL
-        ORDER BY updated_at DESC
-        LIMIT 1
-    """, (
-        ta_name,
-        base_scenario_name,
-        indication,
-        lot
-    ))
-
-    nps_row = cursor.fetchone()
-
-    if not nps_row:
-        return None
-
-    nps_chart = _to_dict(nps_row[0])
-    nps_months, total_nps_values = _get_chart_values(nps_chart)
-
-    # 3B. Get selected brand market share
-    cursor.execute("""
-        SELECT
-            chart
-        FROM raw.forecast_scenarios
-        WHERE ta_name = %s
-          AND scenario_name = %s
-          AND indication = %s
-          AND lot = %s
+          AND LOWER(scenario_name) = LOWER(%s)
+          AND LOWER(indication) = LOWER(%s)
+          AND LOWER(lot) = LOWER(%s)
           AND LOWER(metric) = 'market_share'
           AND LOWER(product) = LOWER(%s)
           AND chart IS NOT NULL
@@ -545,30 +339,48 @@ def fetch_scenario_data(
         brand
     ))
 
-    market_share_row = cursor.fetchone()
+    row = cursor.fetchone()
 
-    if not market_share_row:
+    if not row:
         raise ValueError(
-            f"No market share data found for brand {brand}, scenario {scenario_name}, lot {lot}"
+            f"No market share/patient metrics data found for brand {brand}, "
+            f"scenario {scenario_name}, lot {lot}"
         )
 
-    market_share_chart = _to_dict(market_share_row[0])
-    ms_months, market_share_values = _get_chart_values(market_share_chart)
+    market_share_chart, table_data, patient_metrics = row
 
-    if nps_months != ms_months:
+    market_share_chart = _to_dict(market_share_chart)
+    patient_metrics = _to_dict(patient_metrics)
+
+    if not patient_metrics:
         raise ValueError(
-            f"Month mismatch between NPS and market share for scenario {scenario_name}, lot {lot}"
+            f"No patient_metrics found for brand {brand}, "
+            f"scenario {scenario_name}, lot {lot}"
         )
 
-    brand_nps_values = [
-        round(
-            float(total_nps) * float(ms_value) / 100
+    months = market_share_chart.get("months", [])
+
+    brand_patient_values = patient_metrics.get(
+        "final_patient_share",
+        []
+    )
+
+    total_nps_values = patient_metrics.get(
+        "final_nps",
+        []
+    )
+
+    if not months:
+        raise ValueError(
+            f"No months found for brand {brand}, "
+            f"scenario {scenario_name}, lot {lot}"
         )
-        for total_nps, ms_value in zip(
-            total_nps_values,
-            market_share_values
+
+    if len(months) != len(brand_patient_values):
+        raise ValueError(
+            f"Month and patient_metrics length mismatch for brand {brand}, "
+            f"scenario {scenario_name}, lot {lot}"
         )
-    ]
 
     calculated_nps_table = {
         "lot": lot,
@@ -576,7 +388,10 @@ def fetch_scenario_data(
         "children": [
             {
                 "label": brand,
-                "values": brand_nps_values
+                "values": [
+                    round(float(v or 0))
+                    for v in brand_patient_values
+                ]
             }
         ],
         "scenario": base_scenario_name
@@ -585,7 +400,7 @@ def fetch_scenario_data(
     return {
         "source": "forecast_scenarios",
         "chart": {
-            "months": nps_months
+            "months": months
         },
         "nps_table": calculated_nps_table
     }
@@ -1000,8 +815,19 @@ def apply_persistency_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
-
         
+        save_user_filter(
+            cur=cursor,
+            user_id="system",
+            ta_name=ta_name,
+            scenario_name=scenario_name,
+            indication=indication,
+            lot=lots[0] if lots else "",
+            metric="nps",
+            product=brand,
+             start_date=start_date,
+            end_date=end_date
+        )
         conn.commit()
 
         return {

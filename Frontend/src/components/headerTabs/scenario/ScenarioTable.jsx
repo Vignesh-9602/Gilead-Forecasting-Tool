@@ -19,6 +19,9 @@ import {
 
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
+import DownloadIcon from "@mui/icons-material/Download";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 
 export default function ScenarioTable({
     chartData,
@@ -26,7 +29,8 @@ export default function ScenarioTable({
     selectedLot,
     tableMetric,
     setTableMetric,
-    onSaveSelection
+    onSaveSelection,
+    indication
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -46,7 +50,7 @@ export default function ScenarioTable({
         if (value === null || value === undefined) return "-";
 
         if (tableMetric === "market_share") {
-            return `${Number(value).toFixed(2)}%`;
+            return `${value}%`;
         }
 
         return Number(value).toFixed(0);
@@ -87,6 +91,88 @@ export default function ScenarioTable({
         onSaveSelection(selectedScenario);
     };
 
+    const handleDownloadExcel = async () => {
+        if (!tableData?.length) return;
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet("Scenario Comparison");
+
+        // Filters
+        worksheet.addRow(["Indication", indication]);
+        worksheet.addRow(["LOT", selectedLot]);
+        worksheet.addRow([
+            "Metric",
+            tableMetric === "market_share"
+                ? "Market Share"
+                : "Overall Market Volume"
+        ]);
+        worksheet.addRow([
+            "Scenarios",
+            tableData.map(row => row.scenario).join(", ")
+        ]);
+
+        worksheet.addRow([]);
+
+        const headerRowNumber = worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Scenario / Product",
+            ...allMonths
+        ]);
+
+        tableData.forEach((scenarioRow) => {
+            const scenarioExcelRow = worksheet.addRow([
+                scenarioRow.scenario,
+                ...(scenarioRow.total || [])
+            ]);
+
+            // Scenario row bold
+            scenarioExcelRow.font = { bold: true };
+
+            scenarioRow.children.forEach((child) => {
+                worksheet.addRow([
+                    child.label,
+                    ...(child.values || [])
+                ]);
+            });
+        });
+
+        // Borders + center align
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal: "center",
+                    vertical: "middle"
+                };
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    bottom: { style: "thin" },
+                    right: { style: "thin" }
+                };
+            });
+        });
+
+        // Header row bold
+        worksheet.getRow(headerRowNumber).font = {
+            bold: true
+        };
+
+        worksheet.getColumn(1).width = 25;
+
+        for (let i = 2; i <= allMonths.length + 1; i++) {
+            worksheet.getColumn(i).width = 12;
+        }
+
+        const buffer = await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `Scenario_Comparison_${indication}_${selectedLot}.xlsx`
+        );
+    };
+
     return (
         <>
             <Box
@@ -105,6 +191,16 @@ export default function ScenarioTable({
 
                 {tableData?.length > 0 && (
                     <Box sx={{ display: "flex", gap: 1 }}>
+
+                        <Tooltip title="Download Table">
+                            <IconButton
+                                onClick={handleDownloadExcel}
+                                disabled={!tableData?.length}
+                            >
+                                <DownloadIcon />
+                            </IconButton>
+                        </Tooltip>
+
                         <FormControl size="small" sx={{ minWidth: 180 }}>
                             <Select
                                 value={tableMetric}
@@ -276,7 +372,7 @@ export default function ScenarioTable({
                                                                 : "#fff",
                                                         borderRight: "1px solid #E2E8F0",
                                                     }}>
-                                                    {value}
+                                                    {formatValue(value)}
                                                 </TableCell>
                                             ))}
                                         </TableRow>
@@ -315,7 +411,7 @@ export default function ScenarioTable({
                                                                     : "#fff",
                                                             borderRight: "1px solid #E2E8F0",
                                                         }}>
-                                                            {value}
+                                                            {formatValue(value)}
                                                         </TableCell>
                                                     ))}
                                                 </TableRow>

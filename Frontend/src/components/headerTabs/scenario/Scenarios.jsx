@@ -20,7 +20,7 @@ import { GlobalContext } from "../../../context/Provider";
 import { getScenarioFilters, applyScenarioFilters, saveScenarioSelection, finalizeScenarios, getScenarioStatus, clearStatus } from "../../../services/apiService";
 import ScenarioChart from "./ScenarioChart";
 import ScenarioTable from "./ScenarioTable";
-import { useSnackbarStore } from "../../../stores";
+import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
 export default function Scenarios() {
     const { favState } = useContext(GlobalContext);
@@ -47,6 +47,7 @@ export default function Scenarios() {
     const [tableData, setTableData] = useState({});
 
     const [openResetDialog, setOpenResetDialog] = useState(false);
+    const { setLoading, isLoading } = useLoadingStore();
 
     useEffect(() => {
         if (therapyArea) {
@@ -103,12 +104,13 @@ export default function Scenarios() {
 
     const fetchScenarioFilters = async () => {
         try {
+            setLoading(true);
             const response = await getScenarioFilters(therapyArea);
             const resData = response?.data;
 
             setMappingData(resData?.data || {});
 
-            const defaultFilter = resData?.default_filter;
+            const defaultFilter = resData?.selected_filter;
 
             setFilterOptions({
                 indications: Object.keys(resData?.data || {}),
@@ -157,6 +159,8 @@ export default function Scenarios() {
                 "Failed to fetch scenario filters",
                 "error"
             );
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -175,6 +179,7 @@ export default function Scenarios() {
         };
 
         try {
+            setLoading(true);
             const response = await applyScenarioFilters(payload);
 
             const data = response?.data;
@@ -187,6 +192,8 @@ export default function Scenarios() {
         } catch (error) {
             console.error("Apply filter failed", error);
             showSnackbar("Failed to apply filter", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -202,6 +209,7 @@ export default function Scenarios() {
         };
 
         try {
+            setLoading(true);
             const response = await saveScenarioSelection(payload);
             const data = response?.data;
 
@@ -215,6 +223,8 @@ export default function Scenarios() {
         } catch (error) {
             console.error("Save scenario failed", error);
             showSnackbar("Failed to save scenario", "error");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -228,6 +238,7 @@ export default function Scenarios() {
         };
 
         try {
+            setLoading(true);
             const response = await finalizeScenarios(payload);
             const data = response?.data;
 
@@ -253,10 +264,14 @@ export default function Scenarios() {
         } catch (error) {
             console.error("Finalize failed", error);
             showSnackbar("Failed to finalize scenarios", "error");
+        } finally {
+            setLoading(false);
         }
     };
+
     const handleResetStatus = async () => {
         try {
+            setLoading(true);
             const payload = {
                 ta_name: therapyArea,
                 indication,
@@ -284,6 +299,8 @@ export default function Scenarios() {
                 "Failed to reset scenario status",
                 "error"
             );
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -667,6 +684,7 @@ export default function Scenarios() {
                     tableMetric={tableMetric}
                     setTableMetric={setTableMetric}
                     selectedLot={lot}
+                    indication={indication}
                     onSaveSelection={handleSaveScenario}
                 />
                 <Dialog

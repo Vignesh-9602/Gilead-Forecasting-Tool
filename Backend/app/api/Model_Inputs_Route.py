@@ -11,6 +11,7 @@ from app.schemas.metrics_selection_schema import (
     SaveScenarioRequest,
     UpdateScenarioRequest
 )
+from app.services.Retaining_Filters import save_user_filter
 from app.services.Secenario_Selection import get_base_scenario,save_base_scenario
 from app.services.forecast_service import generate_full_base_forecast, process_forecast
 
@@ -253,7 +254,19 @@ def apply_metrics(payload: MetricSelectionRequest):
             row = cur.fetchone()
             if row:
                 factors = row[0]
+                
+        save_user_filter(
+                cur=cur,
+                user_id="system",
+                ta_name=ta,
+                scenario_name=scenario,
+                indication=payload.indications[0],
+                lot=payload.lots[0],
+                metric=payload.metric_filter,
+                product=payload.product or ""
+                )
 
+        conn.commit()
     finally:
         cur.close()
         conn.close()
@@ -267,6 +280,7 @@ def apply_metrics(payload: MetricSelectionRequest):
         "factors": factors,  # includes multiplier_horizon
         "metrics_data": {
             "nps": {
+                "unit": "",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -275,6 +289,7 @@ def apply_metrics(payload: MetricSelectionRequest):
                 "table": list(nps_table.values()),
             },
             "market_share": {
+                "unit": "%",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -414,10 +429,25 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
             )
         )
 
-        scenario_months = list(scenario_chart["months"])
-        scenario_train_values = list(scenario_chart["train_values"])
-        scenario_forecast_values = list(scenario_chart["forecast_values"])
-        scenario_start_idx = scenario_chart["forecast_start_index"]
+        scenario_train_values = list(scenario_chart.get("train_values", []))
+        scenario_forecast_values = list(scenario_chart.get("forecast_values", []))
+
+        scenario_start_idx = scenario_chart.get(
+            "forecast_start_index",
+            len(scenario_train_values)
+        )
+
+        scenario_months = scenario_chart.get("months")
+
+        if not scenario_months:
+            total_months = len(scenario_train_values) + len(scenario_forecast_values)
+
+            scenario_months = [
+                (train_start + relativedelta(months=i)).strftime("%Y-%m-%d")
+                for i in range(total_months)
+            ]
+        else:
+            scenario_months = list(scenario_months)
 
         if is_selected:
             selected_row_found = True
@@ -659,6 +689,7 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         "factors": response_factors,
         "metrics_data": {
             "nps": {
+                "unit": "",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -667,6 +698,7 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                 "table": list(nps_table.values())
             },
             "market_share": {
+                "unit": "%",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -697,10 +729,67 @@ def build_patient_metrics(nps_values, market_share_values):
         ]
     }
 
-@router.post("/metrics/refresh",tags=["Model_Input"])
+def normalize_market_share_table(market_share_table):
+    normalized_table = []
+
+    for lot_group in market_share_table:
+        lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+        children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+
+        total_months = max(
+            len(child["values"] if isinstance(child, dict) else child.values)
+            for child in children
+        )
+
+        monthly_totals = [0.0] * total_months
+
+        for child in children:
+            values = child["values"] if isinstance(child, dict) else child.values
+
+            for idx, val in enumerate(values):
+                monthly_totals[idx] += float(val or 0)
+
+        normalized_children = []
+
+        for child in children:
+            label = child["label"] if isinstance(child, dict) else child.label
+            values = child["values"] if isinstance(child, dict) else child.values
+
+            normalized_values = []
+
+            for idx in range(total_months):
+                val = values[idx] if idx < len(values) else 0
+                total = monthly_totals[idx]
+
+                normalized_values.append(
+                    round((float(val or 0) / total) * 100, 2)
+                    if total > 0 else 0
+                )
+
+            normalized_children.append({
+                "label": label,
+                "values": normalized_values
+            })
+
+        normalized_table.append({
+            "lot": lot,
+            "total": [100.0] * total_months,
+            "children": normalized_children
+        })
+
+    return normalized_table
+
+@router.post("/metrics/refresh", tags=["Model_Input"])
 def refresh_changes(payload: Refreshchangerequest):
 
     metric = payload.metric.lower()
+    scenario_name = payload.scenario_name.strip()
+    is_base_scenario = scenario_name.upper() == "BASE"
+    # if payload.scenario_name.strip().upper() == "BASE":
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail="BASE scenario is read-only. Please save the scenario with a new name before making changes."
+    #     )
 
     if metric not in ["market_share", "nps"]:
         raise HTTPException(
@@ -749,7 +838,6 @@ def refresh_changes(payload: Refreshchangerequest):
                 if child.label.lower() == payload.product.lower():
                     product_values = child.values
                     break
-
         else:
             if lot_group.children:
                 product_values = lot_group.children[0].values
@@ -760,9 +848,6 @@ def refresh_changes(payload: Refreshchangerequest):
             detail="Selected row not found in table"
         )
 
-    # --------------------------------------------------
-    # Train / forecast split
-    # --------------------------------------------------
     train_len = len(product_values) - forecast_periods
 
     if train_len < 0:
@@ -802,11 +887,9 @@ def refresh_changes(payload: Refreshchangerequest):
     for lot_group in payload.table:
         lot_label = lot_group.lot
 
-        # For market_share chart, send only selected LOT and its products
         if metric == "market_share" and lot_label.lower() != payload.lot.lower():
             continue
 
-        # For NPS chart, send all LOTs
         for child in lot_group.children:
             values = child.values
 
@@ -817,17 +900,51 @@ def refresh_changes(payload: Refreshchangerequest):
                 "forecast_values": values[train_len:]
             })
 
-    updated_metric_block = {
-        "chart": {
-            "months": months,
-            "forecast_start_index": forecast_start_index,
-            "series": selected_chart_series
-        },
-        "table": payload.table
-    }
+    # --------------------------------------------------
+    # Normalize market share for response
+    # --------------------------------------------------
+    if metric == "market_share":
+        normalized_market_share_table = normalize_market_share_table(payload.table)
+
+        selected_chart_series = []
+
+        for lot_group in normalized_market_share_table:
+            lot_label = lot_group["lot"]
+
+            if lot_label.lower() != payload.lot.lower():
+                continue
+
+            for child in lot_group["children"]:
+                values = child["values"]
+
+                selected_chart_series.append({
+                    "lot": lot_label,
+                    "label": child["label"],
+                    "train_values": values[:train_len],
+                    "forecast_values": values[train_len:]
+                })
+
+        updated_metric_block = {
+            "chart": {
+                "months": months,
+                "forecast_start_index": forecast_start_index,
+                "series": selected_chart_series
+            },
+            "table": normalized_market_share_table
+        }
+
+    else:
+        updated_metric_block = {
+            "chart": {
+                "months": months,
+                "forecast_start_index": forecast_start_index,
+                "series": selected_chart_series
+            },
+            "table": payload.table
+        }
 
     # --------------------------------------------------
-    # Load other metric from DB instead of sending empty
+    # Load other metric from DB - always required for response
     # --------------------------------------------------
     other_metric = "market_share" if metric == "nps" else "nps"
 
@@ -839,13 +956,16 @@ def refresh_changes(payload: Refreshchangerequest):
             cur.execute("""
                 SELECT lot, chart
                 FROM raw.forecast_scenarios
-                WHERE
-                    scenario_name = 'BASE'
-                    AND ta_name = %s
-                    AND LOWER(indication) = LOWER(%s)
-                    AND metric = 'nps'
+                WHERE scenario_name = %s
+                  AND ta_name = %s
+                  AND LOWER(indication) = LOWER(%s)
+                  AND metric = 'nps'
                 ORDER BY lot
-            """, (payload.therapy_area, payload.indication))
+            """, (
+                scenario_name,
+                payload.therapy_area,
+                payload.indication
+            ))
 
             rows = cur.fetchall()
 
@@ -873,13 +993,16 @@ def refresh_changes(payload: Refreshchangerequest):
             cur.execute("""
                 SELECT lot, product, chart
                 FROM raw.forecast_scenarios
-                WHERE
-                    scenario_name = 'BASE'
-                    AND ta_name = %s
-                    AND LOWER(indication) = LOWER(%s)
-                    AND metric = 'market_share'
+                WHERE scenario_name = %s
+                  AND ta_name = %s
+                  AND LOWER(indication) = LOWER(%s)
+                  AND metric = 'market_share'
                 ORDER BY lot, product
-            """, (payload.therapy_area, payload.indication))
+            """, (
+                scenario_name,
+                payload.therapy_area,
+                payload.indication
+            ))
 
             rows = cur.fetchall()
 
@@ -888,7 +1011,6 @@ def refresh_changes(payload: Refreshchangerequest):
 
             for lot, product, chart in rows:
 
-                # Chart only selected LOT products
                 if lot.lower() == payload.lot.lower():
                     other_series.append({
                         "lot": lot,
@@ -924,97 +1046,179 @@ def refresh_changes(payload: Refreshchangerequest):
     # --------------------------------------------------
     if metric == "nps":
         metrics_data = {
-            "nps": updated_metric_block,
-            "market_share": other_metric_block
+            "nps": {
+                "unit": "",
+                **updated_metric_block
+            },
+            "market_share": {
+                "unit": "%",
+                **other_metric_block
+            }
         }
     else:
         metrics_data = {
-            "market_share": updated_metric_block,
-            "nps": other_metric_block
+            "market_share": {
+                "unit": "%",
+                **updated_metric_block
+            },
+            "nps": {
+                "unit": "",
+                **other_metric_block
+            }
         }
+
     # --------------------------------------------------
-    # Save patient_metrics based on latest edited values
+    # Save only for non-BASE scenarios
     # --------------------------------------------------
+    if not is_base_scenario:
 
-    nps_table = metrics_data["nps"]["table"]
-    market_share_table = metrics_data["market_share"]["table"]
+        # --------------------------------------------------
+        # Save normalized market share values
+        # --------------------------------------------------
+        if metric == "market_share":
 
-    nps_by_lot = {}
+            conn = get_connection()
+            cur = conn.cursor()
 
-    for lot_group in nps_table:
-        lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
-        children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+            try:
+                market_share_table = metrics_data["market_share"]["table"]
 
-        if children:
-            child = children[0]
-            values = child["values"] if isinstance(child, dict) else child.values
-            nps_by_lot[lot] = values
+                for lot_group in market_share_table:
+                    lot = lot_group["lot"]
+                    children = lot_group["children"]
 
-    conn = get_connection()
-    cur = conn.cursor()
+                    for child in children:
+                        product = child["label"]
+                        values = child["values"]
 
-    try:
-        for lot_group in market_share_table:
+                        chart_payload = {
+                            "train_values": values[:train_len],
+                            "forecast_values": values[train_len:]
+                        }
 
+                        table_payload = {
+                            "lot": lot,
+                            "total": [100.0] * len(values),
+                            "children": [
+                                {
+                                    "label": product,
+                                    "values": values
+                                }
+                            ]
+                        }
+
+                        cur.execute("""
+                            UPDATE raw.forecast_scenarios
+                            SET
+                                chart = %s::jsonb,
+                                table_data = %s::jsonb,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE scenario_name = %s
+                              AND ta_name = %s
+                              AND LOWER(indication) = LOWER(%s)
+                              AND LOWER(lot) = LOWER(%s)
+                              AND LOWER(metric) = 'market_share'
+                              AND LOWER(product) = LOWER(%s)
+                        """, (
+                            json.dumps(chart_payload),
+                            json.dumps(table_payload),
+                            scenario_name,
+                            payload.therapy_area,
+                            payload.indication,
+                            lot,
+                            product
+                        ))
+
+                conn.commit()
+
+            finally:
+                cur.close()
+                conn.close()
+
+        # --------------------------------------------------
+        # Save patient_metrics based on latest edited values
+        # --------------------------------------------------
+        nps_table = metrics_data["nps"]["table"]
+        market_share_table = metrics_data["market_share"]["table"]
+
+        nps_by_lot = {}
+
+        for lot_group in nps_table:
             lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
             children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
 
-            nps_values = nps_by_lot.get(lot)
+            if children:
+                child = children[0]
+                values = child["values"] if isinstance(child, dict) else child.values
+                nps_by_lot[lot] = values
 
-            if not nps_values:
-                continue
+        conn = get_connection()
+        cur = conn.cursor()
 
-            for child in children:
+        try:
+            for lot_group in market_share_table:
 
-                product = child["label"] if isinstance(child, dict) else child.label
-                ms_values = child["values"] if isinstance(child, dict) else child.values
+                lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+                children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
 
-                patient_metrics = {
-                    "final_nps": [
-                        round(float(x or 0), 2)
-                        for x in nps_values
-                    ],
-                    "final_market_share": [
-                        round(float(x or 0), 2)
-                        for x in ms_values
-                    ],
-                    "final_patient_share": [
-                        round(
-                            float(nps or 0)
-                            * (float(ms or 0) / 100),
-                            2
-                        )
-                        for nps, ms in zip(nps_values, ms_values)
-                    ]
-                }
+                nps_values = nps_by_lot.get(lot)
 
-                cur.execute("""
-                    UPDATE raw.forecast_scenarios
-                    SET
-                        patient_metrics = %s::jsonb,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE scenario_name = 'BASE'
-                    AND ta_name = %s
-                    AND LOWER(indication) = LOWER(%s)
-                    AND LOWER(lot) = LOWER(%s)
-                    AND LOWER(metric) = 'market_share'
-                    AND LOWER(product) = LOWER(%s)
-                """, (
-                    json.dumps(patient_metrics),
-                    payload.therapy_area,
-                    payload.indication,
-                    lot,
-                    product
-                ))
+                if not nps_values:
+                    continue
 
-        conn.commit()
+                for child in children:
 
-    finally:
-        cur.close()
-        conn.close()
+                    product = child["label"] if isinstance(child, dict) else child.label
+                    ms_values = child["values"] if isinstance(child, dict) else child.values
+
+                    patient_metrics = {
+                        "final_nps": [
+                            round(float(x or 0), 2)
+                            for x in nps_values
+                        ],
+                        "final_market_share": [
+                            round(float(x or 0), 2)
+                            for x in ms_values
+                        ],
+                        "final_patient_share": [
+                            round(
+                                float(nps or 0) * (float(ms or 0) / 100),
+                                2
+                            )
+                            for nps, ms in zip(nps_values, ms_values)
+                        ]
+                    }
+
+                    cur.execute("""
+                        UPDATE raw.forecast_scenarios
+                        SET
+                            patient_metrics = %s::jsonb,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE scenario_name = %s
+                          AND ta_name = %s
+                          AND LOWER(indication) = LOWER(%s)
+                          AND LOWER(lot) = LOWER(%s)
+                          AND LOWER(metric) = 'market_share'
+                          AND LOWER(product) = LOWER(%s)
+                    """, (
+                        json.dumps(patient_metrics),
+                        scenario_name,
+                        payload.therapy_area,
+                        payload.indication,
+                        lot,
+                        product
+                    ))
+
+            conn.commit()
+
+        finally:
+            cur.close()
+            conn.close()
+
     return {
         "therapy_area": payload.therapy_area,
         "indication": payload.indication,
+        "scenario_name": scenario_name,
         "metrics_data": metrics_data
     }
 
@@ -1534,15 +1738,24 @@ def update_scenario(payload: UpdateScenarioRequest):
         conn.close()
 
     return {
-        "therapy_area": payload.ta_name,
-        "indication": payload.indication,
-        "lot": payload.lot,
-        "metric": payload.metric,
-        "product": payload.product,
-        "scenario_name": payload.scenario_name,
-        "updated_rows": len(saved_ids),
-        "scenario_ids": [f"SCN_{sid}" for sid in saved_ids],
-        "factors": payload.factors,
-        "metrics_data": payload.metrics_data,
-        "message": "Scenario updated successfully"
-    }
+    "therapy_area": payload.ta_name,
+    "indication": payload.indication,
+    "lot": payload.lot,
+    "metric": payload.metric,
+    "product": payload.product,
+    "scenario_name": payload.scenario_name,
+    "updated_rows": len(saved_ids),
+    "scenario_ids": [f"SCN_{sid}" for sid in saved_ids],
+    "factors": payload.factors,
+    "metrics_data": {
+        "nps": {
+            "unit": "",
+            **(payload.metrics_data.get("nps", {}) if payload.metrics_data else {})
+        },
+        "market_share": {
+            "unit": "%",
+            **(payload.metrics_data.get("market_share", {}) if payload.metrics_data else {})
+        }
+    },
+    "message": "Scenario updated successfully"
+}

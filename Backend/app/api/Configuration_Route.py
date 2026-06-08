@@ -10,6 +10,7 @@ from app.schemas.config_schema import (
     UpdateAvgVialsRequest
 )
 from app.repository.metrics_repo import build_metrics_filter_data, build_metrics_hierarchy, get_oncology_metrics
+from app.services.Retaining_Filters import get_saved_user_filter
 from app.services.Secenario_Selection import save_base_scenario
 from app.services.forecast_service import generate_full_base_forecast
 from app.services.scenario_service import get_scenario_filters
@@ -461,27 +462,33 @@ def update_avg_vials(payload: UpdateAvgVialsRequest):
 
 
 
-@router.get( "/metrics/filters/{ta_name}", tags=["Model_Input"])
+@router.get("/metrics/filters/{ta_name}", tags=["Model_Input"])
 def get_metrics_filters(ta_name: str):
+
+    user_id = "system"
 
     conn = get_connection()
     cur = conn.cursor()
 
     try:
+        filter_data = get_scenario_filters(cur, ta_name)
 
-        filter_data = get_scenario_filters(
-            cur,
-            ta_name
-        )
+        saved_filter = get_saved_user_filter(cur, user_id, ta_name)
+
+        default_filter = {
+            **filter_data["default_filter"],
+            "metric": "nps",
+            "product": ""
+        }
+
+        selected_filter = saved_filter if saved_filter else default_filter
 
         return {
             "ta_name": ta_name,
 
-            "scenario_names":
-                filter_data["scenario_names"],
+            "scenario_names": filter_data["scenario_names"],
 
-            "data":
-                filter_data["data"],
+            "data": filter_data["data"],
 
             "metric_filters": [
                 {
@@ -494,14 +501,9 @@ def get_metrics_filters(ta_name: str):
                 }
             ],
 
-            "default_filter": {
-                **filter_data["default_filter"],
-                "metric": "nps",
-                "product": ""
-            }
+            "selected_filter": selected_filter
         }
 
     finally:
         cur.close()
         conn.close()
-

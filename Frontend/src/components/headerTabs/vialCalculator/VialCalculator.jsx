@@ -98,7 +98,7 @@ export default function VialCalculator() {
             setMappingData(resData?.data || {});
 
             const defaultFilter =
-                resData?.default_filter;
+                resData?.selected_filter;
 
             if (defaultFilter) {
                 setScenarioSelector(
@@ -636,7 +636,7 @@ export default function VialCalculator() {
                         variant="contained"
                         onClick={handleApplyFilter}
                         // disabled={loadingFilters}
-                        disabled={!isApplyFilterEnabled}
+                        // disabled={!isApplyFilterEnabled}
                         sx={{ height: "40px", px: 3, borderRadius: "8px", textTransform: "none", backgroundColor: "#4F46E5" }}
                     >
                         Apply Filter

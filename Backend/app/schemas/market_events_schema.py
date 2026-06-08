@@ -8,17 +8,21 @@ class MarketEventIndicationData(BaseModel):
 class MarketEventDefaultFilter(BaseModel):
     indication: str
     scenario_name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 class MarketEventFiltersResponse(BaseModel):
     ta_name: str
-    # indications: List[str]
+    indications: List[str]
     data: Dict[str, MarketEventIndicationData]
-    default_filter: MarketEventDefaultFilter
+    selected_filter: MarketEventDefaultFilter
 
 class MarketEventApplyFilterRequest(BaseModel):
     ta_name: str
     indication: str
     scenario_name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 
 class MarketEventApplyFilterResponse(BaseModel):
@@ -52,6 +56,8 @@ class MarketEventRunCalculationRequest(BaseModel):
     ta_name: str
     indication: str
     scenario_name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None  
     events: List[MarketEventRunEvent]
 
 
@@ -79,6 +85,8 @@ class MarketEventSaveRequest(BaseModel):
     indication: str
     scenario_name: str
     metric: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     table: List[MarketEventLotGroup]
 
 class DeleteMarketEventRequest(BaseModel):
