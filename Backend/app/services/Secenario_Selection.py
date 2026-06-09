@@ -511,7 +511,7 @@ def finalize_scenarios(payload):
         if not all_lots:
             return {
                 "message": "No LOTs found for selected metric",
-                "finalized": False,
+                "can_finalize": False,
                 "finalized_selections": {}
             }
 
@@ -563,7 +563,7 @@ def finalize_scenarios(payload):
         if missing_lots:
             return {
                 "message": f"Cannot finalize. Missing selections for LOTs: {missing_lots}",
-                "finalized": False,
+                "can_finalize": False,
                 "finalized_selections": selected_map
             }
 
@@ -732,6 +732,18 @@ def clear_scenario_selections(payload):
             payload.ta_name,
             payload.indication,
             metric
+        ))
+        cursor.execute("""
+            UPDATE raw.user_filter_preferences
+            SET
+                scenario_name = 'BASE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
+            AND indication = %s
+            AND LOWER(scenario_name) = 'finalised'
+        """, (
+            payload.ta_name,
+            payload.indication
         ))
 
         conn.commit()

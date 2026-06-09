@@ -394,6 +394,12 @@ def generate_full_base_forecast(
     months = None
     forecast_start_index = None
 
+    # -----------------------------------
+    # Calculate forecast periods
+    # FE now sends forecast end date
+    # -----------------------------------
+    forecast_periods = int(config["forecast_periods"])
+
     for key, data in sorted(metrics.items(), key=lambda x: x[0]):
         parts = key.split("-")
 
@@ -437,7 +443,7 @@ def generate_full_base_forecast(
             series_values,
             train_start,
             train_end,
-            config["forecast_periods"],
+            forecast_periods,
             metric=metric
         )
 

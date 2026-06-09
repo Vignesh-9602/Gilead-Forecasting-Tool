@@ -26,6 +26,7 @@ import { useLoadingStore } from "../../stores";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
+    fieldYearPlaceholder: () => "YYYY",
 };
 
 
@@ -43,6 +44,7 @@ export default function GlobalConfiguration() {
     // const [loading, setLoading] = useState(false);
     // const { setLoading } = useLoadingStore();
     const { setLoading, isLoading } = useLoadingStore();
+    const [availableTrainMonths, setAvailableTrainMonths] = useState([]);
 
     useEffect(() => {
         if (therapyArea) {
@@ -56,12 +58,15 @@ export default function GlobalConfiguration() {
             const response = await getConfigurationByTherapyArea(taName);
 
             const config = response?.data?.config;
+            setAvailableTrainMonths(
+                response?.data?.available_train_months || []
+            );
 
             if (config) {
                 setTrainStartDate(config.train_start_date || "");
                 setTrainEndDate(config.train_end_date || "");
                 setModelGranularity(config.model_granularity?.toLowerCase() || "");
-                setForecastPeriods(config.forecast_periods?.toString() || "");
+                setForecastPeriods(config.forecast_periods || "");
             }
         } catch (error) {
             console.error("No existing configuration found", error);
@@ -110,7 +115,7 @@ export default function GlobalConfiguration() {
                 train_start_date: trainStartDate,
                 train_end_date: trainEndDate,
                 model_granularity: modelGranularity,
-                forecast_periods: Number(forecastPeriods),
+                forecast_periods: forecastPeriods,
             },
         };
 
@@ -284,22 +289,42 @@ export default function GlobalConfiguration() {
                         </Typography>
 
                         <LocalizationProvider dateAdapter={AdapterDayjs} localeText={globalConfigDateLocaleText}>
-                            <DatePicker
-                                value={trainStartDate ? dayjs(trainStartDate) : null}
-                                onChange={(newValue) =>
-                                    setTrainStartDate(newValue ? newValue.format("YYYY-MM-DD") : "")
-                                }
-                                format="DD-MMM-YYYY"
-                                slotProps={{
-                                    textField: {
-                                        fullWidth: true,
-                                        size: "small",
-                                        sx: inputStyle,
-                                        error: !!errors.trainStartDate,
-                                        helperText: errors.trainStartDate,
-                                    },
-                                }}
-                            />
+                            <FormControl fullWidth size="small" error={!!errors.trainStartDate}>
+                                <Select
+                                    value={trainStartDate}
+                                    onChange={(e) => setTrainStartDate(e.target.value)}
+                                    sx={inputStyle}
+                                    displayEmpty
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 250,
+                                                width: 120,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "14px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
+                                    renderValue={(selected) =>
+                                        selected
+                                            ? dayjs(selected).format("MMM YY")
+                                            : "Select Start Date"
+                                    }
+                                >
+                                    {/* <MenuItem value="" disabled>
+                                        Select Start Date
+                                    </MenuItem> */}
+                                    {availableTrainMonths.map((month) => (
+                                        <MenuItem key={month} value={month}>
+                                            {dayjs(month).format("MMM YY")}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                                <FormHelperText>{errors.trainStartDate}</FormHelperText>
+                            </FormControl>
                         </LocalizationProvider>
                     </Box>
 
@@ -309,23 +334,45 @@ export default function GlobalConfiguration() {
                         </Typography>
 
                         <LocalizationProvider dateAdapter={AdapterDayjs} localeText={globalConfigDateLocaleText}>
-                            <DatePicker
-                                value={trainEndDate ? dayjs(trainEndDate) : null}
-                                onChange={(newValue) =>
-                                    setTrainEndDate(newValue ? newValue.format("YYYY-MM-DD") : "")
-                                }
-                                format="DD-MMM-YYYY"
-                                maxDate={dayjs()}
-                                slotProps={{
-                                    textField: {
-                                        fullWidth: true,
-                                        size: "small",
-                                        sx: inputStyle,
-                                        error: !!errors.trainEndDate,
-                                        helperText: errors.trainEndDate,
-                                    },
-                                }}
-                            />
+                            <FormControl fullWidth size="small" error={!!errors.trainEndDate}>
+                                <Select
+                                    value={trainEndDate}
+                                    onChange={(e) => setTrainEndDate(e.target.value)}
+                                    sx={inputStyle}
+                                    displayEmpty
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 250,
+                                                width: 120,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "14px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
+                                    renderValue={(selected) =>
+                                        selected
+                                            ? dayjs(selected).format("MMM YY")
+                                            : "Select End Date"
+                                    }
+                                >
+                                    {availableTrainMonths
+                                        .filter(
+                                            (month) =>
+                                                dayjs(month).isAfter(trainStartDate)
+                                            // || dayjs(month).isSame(trainStartDate)
+                                        )
+                                        .map((month) => (
+                                            <MenuItem key={month} value={month}>
+                                                {dayjs(month).format("MMM YY")}
+                                            </MenuItem>
+                                        ))}
+                                </Select>
+                                <FormHelperText>{errors.trainEndDate}</FormHelperText>
+                            </FormControl>
                         </LocalizationProvider>
                     </Box>
                 </Box>
@@ -355,25 +402,48 @@ export default function GlobalConfiguration() {
                     </Box>
 
                     <Box sx={{ flex: 1, minWidth: "320px" }}>
-                        <Typography sx={{ mb: 1, fontSize: "16px", fontWeight: 600, color: "#64748b" }}>
-                            FORECAST PERIODS
+                        <Typography
+                            sx={{
+                                mb: 1,
+                                fontSize: "16px",
+                                fontWeight: 600,
+                                color: "#64748b",
+                            }}
+                        >
+                            FORECAST END DATE
                         </Typography>
 
-                        <TextField
-                            fullWidth
-                            value={forecastPeriods}
-                            onChange={(e) => {
-                                const value = e.target.value;
-                                if (/^\d*$/.test(value)) {
-                                    setForecastPeriods(value);
+                        <LocalizationProvider
+                            dateAdapter={AdapterDayjs}
+                            localeText={globalConfigDateLocaleText}
+                        >
+                            <DatePicker
+                                views={["year", "month"]}
+                                value={forecastPeriods ? dayjs(forecastPeriods) : null}
+                                minDate={
+                                    trainEndDate
+                                        ? dayjs(trainEndDate).add(1, "month")
+                                        : undefined
                                 }
-                            }}
-                            size="small"
-                            placeholder="eg. 36"
-                            sx={inputStyle}
-                            error={!!errors.forecastPeriods}
-                            helperText={errors.forecastPeriods}
-                        />
+                                onChange={(newValue) =>
+                                    setForecastPeriods(
+                                        newValue
+                                            ? newValue.startOf("month").format("YYYY-MM-DD")
+                                            : ""
+                                    )
+                                }
+                                format="MMM YY"
+                                slotProps={{
+                                    textField: {
+                                        fullWidth: true,
+                                        size: "small",
+                                        sx: inputStyle,
+                                        error: !!errors.forecastPeriods,
+                                        helperText: errors.forecastPeriods,
+                                    },
+                                }}
+                            />
+                        </LocalizationProvider>
                     </Box>
                 </Box>
 

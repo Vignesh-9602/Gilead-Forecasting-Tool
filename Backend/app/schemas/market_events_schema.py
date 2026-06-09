@@ -15,6 +15,7 @@ class MarketEventFiltersResponse(BaseModel):
     ta_name: str
     indications: List[str]
     data: Dict[str, MarketEventIndicationData]
+    available_months: List[str] = []
     selected_filter: MarketEventDefaultFilter
 
 class MarketEventApplyFilterRequest(BaseModel):

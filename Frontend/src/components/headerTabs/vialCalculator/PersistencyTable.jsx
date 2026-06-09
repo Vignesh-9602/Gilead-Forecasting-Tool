@@ -706,7 +706,7 @@ export default function PersistencyTable({
                                                         }}
                                                         renderValue={(selected) => {
                                                             if (!selected) {
-                                                                return "Curves";
+                                                                return "Linear";
                                                             }
 
                                                             return selected;
@@ -928,7 +928,29 @@ export default function PersistencyTable({
                                                                             );
                                                                         }
                                                                     }}
-                                                                    style={{ width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", textAlign: "center", fontSize: "14px", fontFamily: "inherit", color: "#506784", padding: 0, margin: 0, lineHeight: 1, fontWeight: 500 }}
+                                                                    // style={{
+                                                                    //     width: "100%", height: "100%", border: "none",
+                                                                    //     outline: "none", background: "transparent", textAlign: "center",
+                                                                    //     fontSize: "14px", fontFamily: "inherit", color: "#506784",
+                                                                    //     padding: 0, margin: 0, lineHeight: 1, fontWeight: 500
+                                                                    // }}
+
+                                                                    style={{
+                                                                        width: "46px",
+                                                                        height: "25px",
+                                                                        boxSizing: "border-box",
+                                                                        display: "inline-block",
+                                                                        verticalAlign: "middle",
+                                                                        border: "1px solid #93c5fd",
+                                                                        borderRadius: "4px",
+                                                                        outline: "none",
+                                                                        background: "#eff6ff",
+                                                                        color: "#1e293b",
+                                                                        textAlign: "center",
+                                                                        fontSize: "14px",
+                                                                        lineHeight: "20px",
+                                                                        padding: "1px 4px",
+                                                                    }}
                                                                 />
                                                             ) : (
                                                                 value
@@ -1328,22 +1350,39 @@ export default function PersistencyTable({
                                                                                 );
                                                                             }
                                                                         }}
+                                                                        // style={{
+                                                                        //     width: "100%",
+                                                                        //     // height: "20px",
+                                                                        //     // display: "block",
+                                                                        //     height: "100%",
+                                                                        //     border: "none",
+                                                                        //     outline: "none",
+                                                                        //     background: "transparent",
+                                                                        //     textAlign: "center",
+                                                                        //     fontSize: "13px",
+                                                                        //     fontFamily: "inherit",
+                                                                        //     color: "#506784",
+                                                                        //     padding: 0,
+                                                                        //     margin: 0,
+                                                                        //     lineHeight: 1,
+                                                                        //     fontWeight: 500
+                                                                        // }}
+
                                                                         style={{
-                                                                            width: "100%",
-                                                                            // height: "20px",
-                                                                            // display: "block",
-                                                                            height: "100%",
-                                                                            border: "none",
+                                                                            width: "46px",
+                                                                            height: "25px",
+                                                                            boxSizing: "border-box",
+                                                                            display: "inline-block",
+                                                                            verticalAlign: "middle",
+                                                                            border: "1px solid #93c5fd",
+                                                                            borderRadius: "4px",
                                                                             outline: "none",
-                                                                            background: "transparent",
+                                                                            background: "#eff6ff",
+                                                                            color: "#1e293b",
                                                                             textAlign: "center",
-                                                                            fontSize: "13px",
-                                                                            fontFamily: "inherit",
-                                                                            color: "#506784",
-                                                                            padding: 0,
-                                                                            margin: 0,
-                                                                            lineHeight: 1,
-                                                                            fontWeight: 500
+                                                                            fontSize: "14px",
+                                                                            lineHeight: "20px",
+                                                                            padding: "1px 4px",
                                                                         }}
                                                                     />
                                                                 ) : (

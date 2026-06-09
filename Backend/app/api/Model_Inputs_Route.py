@@ -729,7 +729,10 @@ def build_patient_metrics(nps_values, market_share_values):
         ]
     }
 
-def normalize_market_share_table(market_share_table):
+def normalize_market_share_table(
+    market_share_table,
+    selected_brand: str
+):
     normalized_table = []
 
     for lot_group in market_share_table:
@@ -741,35 +744,59 @@ def normalize_market_share_table(market_share_table):
             for child in children
         )
 
-        monthly_totals = [0.0] * total_months
-
-        for child in children:
-            values = child["values"] if isinstance(child, dict) else child.values
-
-            for idx, val in enumerate(values):
-                monthly_totals[idx] += float(val or 0)
-
         normalized_children = []
 
-        for child in children:
-            label = child["label"] if isinstance(child, dict) else child.label
-            values = child["values"] if isinstance(child, dict) else child.values
+        for month_idx in range(total_months):
 
-            normalized_values = []
+            edited_value = 0.0
+            other_total = 0.0
 
-            for idx in range(total_months):
-                val = values[idx] if idx < len(values) else 0
-                total = monthly_totals[idx]
+            # -----------------------------
+            # Get edited brand value and other brands total
+            # -----------------------------
+            for child in children:
+                label = child["label"] if isinstance(child, dict) else child.label
+                values = child["values"] if isinstance(child, dict) else child.values
 
-                normalized_values.append(
-                    round((float(val or 0) / total) * 100, 2)
-                    if total > 0 else 0
-                )
+                value = float(values[month_idx] or 0) if month_idx < len(values) else 0.0
 
-            normalized_children.append({
-                "label": label,
-                "values": normalized_values
-            })
+                if label == selected_brand:
+                    edited_value = value
+                else:
+                    other_total += value
+
+            remaining_share = max(100.0 - edited_value, 0.0)
+
+            # -----------------------------
+            # Normalize each brand
+            # -----------------------------
+            month_values = {}
+
+            for child in children:
+                label = child["label"] if isinstance(child, dict) else child.label
+                values = child["values"] if isinstance(child, dict) else child.values
+
+                value = float(values[month_idx] or 0) if month_idx < len(values) else 0.0
+
+                if label == selected_brand:
+                    month_values[label] = round(edited_value, 2)
+                else:
+                    month_values[label] = (
+                        round((value / other_total) * remaining_share, 2)
+                        if other_total > 0
+                        else 0.0
+                    )
+
+            if not normalized_children:
+                for child in children:
+                    label = child["label"] if isinstance(child, dict) else child.label
+                    normalized_children.append({
+                        "label": label,
+                        "values": []
+                    })
+
+            for child in normalized_children:
+                child["values"].append(month_values[child["label"]])
 
         normalized_table.append({
             "lot": lot,
@@ -904,7 +931,10 @@ def refresh_changes(payload: Refreshchangerequest):
     # Normalize market share for response
     # --------------------------------------------------
     if metric == "market_share":
-        normalized_market_share_table = normalize_market_share_table(payload.table)
+        normalized_market_share_table = normalize_market_share_table(
+                    payload.table,
+                    selected_brand=payload.product
+                )
 
         selected_chart_series = []
 

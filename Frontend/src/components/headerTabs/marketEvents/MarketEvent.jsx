@@ -66,6 +66,7 @@ export default function MarketEvents() {
     const [marketShareChartData, setMarketShareChartData] = useState(null);
     const [marketEventMetricsData, setMarketEventMetricsData] = useState(null);
     const { setLoading, isLoading } = useLoadingStore();
+    const [availableMonths, setAvailableMonths] = useState([]);
 
     useEffect(() => {
         if (therapyArea) {
@@ -84,6 +85,9 @@ export default function MarketEvents() {
             const response = await getMarketEventFilters(therapyArea);
 
             const resData = response?.data;
+            setAvailableMonths(
+                resData?.available_months || []
+            );
 
             setMappingData(resData?.data || {});
 
@@ -584,6 +588,8 @@ export default function MarketEvents() {
             ta_name: therapyArea,
             indication,
             scenario_name: selectedScenario,
+            start_date: startDate,
+            end_date: endDate,
 
             events: eventRows.map((row) => ({
                 event_name: row.event_name,
@@ -822,34 +828,34 @@ export default function MarketEvents() {
                         </Typography>
 
                         <LocalizationProvider dateAdapter={AdapterDayjs} localeText={marketEventDateLocaleText}>
-                            <DatePicker
-                                views={["year", "month"]}
-                                value={startDate ? dayjs(startDate) : null}
-                                onChange={(newValue) =>
-                                    setStartDate(
-                                        newValue
-                                            ? newValue
-                                                .startOf("month")
-                                                .format("YYYY-MM-DD")
-                                            : ""
-                                    )
-                                }
-                                format="MMM YY"
-                                slotProps={{
-                                    textField: {
-                                        size: "small",
-                                        sx: {
-                                            // ...inputStyle,
-                                            maxWidth: "150px",
-                                            "& .MuiOutlinedInput-root": {
-                                                borderRadius: "8px",
-                                                height: "35px",
-                                                backgroundColor: "#fcfcfd",
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={startDate}
+                                    onChange={(e) => setStartDate(e.target.value)}
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
                                             },
                                         },
-                                    },
-                                }}
-                            />
+                                    }}
+                                >
+                                    {availableMonths.map((month) => (
+                                        <MenuItem
+                                            key={month}
+                                            value={month}
+                                        >
+                                            {dayjs(month).format("MMM YY")}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
                         </LocalizationProvider>
                     </Box>
 
@@ -866,34 +872,40 @@ export default function MarketEvents() {
                         </Typography>
 
                         <LocalizationProvider dateAdapter={AdapterDayjs} localeText={marketEventDateLocaleText}>
-                            <DatePicker
-                                views={["year", "month"]}
-                                value={endDate ? dayjs(endDate) : null}
-                                onChange={(newValue) =>
-                                    setEndDate(
-                                        newValue
-                                            ? newValue
-                                                .startOf("month")
-                                                .format("YYYY-MM-DD")
-                                            : ""
-                                    )
-                                }
-                                format="MMM YY"
-                                slotProps={{
-                                    textField: {
-                                        size: "small",
-                                        sx: {
-                                            // ...inputStyle,
-                                            maxWidth: "150px",
-                                            "& .MuiOutlinedInput-root": {
-                                                borderRadius: "8px",
-                                                height: "35px",
-                                                backgroundColor: "#fcfcfd",
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={endDate}
+                                    onChange={(e) => setEndDate(e.target.value)}
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
                                             },
                                         },
-                                    },
-                                }}
-                            />
+                                    }}
+                                >
+                                    {availableMonths
+                                        .filter(
+                                            (month) =>
+                                                dayjs(month).isAfter(startDate)
+                                            // || dayjs(month).isSame(startDate)
+                                        )
+                                        .map((month) => (
+                                            <MenuItem
+                                                key={month}
+                                                value={month}
+                                            >
+                                                {dayjs(month).format("MMM YY")}
+                                            </MenuItem>
+                                        ))}
+                                </Select>
+                            </FormControl>
                         </LocalizationProvider>
                     </Box>
 
@@ -1042,7 +1054,7 @@ export default function MarketEvents() {
                                     "Event Name",
                                     "LOT",
                                     "Target Product",
-                                    "Source",
+                                    "Source Of Business",
                                     "Start Date",
                                     "Peak %",
                                     "Months",

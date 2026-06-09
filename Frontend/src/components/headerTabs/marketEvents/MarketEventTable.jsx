@@ -342,6 +342,8 @@ export default function MarketEventTable({
                 scenario_name: selectedScenario,
 
                 metric: selectedMetricView,
+                start_date: startDate,
+                end_date: endDate,
 
                 table: editableRows.map((row) => ({
                     lot: row.lot,

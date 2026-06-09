@@ -28,6 +28,8 @@ export default function Scenarios() {
 
     const [indication, setIndication] = useState("");
     const [lot, setLot] = useState("");
+    const [appliedLot, setAppliedLot] = useState(""); // last applied lot
+    const [appliedIndication, setAppliedIndication] = useState("");
     // const [metric, setMetric] = useState("");
     // const [brand, setBrand] = useState("");
     const [compareScenarios, setCompareScenarios] = useState([]);
@@ -120,6 +122,8 @@ export default function Scenarios() {
             if (defaultFilter) {
                 setIndication(defaultFilter.indication);
                 setLot(defaultFilter.lot);
+                setAppliedLot(defaultFilter.lot);
+                setAppliedIndication(defaultFilter.indication);
 
                 // Auto Apply Filter
                 const scenarioNames =
@@ -187,6 +191,8 @@ export default function Scenarios() {
             // DIRECT ASSIGN (no transformation needed)
             setChartData(data.chart);
             setTableData(data.table);
+            setAppliedLot(lot);
+            setAppliedIndication(indication);
             setIsDataLoaded(true);
             showSnackbar("Filters applied successfully", "success");
         } catch (error) {
@@ -202,8 +208,8 @@ export default function Scenarios() {
 
         const payload = {
             ta_name: therapyArea,
-            indication,
-            lot,
+            indication: appliedIndication,
+            lot: appliedLot,
             metric: "nps",
             scenario_name: selectedScenario,
         };
@@ -218,7 +224,7 @@ export default function Scenarios() {
             // Update UI
             setFinalizationStatus(data.finalization_status || {});
             setCanFinalize(data.can_finalize);
-            showSnackbar(`Scenario saved successfully for ${lot}`, "success");
+            showSnackbar(`Scenario saved successfully for ${appliedLot}`, "success");
 
         } catch (error) {
             console.error("Save scenario failed", error);
@@ -683,9 +689,9 @@ export default function Scenarios() {
                     tableData={tableData?.[tableMetric] || []}
                     tableMetric={tableMetric}
                     setTableMetric={setTableMetric}
-                    selectedLot={lot}
                     indication={indication}
                     onSaveSelection={handleSaveScenario}
+                    selectedLot={appliedLot}
                 />
                 <Dialog
                     open={openResetDialog}

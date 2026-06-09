@@ -393,15 +393,20 @@ export default function ForecastTrendChart({
                     }
                 }}
                 style={{
-                    // width: "42px",
-                    width: "100%",
-                    maxWidth: "38px",
-                    border: "none",
+                    width: "46px",
+                    height: "20px",
+                    boxSizing: "border-box",
+                    display: "inline-block",
+                    verticalAlign: "middle",
+                    border: "1px solid #93c5fd",
+                    borderRadius: "4px",
                     outline: "none",
-                    background: "transparent",
+                    background: "#eff6ff",
+                    color: "#1e293b",
                     textAlign: "center",
-                    fontSize: "14px",
-                    padding: 0,
+                    fontSize: "13px",
+                    lineHeight: "20px",
+                    padding: "1px 4px",
                 }}
             />
         ) : (
@@ -409,6 +414,11 @@ export default function ForecastTrendChart({
                 sx={{
                     color: highlight ? "#f59e0b" : "#334155",
                     fontWeight: highlight ? 700 : 400,
+                    minHeight: "20px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "14px",
                 }}
             >
                 {editable ? value : formatValue(value)}
@@ -697,7 +707,7 @@ export default function ForecastTrendChart({
                         disabled={!tableRows.length}
                         onClick={() => setEditable(true)}
                     >
-                        Edit Changes
+                        {editable ? "Editing..." : "Edit Changes"}
                     </Button>
 
                     {editable && (
@@ -819,6 +829,10 @@ export default function ForecastTrendChart({
                                                             align="center"
                                                             sx={{
                                                                 borderRight: "1px solid #E2E8F0",
+                                                                py: "2px",
+                                                                px: 1,
+                                                                height: "22px",
+                                                                lineHeight: "18px",
 
                                                                 backgroundColor:
                                                                     index < forecastStartIndex
@@ -886,6 +900,10 @@ export default function ForecastTrendChart({
                                                     align="center"
                                                     sx={{
                                                         borderRight: "1px solid #E2E8F0",
+                                                        height: "22px",
+                                                        lineHeight: "18px",
+                                                        py: "2px",
+                                                        px: 1,
 
                                                         backgroundColor:
                                                             index < forecastStartIndex

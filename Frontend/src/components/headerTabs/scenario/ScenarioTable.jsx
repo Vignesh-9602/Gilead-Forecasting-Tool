@@ -90,6 +90,7 @@ export default function ScenarioTable({
         if (!selectedScenario) return;
         onSaveSelection(selectedScenario);
     };
+    
 
     const handleDownloadExcel = async () => {
         if (!tableData?.length) return;

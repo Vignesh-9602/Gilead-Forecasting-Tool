@@ -16,6 +16,7 @@ class PersistencyFiltersResponse(BaseModel):
     ta_name: str
     scenario_names: List[str]
     data: Dict[str, Dict[str, Dict[str, List[str]]]]
+    available_months: List[str] = []
     selected_filter: PersistencyDefaultFilter
 
 class PersistencyApplyRequest(BaseModel):

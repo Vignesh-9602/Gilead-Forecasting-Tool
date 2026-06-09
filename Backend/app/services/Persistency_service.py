@@ -2,6 +2,8 @@ import json
 import math
 import re
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from fastapi import HTTPException
 from app.db.connection import get_connection
 from app.schemas.Vial_Calculator_schema import PersistencyApplyCurveRequest, PersistencyCalculateApplyRequest
 from app.services.Retaining_Filters import get_saved_user_filter, save_user_filter
@@ -45,6 +47,48 @@ def sort_lot_key(lot):
     match = re.search(r"\d+", str(lot))
     return int(match.group()) if match else 999
 
+def get_available_months_from_config(cur, ta_name: str):
+    cur.execute("""
+        SELECT config
+        FROM raw.forecast_configurations
+        WHERE LOWER(config->>'ta_name') = LOWER(%s)
+    """, (ta_name,))
+
+    row = cur.fetchone()
+
+    if row:
+        config = row[0]
+
+        train_start = datetime.fromisoformat(config["train_start_date"]).replace(day=1)
+        train_end = datetime.fromisoformat(config["train_end_date"]).replace(day=1)
+        forecast_periods = int(config.get("forecast_periods", 0))
+
+        forecast_end = train_end + relativedelta(months=forecast_periods)
+
+        months = []
+        current = train_start
+
+        while current <= forecast_end:
+            months.append(current.strftime("%Y-%m-%d"))
+            current = current + relativedelta(months=1)
+
+        return months
+
+    # fallback when config does not exist
+    cur.execute("""
+        SELECT DISTINCT
+            jsonb_array_elements_text(chart->'months')::date AS month_date
+        FROM raw.forecast_scenarios
+        WHERE LOWER(ta_name) = LOWER(%s)
+          AND chart IS NOT NULL
+          AND chart ? 'months'
+        ORDER BY month_date
+    """, (ta_name,))
+
+    return [
+        r[0].strftime("%Y-%m-%d")
+        for r in cur.fetchall()
+    ]
 
 def get_persistency_filters_service(ta_name: str):
 
@@ -54,23 +98,27 @@ def get_persistency_filters_service(ta_name: str):
     try:
         cursor.execute("""
             SELECT DISTINCT
-                indication,
-                lot,
-                product,
-                scenario_name,
-                BOOL_OR(is_finalized = TRUE) OVER (
-                    PARTITION BY indication, scenario_name
+                fs.indication,
+                fs.lot,
+                fs.product,
+                fs.scenario_name,
+                EXISTS (
+                    SELECT 1
+                    FROM raw.forecast_scenarios fs2
+                    WHERE fs2.ta_name = fs.ta_name
+                    AND LOWER(fs2.indication) = LOWER(fs.indication)
+                    AND fs2.is_finalized = TRUE
                 ) AS is_finalized
-            FROM raw.forecast_scenarios
-            WHERE ta_name = %s
-              AND LOWER(metric) = 'market_share'
-              AND product IS NOT NULL
-              AND scenario_name IS NOT NULL
+            FROM raw.forecast_scenarios fs
+            WHERE fs.ta_name = %s
+            AND LOWER(fs.metric) = 'market_share'
+            AND fs.product IS NOT NULL
+            AND fs.scenario_name IS NOT NULL
             ORDER BY
-                indication,
-                lot,
-                product,
-                scenario_name
+                fs.indication,
+                fs.lot,
+                fs.product,
+                fs.scenario_name
         """, (ta_name,))
 
         rows = cursor.fetchall()
@@ -80,25 +128,33 @@ def get_persistency_filters_service(ta_name: str):
 
         for indication, lot, product, scenario_name, is_finalized in rows:
 
-            display_scenario_name = (
-                f"{scenario_name}_Finalised"
-                if is_finalized
-                else scenario_name
-            )
+            # Always add the actual scenario name
+            scenario_names_set.add(scenario_name)
 
-            scenario_names_set.add(display_scenario_name)
+            data.setdefault(scenario_name, {})
+            data[scenario_name].setdefault(indication, {})
+            data[scenario_name][indication].setdefault(lot, [])
 
-            data.setdefault(display_scenario_name, {})
-            data[display_scenario_name].setdefault(indication, {})
-            data[display_scenario_name][indication].setdefault(lot, [])
+            if product not in data[scenario_name][indication][lot]:
+                data[scenario_name][indication][lot].append(product)
 
-            if product not in data[display_scenario_name][indication][lot]:
-                data[display_scenario_name][indication][lot].append(product)
+            # Add generic Finalised option once if any scenario is finalized
+            if is_finalized:
+                scenario_names_set.add("Finalised")
+
+                data.setdefault("Finalised", {})
+                data["Finalised"].setdefault(indication, {})
+                data["Finalised"][indication].setdefault(lot, [])
+
+                if product not in data["Finalised"][indication][lot]:
+                    data["Finalised"][indication][lot].append(product)
 
         scenario_names = sorted(
             list(scenario_names_set),
             key=lambda x: (
-                0 if x == "BASE" else 1,
+                0 if x == "Finalised" else
+                1 if x == "BASE" else
+                2,
                 x
             )
         )
@@ -116,13 +172,12 @@ def get_persistency_filters_service(ta_name: str):
 
         if scenario_names:
             default_scenario_name = (
-                "BASE_Finalised"
-                if "BASE_Finalised" in scenario_names
+                "Finalised"
+                if "Finalised" in scenario_names
                 else "BASE"
                 if "BASE" in scenario_names
                 else scenario_names[0]
             )
-
         if default_scenario_name in data and data[default_scenario_name]:
 
             default_indication = sorted(
@@ -190,7 +245,17 @@ def get_persistency_filters_service(ta_name: str):
 
         if saved_filter:
             selected_scenario = saved_filter.get("scenario_name") or default_scenario_name
+
+            if selected_scenario.lower().endswith("_finalised"):
+                selected_scenario = "Finalised"
+
+            if selected_scenario not in data:
+                selected_scenario = default_scenario_name
+
             selected_indication = saved_filter.get("indication") or default_indication
+
+            if selected_indication not in data.get(selected_scenario, {}):
+                selected_indication = default_indication
 
             selected_lots_map = (
                 data
@@ -213,11 +278,15 @@ def get_persistency_filters_service(ta_name: str):
             }
         else:
             selected_filter = default_filter
-
+        available_months = get_available_months_from_config(
+            cursor,
+            ta_name
+        )
         return {
             "ta_name": ta_name,
             "scenario_names": scenario_names,
             "data": data,
+            "available_months": available_months,
             "selected_filter": selected_filter
 
         }
@@ -406,15 +475,56 @@ def fetch_scenario_data(
     }
 
 
+def validate_date_range(start_date, end_date):
+    if not start_date or not end_date:
+        return
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    if start_dt > end_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="Start date cannot be greater than end date."
+        )
 def apply_persistency_service(payload):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     try:
+        validate_date_range(
+            payload.start_date,
+            payload.end_date
+        )
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
 
         indication = payload.indication
         lots = payload.lots
@@ -431,7 +541,7 @@ def apply_persistency_service(payload):
             scenario_data = fetch_scenario_data(
                 cursor=cursor,
                 ta_name=ta_name,
-                scenario_name=scenario_name,
+                scenario_name=db_scenario_name,
                 indication=indication,
                 lot=lot,
                 brand=brand
@@ -439,7 +549,7 @@ def apply_persistency_service(payload):
 
             if not scenario_data:
                 raise ValueError(
-                    f"No data found for scenario {scenario_name}, indication {indication}, lot {lot}"
+                    f"No data found for scenario {display_scenario_name}, indication {indication}, lot {lot}"
                 )
 
             chart = scenario_data["chart"]
@@ -449,7 +559,7 @@ def apply_persistency_service(payload):
 
             if not months:
                 raise ValueError(
-                    f"No months available for scenario {scenario_name}, lot {lot}"
+                    f"No months available for scenario {display_scenario_name}, lot {lot}"
                 )
 
             available_start_date = min(months)
@@ -502,7 +612,7 @@ def apply_persistency_service(payload):
 
             if brand_values is None:
                 raise ValueError(
-                    f"Brand {brand} not found in NPS table for scenario {scenario_name}, lot {lot}"
+                    f"Brand {brand} not found in NPS table for scenario {display_scenario_name}, lot {lot}"
                 )
 
             new_patients = [
@@ -619,7 +729,7 @@ def apply_persistency_service(payload):
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
-                base_scenario_name,
+                db_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -787,7 +897,7 @@ def apply_persistency_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -808,7 +918,7 @@ def apply_persistency_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             months=response_months or [],
@@ -820,12 +930,12 @@ def apply_persistency_service(payload):
             cur=cursor,
             user_id="system",
             ta_name=ta_name,
-            scenario_name=scenario_name,
+            scenario_name=display_scenario_name,
             indication=indication,
             lot=lots[0] if lots else "",
             metric="nps",
             product=brand,
-             start_date=start_date,
+            start_date=start_date,
             end_date=end_date
         )
         conn.commit()
@@ -1242,10 +1352,34 @@ def apply_persistency_curve_service(
 
     try:
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(
-            scenario_name
-        )
+
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
 
         indication = payload.indication
         brand = payload.brand
@@ -1268,7 +1402,7 @@ def apply_persistency_curve_service(
             scenario_data = fetch_scenario_data(
                 cursor=cursor,
                 ta_name=ta_name,
-                scenario_name=scenario_name,
+                scenario_name=db_scenario_name,
                 indication=indication,
                 lot=lot,
                 brand=brand
@@ -1276,7 +1410,7 @@ def apply_persistency_curve_service(
 
             if not scenario_data:
                 raise ValueError(
-                    f"No data found for scenario {scenario_name}, indication {indication}, lot {lot}"
+                    f"No data found for scenario {display_scenario_name}, indication {indication}, lot {lot}"
                 )
 
             chart = scenario_data["chart"]
@@ -1289,7 +1423,7 @@ def apply_persistency_curve_service(
 
             if not months:
                 raise ValueError(
-                    f"No months available for scenario {scenario_name}, lot {lot}"
+                    f"No months available for scenario {display_scenario_name}, lot {lot}"
                 )
 
             available_start_date = min(months)
@@ -1353,7 +1487,7 @@ def apply_persistency_curve_service(
 
             if brand_values is None:
                 raise ValueError(
-                    f"Brand {brand} not found in NPS table for scenario {scenario_name}, lot {lot}"
+                    f"Brand {brand} not found in NPS table for scenario {display_scenario_name}, lot {lot}"
                 )
 
             new_patients = [
@@ -1482,7 +1616,7 @@ def apply_persistency_curve_service(
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
-                base_scenario_name,
+                db_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -1514,7 +1648,7 @@ def apply_persistency_curve_service(
             ORDER BY lot
         """, (
             ta_name,
-            base_scenario_name,
+            db_scenario_name,
             indication,
             brand,
             response_lots
@@ -1571,7 +1705,7 @@ def apply_persistency_curve_service(
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1597,7 +1731,7 @@ def apply_persistency_curve_service(
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": response_months or [],
@@ -1622,8 +1756,33 @@ def save_avg_vials_per_dose_service(payload):
         indication = payload.indication
         brand = payload.brand
         months = payload.months
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                ta_name,
+                indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
 
         for lot_item in payload.avg_vials_per_dose_table:
 
@@ -1654,7 +1813,7 @@ def save_avg_vials_per_dose_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     lot,
                     brand,
@@ -1699,7 +1858,7 @@ def save_avg_vials_per_dose_service(payload):
                         avg_vials_per_dose = EXCLUDED.avg_vials_per_dose
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     lot,
                     brand,
@@ -1731,7 +1890,7 @@ def save_avg_vials_per_dose_service(payload):
             ORDER BY lot
         """, (
             ta_name,
-            base_scenario_name,
+            db_scenario_name,
             indication,
             brand,
             response_lots
@@ -1783,7 +1942,7 @@ def save_avg_vials_per_dose_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1811,7 +1970,7 @@ def save_avg_vials_per_dose_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             months=response_months or [],
@@ -1823,7 +1982,7 @@ def save_avg_vials_per_dose_service(payload):
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": response_months,

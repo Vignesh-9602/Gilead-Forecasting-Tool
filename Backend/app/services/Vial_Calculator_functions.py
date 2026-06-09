@@ -1,3 +1,5 @@
+from fastapi import HTTPException
+
 from app.db.connection import get_connection
 from datetime import datetime
 
@@ -346,12 +348,37 @@ def save_demand_adjustments_service(payload):
 
     try:
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
-
         indication = payload.indication
         brand = payload.brand
         months = payload.months
+
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                ta_name,
+                indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
 
         for lot_item in payload.demand_vials_table:
 
@@ -426,7 +453,7 @@ def save_demand_adjustments_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -501,7 +528,7 @@ def save_demand_adjustments_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -535,7 +562,7 @@ def save_demand_adjustments_service(payload):
             ORDER BY lot
         """, (
             ta_name,
-            base_scenario_name,
+            db_scenario_name,
             indication,
             brand,
             response_lots
@@ -586,7 +613,7 @@ def save_demand_adjustments_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -597,7 +624,7 @@ def save_demand_adjustments_service(payload):
         demand_vials_table = build_demand_vials_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -616,7 +643,7 @@ def save_demand_adjustments_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
@@ -628,7 +655,7 @@ def save_demand_adjustments_service(payload):
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -753,9 +780,7 @@ def apply_compliance_configuration_service(payload):
 
     try:
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
-
+        # scenario_name = payload.scenario_name
         indication = payload.indication
         brand = payload.brand
 
@@ -763,6 +788,35 @@ def apply_compliance_configuration_service(payload):
             config.lot
             for config in payload.compliance_configuration
         ]
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                ta_name,
+                indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
+
+        
 
         cursor.execute("""
             SELECT
@@ -781,7 +835,7 @@ def apply_compliance_configuration_service(payload):
             ORDER BY lot
         """, (
             ta_name,
-            base_scenario_name,
+            db_scenario_name,
             indication,
             brand,
             response_lots
@@ -858,7 +912,7 @@ def apply_compliance_configuration_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -936,7 +990,7 @@ def apply_compliance_configuration_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -956,7 +1010,7 @@ def apply_compliance_configuration_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -967,7 +1021,7 @@ def apply_compliance_configuration_service(payload):
         demand_vials_table = build_demand_vials_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -986,7 +1040,7 @@ def apply_compliance_configuration_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
@@ -998,7 +1052,7 @@ def apply_compliance_configuration_service(payload):
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -1027,9 +1081,7 @@ def apply_edit_row_values_service(payload):
 
     try:
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
-
+        # scenario_name = payload.scenario_name
         indication = payload.indication
         brand = payload.brand
 
@@ -1039,6 +1091,35 @@ def apply_edit_row_values_service(payload):
         percentage_change_per_month = config.percentage_change_per_month
         number_of_months = config.number_of_months
         response_lots = payload.lots
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                ta_name,
+                indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
+
+        
 
         cursor.execute("""
             SELECT
@@ -1057,7 +1138,7 @@ def apply_edit_row_values_service(payload):
             ORDER BY lot
         """, (
             ta_name,
-            base_scenario_name,
+            db_scenario_name,
             indication,
             brand,
             response_lots
@@ -1124,7 +1205,7 @@ def apply_edit_row_values_service(payload):
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
@@ -1193,7 +1274,7 @@ def apply_edit_row_values_service(payload):
                 ORDER BY year, month
             """, (
                 ta_name,
-                base_scenario_name,
+                db_scenario_name,
                 indication,
                 brand,
                 lot
@@ -1291,7 +1372,7 @@ def apply_edit_row_values_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1365,7 +1446,7 @@ def apply_edit_row_values_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    base_scenario_name,
+                    db_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1448,7 +1529,7 @@ def apply_edit_row_values_service(payload):
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=base_scenario_name,
+            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             months=months,
@@ -1460,7 +1541,7 @@ def apply_edit_row_values_service(payload):
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,
@@ -1574,13 +1655,39 @@ def update_inventory_stock_service(payload):
 
     try:
         ta_name = payload.ta_name
-        scenario_name = payload.scenario_name
-        base_scenario_name = clean_scenario_name(scenario_name)
-
         indication = payload.indication
         brand = payload.brand
         months = payload.months
         stock_percentage = payload.stock_percentage
+        display_scenario_name = payload.scenario_name.strip()
+        db_scenario_name = clean_scenario_name(display_scenario_name)
+
+        if db_scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                ta_name,
+                indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            db_scenario_name = finalised_row[0]
+
+        
 
         inventory_values = []
 
@@ -1606,7 +1713,7 @@ def update_inventory_stock_service(payload):
                   AND month = %s
             """, (
                 ta_name,
-                base_scenario_name,
+                db_scenario_name,
                 indication,
                 brand,
                 year,
@@ -1646,7 +1753,7 @@ def update_inventory_stock_service(payload):
                 stock_percentage,
                 inventory_value,
                 ta_name,
-                base_scenario_name,
+                db_scenario_name,
                 indication,
                 brand,
                 year,
@@ -1657,7 +1764,7 @@ def update_inventory_stock_service(payload):
 
         return {
             "ta_name": ta_name,
-            "scenario_name": scenario_name,
+            "scenario_name": display_scenario_name,
             "indication": indication,
             "brand": brand,
             "months": months,

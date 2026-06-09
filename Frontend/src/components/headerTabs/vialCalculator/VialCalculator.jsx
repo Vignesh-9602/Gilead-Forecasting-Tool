@@ -70,6 +70,8 @@ export default function VialCalculator() {
 
     const [filterApplyVersion, setFilterApplyVersion] = useState(0);
 
+    const [availableMonths, setAvailableMonths] = useState([]);
+
     const isApplyFilterEnabled =
         !!therapyArea &&
         !!scenarioSelector &&
@@ -94,6 +96,9 @@ export default function VialCalculator() {
             );
 
             const resData = response?.data;
+            setAvailableMonths(
+                resData?.available_months || []
+            );
 
             setMappingData(resData?.data || {});
 
@@ -540,43 +545,29 @@ export default function VialCalculator() {
                             dateAdapter={AdapterDayjs}
                             localeText={vialCalculatorDateLocaleText}
                         >
-                            <DatePicker
-                                value={
-                                    startDate
-                                        ? dayjs(startDate)
-                                        : null
-                                }
-                                onChange={(newValue) =>
-                                    setStartDate(
-                                        newValue
-                                            ? newValue.format(
-                                                "YYYY-MM-DD"
-                                            )
-                                            : ""
-                                    )
-                                }
-                                format="DD-MMM-YYYY"
-                                slotProps={{
-                                    textField: {
-                                        size: "small",
-                                        placeholder: "DD-MMM-YYYY",
-                                        sx: {
-                                            ...inputStyle,
-                                            width: "140px",
-                                            "& .MuiInputBase-input": {
-                                                color:
-                                                    startDate
-                                                        ? "#000"
-                                                        : "transparent",
-
-                                                caretColor:
-                                                    "transparent",
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={startDate}
+                                    onChange={(e) => setStartDate(e.target.value)}
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
                                             },
                                         },
-                                        fullWidth: true,
-                                    },
-                                }}
-                            />
+                                    }}
+                                >
+                                    {availableMonths.map((month) => (
+                                        <MenuItem
+                                            key={month}
+                                            value={month}
+                                        >
+                                            {dayjs(month).format("MMM YY")}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
                         </LocalizationProvider>
                     </Box>
 
@@ -589,44 +580,35 @@ export default function VialCalculator() {
                             dateAdapter={AdapterDayjs}
                             localeText={vialCalculatorDateLocaleText}
                         >
-                            <DatePicker
-                                value={
-                                    endDate
-                                        ? dayjs(endDate)
-                                        : null
-                                }
-                                onChange={(newValue) =>
-                                    setEndDate(
-                                        newValue
-                                            ? newValue.format(
-                                                "YYYY-MM-DD"
-                                            )
-                                            : ""
-                                    )
-                                }
-                                format="DD-MMM-YYYY"
-                                slotProps={{
-                                    textField: {
-                                        size: "small",
-                                        placeholder: "DD-MMM-YYYY",
-                                        sx: {
-                                            ...inputStyle,
-                                            width: "140px",
-                                            "& .MuiInputBase-input": {
-                                                color:
-                                                    endDate
-                                                        ? "#000"
-                                                        : "transparent",
-
-                                                caretColor:
-                                                    "transparent",
+                            <FormControl sx={inputStyle}>
+                                <Select
+                                    value={endDate}
+                                    onChange={(e) => setEndDate(e.target.value)}
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
                                             },
                                         },
-
-                                        fullWidth: true,
-                                    },
-                                }}
-                            />
+                                    }}
+                                >
+                                    {availableMonths
+                                        .filter(
+                                            (month) =>
+                                                dayjs(month).isAfter(startDate)
+                                            // || dayjs(month).isSame(startDate)
+                                        )
+                                        .map((month) => (
+                                            <MenuItem
+                                                key={month}
+                                                value={month}
+                                            >
+                                                {dayjs(month).format("MMM YY")}
+                                            </MenuItem>
+                                        ))}
+                                </Select>
+                            </FormControl>
 
                         </LocalizationProvider>
                     </Box>

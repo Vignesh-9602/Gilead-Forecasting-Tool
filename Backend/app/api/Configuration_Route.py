@@ -6,6 +6,7 @@ import json
 from app.api.Model_Inputs_Route import parse_month_date
 from app.db.connection import get_connection
 from app.schemas.config_schema import (
+    ConfigurationResponse,
     SaveConfigRequest,
     UpdateAvgVialsRequest
 )
@@ -110,16 +111,72 @@ def get_avg_vials_by_ta(ta_name: str):
     finally:
         cur.close()
         conn.close()
+def add_months(source_date: date, months: int) -> date:
+    month = source_date.month - 1 + months
+    year = source_date.year + month // 12
+    month = month % 12 + 1
 
+    return date(year, month, 1)
+
+def get_available_months(start_date: date, end_date: date):
+    months = []
+
+    current = date(
+        start_date.year,
+        start_date.month,
+        1
+    )
+
+    end = date(
+        end_date.year,
+        end_date.month,
+        1
+    )
+
+    while current <= end:
+        months.append(current.isoformat())
+
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+
+    return months
 # ----------------------------------------------------
 # GET: LOAD FULL CONFIG BY TA
 # ----------------------------------------------------
-@router.get("/configurations/{ta_name}",tags=["Configuration"])
+@router.get(
+    "/configurations/{ta_name}",
+    response_model=ConfigurationResponse,
+    tags=["Configuration"]
+)
 def get_configuration_by_ta(ta_name: str):
+
     conn = get_connection()
     cur = conn.cursor()
 
     try:
+
+        # ==========================================
+        # Always fetch available months
+        # ==========================================
+        cur.execute("""
+            SELECT DISTINCT
+                year,
+                month
+            FROM raw.fact_market_patients
+            WHERE LOWER(TRIM(ta)) = LOWER(TRIM(%s))
+            ORDER BY year, month
+        """, (ta_name,))
+
+        available_train_months = [
+            date(int(year), int(month), 1).isoformat()
+            for year, month in cur.fetchall()
+        ]
+
+        # ==========================================
+        # Fetch configuration
+        # ==========================================
         cur.execute("""
             SELECT config
             FROM raw.forecast_configurations
@@ -127,20 +184,52 @@ def get_configuration_by_ta(ta_name: str):
         """, (ta_name,))
 
         row = cur.fetchone()
-        if not row:
-            return {"ta_name": ta_name, "exists": False, "config": None}
 
-        return {"ta_name": ta_name, "exists": True, "config": row[0]}
+        # ==========================================
+        # First time load
+        # ==========================================
+        if not row:
+            return {
+                "ta_name": ta_name,
+                "exists": False,
+                "config": None,
+                "available_train_months": available_train_months
+            }
+
+        config = row[0]
+
+        train_end_date = date.fromisoformat(
+            config["train_end_date"]
+        )
+
+        forecast_periods = int(
+            config["forecast_periods"]
+        )
+
+        forecast_end_date = add_months(
+            train_end_date,
+            forecast_periods
+        )
+
+        config["forecast_periods"] = (
+            forecast_end_date.isoformat()
+        )
+
+        return {
+            "ta_name": ta_name,
+            "exists": True,
+            "config": config,
+            "available_train_months": available_train_months
+        }
 
     finally:
         cur.close()
         conn.close()
 
-
 # ----------------------------------------------------
 # POST: SAVE / UPDATE FORECAST CONFIG
 # ----------------------------------------------------
-@router.post("/configurations",tags=["Configuration"])
+@router.post("/configurations", tags=["Configuration"])
 def save_configuration(payload: SaveConfigRequest):
 
     cfg = payload.config
@@ -162,6 +251,28 @@ def save_configuration(payload: SaveConfigRequest):
             400,
             "Only 'monthly' granularity is supported"
         )
+
+    # =====================================================
+    # 0.1 CONVERT FORECAST END DATE TO FORECAST PERIODS
+    # FE sends forecast_periods as date, DB saves as number
+    # =====================================================
+    forecast_end_date = date.fromisoformat(cfg.forecast_periods)
+
+    forecast_periods = (
+        (forecast_end_date.year - end_date.year) * 12
+        + (forecast_end_date.month - end_date.month)
+    )
+
+    if forecast_periods <= 0:
+        raise HTTPException(
+            400,
+            "Forecast end date must be after Train End Date"
+        )
+
+    # Save only number in DB
+    config_to_save = cfg.model_dump()
+    config_to_save["forecast_periods"] = forecast_periods
+
     # =============================
     # VALIDATE AGAINST DB DATES
     # =============================
@@ -195,19 +306,18 @@ def save_configuration(payload: SaveConfigRequest):
     # VALIDATION LOGIC
     # =============================
 
-    # Start date check
     if start_date < min_date or start_date > max_date:
         raise HTTPException(
             400,
             f"Invalid Train Start Date. Available data is from {min_date} to {max_date}"
         )
 
-    # End date check
     if end_date < min_date or end_date > max_date:
         raise HTTPException(
             400,
             f"Invalid Train End Date. Available data is from {min_date} to {max_date}"
-    )
+        )
+
     ta = cfg.ta_name
 
     # =====================================================
@@ -226,8 +336,9 @@ def save_configuration(payload: SaveConfigRequest):
                 updated_at = CURRENT_TIMESTAMP
         """, (
             str(uuid4()),
-            json.dumps(cfg.model_dump())
+            json.dumps(config_to_save)
         ))
+
         conn.commit()
 
     finally:
@@ -235,7 +346,7 @@ def save_configuration(payload: SaveConfigRequest):
         conn.close()
 
     # =====================================================
-    # 2. INVALIDATE EXISTING BASE (CRITICAL FIX)
+    # 2. INVALIDATE EXISTING BASE
     # =====================================================
     conn = get_connection()
     cur = conn.cursor()
@@ -246,6 +357,7 @@ def save_configuration(payload: SaveConfigRequest):
             WHERE scenario_name = 'BASE'
               AND ta_name = %s
         """, (ta,))
+
         conn.commit()
 
     finally:
@@ -260,23 +372,20 @@ def save_configuration(payload: SaveConfigRequest):
 
     metrics_data = get_oncology_metrics(ta)
 
-  # ---------- NPS BASE ----------
+    # ---------- NPS BASE ----------
     nps_base = generate_full_base_forecast(
         metrics=metrics_data,
-        config=cfg.model_dump(),
+        config=config_to_save,
         metric="nps",
         train_start=train_start,
         train_end=train_end
     )
 
     for s in nps_base["series"]:
-        indication = s["display"]["indication"]   #    DISPLAY VALUE
-        lot = s["display"]["lot"]                 #    DISPLAY VALUE
+        indication = s["display"]["indication"]
+        lot = s["display"]["lot"]
 
         factors = nps_base["factors_map"][(indication, lot)]
-        # ↑ NO .get(), crash loudly if mismatched
-
-
 
         save_base_scenario(
             ta=ta,
@@ -291,36 +400,30 @@ def save_configuration(payload: SaveConfigRequest):
                 "forecast_values": s["forecast_values"],
             },
             factors=factors
-        
         )
 
     # ---------- MARKET SHARE BASE ----------
     ms_base = generate_full_base_forecast(
         metrics=metrics_data,
-        config=cfg.model_dump(),
+        config=config_to_save,
         metric="market_share",
         train_start=train_start,
         train_end=train_end
     )
 
     for s in ms_base["series"]:
-        indication = s["display"]["indication"]   
-        lot = s["display"]["lot"]                 
-        product = s["display"]["product"]         
+        indication = s["display"]["indication"]
+        lot = s["display"]["lot"]
+        product = s["display"]["product"]
 
         factors = ms_base["factors_map"][(indication, lot, product)]
-        # ↑ NO .get()
-        # -----------------------------------------------------
-        # Build patient metrics
-        # -----------------------------------------------------
 
         nps_series = next(
             (
                 x for x in nps_base["series"]
                 if (
                     x["display"]["indication"] == indication
-                    and
-                    x["display"]["lot"] == lot
+                    and x["display"]["lot"] == lot
                 )
             ),
             None
@@ -329,7 +432,6 @@ def save_configuration(payload: SaveConfigRequest):
         patient_metrics = None
 
         if nps_series:
-
             nps_values = (
                 nps_series["train_values"]
                 + nps_series["forecast_values"]
@@ -342,14 +444,9 @@ def save_configuration(payload: SaveConfigRequest):
 
             final_patient_share = []
 
-            for nps, share in zip(
-                nps_values,
-                market_share_values
-            ):
-
+            for nps, share in zip(nps_values, market_share_values):
                 patient_count = round(
-                    float(nps or 0)
-                    * (float(share or 0) / 100),
+                    float(nps or 0) * (float(share or 0) / 100),
                     2
                 )
 
@@ -360,15 +457,13 @@ def save_configuration(payload: SaveConfigRequest):
                     round(float(x or 0), 2)
                     for x in nps_values
                 ],
-
                 "final_market_share": [
                     round(float(x or 0), 2)
                     for x in market_share_values
                 ],
-
-                "final_patient_share":
-                    final_patient_share
+                "final_patient_share": final_patient_share
             }
+
         save_base_scenario(
             ta=ta,
             indication=indication,
@@ -385,13 +480,13 @@ def save_configuration(payload: SaveConfigRequest):
             patient_metrics=patient_metrics
         )
 
-
     # =====================================================
-    #    FINAL RESPONSE
+    # FINAL RESPONSE
     # =====================================================
     return {
         "ta_name": ta,
-        "status": "config_saved_and_base_rebuilt"
+        "status": "config_saved_and_base_rebuilt",
+        # "forecast_periods": forecast_periods
     }
 
 
@@ -481,7 +576,13 @@ def get_metrics_filters(ta_name: str):
             "product": ""
         }
 
-        selected_filter = saved_filter if saved_filter else default_filter
+        selected_filter = (
+            saved_filter.copy()
+            if saved_filter
+            else default_filter.copy()
+        )
+
+        selected_filter["scenario_name"] = "BASE"
 
         return {
             "ta_name": ta_name,

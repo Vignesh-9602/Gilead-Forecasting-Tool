@@ -1,10 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Dict, Any
-
-
-# ------------------------
-# AVG VIAL
-# ------------------------
+from typing import List, Dict, Any, Optional
 
 
 class AvgVialUpdate(BaseModel):
@@ -13,26 +8,25 @@ class AvgVialUpdate(BaseModel):
     vials_per_month: int
 
 
-# ------------------------
-# CONFIGURATION
-# ------------------------
 class Configuration(BaseModel):
-    # PAGE 1 (Scope)
     ta_name: str
     train_start_date: str
     train_end_date: str
     model_granularity: str
-    forecast_periods: int
+    forecast_periods: str
+
+
+class ConfigurationResponse(BaseModel):
+    ta_name: str
+    exists: bool
+    config: Optional[Configuration] = None
+    available_train_months: List[str] = []
+
 
 class SaveConfigRequest(BaseModel):
     config: Configuration
 
 
-# ------------------------
-# UPDATE AVG VIALS ONLY
-# ------------------------
-
 class UpdateAvgVialsRequest(BaseModel):
     ta_name: str
     avg_vials: List[AvgVialUpdate]
-

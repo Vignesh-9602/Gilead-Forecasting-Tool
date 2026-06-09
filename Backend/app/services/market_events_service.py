@@ -38,10 +38,10 @@ def get_display_scenario_name(cur, ta_name: str, indication: str, scenario_name:
     is_finalized = row[0] if row else False
 
     return (
-        f"{base_scenario_name}_Finalised"
-        if is_finalized
-        else base_scenario_name
-    )
+    "Finalised"
+    if is_finalized
+    else base_scenario_name
+        )
 
 
 def get_default_date_range(cur, ta_name: str):
@@ -69,6 +69,48 @@ def get_default_date_range(cur, ta_name: str):
 
     return "", ""
 
+def validate_saved_dates(saved_filter, default_start_date, default_end_date, available_months):
+    saved_start = saved_filter.get("start_date") if saved_filter else ""
+    saved_end = saved_filter.get("end_date") if saved_filter else ""
+
+    if (
+        saved_start
+        and saved_end
+        and saved_start in available_months
+        and saved_end in available_months
+    ):
+        return saved_start, saved_end
+
+    return default_start_date, default_end_date
+
+def get_available_months_from_config(cur, ta_name: str):
+    cur.execute("""
+        SELECT config
+        FROM raw.forecast_configurations
+        WHERE config->>'ta_name' = %s
+    """, (ta_name,))
+
+    row = cur.fetchone()
+
+    if not row:
+        return []
+
+    config = row[0]
+
+    train_start = datetime.fromisoformat(config["train_start_date"]).replace(day=1)
+    train_end = datetime.fromisoformat(config["train_end_date"]).replace(day=1)
+    forecast_periods = int(config.get("forecast_periods", 0))
+
+    forecast_end = train_end + relativedelta(months=forecast_periods)
+
+    months = []
+    current = train_start
+
+    while current <= forecast_end:
+        months.append(current.strftime("%Y-%m-%d"))
+        current = current + relativedelta(months=1)
+
+    return months
 
 def get_market_event_filters_service(ta_name: str):
     conn = get_connection()
@@ -94,16 +136,18 @@ def get_market_event_filters_service(ta_name: str):
 
         for indication, scenario_name, is_finalized in rows:
 
-            display_name = (
-                f"{scenario_name}_Finalised"
-                if is_finalized
-                else scenario_name
-            )
-
             data.setdefault(indication, {"scenarios": []})
 
-            if display_name not in data[indication]["scenarios"]:
-                data[indication]["scenarios"].append(display_name)
+            # Add actual scenario
+            if scenario_name not in data[indication]["scenarios"]:
+                data[indication]["scenarios"].append(scenario_name)
+
+            # Add Finalised option once per indication
+            if (
+                is_finalized
+                and "Finalised" not in data[indication]["scenarios"]
+            ):
+                data[indication]["scenarios"].append("Finalised")
 
         default_indication = ""
         default_scenario_name = ""
@@ -114,18 +158,20 @@ def get_market_event_filters_service(ta_name: str):
 
             if scenarios:
                 default_scenario_name = (
-                    "BASE_Finalised"
-                    if "BASE_Finalised" in scenarios
+                    "Finalised"
+                    if "Finalised" in scenarios
                     else "BASE"
                     if "BASE" in scenarios
                     else sorted(scenarios)[0]
                 )
-
         default_start_date, default_end_date = get_default_date_range(
             cur,
             ta_name
         )
-
+        available_months = get_available_months_from_config(
+            cur,
+            ta_name
+        )
         default_filter = {
             "scenario_name": default_scenario_name,
             "indication": default_indication,
@@ -145,14 +191,21 @@ def get_market_event_filters_service(ta_name: str):
         )
 
         if saved_filter:
+            selected_indication = (
+                saved_filter.get("indication")
+                or default_indication
+            )
+
+            selected_scenario = get_display_scenario_name(
+                cur,
+                ta_name,
+                selected_indication,
+                saved_filter.get("scenario_name", "")
+            )
+
             selected_filter = {
-                "scenario_name": get_display_scenario_name(
-                    cur,
-                    ta_name,
-                    saved_filter.get("indication", ""),
-                    saved_filter.get("scenario_name", "")
-                ),
-                "indication": saved_filter.get("indication", ""),
+                "scenario_name": selected_scenario,
+                "indication": selected_indication,
                 "lot": saved_filter.get("lot", ""),
                 "metric": saved_filter.get("metric", ""),
                 "product": saved_filter.get("product", ""),
@@ -166,13 +219,13 @@ def get_market_event_filters_service(ta_name: str):
             "ta_name": ta_name,
             "indications": list(data.keys()),
             "data": data,
+            "available_months": available_months,
             "selected_filter": selected_filter
         }
 
     finally:
         cur.close()
         conn.close()
-
 def split_train_forecast(values, forecast_start_index):
     return {
         "train_values": values[:forecast_start_index],
@@ -221,7 +274,7 @@ def empty_market_event_apply_response(payload):
                 "table": []
             },
             "nps": {
-                
+
                 # frontend needs ONLY forecast_start_index inside chart
                 "chart": {
                     "forecast_start_index": 0
@@ -294,13 +347,57 @@ def get_new_forecast_start_index(filtered_months, global_forecast_start_date):
     return count
 
 
+def validate_date_range(start_date, end_date):
+    if not start_date or not end_date:
+        return
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    if start_dt > end_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="Start date cannot be greater than end date."
+        )
 def apply_market_event_filters_service(payload):
 
     conn = get_connection()
     cursor = conn.cursor()
 
     try:
+        validate_date_range(
+            payload.start_date,
+            payload.end_date
+        )
         selected_scenario = clean_scenario_name(payload.scenario_name)
+
+        is_finalised_selected = selected_scenario.lower() == "finalised"
+        display_scenario_name = payload.scenario_name.strip()
+        selected_scenario = clean_scenario_name(display_scenario_name)
+
+        if is_finalised_selected:
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                return empty_market_event_apply_response(payload)
+
+            selected_scenario = finalised_row[0]
+
+
 
         lot_scenario_map = {}
 
@@ -642,7 +739,7 @@ def apply_market_event_filters_service(payload):
             cur=cursor,
             user_id="system",
             ta_name=payload.ta_name,
-            scenario_name=selected_scenario,
+            scenario_name=display_scenario_name,
             indication=payload.indication,
             lot=lots[0] if lots else "",
             metric="nps",
@@ -708,7 +805,7 @@ def apply_market_event_filters_service(payload):
     finally:
         cursor.close()
         conn.close()
-        
+
 def run_market_event_calculation_service(payload):
 
     conn = get_connection()
@@ -727,10 +824,47 @@ def run_market_event_calculation_service(payload):
                     status_code=400,
                     detail="Event name is required before running calculation."
                 )       
-        selected_scenario = payload.scenario_name.strip()
+        # selected_scenario = payload.scenario_name.strip()
+        display_scenario_name = payload.scenario_name.strip()
+        selected_scenario = display_scenario_name
 
         if selected_scenario.lower().endswith("_finalised"):
             selected_scenario = selected_scenario[:-10]
+            display_scenario_name = "Finalised"
+
+        if selected_scenario.strip().upper() == "BASE":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "BASE scenario is read-only. "
+                    "Please select another scenario before running Market Events."
+                )
+            )
+
+        if selected_scenario.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            selected_scenario = finalised_row[0]
 
         lot_scenario_map = {}
 
@@ -946,11 +1080,13 @@ def run_market_event_calculation_service(payload):
 
                 event_start_date = str(event.start_date)
 
-                if event_start_date not in months:
+                if event_start_date not in filtered_months:
                     continue
 
-                start_index = months.index(event_start_date)
-                forecast_periods = len(months) - start_index
+                start_index = original_months.index(event_start_date)
+
+                selected_end_index = selected_indices[-1]
+                forecast_periods = selected_end_index - start_index + 1
 
                 if forecast_periods <= 0:
                     continue
@@ -994,8 +1130,8 @@ def run_market_event_calculation_service(payload):
                     })
 
                 current_market_share_chart = {
-                    "months": months,
-                    "forecast_start_index": forecast_start_index,
+                    "months": original_months,
+                    "forecast_start_index": original_forecast_start_index,
                     "series": current_ms_series
                 }
 
@@ -1195,7 +1331,7 @@ def run_market_event_calculation_service(payload):
                 for offset, desired_target in enumerate(desired_target_shares):
                     idx = start_index + offset
 
-                    if idx >= len(months):
+                    if idx > selected_end_index:
                         break
 
                     desired_target = max(
@@ -1270,20 +1406,27 @@ def run_market_event_calculation_service(payload):
                     round(float(v or 0), 2)
                     for v in values
                 ]
-                values = filter_values_by_indices(values, selected_indices)
-                train_values = values[:forecast_start_index]
-                forecast_values = values[forecast_start_index:]
-                
+
+                filtered_values = filter_values_by_indices(
+                    values,
+                    selected_indices
+                )
+
+                train_values = filtered_values[:forecast_start_index]
+                forecast_values = filtered_values[forecast_start_index:]
+
+                filtered_nps_values = filter_values_by_indices(
+                    overall_nps_values,
+                    selected_indices
+                )
+
                 brand_nps_values = [
                     round((ms / 100.0) * nps, 0)
-                    for ms, nps in zip(values, overall_nps_values)
+                    for ms, nps in zip(filtered_values, filtered_nps_values)
                 ]
 
                 patient_metrics = {
-                    "final_nps": [
-                        round(float(x or 0), 2)
-                        for x in overall_nps_values
-                    ],
+                    "final_nps": overall_nps_values,
                     "final_market_share": values,
                     "final_patient_share": [
                         round(
@@ -1297,6 +1440,8 @@ def run_market_event_calculation_service(payload):
                 series_obj = {
                     "lot": lot,
                     "label": product,
+                    "months": filtered_months,
+                    "forecast_start_index": forecast_start_index,
                     "train_values": train_values,
                     "forecast_values": forecast_values
                 }
@@ -1306,12 +1451,12 @@ def run_market_event_calculation_service(payload):
 
                 market_share_children.append({
                     "label": product,
-                    "values": values
+                    "values": filtered_values
                 })
 
                 market_share_total_values = [
                     round(a + b, 2)
-                    for a, b in zip(market_share_total_values, values)
+                    for a, b in zip(market_share_total_values, filtered_values)
                 ]
 
                 nps_children.append({
@@ -1325,15 +1470,15 @@ def run_market_event_calculation_service(payload):
                 ]
 
                 row_chart = {
-                    "months": months,
-                    "forecast_start_index": forecast_start_index,
-                    "train_values": train_values,
-                    "forecast_values": forecast_values
+                    "months": original_months,
+                    "forecast_start_index": original_forecast_start_index,
+                    "train_values": values[:original_forecast_start_index],
+                    "forecast_values": values[original_forecast_start_index:]
                 }
 
                 product_table = [{
                     "lot": lot,
-                    "total": market_share_total_values,
+                    "total": [100.0] * len(months),
                     "children": [
                         {
                             "label": product,
@@ -1415,7 +1560,7 @@ def run_market_event_calculation_service(payload):
             "metrics_data": {
                 "market_share": {
                     "chart": {
-                        "months": chart_months or [],
+                        "months": filtered_months,
                         "forecast_start_index": forecast_start_index,
                         "series": market_share_chart_series
                     },
@@ -1447,6 +1592,37 @@ def merge_selected_values(full_values, selected_values, selected_indices):
 
     return full_values
 
+def align_values(values, target_len, default=0):
+    values = list(values or [])
+    values = values[:target_len]
+
+    if len(values) < target_len:
+        values += [default] * (target_len - len(values))
+
+    return values
+
+
+def sum_lists(a, b, target_len, decimals=2):
+    a = align_values(a, target_len, 0)
+    b = align_values(b, target_len, 0)
+
+    return [
+        round(float(a[i] or 0) + float(b[i] or 0), decimals)
+        for i in range(target_len)
+    ]
+
+def merge_edited_values(existing_values, edited_values, selected_indices, full_len):
+    """
+    Keeps full DB month length.
+    Replaces only selected date-range indices with edited frontend values.
+    """
+    merged = align_values(existing_values, full_len, 0)
+
+    for i, idx in enumerate(selected_indices):
+        if i < len(edited_values) and idx < full_len:
+            merged[idx] = round(float(edited_values[i] or 0), 2)
+
+    return merged
 def save_market_event_changes_service(payload):
 
     metric = payload.metric.lower().strip()
@@ -1465,7 +1641,39 @@ def save_market_event_changes_service(payload):
 
         if scenario_name.lower().endswith("_finalised"):
             scenario_name = scenario_name[:-10]
-        
+
+        if scenario_name.strip().upper() == "BASE":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "BASE scenario is read-only Please select another scenario before running Market Events."
+                )
+            )
+
+        if scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            scenario_name = finalised_row[0]
         saved_filter = get_saved_user_filter(
             cursor,
             "system",
@@ -1563,6 +1771,11 @@ def save_market_event_changes_service(payload):
             }
 
         def build_patient_metrics(nps_values, ms_values):
+            target_len = max(len(nps_values or []), len(ms_values or []))
+
+            nps_values = align_values(nps_values, target_len, 0)
+            ms_values = align_values(ms_values, target_len, 0)
+
             return {
                 "final_nps": [
                     round(float(x or 0), 2)
@@ -1574,10 +1787,10 @@ def save_market_event_changes_service(payload):
                 ],
                 "final_patient_share": [
                     round(
-                        float(nps or 0) * (float(ms or 0) / 100),
+                        float(nps_values[i] or 0) * (float(ms_values[i] or 0) / 100),
                         2
                     )
-                    for nps, ms in zip(nps_values, ms_values)
+                    for i in range(target_len)
                 ]
             }
 
@@ -1648,6 +1861,15 @@ def save_market_event_changes_service(payload):
             months = nps_chart.get("months", [])
             forecast_start_index = nps_chart.get("forecast_start_index", 0)
 
+            selected_indices_for_save = get_filtered_indices(
+                months,
+                start_date,
+                end_date
+            )
+
+            if not selected_indices_for_save:
+                selected_indices_for_save = list(range(len(months)))
+
             if not months:
                 raise HTTPException(
                     status_code=400,
@@ -1659,16 +1881,40 @@ def save_market_event_changes_service(payload):
                 nps_chart.get("forecast_values", [])
             )
 
-            input_children = [
-                {
-                    "label": child.label,
-                    "values": [
-                        round(float(v or 0), 2)
-                        for v in child.values
-                    ]
-                }
-                for child in lot_group.children
-            ]
+            input_children = []
+
+            for child in lot_group.children:
+                product = child.label
+
+                existing_values = []
+
+                if metric == "market_share":
+                    existing_product_row = existing["market_share"].get(product)
+
+                    if existing_product_row and existing_product_row.get("chart"):
+                        existing_values = (
+                            existing_product_row["chart"].get("train_values", []) +
+                            existing_product_row["chart"].get("forecast_values", [])
+                        )
+                else:
+                    existing_values = [0] * len(months)
+
+                edited_values = [
+                    round(float(v or 0), 2)
+                    for v in child.values
+                ]
+
+                final_values = merge_edited_values(
+                    existing_values,
+                    edited_values,
+                    selected_indices_for_save,
+                    len(months)
+                )
+
+                input_children.append({
+                    "label": product,
+                    "values": final_values
+                })
 
             # =================================================
             # CASE 1: User edited MARKET SHARE
@@ -1704,13 +1950,12 @@ def save_market_event_changes_service(payload):
                         "values": brand_patient_values
                     })
 
-                    updated_nps_total = [
-                        round(a + b, 0)
-                        for a, b in zip(
-                            updated_nps_total,
-                            brand_patient_values
-                        )
-                    ]
+                    updated_nps_total = sum_lists(
+                        updated_nps_total,
+                        brand_patient_values,
+                        len(months),
+                        decimals=0
+                    )
 
                     row_chart = build_chart_from_values(
                         months,
@@ -1782,22 +2027,23 @@ def save_market_event_changes_service(payload):
 
                 updated_nps_children = input_children
 
-                updated_nps_total = [
-                    round(float(v or 0), 2)
-                    for v in lot_group.total
-                ]
+                updated_nps_total = merge_edited_values(
+                    existing_nps_values,
+                    [round(float(v or 0), 2) for v in lot_group.total],
+                    selected_indices_for_save,
+                    len(months)
+                )
 
                 if not updated_nps_total:
                     updated_nps_total = [0] * len(months)
 
                     for child in updated_nps_children:
-                        updated_nps_total = [
-                            round(a + b, 2)
-                            for a, b in zip(
-                                updated_nps_total,
-                                child["values"]
-                            )
-                        ]
+                        updated_nps_total = sum_lists(
+                            updated_nps_total,
+                            child["values"],
+                            len(months),
+                            decimals=2
+                        )
 
                 updated_ms_children = []
 
@@ -1903,7 +2149,7 @@ def save_market_event_changes_service(payload):
             cur=cursor,
             user_id="system",
             ta_name=payload.ta_name,
-            scenario_name=scenario_name,
+            scenario_name=payload.scenario_name,
             indication=payload.indication,
             lot=updated_lots[0] if updated_lots else "",
             metric=metric,
@@ -1911,7 +2157,7 @@ def save_market_event_changes_service(payload):
             start_date=start_date,
             end_date=end_date
             )
-        
+
         conn.commit()
 
         # =====================================================
@@ -1949,7 +2195,7 @@ def save_market_event_changes_service(payload):
         filtered_response_months = []
         selected_indices = []
         response_forecast_start_index = 0
-        
+
 
         saved_events = []
         event_id = 1
@@ -2041,13 +2287,12 @@ def save_market_event_changes_service(payload):
                         "values": brand_values
                     })
 
-                    nps_table_map[lot]["total"] = [
-                        round(a + b, 0)
-                        for a, b in zip(
-                            nps_table_map[lot]["total"],
-                            brand_values
-                        )
-                    ]
+                    nps_table_map[lot]["total"] = sum_lists(
+                        nps_table_map[lot]["total"],
+                        brand_values,
+                        len(filtered_response_months),
+                        decimals=0
+                    )
 
         return {
             "ta_name": payload.ta_name,
@@ -2090,9 +2335,42 @@ def delete_market_event_service(payload):
 
     try:
         scenario_name = payload.scenario_name.strip()
-
         if scenario_name.lower().endswith("_finalised"):
             scenario_name = scenario_name[:-10]
+
+        if scenario_name.strip().upper() == "BASE":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "BASE scenario is read-only. "
+                    "Please select another scenario before deleting Market Events."
+                )
+            )
+
+        if scenario_name.strip().upper() == "FINALISED":
+            cursor.execute("""
+                SELECT scenario_name
+                FROM raw.forecast_scenarios
+                WHERE ta_name = %s
+                AND LOWER(indication) = LOWER(%s)
+                AND is_finalized = TRUE
+                AND scenario_name IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """, (
+                payload.ta_name,
+                payload.indication
+            ))
+
+            finalised_row = cursor.fetchone()
+
+            if not finalised_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No finalised scenario found for the selected indication."
+                )
+
+            scenario_name = finalised_row[0]
 
         cursor.execute("""
             SELECT DISTINCT
