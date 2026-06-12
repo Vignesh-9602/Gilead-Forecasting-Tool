@@ -333,6 +333,11 @@ def save_scenario_comparision(payload):
     try:
         metric = payload.metric.lower().strip()
         scenario_name = payload.scenario_name.strip()
+        if scenario_name.upper() == "BASE":
+            raise HTTPException(
+                status_code=400,
+                detail="BASE scenario cannot be finalized. Please select a saved scenario."
+            )
 
         # =============================
         # 1. Check existing finalized scenario for same LOT
@@ -516,27 +521,20 @@ def finalize_scenarios(payload):
             }
 
         # =============================
-        # 2. Get saved selections + scenario_id
+        # 2. Get already selected finalized scenarios
         # =============================
         cursor.execute("""
-            SELECT 
-                fs.lot,
-                fs.selected_scenario_name,
-                sc.id AS scenario_id
-            FROM raw.forecast_finalized_selections fs
-            LEFT JOIN raw.forecast_scenarios sc
-              ON sc.ta_name = fs.ta_name
-             AND sc.indication = fs.indication
-             AND sc.lot = fs.lot
-             AND sc.metric = fs.metric
-             AND sc.scenario_name = fs.selected_scenario_name
-            WHERE fs.user_id = %s
-              AND fs.ta_name = %s
-              AND fs.indication = %s
-              AND fs.metric = %s
-              AND fs.selected_scenario_name IS NOT NULL
+            SELECT
+                lot,
+                scenario_name,
+                id AS scenario_id
+            FROM raw.forecast_scenarios
+            WHERE ta_name = %s
+              AND indication = %s
+              AND metric = %s
+              AND is_finalized = TRUE
+              AND UPPER(scenario_name) <> 'BASE'
         """, (
-            DEFAULT_USER_ID,
             payload.ta_name,
             payload.indication,
             metric
@@ -563,27 +561,9 @@ def finalize_scenarios(payload):
         if missing_lots:
             return {
                 "message": f"Cannot finalize. Missing selections for LOTs: {missing_lots}",
-                "can_finalize": False,
-                "finalized_selections": selected_map
+                "finalized_selections": selected_map,
+                "can_finalize": False
             }
-
-        # =============================
-        # 4. Mark finalized
-        # =============================
-        cursor.execute("""
-            UPDATE raw.forecast_finalized_selections
-            SET is_finalized = TRUE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = %s
-              AND ta_name = %s
-              AND indication = %s
-              AND metric = %s
-        """, (
-            DEFAULT_USER_ID,
-            payload.ta_name,
-            payload.indication,
-            metric
-        ))
 
         conn.commit()
 
@@ -591,7 +571,6 @@ def finalize_scenarios(payload):
             "message": "All scenarios finalized successfully",
             "finalized_selections": selected_map,
             "can_finalize": True
-
         }
 
     except Exception as e:
@@ -734,17 +713,17 @@ def clear_scenario_selections(payload):
             metric
         ))
         cursor.execute("""
-            UPDATE raw.user_filter_preferences
-            SET
-                scenario_name = 'BASE',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE ta_name = %s
-            AND indication = %s
-            AND LOWER(scenario_name) = 'finalised'
-        """, (
-            payload.ta_name,
-            payload.indication
-        ))
+        UPDATE raw.user_filter_preferences
+        SET
+            scenario_name = 'BASE',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE ta_name = %s
+        AND indication = %s
+        AND LOWER(scenario_name) = 'finalised'
+    """, (
+        payload.ta_name,
+        payload.indication
+    ))
 
         conn.commit()
 

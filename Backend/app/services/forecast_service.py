@@ -271,23 +271,34 @@ def process_forecast(
     ]
 
     # MULTIPLIER FLAGS
-    mh = (multiplier_horizon or "Forecast").lower()
-    apply_to_forecast = mh in ("forecast", "both history & forecast")
-    apply_to_history = mh in ("history", "both history & forecast")
+    # Keep original training values for model calculation
+    original_train_values = train_values.copy()
 
-    # Apply to history BEFORE model
-    if apply_to_history:
-        train_values = apply_multiplier(train_values, multiplier, metric)
+    # MULTIPLIER FLAGS
+    mh = (multiplier_horizon or "Forecast").lower()
+
+    apply_to_forecast = mh in (
+        "forecast",
+        "both history & forecast"
+    )
+
+    apply_to_history = mh in (
+        "history",
+        "both history & forecast"
+    )
 
     model_type_l = model_type.lower()
+
+    # Use original values for forecasting always
+    model_train_values = original_train_values.copy()
 
     # MODEL SWITCH
     if model_type_l == "ets":
         if alpha is None or beta is None or gamma is None:
-            alpha, beta, gamma = estimate_parameters(train_values)
+            alpha, beta, gamma = estimate_parameters(model_train_values)
 
         forecast_values = forecast_ets(
-            train_values,
+            model_train_values,
             forecast_periods,
             alpha,
             beta,
@@ -298,7 +309,7 @@ def process_forecast(
         factors = {"alpha": alpha, "beta": beta, "gamma": gamma}
 
     else:
-        base_value = train_values[-1]
+        base_value = model_train_values[-1]
         duration = forecast_periods if duration is None else max(1, int(duration))
 
         trajectory_start_idx = 0
@@ -306,13 +317,12 @@ def process_forecast(
         if trajectory_start:
             trajectory_start_month = parse_month(trajectory_start)
 
-            if trajectory_start_month in [parse_month(m) for m in forecast_months]:
-                trajectory_start_idx = [
-                    parse_month(m) for m in forecast_months
-                ].index(trajectory_start_month)
+            forecast_month_dates = [parse_month(m) for m in forecast_months]
+
+            if trajectory_start_month in forecast_month_dates:
+                trajectory_start_idx = forecast_month_dates.index(trajectory_start_month)
 
         pre_trajectory_values = [base_value] * trajectory_start_idx
-
         remaining_periods = forecast_periods - trajectory_start_idx
 
         if model_type_l == "linear":
@@ -344,7 +354,7 @@ def process_forecast(
                 metric
             )
 
-        elif model_type_l in ("scurve"):
+        elif model_type_l == "scurve":
             growth_values = forecast_s_curve(
                 base_value,
                 remaining_periods,
@@ -366,7 +376,12 @@ def process_forecast(
             "k": None if k is None else float(k)
         }
 
-    #   Apply to forecast AFTER model
+    # Apply multiplier only to the output values, not to model input
+    if apply_to_history:
+        train_values = apply_multiplier(original_train_values, multiplier, metric)
+    else:
+        train_values = original_train_values
+
     if apply_to_forecast:
         forecast_values = apply_multiplier(forecast_values, multiplier, metric)
 

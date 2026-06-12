@@ -341,16 +341,28 @@ def apply_filters(payload):
                 "total": market_share_total_values or [],
                 "children": market_share_children
             })
-            save_user_filter(
-                    cur=cursor,
-                    user_id="system",
-                    ta_name=payload.ta_name,
-                    scenario_name=scenario_names[0],
-                    indication=payload.indication,
-                    lot=payload.lot,
-                    metric="nps",
-                    product=""
-                )
+            selected_scenario_for_filter = (
+                scenario_names[0]
+                if scenario_names
+                else ""
+            )
+
+            cursor.execute("""
+                UPDATE raw.user_filter_preferences
+                SET
+                    scenario_name = %s,
+                    indication = %s,
+                    lot = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = %s
+                AND ta_name = %s
+            """, (
+                selected_scenario_for_filter,
+                payload.indication,
+                payload.lot,
+                "system",
+                payload.ta_name
+            ))
 
         conn.commit()
         return {

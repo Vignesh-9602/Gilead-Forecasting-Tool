@@ -184,6 +184,24 @@ export const deleteMarketEvent = (payload) => {
   );
 };
 
+export const getNetRevenueFilters = (taName) => {
+  return httpClient.get(`/api/Net_Revenue/filters/${taName}`);
+};
+
+export const applyNetRevenueFilter = (payload) => {
+  return httpClient.post(
+    "/api/Net_Revenue/revenue/apply-filter",
+    payload
+  );
+};
+
+export const editNetRevenue = (payload) => {
+  return httpClient.post(
+    "/api/Net_Revenue/revenue/edit",
+    payload
+  );
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

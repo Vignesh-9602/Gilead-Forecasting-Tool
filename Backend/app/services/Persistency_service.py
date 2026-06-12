@@ -759,7 +759,6 @@ def apply_persistency_service(payload):
                 ]
             })
 
-        conn.commit()
         
         ############ avg_vials_per_dose helper fucnction ###############
         avg_vials_table = build_avg_vials_per_dose_table(
@@ -784,27 +783,33 @@ def apply_persistency_service(payload):
         persistency_table=response_table,
         avg_vials_per_dose_table=avg_vials_table
         )
+        
 
         ############ save avg vials + compliance into raw.vials_assumptions ###############
 
+        def get_child_values(table_item, expected_label):
+            expected_label = expected_label.strip().lower()
+
+            for child in table_item.get("children", []):
+                label = str(child.get("label", "")).strip().lower()
+
+                if expected_label in label:
+                    return child.get("values", [])
+
+            return []
+
+
+        # ================================
+        # SAVE AVG VIALS + DEMAND VALUES
+        # ================================
         for lot_data in avg_vials_table:
 
             lot = lot_data.get("lot")
 
-            avg_vials_values = []
-
-            # Get Avg Vials from avg_vials_table
-            for child in lot_data.get("children", []):
-                label = str(child.get("label", "")).strip().lower()
-
-                if "avg" in label and "vial" in label:
-                    avg_vials_values = child.get("values", [])
-                    break
-
-            # Get Compliance from demand_vials_table
-            compliance_values = []
-            absolute_adjustment_values = []
-            adjustment_percent_values = []
+            avg_vials_values = get_child_values(
+                lot_data,
+                "Avg Vials"
+            )
 
             demand_lot_data = next(
                 (
@@ -814,18 +819,31 @@ def apply_persistency_service(payload):
                 None
             )
 
+            compliance_values = []
+            absolute_adjustment_values = []
+            adjustment_percent_values = []
+            after_adjustment_values = []
+
             if demand_lot_data:
-                for child in demand_lot_data.get("children", []):
-                    label = str(child.get("label", "")).strip().lower()
+                compliance_values = get_child_values(
+                    demand_lot_data,
+                    "Compliance %"
+                )
 
-                    if "compliance" in label:
-                        compliance_values = child.get("values", [])
+                absolute_adjustment_values = get_child_values(
+                    demand_lot_data,
+                    "(+) Absolute Adjustment"
+                )
 
-                    elif "absolute adjustment" in label:
-                        absolute_adjustment_values = child.get("values", [])
+                adjustment_percent_values = get_child_values(
+                    demand_lot_data,
+                    "(x) Adjustment %"
+                )
 
-                    elif "adjustment %" in label:
-                        adjustment_percent_values = child.get("values", [])
+                after_adjustment_values = get_child_values(
+                    demand_lot_data,
+                    "After Adjustment"
+                )
 
             for idx, month_str in enumerate(response_months or []):
 
@@ -836,28 +854,30 @@ def apply_persistency_service(payload):
                 avg_vials_value = (
                     avg_vials_values[idx]
                     if idx < len(avg_vials_values)
-                    and avg_vials_values[idx] is not None
                     else 0
                 )
 
                 compliance_value = (
                     compliance_values[idx]
                     if idx < len(compliance_values)
-                    and compliance_values[idx] is not None
                     else 0
                 )
 
                 absolute_adjustment_value = (
                     absolute_adjustment_values[idx]
                     if idx < len(absolute_adjustment_values)
-                    and absolute_adjustment_values[idx] is not None
                     else 0
                 )
 
                 adjustment_percent_value = (
                     adjustment_percent_values[idx]
                     if idx < len(adjustment_percent_values)
-                    and adjustment_percent_values[idx] is not None
+                    else 0
+                )
+
+                after_adjustment_value = (
+                    after_adjustment_values[idx]
+                    if idx < len(after_adjustment_values)
                     else 0
                 )
 
@@ -873,12 +893,13 @@ def apply_persistency_service(payload):
                         avg_vials_per_dose,
                         compliance,
                         absolute_adjustment,
-                        adjustment_percent
+                        adjustment_percent,
+                        after_adjustment
                     )
                     VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s,
-                        %s, %s, %s, %s
+                        %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (
                         ta_name,
@@ -894,6 +915,7 @@ def apply_persistency_service(payload):
                         compliance = EXCLUDED.compliance,
                         absolute_adjustment = EXCLUDED.absolute_adjustment,
                         adjustment_percent = EXCLUDED.adjustment_percent,
+                        after_adjustment = EXCLUDED.after_adjustment,
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
@@ -906,7 +928,8 @@ def apply_persistency_service(payload):
                     avg_vials_value,
                     compliance_value,
                     absolute_adjustment_value,
-                    adjustment_percent_value
+                    adjustment_percent_value,
+                    after_adjustment_value
                 ))
 
         ############ inventory table ###############
@@ -1746,6 +1769,96 @@ def apply_persistency_curve_service(
         conn.close()
 
 
+def save_demand_vials_values(
+    cursor,
+    ta_name,
+    scenario_name,
+    indication,
+    brand,
+    months,
+    demand_vials_table
+):
+    for lot_data in demand_vials_table:
+
+        lot = lot_data.get("lot")
+
+        if lot == "Total":
+            continue
+
+        children = lot_data.get("children", [])
+
+        def get_values(label_name):
+            for child in children:
+                label = str(child.get("label", "")).strip().lower()
+
+                if label == label_name.strip().lower():
+                    return child.get("values", [])
+
+            return []
+
+        compliance_values = get_values("Compliance %")
+        absolute_adjustment_values = get_values("(+) Absolute Adjustment")
+        adjustment_percent_values = get_values("(x) Adjustment %")
+        after_adjustment_values = get_values("After Adjustment")
+
+        for idx, month_str in enumerate(months):
+
+            month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+            year = month_dt.year
+            month = month_dt.month
+
+            compliance_value = (
+                compliance_values[idx]
+                if idx < len(compliance_values)
+                else 100
+            )
+
+            absolute_adjustment_value = (
+                absolute_adjustment_values[idx]
+                if idx < len(absolute_adjustment_values)
+                else 0
+            )
+
+            adjustment_percent_value = (
+                adjustment_percent_values[idx]
+                if idx < len(adjustment_percent_values)
+                else 0
+            )
+
+            after_adjustment_value = (
+                after_adjustment_values[idx]
+                if idx < len(after_adjustment_values)
+                else 0
+            )
+
+            cursor.execute("""
+                UPDATE raw.vials_assumptions
+                SET
+                    compliance = %s,
+                    absolute_adjustment = %s,
+                    adjustment_percent = %s,
+                    after_adjustment = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ta_name = %s
+                  AND scenario_name = %s
+                  AND indication = %s
+                  AND brand = %s
+                  AND lot = %s
+                  AND year = %s
+                  AND month = %s
+            """, (
+                compliance_value,
+                absolute_adjustment_value,
+                adjustment_percent_value,
+                after_adjustment_value,
+                ta_name,
+                scenario_name,
+                indication,
+                brand,
+                lot,
+                year,
+                month
+            ))
 def save_avg_vials_per_dose_service(payload):
 
     conn = get_connection()
@@ -1960,7 +2073,15 @@ def save_avg_vials_per_dose_service(payload):
             persistency_table=persistency_table,
             avg_vials_per_dose_table=avg_vials_table
         )
-
+        save_demand_vials_values(
+            cursor=cursor,
+            ta_name=ta_name,
+            scenario_name=db_scenario_name,
+            indication=indication,
+            brand=brand,
+            months=response_months,
+            demand_vials_table=demand_vials_table
+        )
         inventory_table = build_inventory_table(
             brand=brand,
             demand_vials_table=demand_vials_table,

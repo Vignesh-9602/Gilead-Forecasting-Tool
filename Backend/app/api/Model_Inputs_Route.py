@@ -255,16 +255,54 @@ def apply_metrics(payload: MetricSelectionRequest):
             if row:
                 factors = row[0]
                 
-        save_user_filter(
-                cur=cur,
-                user_id="system",
-                ta_name=ta,
-                scenario_name=scenario,
-                indication=payload.indications[0],
-                lot=payload.lots[0],
-                metric=payload.metric_filter,
-                product=payload.product or ""
+        # =====================================================
+        # SAVE USER FILTER PREFERENCE
+        # =====================================================
+        selected_indication = payload.indications[0] if payload.indications else None
+        selected_lot = payload.lots[0] if payload.lots else None
+        selected_product = payload.product.strip() if payload.product and payload.product.strip() else None
+
+        cur.execute("""
+            UPDATE raw.user_filter_preferences
+            SET
+                scenario_name = COALESCE(%s, scenario_name),
+                indication   = COALESCE(%s, indication),
+                lot          = COALESCE(%s, lot),
+                metric       = 'nps',
+                product      = COALESCE(%s, product),
+                updated_at   = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+            AND ta_name = %s
+        """, (
+            scenario,
+            selected_indication,
+            selected_lot,
+            selected_product,
+            "system",
+            ta
+        ))
+
+        if cur.rowcount == 0:
+            cur.execute("""
+                INSERT INTO raw.user_filter_preferences (
+                    user_id,
+                    ta_name,
+                    scenario_name,
+                    indication,
+                    lot,
+                    metric,
+                    product
                 )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                "system",
+                ta,
+                scenario,
+                selected_indication,
+                selected_lot,
+                "nps",
+                selected_product
+            ))
 
         conn.commit()
     finally:

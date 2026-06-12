@@ -237,16 +237,16 @@ export default function VialCalculator() {
     // ------------------------------------
     // RESET DEPENDENCIES
     // ------------------------------------
-    useEffect(() => {
-        setIndication("");
-        setLots([]);
-        setBrand("");
-    }, [scenarioSelector]);
+    // useEffect(() => {
+    //     setIndication("");
+    //     setLots([]);
+    //     setBrand("");
+    // }, [scenarioSelector]);
 
-    useEffect(() => {
-        setLots([]);
-        setBrand("");
-    }, [indication]);
+    // useEffect(() => {
+    //     setLots([]);
+    //     setBrand("");
+    // }, [indication]);
 
     useEffect(() => {
         if (indication && lotOptions.length > 0) {

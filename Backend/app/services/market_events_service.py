@@ -274,7 +274,7 @@ def empty_market_event_apply_response(payload):
                 "table": []
             },
             "nps": {
-
+                
                 # frontend needs ONLY forecast_start_index inside chart
                 "chart": {
                     "forecast_start_index": 0
@@ -397,7 +397,7 @@ def apply_market_event_filters_service(payload):
 
             selected_scenario = finalised_row[0]
 
-
+        
 
         lot_scenario_map = {}
 
@@ -735,18 +735,24 @@ def apply_market_event_filters_service(payload):
                 "children": market_share_children
             })
 
-        save_user_filter(
-            cur=cursor,
-            user_id="system",
-            ta_name=payload.ta_name,
-            scenario_name=display_scenario_name,
-            indication=payload.indication,
-            lot=lots[0] if lots else "",
-            metric="nps",
-            product="",
-            start_date=payload.start_date,
-            end_date=payload.end_date
-        )
+        cursor.execute("""
+            UPDATE raw.user_filter_preferences
+            SET
+                scenario_name = %s,
+                indication = %s,
+                start_date = %s,
+                end_date = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+            AND ta_name = %s
+        """, (
+            display_scenario_name,
+            payload.indication,
+            payload.start_date,
+            payload.end_date,
+            "system",
+            payload.ta_name
+        ))
 
         conn.commit()
 
@@ -805,7 +811,7 @@ def apply_market_event_filters_service(payload):
     finally:
         cursor.close()
         conn.close()
-
+        
 def run_market_event_calculation_service(payload):
 
     conn = get_connection()
@@ -1414,7 +1420,7 @@ def run_market_event_calculation_service(payload):
 
                 train_values = filtered_values[:forecast_start_index]
                 forecast_values = filtered_values[forecast_start_index:]
-
+                
                 filtered_nps_values = filter_values_by_indices(
                     overall_nps_values,
                     selected_indices
@@ -1649,7 +1655,7 @@ def save_market_event_changes_service(payload):
                     "BASE scenario is read-only Please select another scenario before running Market Events."
                 )
             )
-
+        
         if scenario_name.strip().upper() == "FINALISED":
             cursor.execute("""
                 SELECT scenario_name
@@ -2157,7 +2163,7 @@ def save_market_event_changes_service(payload):
             start_date=start_date,
             end_date=end_date
             )
-
+        
         conn.commit()
 
         # =====================================================
@@ -2195,7 +2201,7 @@ def save_market_event_changes_service(payload):
         filtered_response_months = []
         selected_indices = []
         response_forecast_start_index = 0
-
+        
 
         saved_events = []
         event_id = 1

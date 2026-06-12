@@ -103,12 +103,12 @@ class LotGroup(BaseModel):
 
 class Refreshchangerequest(BaseModel):
     therapy_area: str
+    scenario_name: str
     indication: str
     metric: str
     product: str
     lot: str
     table: List[LotGroup]
-    scenario_name: str
 
 # ------------------------------------
 # save scenario

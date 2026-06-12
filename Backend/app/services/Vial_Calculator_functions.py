@@ -340,7 +340,96 @@ def get_child_values(children, label):
             return child.values
     return None
 
+def save_demand_vials_values(
+    cursor,
+    ta_name,
+    scenario_name,
+    indication,
+    brand,
+    months,
+    demand_vials_table
+):
+    for lot_data in demand_vials_table:
 
+        lot = lot_data.get("lot")
+
+        if lot == "Total":
+            continue
+
+        children = lot_data.get("children", [])
+
+        def get_values(label_name):
+            for child in children:
+                label = str(child.get("label", "")).strip().lower()
+
+                if label == label_name.strip().lower():
+                    return child.get("values", [])
+
+            return []
+
+        compliance_values = get_values("Compliance %")
+        absolute_adjustment_values = get_values("(+) Absolute Adjustment")
+        adjustment_percent_values = get_values("(x) Adjustment %")
+        after_adjustment_values = get_values("After Adjustment")
+
+        for idx, month_str in enumerate(months):
+
+            month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+            year = month_dt.year
+            month = month_dt.month
+
+            compliance_value = (
+                compliance_values[idx]
+                if idx < len(compliance_values)
+                else 100
+            )
+
+            absolute_adjustment_value = (
+                absolute_adjustment_values[idx]
+                if idx < len(absolute_adjustment_values)
+                else 0
+            )
+
+            adjustment_percent_value = (
+                adjustment_percent_values[idx]
+                if idx < len(adjustment_percent_values)
+                else 0
+            )
+
+            after_adjustment_value = (
+                after_adjustment_values[idx]
+                if idx < len(after_adjustment_values)
+                else 0
+            )
+
+            cursor.execute("""
+                UPDATE raw.vials_assumptions
+                SET
+                    compliance = %s,
+                    absolute_adjustment = %s,
+                    adjustment_percent = %s,
+                    after_adjustment = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ta_name = %s
+                  AND scenario_name = %s
+                  AND indication = %s
+                  AND brand = %s
+                  AND lot = %s
+                  AND year = %s
+                  AND month = %s
+            """, (
+                compliance_value,
+                absolute_adjustment_value,
+                adjustment_percent_value,
+                after_adjustment_value,
+                ta_name,
+                scenario_name,
+                indication,
+                brand,
+                lot,
+                year,
+                month
+            ))
 def save_demand_adjustments_service(payload):
 
     conn = get_connection()
@@ -633,6 +722,15 @@ def save_demand_adjustments_service(payload):
             avg_vials_per_dose_table=avg_vials_table,
             use_assumptions=True
         )
+        save_demand_vials_values(
+            cursor=cursor,
+            ta_name=ta_name,
+            scenario_name=db_scenario_name,
+            indication=indication,
+            brand=brand,
+            months=months,
+            demand_vials_table=demand_vials_table
+        )     
 
         inventory_table = build_inventory_table(
             brand=brand,
@@ -1030,7 +1128,15 @@ def apply_compliance_configuration_service(payload):
             avg_vials_per_dose_table=avg_vials_table,
             use_assumptions=True
         )
-
+        save_demand_vials_values(
+            cursor=cursor,
+            ta_name=ta_name,
+            scenario_name=db_scenario_name,
+            indication=indication,
+            brand=brand,
+            months=months,
+            demand_vials_table=demand_vials_table
+        )
         inventory_table = build_inventory_table(
             brand=brand,
             demand_vials_table=demand_vials_table,
@@ -1475,7 +1581,36 @@ def apply_edit_row_values_service(payload):
                     compliance_values
                 )
             ]
+            for month_str, after_adjustment_value in zip(
+                months,
+                after_adjustment
+            ):
+                month_dt = datetime.strptime(month_str, "%Y-%m-%d")
+                year = month_dt.year
+                month = month_dt.month
 
+                cursor.execute("""
+                    UPDATE raw.vials_assumptions
+                    SET
+                        after_adjustment = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE ta_name = %s
+                    AND scenario_name = %s
+                    AND indication = %s
+                    AND brand = %s
+                    AND lot = %s
+                    AND year = %s
+                    AND month = %s
+                """, (
+                    after_adjustment_value,
+                    ta_name,
+                    db_scenario_name,
+                    indication,
+                    brand,
+                    lot,
+                    year,
+                    month
+                ))
             ex_factory_total = [
                 total + adjusted
                 for total, adjusted in zip(
