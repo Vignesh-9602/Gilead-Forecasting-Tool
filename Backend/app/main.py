@@ -6,6 +6,7 @@ from app.api.Model_Inputs_Route import router as Model_Inputs_Router
 from app.api.Scenario_comparision_route import router as Scenario_comparision_router
 from app.api.market_events_route import router as market_events_router
 from app.api.Vial_Calculator_Route import router as Vial_Calculator_router
+from app.api.monte_carlo_route import router as monte_carlo_router
 app = FastAPI(title="TA Forecast API")
 
 # Allow all CORS (frontend can be any origin)
@@ -23,3 +24,4 @@ app.include_router(Model_Inputs_Router)
 app.include_router(Scenario_comparision_router)
 app.include_router(market_events_router)
 app.include_router(Vial_Calculator_router)
+app.include_router(monte_carlo_router)
