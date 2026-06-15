@@ -45,8 +45,8 @@ export default function MainLayout() {
                 return <VialCalculator />;
             case "Net Demand Revenue":
                 return <NetDemandRevenue />;
-            // case "Output":
-            //     return <Output />;
+            case "Output":
+                return <Output />;
             default:
                 return (
                     <Box p={3}>
