@@ -2,6 +2,8 @@ import React, { useContext, useEffect, useState } from "react";
 import { Box, Paper, Typography, FormControl, Select, MenuItem, Button } from "@mui/material";
 import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
+import OutputChart from "./OutputChart";
+import OutputTable from "./OutputTable";
 
 // import { getOutputFilters, applyOutputFilters,} from "../../../services/apiService";
 
@@ -35,6 +37,68 @@ export default function Output() {
     const [endDate, setEndDate] = useState("");
 
     const [outputData, setOutputData] = useState(null);
+
+    const MOCK_OUTPUT_RESPONSE = {
+        chart: {
+            months: [
+                "2024-12-01",
+                "2025-01-01",
+                "2025-02-01",
+                "2025-03-01",
+                "2025-04-01",
+                "2025-05-01",
+                "2025-06-01",
+                "2025-07-01",
+                "2025-08-01",
+                "2025-09-01",
+                "2025-10-01",
+                "2025-11-01",
+                "2025-12-01",
+                "2026-01-01",
+                "2026-02-01",
+                "2026-03-01",
+                "2026-04-01",
+                "2026-05-01",
+                "2026-06-01",
+            ],
+
+            forecast_start_index: 15,
+
+            series: [
+                {
+                    scenario: "BASE",
+                    label: "Demand Volume",
+
+                    train_values: [
+                        64643,
+                        68113,
+                        77994,
+                        85456,
+                        85025,
+                        89566,
+                        102370,
+                        87668,
+                        97228,
+                        106020,
+                        113350,
+                        108800,
+                        109910,
+                        124670,
+                        123920,
+                    ],
+
+                    forecast_values: [
+                        124550,
+                        126590,
+                        128890,
+                        130400,
+                    ],
+                },
+            ],
+        },
+    };
+
+    const [chartData, setChartData] = useState(MOCK_OUTPUT_RESPONSE.chart);
 
     useEffect(() => {
         if (therapyArea) {
@@ -580,6 +644,9 @@ export default function Output() {
                         Apply Filter
                     </Button>
                 </Box>
+
+                <OutputChart chartData={chartData} />
+                <OutputTable />
 
                 {/* OUTPUT TABLE / CHART COMPONENT HERE */}
                 {/* <OutputTable outputData={outputData} /> */}

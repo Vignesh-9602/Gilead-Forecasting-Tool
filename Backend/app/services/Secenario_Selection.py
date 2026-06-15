@@ -333,11 +333,11 @@ def save_scenario_comparision(payload):
     try:
         metric = payload.metric.lower().strip()
         scenario_name = payload.scenario_name.strip()
-        if scenario_name.upper() == "BASE":
-            raise HTTPException(
-                status_code=400,
-                detail="BASE scenario cannot be finalized. Please select a saved scenario."
-            )
+        # if scenario_name.upper() == "BASE":
+        #     raise HTTPException(
+        #         status_code=400,
+        #         detail="BASE scenario cannot be finalized. Please select a saved scenario."
+        #     )
 
         # =============================
         # 1. Check existing finalized scenario for same LOT
@@ -753,3 +753,4 @@ def clear_scenario_selections(payload):
         cursor.close()
         conn.close()
 
+ 

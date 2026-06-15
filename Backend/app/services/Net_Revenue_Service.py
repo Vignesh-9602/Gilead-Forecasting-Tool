@@ -657,9 +657,15 @@ def get_revenue_service(payload):
 
 def get_row_values(rows, metric_name, months, default=0):
     for row in rows:
-        if row.get("metric") == metric_name:
-            values = row.get("values", [])
 
+        if isinstance(row, dict):
+            metric = row.get("metric")
+            values = row.get("values", [])
+        else:
+            metric = row.metric
+            values = row.values
+
+        if metric == metric_name:
             return [
                 float(values[i] or 0)
                 if i < len(values)
