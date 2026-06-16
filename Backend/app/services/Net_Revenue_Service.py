@@ -250,12 +250,13 @@ def get_net_revenue_filters_service(ta_name: str):
                 or ""
             )
 
-            selected_scenario = get_display_scenario_name(
-                cur,
-                ta_name,
-                saved_indication,
-                saved_scenario_name
-            )
+            selected_scenario = saved_scenario_name
+
+            if selected_scenario and selected_scenario.lower().endswith("_finalised"):
+                selected_scenario = "Finalised"
+
+            if selected_scenario not in scenario_names:
+                selected_scenario = default_scenario_name
 
             selected_filter = {
                 "scenario_name": selected_scenario or default_scenario_name,
@@ -291,6 +292,7 @@ def get_revenue_service(payload):
         ta_name = payload.ta_name
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
+        is_finalised_view = display_scenario_name.strip().lower() == "finalised"
         product = payload.product
         start_date = payload.start_date
         end_date = payload.end_date
@@ -324,41 +326,80 @@ def get_revenue_service(payload):
         # =============================
         # 2. Forecasted demand
         # =============================
-        cursor.execute("""
-            SELECT
-                year,
-                month,
+        if is_finalised_view:
+            cursor.execute("""
+                SELECT
+                    va.year,
+                    va.month,
+                    SUM(COALESCE(va.after_adjustment, 0)) AS forecasted_demand,
+                    SUM(
+                        CASE
+                            WHEN COALESCE(va.absolute_adjustment, 0) <> 0
+                                THEN COALESCE(va.absolute_adjustment, 0)
 
-                SUM(COALESCE(after_adjustment, 0)) AS forecasted_demand,
+                            WHEN COALESCE(va.adjustment_percent, 0) <> 0
+                                THEN COALESCE(va.after_adjustment, 0)
+                                    * COALESCE(va.adjustment_percent, 0) / 100.0
 
-                SUM(
-                    CASE
-                        WHEN COALESCE(absolute_adjustment, 0) <> 0
-                            THEN COALESCE(absolute_adjustment, 0)
+                            ELSE 0
+                        END
+                    ) AS adjustment
+                FROM raw.vials_assumptions va
+                WHERE va.ta_name = %s
+                AND va.brand = %s
+                AND make_date(va.year, va.month, 1)
+                        BETWEEN %s::date AND %s::date
+                AND EXISTS (
+                    SELECT 1
+                    FROM raw.forecast_scenarios nps
+                    WHERE LOWER(nps.ta_name) = LOWER(va.ta_name)
+                    AND LOWER(nps.scenario_name) = LOWER(va.scenario_name)
+                    AND LOWER(nps.indication) = LOWER(va.indication)
+                    AND LOWER(nps.lot) = LOWER(va.lot)
+                    AND LOWER(nps.metric) = 'nps'
+                    AND nps.is_finalized = TRUE
+                )
+                GROUP BY va.year, va.month
+                ORDER BY va.year, va.month
+            """, (
+                ta_name,
+                product,
+                start_date,
+                end_date
+            ))
+        else:
+            cursor.execute("""
+                SELECT
+                    year,
+                    month,
+                    SUM(COALESCE(after_adjustment, 0)) AS forecasted_demand,
+                    SUM(
+                        CASE
+                            WHEN COALESCE(absolute_adjustment, 0) <> 0
+                                THEN COALESCE(absolute_adjustment, 0)
 
-                        WHEN COALESCE(adjustment_percent, 0) <> 0
-                            THEN COALESCE(after_adjustment, 0)
-                                * COALESCE(adjustment_percent, 0) / 100.0
+                            WHEN COALESCE(adjustment_percent, 0) <> 0
+                                THEN COALESCE(after_adjustment, 0)
+                                    * COALESCE(adjustment_percent, 0) / 100.0
 
-                        ELSE 0
-                    END
-                ) AS adjustment
-
-            FROM raw.vials_assumptions
-            WHERE ta_name = %s
-            AND scenario_name = %s
-            AND brand = %s
-            AND make_date(year, month, 1)
-                    BETWEEN %s::date AND %s::date
-            GROUP BY year, month
-            ORDER BY year, month
-        """, (
-            ta_name,
-            db_scenario_name,
-            product,
-            start_date,
-            end_date
-        ))
+                            ELSE 0
+                        END
+                    ) AS adjustment
+                FROM raw.vials_assumptions
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND brand = %s
+                AND make_date(year, month, 1)
+                        BETWEEN %s::date AND %s::date
+                GROUP BY year, month
+                ORDER BY year, month
+            """, (
+                ta_name,
+                db_scenario_name,
+                product,
+                start_date,
+                end_date
+            ))
 
         forecast_map = {}
         adjustment_map = {}
@@ -435,7 +476,35 @@ def get_revenue_service(payload):
                 status_code=404,
                 detail="No demand pricing data found for selected product."
             )
+        cursor.execute("""
+            SELECT
+                month_date,
+                final_factor,
+                wac_price_usd,
+                price_increase,
+                gtn
+            FROM raw.revenue_outputs
+            WHERE ta_name = %s
+            AND scenario_name = %s
+            AND brand = %s
+            AND month_date BETWEEN %s::date AND %s::date
+        """, (
+            ta_name,
+            display_scenario_name,
+            product,
+            start_date,
+            end_date
+        ))
 
+        override_map = {
+            row[0].strftime("%Y-%m-%d"): {
+                "final_factor": float(row[1]) if row[1] is not None else None,
+                "wac_price_usd": float(row[2]) if row[2] is not None else None,
+                "price_increase": float(row[3]) if row[3] is not None else None,
+                "gtn": float(row[4]) if row[4] is not None else None
+            }
+            for row in cursor.fetchall()
+        }
         # =============================
         # 5. Last known WAC / GTN up to history end
         # =============================
@@ -512,7 +581,25 @@ def get_revenue_service(payload):
             # previous_wac_price = wac_price
 
             adjustment = adjustment_map.get(month_str, 0)
-            final_factor = 1
+            override = override_map.get(month_str, {})
+
+            final_factor = (
+                override.get("final_factor")
+                if override.get("final_factor") is not None
+                else 1
+            )
+
+            price_increase = (
+                override.get("price_increase")
+                if override.get("price_increase") is not None
+                else 0
+            )
+
+            if override.get("gtn") is not None:
+                gtn = override["gtn"]
+
+            if override.get("wac_price_usd") is not None:
+                wac_price = override["wac_price_usd"]
 
             final_demand = (
                 forecasted_demand + adjustment
@@ -684,6 +771,7 @@ def edit_revenue_service(payload):
         ta_name = payload.ta_name
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
+        is_finalised_view = display_scenario_name.strip().lower() == "finalised"
         product = payload.product
         months = payload.months
         rows = payload.rows or []
@@ -718,26 +806,56 @@ def edit_revenue_service(payload):
         # =============================
         # 2. Forecasted demand from DB
         # =============================
-        cursor.execute("""
-            SELECT
-                year,
-                month,
-                SUM(COALESCE(after_adjustment, 0)) AS forecasted_demand
-            FROM raw.vials_assumptions
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND brand = %s
-              AND make_date(year, month, 1)
-                    BETWEEN %s::date AND %s::date
-            GROUP BY year, month
-            ORDER BY year, month
-        """, (
-            ta_name,
-            db_scenario_name,
-            product,
-            start_date,
-            end_date
-        ))
+        if is_finalised_view:
+            cursor.execute("""
+                SELECT
+                    va.year,
+                    va.month,
+                    SUM(COALESCE(va.after_adjustment, 0)) AS forecasted_demand
+                FROM raw.vials_assumptions va
+                WHERE va.ta_name = %s
+                AND va.brand = %s
+                AND make_date(va.year, va.month, 1)
+                        BETWEEN %s::date AND %s::date
+                AND EXISTS (
+                    SELECT 1
+                    FROM raw.forecast_scenarios nps
+                    WHERE LOWER(nps.ta_name) = LOWER(va.ta_name)
+                    AND LOWER(nps.scenario_name) = LOWER(va.scenario_name)
+                    AND LOWER(nps.indication) = LOWER(va.indication)
+                    AND LOWER(nps.lot) = LOWER(va.lot)
+                    AND LOWER(nps.metric) = 'nps'
+                    AND nps.is_finalized = TRUE
+                )
+                GROUP BY va.year, va.month
+                ORDER BY va.year, va.month
+            """, (
+                ta_name,
+                product,
+                start_date,
+                end_date
+            ))
+        else:
+            cursor.execute("""
+                SELECT
+                    year,
+                    month,
+                    SUM(COALESCE(after_adjustment, 0)) AS forecasted_demand
+                FROM raw.vials_assumptions
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND brand = %s
+                AND make_date(year, month, 1)
+                        BETWEEN %s::date AND %s::date
+                GROUP BY year, month
+                ORDER BY year, month
+            """, (
+                ta_name,
+                db_scenario_name,
+                product,
+                start_date,
+                end_date
+            ))
 
         forecast_map = {
             f"{int(year)}-{int(month):02d}-01": float(value or 0)
@@ -935,7 +1053,72 @@ def edit_revenue_service(payload):
             net_revenue = (
                 final_demand + inventory
             ) * net_price
-
+            cursor.execute("""
+                INSERT INTO raw.revenue_outputs (
+                    ta_name,
+                    scenario_name,
+                    brand,
+                    month_date,
+                    forecasted_demand,
+                    adjustment,
+                    actual_demand,
+                    derived_factor,
+                    final_factor,
+                    final_demand,
+                    inventory_vials,
+                    wac_price_usd,
+                    price_increase,
+                    gtn,
+                    net_price,
+                    net_demand_revenue,
+                    net_revenue
+                )
+                VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (
+                    ta_name,
+                    scenario_name,
+                    brand,
+                    month_date
+                )
+                DO UPDATE SET
+                    forecasted_demand = EXCLUDED.forecasted_demand,
+                    adjustment = EXCLUDED.adjustment,
+                    actual_demand = EXCLUDED.actual_demand,
+                    derived_factor = EXCLUDED.derived_factor,
+                    final_factor = EXCLUDED.final_factor,
+                    final_demand = EXCLUDED.final_demand,
+                    inventory_vials = EXCLUDED.inventory_vials,
+                    wac_price_usd = EXCLUDED.wac_price_usd,
+                    price_increase = EXCLUDED.price_increase,
+                    gtn = EXCLUDED.gtn,
+                    net_price = EXCLUDED.net_price,
+                    net_demand_revenue = EXCLUDED.net_demand_revenue,
+                    net_revenue = EXCLUDED.net_revenue,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                ta_name,
+                display_scenario_name,
+                product,
+                month_str,
+                forecasted_demand,
+                adjustment,
+                actual_demand,
+                derived_factor,
+                final_factor,
+                final_demand,
+                inventory,
+                wac_price,
+                price_increase,
+                gtn,
+                net_price,
+                net_demand_revenue,
+                net_revenue
+            ))
             forecasted_demand_values.append(round(forecasted_demand))
             adjustment_values.append(round(adjustment))
             actual_demand_values.append(round(actual_demand))
@@ -959,7 +1142,8 @@ def edit_revenue_service(payload):
             if month_str > last_history_month:
                 forecast_start_index = idx
                 break
-
+        
+        conn.commit()
         return {
             "therapy_area": ta_name,
             "scenario_name": display_scenario_name,

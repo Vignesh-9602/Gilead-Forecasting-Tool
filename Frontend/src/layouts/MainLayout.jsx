@@ -9,6 +9,7 @@ import MarketEvents from "../components/headerTabs/marketEvents/MarketEvent";
 import VialCalculator from "../components/headerTabs/vialCalculator/VialCalculator";
 import Output from "../components/headerTabs/output/Output";
 import NetDemandRevenue from "../components/headerTabs/netDemandRevenue/NetDemandRevenue";
+import MonteCarloSimulation from "../components/headerTabs/monteCarloSimulation/MonteCarloSimulation";
 
 const tabs = [
     "Configurations",
@@ -47,6 +48,8 @@ export default function MainLayout() {
                 return <NetDemandRevenue />;
             case "Output":
                 return <Output />;
+            case "Monte Carlo Simulation":
+                return <MonteCarloSimulation />
             default:
                 return (
                     <Box p={3}>

@@ -1,5 +1,4 @@
 from fastapi import HTTPException
-
 from app.db.connection import get_connection
 from datetime import datetime
 
@@ -14,12 +13,17 @@ def build_avg_vials_per_dose_table(
     lots: list,
     months: list,
     use_assumptions: bool = False,
-    scenario_name: str = None
+    scenario_name: str = None,
+    lot_actual_scenario_map: dict = None
 ):
     avg_vials_table = []
 
     for lot in lots:
-
+        actual_scenario_name = (
+            lot_actual_scenario_map.get(lot, scenario_name)
+            if lot_actual_scenario_map
+            else scenario_name
+        )
         if use_assumptions:
             cursor.execute("""
                 SELECT
@@ -35,7 +39,7 @@ def build_avg_vials_per_dose_table(
                 ORDER BY year, month
             """, (
                 ta_name,
-                scenario_name,
+                actual_scenario_name,
                 indication,
                 brand,
                 lot
@@ -121,13 +125,18 @@ def build_demand_vials_table(
     persistency_table: list,
     avg_vials_per_dose_table: list,
     use_assumptions: bool = False,
-    scenario_name: str = None
+    scenario_name: str = None,
+    lot_actual_scenario_map: dict = None
 ):
     demand_vials_table = []
     ex_factory_total = [0] * len(months)
 
     for lot in lots:
-
+        actual_scenario_name = (
+            lot_actual_scenario_map.get(lot, scenario_name)
+            if lot_actual_scenario_map
+            else scenario_name
+        )
         lot_persistency = next(
             (item for item in persistency_table if item["lot"] == lot),
             None
@@ -176,7 +185,7 @@ def build_demand_vials_table(
             """, (
                 ta_name,
                 indication,
-                scenario_name,
+                actual_scenario_name,
                 brand,
                 lot
             ))
@@ -217,7 +226,9 @@ def build_demand_vials_table(
         for year, month, compliance, absolute_adjustment, adjustment_percent in rows:
             month_key = f"{int(year)}-{int(month):02d}-01"
 
-            compliance_value = float(compliance)
+            compliance_value = float(
+                    compliance if compliance is not None else 100
+                )
             absolute_value = float(absolute_adjustment)
             percent_value = float(adjustment_percent)
 
@@ -242,11 +253,7 @@ def build_demand_vials_table(
             value = compliance_map.get(month)
 
             if value is None:
-                if use_assumptions:
-                    raise ValueError(
-                        f"Compliance not found in assumptions for lot {lot}, month {month}"
-                    )
-                value = latest_compliance
+                value = latest_compliance if latest_compliance is not None else 90
 
             compliance_values.append(value)
 
@@ -347,11 +354,17 @@ def save_demand_vials_values(
     indication,
     brand,
     months,
-    demand_vials_table
+    demand_vials_table,
+    lot_actual_scenario_map=None
 ):
     for lot_data in demand_vials_table:
 
         lot = lot_data.get("lot")
+        actual_scenario_name = (
+            lot_actual_scenario_map.get(lot, scenario_name)
+            if lot_actual_scenario_map
+            else scenario_name
+        )
 
         if lot == "Total":
             continue
@@ -423,13 +436,45 @@ def save_demand_vials_values(
                 adjustment_percent_value,
                 after_adjustment_value,
                 ta_name,
-                scenario_name,
+                actual_scenario_name,
                 indication,
                 brand,
                 lot,
                 year,
                 month
             ))
+def get_actual_scenario_for_finalised_lot(
+    cursor,
+    ta_name: str,
+    indication: str,
+    lot: str,
+    brand: str = None
+):
+    cursor.execute("""
+        SELECT scenario_name
+        FROM raw.forecast_scenarios
+        WHERE LOWER(ta_name) = LOWER(%s)
+          AND LOWER(indication) = LOWER(%s)
+          AND LOWER(lot) = LOWER(%s)
+          AND is_finalized = TRUE
+          AND scenario_name IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        indication,
+        lot
+    ))
+
+    row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No finalised scenario found for lot {lot}."
+        )
+
+    return row[0]
 def save_demand_adjustments_service(payload):
 
     conn = get_connection()
@@ -444,35 +489,26 @@ def save_demand_adjustments_service(payload):
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
 
-        if db_scenario_name.strip().upper() == "FINALISED":
-            cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                ta_name,
-                indication
-            ))
-
-            finalised_row = cursor.fetchone()
-
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
+        lot_actual_scenario_map = {}
 
         for lot_item in payload.demand_vials_table:
 
             lot = lot_item.lot
             children = lot_item.children
+            actual_scenario_name = (
+            get_actual_scenario_for_finalised_lot(
+                cursor=cursor,
+                ta_name=ta_name,
+                indication=indication,
+                lot=lot,
+                brand=brand
+            )
+            if is_finalised_view
+            else db_scenario_name
+        )
+
+            lot_actual_scenario_map[lot] = actual_scenario_name
 
             compliance_values = get_child_values(
                 children,
@@ -542,7 +578,7 @@ def save_demand_adjustments_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -617,7 +653,7 @@ def save_demand_adjustments_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -634,30 +670,41 @@ def save_demand_adjustments_service(payload):
             for item in payload.demand_vials_table
         ]
 
-        cursor.execute("""
-            SELECT
-                lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND indication = %s
-              AND brand = %s
-              AND lot = ANY(%s)
-            ORDER BY lot
-        """, (
-            ta_name,
-            db_scenario_name,
-            indication,
-            brand,
-            response_lots
-        ))
+        output_rows = []
 
-        output_rows = cursor.fetchall()
+        for lot in response_lots:
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
+
+            cursor.execute("""
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
+                LIMIT 1
+            """, (
+                ta_name,
+                actual_scenario_name,
+                indication,
+                brand,
+                lot
+            ))
+
+            row = cursor.fetchone()
+
+            if row:
+                output_rows.append(row)
 
         if not output_rows:
             raise ValueError(
@@ -707,7 +754,9 @@ def save_demand_adjustments_service(payload):
             brand=brand,
             lots=lots,
             months=months,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
+            
         )
 
         demand_vials_table = build_demand_vials_table(
@@ -720,7 +769,8 @@ def save_demand_adjustments_service(payload):
             months=months,
             persistency_table=persistency_table,
             avg_vials_per_dose_table=avg_vials_table,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
         save_demand_vials_values(
             cursor=cursor,
@@ -729,7 +779,8 @@ def save_demand_adjustments_service(payload):
             indication=indication,
             brand=brand,
             months=months,
-            demand_vials_table=demand_vials_table
+            demand_vials_table=demand_vials_table,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )     
 
         inventory_table = build_inventory_table(
@@ -886,60 +937,63 @@ def apply_compliance_configuration_service(payload):
             config.lot
             for config in payload.compliance_configuration
         ]
+        
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
 
-        if db_scenario_name.strip().upper() == "FINALISED":
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
+        lot_actual_scenario_map = {}
+
+        for lot in response_lots:
+            actual_scenario_name = (
+                get_actual_scenario_for_finalised_lot(
+                    cursor=cursor,
+                    ta_name=ta_name,
+                    indication=indication,
+                    lot=lot,
+                    brand=brand
+                )
+                if is_finalised_view
+                else db_scenario_name
+            )
+
+            lot_actual_scenario_map[lot] = actual_scenario_name
+
+        output_rows = []
+
+        for lot in response_lots:
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
+
             cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
                 WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
                 LIMIT 1
             """, (
                 ta_name,
-                indication
+                actual_scenario_name,
+                indication,
+                brand,
+                lot
             ))
 
-            finalised_row = cursor.fetchone()
+            row = cursor.fetchone()
 
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
-
-        
-
-        cursor.execute("""
-            SELECT
-                lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND indication = %s
-              AND brand = %s
-              AND lot = ANY(%s)
-            ORDER BY lot
-        """, (
-            ta_name,
-            db_scenario_name,
-            indication,
-            brand,
-            response_lots
-        ))
-
-        output_rows = cursor.fetchall()
+            if row:
+                output_rows.append(row)
 
         if not output_rows:
             raise ValueError(
@@ -984,6 +1038,10 @@ def apply_compliance_configuration_service(payload):
 
             lot = config.lot
             compliance_value = config.compliance_percentage
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
 
             for month_str in months:
 
@@ -1010,7 +1068,7 @@ def apply_compliance_configuration_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1088,7 +1146,7 @@ def apply_compliance_configuration_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1113,7 +1171,8 @@ def apply_compliance_configuration_service(payload):
             brand=brand,
             lots=lots,
             months=months,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         demand_vials_table = build_demand_vials_table(
@@ -1126,7 +1185,8 @@ def apply_compliance_configuration_service(payload):
             months=months,
             persistency_table=persistency_table,
             avg_vials_per_dose_table=avg_vials_table,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
         save_demand_vials_values(
             cursor=cursor,
@@ -1135,7 +1195,8 @@ def apply_compliance_configuration_service(payload):
             indication=indication,
             brand=brand,
             months=months,
-            demand_vials_table=demand_vials_table
+            demand_vials_table=demand_vials_table,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
         inventory_table = build_inventory_table(
             brand=brand,
@@ -1197,60 +1258,62 @@ def apply_edit_row_values_service(payload):
         percentage_change_per_month = config.percentage_change_per_month
         number_of_months = config.number_of_months
         response_lots = payload.lots
+        
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
+        lot_actual_scenario_map = {}
 
-        if db_scenario_name.strip().upper() == "FINALISED":
+        for lot in response_lots:
+            actual_scenario_name = (
+                get_actual_scenario_for_finalised_lot(
+                    cursor=cursor,
+                    ta_name=ta_name,
+                    indication=indication,
+                    lot=lot,
+                    brand=brand
+                )
+                if is_finalised_view
+                else db_scenario_name
+            )
+
+            lot_actual_scenario_map[lot] = actual_scenario_name
+
+        output_rows = []
+
+        for lot in response_lots:
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
+
             cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
                 WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
                 LIMIT 1
             """, (
                 ta_name,
-                indication
+                actual_scenario_name,
+                indication,
+                brand,
+                lot
             ))
 
-            finalised_row = cursor.fetchone()
+            row = cursor.fetchone()
 
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
-
-        
-
-        cursor.execute("""
-            SELECT
-                lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND indication = %s
-              AND brand = %s
-              AND lot = ANY(%s)
-            ORDER BY lot
-        """, (
-            ta_name,
-            db_scenario_name,
-            indication,
-            brand,
-            response_lots
-        ))
-
-        output_rows = cursor.fetchall()
+            if row:
+                output_rows.append(row)
 
         if not output_rows:
             raise ValueError(
@@ -1316,13 +1379,19 @@ def apply_edit_row_values_service(payload):
             brand=brand,
             lots=lots,
             months=months,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         demand_vials_table = []
         ex_factory_total = [0] * len(months)
 
         for lot in lots:
+            
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
 
             lot_persistency = next(
                 (
@@ -1380,7 +1449,7 @@ def apply_edit_row_values_service(payload):
                 ORDER BY year, month
             """, (
                 ta_name,
-                db_scenario_name,
+                actual_scenario_name,
                 indication,
                 brand,
                 lot
@@ -1478,7 +1547,7 @@ def apply_edit_row_values_service(payload):
                     LIMIT 1
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1552,7 +1621,7 @@ def apply_edit_row_values_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1604,7 +1673,7 @@ def apply_edit_row_values_service(payload):
                 """, (
                     after_adjustment_value,
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -1796,31 +1865,6 @@ def update_inventory_stock_service(payload):
         stock_percentage = payload.stock_percentage
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
-
-        if db_scenario_name.strip().upper() == "FINALISED":
-            cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                ta_name,
-                indication
-            ))
-
-            finalised_row = cursor.fetchone()
-
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
 
         
 

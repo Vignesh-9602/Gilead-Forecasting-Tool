@@ -533,7 +533,6 @@ def finalize_scenarios(payload):
               AND indication = %s
               AND metric = %s
               AND is_finalized = TRUE
-              AND UPPER(scenario_name) <> 'BASE'
         """, (
             payload.ta_name,
             payload.indication,
