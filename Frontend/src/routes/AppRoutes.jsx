@@ -8,6 +8,7 @@ import {
 import LandingPage from "../pages/LandingPage";
 import MainLayout from "../layouts/MainLayout";
 import { GlobalContext } from "../context/Provider";
+import TherapyAreaRouter from "./TherapyAreaRouter";
 
 export default function AppRoutes() {
   const { favState } = useContext(GlobalContext);
@@ -20,11 +21,22 @@ export default function AppRoutes() {
 
         <Route path="/landingpage" element={<LandingPage />} />
 
-        <Route
+        {/* <Route
           path="/app"
           element={
             favState?.selectedTherapyArea ? (
               <MainLayout />
+            ) : (
+              <Navigate to="/landingpage" />
+            )
+          }
+        /> */}
+
+        <Route
+          path="/app"
+          element={
+            favState?.selectedTherapyArea ? (
+              <TherapyAreaRouter />
             ) : (
               <Navigate to="/landingpage" />
             )

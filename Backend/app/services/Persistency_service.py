@@ -389,7 +389,8 @@ def fetch_scenario_data(
         SELECT
             chart,
             table_data,
-            patient_metrics
+            patient_metrics,
+            scenario_name
         FROM raw.forecast_scenarios
         WHERE ta_name = %s
           AND LOWER(scenario_name) = LOWER(%s)
@@ -416,7 +417,7 @@ def fetch_scenario_data(
             f"scenario {scenario_name}, lot {lot}"
         )
 
-    market_share_chart, table_data, patient_metrics = row
+    market_share_chart, table_data, patient_metrics, actual_scenario_name = row
 
     market_share_chart = _to_dict(market_share_chart)
     patient_metrics = _to_dict(patient_metrics)
@@ -463,7 +464,7 @@ def fetch_scenario_data(
                 ]
             }
         ],
-        "scenario": base_scenario_name
+        "scenario": actual_scenario_name
     }
 
     return {
@@ -471,7 +472,8 @@ def fetch_scenario_data(
         "chart": {
             "months": months
         },
-        "nps_table": calculated_nps_table
+        "nps_table": calculated_nps_table,
+        "actual_scenario_name": actual_scenario_name
     }
 
 
@@ -487,6 +489,40 @@ def validate_date_range(start_date, end_date):
             status_code=400,
             detail="Start date cannot be greater than end date."
         )
+
+def get_actual_scenario_for_finalised_lot(
+    cursor,
+    ta_name: str,
+    indication: str,
+    lot: str,
+    brand: str = None
+):
+    cursor.execute("""
+        SELECT scenario_name
+        FROM raw.forecast_scenarios
+        WHERE LOWER(ta_name) = LOWER(%s)
+          AND LOWER(indication) = LOWER(%s)
+          AND LOWER(lot) = LOWER(%s)
+          AND is_finalized = TRUE
+          AND scenario_name IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """, (
+        ta_name,
+        indication,
+        lot
+    ))
+
+    row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No finalised scenario found for lot {lot}."
+        )
+
+    return row[0]
+
 def apply_persistency_service(payload):
 
     conn = get_connection()
@@ -500,32 +536,7 @@ def apply_persistency_service(payload):
         ta_name = payload.ta_name
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
-
-        if db_scenario_name.strip().upper() == "FINALISED":
-            cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                payload.ta_name,
-                payload.indication
-            ))
-
-            finalised_row = cursor.fetchone()
-
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
-
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
         indication = payload.indication
         lots = payload.lots
         brand = payload.brand
@@ -535,23 +546,36 @@ def apply_persistency_service(payload):
 
         response_months = None
         response_table = []
+        lot_actual_scenario_map = {}
 
         for lot in lots:
-
+            actual_scenario_name = (
+            get_actual_scenario_for_finalised_lot(
+                cursor=cursor,
+                ta_name=ta_name,
+                indication=indication,
+                lot=lot,
+                brand=brand
+            )
+            if is_finalised_view
+            else db_scenario_name
+            )
             scenario_data = fetch_scenario_data(
                 cursor=cursor,
                 ta_name=ta_name,
-                scenario_name=db_scenario_name,
+                scenario_name=actual_scenario_name,
                 indication=indication,
                 lot=lot,
                 brand=brand
             )
 
+
             if not scenario_data:
                 raise ValueError(
                     f"No data found for scenario {display_scenario_name}, indication {indication}, lot {lot}"
                 )
-
+            actual_scenario_name = scenario_data["actual_scenario_name"]
+            lot_actual_scenario_map[lot] = actual_scenario_name
             chart = scenario_data["chart"]
             nps_table = scenario_data["nps_table"]
 
@@ -729,7 +753,7 @@ def apply_persistency_service(payload):
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
-                db_scenario_name,
+                actual_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -739,7 +763,7 @@ def apply_persistency_service(payload):
                 json.dumps(continuing_patients),
                 json.dumps(total_patients)
             ))
-            
+
             response_table.append({
                 "lot": lot,
                 "source": scenario_data["source"],
@@ -759,7 +783,7 @@ def apply_persistency_service(payload):
                 ]
             })
 
-        
+
         ############ avg_vials_per_dose helper fucnction ###############
         avg_vials_table = build_avg_vials_per_dose_table(
         cursor=cursor,
@@ -783,7 +807,7 @@ def apply_persistency_service(payload):
         persistency_table=response_table,
         avg_vials_per_dose_table=avg_vials_table
         )
-        
+
 
         ############ save avg vials + compliance into raw.vials_assumptions ###############
 
@@ -805,7 +829,10 @@ def apply_persistency_service(payload):
         for lot_data in avg_vials_table:
 
             lot = lot_data.get("lot")
-
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
             avg_vials_values = get_child_values(
                 lot_data,
                 "Avg Vials"
@@ -919,7 +946,7 @@ def apply_persistency_service(payload):
                         updated_at = CURRENT_TIMESTAMP
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     brand,
                     lot,
@@ -948,7 +975,7 @@ def apply_persistency_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
-        
+
         save_user_filter(
             cur=cursor,
             user_id="system",
@@ -1378,31 +1405,9 @@ def apply_persistency_curve_service(
 
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
 
-        if db_scenario_name.strip().upper() == "FINALISED":
-            cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                payload.ta_name,
-                payload.indication
-            ))
 
-            finalised_row = cursor.fetchone()
-
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
 
         indication = payload.indication
         brand = payload.brand
@@ -1415,17 +1420,37 @@ def apply_persistency_curve_service(
         )
 
         response_months = None
-        response_table = []
+        lot_actual_scenario_map = {}
+        all_lots = payload.lots or []
+
+        for lot in all_lots:
+            actual_scenario_name = (
+                get_actual_scenario_for_finalised_lot(
+                    cursor=cursor,
+                    ta_name=ta_name,
+                    indication=indication,
+                    lot=lot,
+                    brand=brand
+                )
+                if is_finalised_view
+                else db_scenario_name
+            )
+
+            lot_actual_scenario_map[lot] = actual_scenario_name
 
         for lot_curve in payload.lot_curve_mapping:
 
             lot = lot_curve.lot
             curve_name = lot_curve.curve_name
+            actual_scenario_name = lot_actual_scenario_map.get(
+                    lot,
+                    db_scenario_name
+                )
 
             scenario_data = fetch_scenario_data(
                 cursor=cursor,
                 ta_name=ta_name,
-                scenario_name=db_scenario_name,
+                scenario_name=actual_scenario_name,
                 indication=indication,
                 lot=lot,
                 brand=brand
@@ -1639,7 +1664,7 @@ def apply_persistency_curve_service(
                     updated_at = CURRENT_TIMESTAMP
             """, (
                 ta_name,
-                db_scenario_name,
+                actual_scenario_name,
                 indication,
                 brand,
                 lot,
@@ -1650,35 +1675,44 @@ def apply_persistency_curve_service(
                 json.dumps(total_patients)
             ))
 
-        conn.commit()
 
         response_lots = payload.lots
 
-        cursor.execute("""
-            SELECT
+        output_rows = []
+
+        for lot in response_lots:
+            actual_scenario_name = lot_actual_scenario_map.get(
                 lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND indication = %s
-              AND brand = %s
-              AND lot = ANY(%s)
-            ORDER BY lot
-        """, (
-            ta_name,
-            db_scenario_name,
-            indication,
-            brand,
-            response_lots
-        ))
+                db_scenario_name
+            )
 
-        output_rows = cursor.fetchall()
+            cursor.execute("""
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
+                LIMIT 1
+            """, (
+                ta_name,
+                actual_scenario_name,
+                indication,
+                brand,
+                lot
+            ))
 
+            row = cursor.fetchone()
+
+            if row:
+                output_rows.append(row)
         response_table = []
         response_months = None
 
@@ -1732,7 +1766,8 @@ def apply_persistency_curve_service(
             indication=indication,
             brand=brand,
             lots=lots,
-            months=response_months or []
+            months=response_months or [],
+            # lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         demand_vials_table = build_demand_vials_table(
@@ -1746,11 +1781,23 @@ def apply_persistency_curve_service(
             avg_vials_per_dose_table=avg_vials_table
         )
 
+        save_ex_factory_output(
+        cursor=cursor,
+        ta_name=ta_name,
+        scenario_name=display_scenario_name,
+        indication=indication,
+        brand=brand,
+        months=response_months or [],
+        demand_vials_table=demand_vials_table,
+        stock_percentage=1
+        )
+
         inventory_table = build_inventory_table(
             brand=brand,
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+        conn.commit()
 
         return {
             "ta_name": ta_name,
@@ -1871,36 +1918,26 @@ def save_avg_vials_per_dose_service(payload):
         months = payload.months
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
-
-        if db_scenario_name.strip().upper() == "FINALISED":
-            cursor.execute("""
-                SELECT scenario_name
-                FROM raw.forecast_scenarios
-                WHERE ta_name = %s
-                AND LOWER(indication) = LOWER(%s)
-                AND is_finalized = TRUE
-                AND scenario_name IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (
-                ta_name,
-                indication
-            ))
-
-            finalised_row = cursor.fetchone()
-
-            if not finalised_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No finalised scenario found for the selected indication."
-                )
-
-            db_scenario_name = finalised_row[0]
+        is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
+        lot_actual_scenario_map = {}
 
         for lot_item in payload.avg_vials_per_dose_table:
 
             lot = lot_item.lot
             values = lot_item.values
+            actual_scenario_name = (
+            get_actual_scenario_for_finalised_lot(
+                cursor=cursor,
+                ta_name=ta_name,
+                indication=indication,
+                lot=lot,
+                brand=brand
+            )
+            if is_finalised_view
+            else db_scenario_name
+        )
+
+            lot_actual_scenario_map[lot] = actual_scenario_name
 
             if len(values) != len(months):
                 raise ValueError(
@@ -1915,18 +1952,18 @@ def save_avg_vials_per_dose_service(payload):
 
                 cursor.execute("""
                     SELECT compliance
-                    FROM raw.vials_assumptions
-                    WHERE ta_name = %s
-                      AND scenario_name = %s
-                      AND indication = %s
-                      AND lot = %s
-                      AND brand = %s
-                      AND year = %s
-                      AND month = %s
+                    FROM raw.vials_assumptions va
+                    WHERE va.ta_name = %s
+                    AND va.scenario_name = %s
+                    AND va.indication = %s
+                    AND va.lot = %s
+                    AND va.brand = %s
+                    AND va.year = %s
+                    AND va.month = %s
                     LIMIT 1
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     lot,
                     brand,
@@ -1971,7 +2008,7 @@ def save_avg_vials_per_dose_service(payload):
                         avg_vials_per_dose = EXCLUDED.avg_vials_per_dose
                 """, (
                     ta_name,
-                    db_scenario_name,
+                    actual_scenario_name,
                     indication,
                     lot,
                     brand,
@@ -1986,30 +2023,41 @@ def save_avg_vials_per_dose_service(payload):
             for item in payload.avg_vials_per_dose_table
         ]
 
-        cursor.execute("""
-            SELECT
-                lot,
-                curve_name,
-                months,
-                new_patients,
-                continuing_patients,
-                total_patients
-            FROM raw.persistency_outputs
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND indication = %s
-              AND brand = %s
-              AND lot = ANY(%s)
-            ORDER BY lot
-        """, (
-            ta_name,
-            db_scenario_name,
-            indication,
-            brand,
-            response_lots
-        ))
+        output_rows = []
 
-        output_rows = cursor.fetchall()
+        for lot in response_lots:
+            actual_scenario_name = lot_actual_scenario_map.get(
+                lot,
+                db_scenario_name
+            )
+
+            cursor.execute("""
+                SELECT
+                    lot,
+                    curve_name,
+                    months,
+                    new_patients,
+                    continuing_patients,
+                    total_patients
+                FROM raw.persistency_outputs
+                WHERE ta_name = %s
+                AND scenario_name = %s
+                AND indication = %s
+                AND brand = %s
+                AND lot = %s
+                LIMIT 1
+            """, (
+                ta_name,
+                actual_scenario_name,
+                indication,
+                brand,
+                lot
+            ))
+
+            row = cursor.fetchone()
+
+            if row:
+                output_rows.append(row)
 
         if not output_rows:
             raise ValueError(
@@ -2060,7 +2108,8 @@ def save_avg_vials_per_dose_service(payload):
             brand=brand,
             lots=lots,
             months=response_months,
-            use_assumptions=True
+            use_assumptions=True,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         demand_vials_table = build_demand_vials_table(
@@ -2071,7 +2120,10 @@ def save_avg_vials_per_dose_service(payload):
             lots=lots,
             months=response_months,
             persistency_table=persistency_table,
-            avg_vials_per_dose_table=avg_vials_table
+            avg_vials_per_dose_table=avg_vials_table,
+            use_assumptions=True,
+            scenario_name=db_scenario_name,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
         save_demand_vials_values(
             cursor=cursor,
