@@ -3,19 +3,24 @@ from typing import List, Optional
 
 
 class DemandParams(BaseModel):
-    # If not sent → std auto-calculated using Poisson (sqrt of base demand per month)
-    # If sent     → overrides the auto-calculated value
-    std_pct: Optional[float] = Field(default=None, ge=0, description="Std dev as % of monthly demand. Auto-calculated if not provided.")
+    base_mean: Optional[float] = Field(default=None, ge=0,
+        description="Override base demand per month. If None → dynamic from DB per month.")
+    std_pct: Optional[float] = Field(default=None, ge=0,
+        description="Std dev as % of mean. If None → auto-calculated using Poisson (sqrt of mean).")
 
 
 class ComplianceParams(BaseModel):
-    # If not sent → std defaults to 0.05
-    # If sent     → overrides the default
-    std: Optional[float] = Field(default=None, ge=0, description="Compliance std dev. Defaults to 0.05 if not provided.")
+    mean: Optional[float] = Field(default=None, ge=0, le=1,
+        description="Compliance base mean (0–1). If None → calculated from DB (fact_vials_compliance).")
+    std: Optional[float] = Field(default=None, ge=0,
+        description="Compliance std dev. If None → defaults to 0.05.")
 
 
 class PricingParams(BaseModel):
-    price_per_vial: float = Field(gt=0, description="USD price per vial (fixed)")
+    price_per_vial: Optional[float] = Field(default=None, ge=0,
+        description="USD price per vial. If None → revenue calculated as 0 (no price set).")
+    std: float = Field(default=0.0, ge=0,
+        description="Pricing std dev. Always 0 (Fixed distribution) — shown in modal but not sampled.")
 
 
 class MonteCarloRunRequest(BaseModel):
@@ -23,9 +28,9 @@ class MonteCarloRunRequest(BaseModel):
     brand: str = "All Brands"
     n_iterations: int = Field(default=1000, ge=100, le=10000)
     confidence_interval: float = Field(default=0.90, gt=0, lt=1)
-    demand_params: Optional[DemandParams] = None      # None = auto-calculate
-    compliance_params: Optional[ComplianceParams] = None  # None = use default
-    pricing_params: PricingParams
+    demand_params: Optional[DemandParams] = None
+    compliance_params: Optional[ComplianceParams] = None
+    pricing_params: Optional[PricingParams] = None
 
 
 class HistogramBin(BaseModel):
@@ -47,9 +52,12 @@ class SimulationSummary(BaseModel):
 
 
 class InputParameters(BaseModel):
-    demand_volatility: float     # effective std_pct used (auto or user override)
-    compliance_mean: float       # always from DB
-    compliance_volatility: float # std used (auto or user override)
+    demand_base_mean: float         # average monthly demand (auto-calculated or user override)
+    demand_volatility: float        # effective std_pct used
+    compliance_mean: float          # from DB or user override
+    compliance_volatility: float    # std used
+    price_per_vial: float           # from user or 0 if not set
+    pricing_std: float              # always 0.00
 
 
 class MonteCarloRunResponse(BaseModel):

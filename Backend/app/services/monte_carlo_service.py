@@ -130,37 +130,55 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        months, base_demand, comp_mean = _load_base_demand(cur, payload.ta_name, payload.brand)
+        months, base_demand, db_comp_mean = _load_base_demand(cur, payload.ta_name, payload.brand)
     finally:
         cur.close()
         conn.close()
 
-    n     = payload.n_iterations
-    price = payload.pricing_params.price_per_vial
-
+    n        = payload.n_iterations
     base_arr = np.array(base_demand, dtype=float)
 
     # ------------------------------------------------------------------
-    # Demand std — auto-calculate using Poisson (std = sqrt(mean))
-    # or use user override if demand_params.std_pct was sent.
-    # Poisson is the standard assumption for count data (vials).
+    # 1. Demand Base Mean
+    #    Override: user provides a single value used for all months
+    #    Auto:     dynamic per month from DB (base_arr as-is)
+    # ------------------------------------------------------------------
+    if payload.demand_params and payload.demand_params.base_mean is not None:
+        base_arr               = np.full_like(base_arr, payload.demand_params.base_mean)
+        demand_base_mean_used  = float(payload.demand_params.base_mean)
+    else:
+        # Return the average monthly demand so the modal can show a real number
+        demand_base_mean_used  = float(np.mean(base_arr)) if len(base_arr) > 0 else 0.0
+
+    # ------------------------------------------------------------------
+    # 2. Demand STD DEV
+    #    Override: user provides std_pct (as % of mean)
+    #    Auto:     Poisson — std = sqrt(mean) per month
     # ------------------------------------------------------------------
     if payload.demand_params and payload.demand_params.std_pct is not None:
-        demand_std = base_arr * (payload.demand_params.std_pct / 100.0)
+        demand_std            = base_arr * (payload.demand_params.std_pct / 100.0)
         demand_volatility_used = float(payload.demand_params.std_pct)
     else:
         demand_std = np.sqrt(np.where(base_arr > 0, base_arr, 1e-9))
-        # Report back effective std_pct for the modal (std/mean × 100)
         nonzero_mask = base_arr > 0
-        if nonzero_mask.any():
-            demand_volatility_used = float(
-                np.mean(demand_std[nonzero_mask] / base_arr[nonzero_mask]) * 100
-            )
-        else:
-            demand_volatility_used = 0.0
+        demand_volatility_used = float(
+            np.mean(demand_std[nonzero_mask] / base_arr[nonzero_mask]) * 100
+        ) if nonzero_mask.any() else 0.0
 
     # ------------------------------------------------------------------
-    # Compliance std — use user override or default to 0.05
+    # 3. Compliance Base Mean
+    #    Override: user provides mean value
+    #    Auto:     calculated from DB (fact_vials_compliance)
+    # ------------------------------------------------------------------
+    if payload.compliance_params and payload.compliance_params.mean is not None:
+        comp_mean = payload.compliance_params.mean
+    else:
+        comp_mean = db_comp_mean
+
+    # ------------------------------------------------------------------
+    # 4. Compliance STD DEV
+    #    Override: user provides std
+    #    Auto:     default 0.05
     # ------------------------------------------------------------------
     if payload.compliance_params and payload.compliance_params.std is not None:
         comp_std = payload.compliance_params.std
@@ -168,17 +186,27 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
         comp_std = 0.05
 
     # ------------------------------------------------------------------
+    # 5. Price per vial
+    #    Override: user provides price
+    #    Auto:     0.0 (no price set — revenue will be 0)
+    # ------------------------------------------------------------------
+    if payload.pricing_params and payload.pricing_params.price_per_vial is not None:
+        price = payload.pricing_params.price_per_vial
+    else:
+        price = 0.0
+
+    # 6. Pricing STD DEV — always 0 (Fixed distribution, never sampled)
+    pricing_std_used = payload.pricing_params.std if payload.pricing_params else 0.0
+
+    # ------------------------------------------------------------------
     # Sample demand: shape (n_iterations, n_months)
-    # Each month is drawn from Normal(base_demand[m], std[m]) independently.
     # ------------------------------------------------------------------
     sampled_demand = np.random.normal(loc=base_arr, scale=demand_std, size=(n, len(base_arr)))
     sampled_demand = np.maximum(sampled_demand, 0.0)
-
-    # Total demand across all months, per iteration: shape (n_iterations,)
     total_demand_per_iter = sampled_demand.sum(axis=1)
 
     # ------------------------------------------------------------------
-    # Sample compliance: one draw per iteration from Truncated Normal [0, 1]
+    # Sample compliance: one draw per iteration from Truncated Normal [0,1]
     # ------------------------------------------------------------------
     a_comp = (0.0 - comp_mean) / comp_std
     b_comp = (1.0 - comp_mean) / comp_std
@@ -229,8 +257,11 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
             "percentile_95":         p95,
         },
         "input_parameters": {
+            "demand_base_mean":      demand_base_mean_used,
             "demand_volatility":     demand_volatility_used,
             "compliance_mean":       comp_mean,
             "compliance_volatility": comp_std,
+            "price_per_vial":        price,
+            "pricing_std":           pricing_std_used,
         },
     }
