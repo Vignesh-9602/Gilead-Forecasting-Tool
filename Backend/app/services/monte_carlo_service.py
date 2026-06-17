@@ -33,104 +33,89 @@ def get_monte_carlo_filters(ta_name: str) -> dict:
         conn.close()
 
 
-def _load_base_demand(cur, ta_name: str, brand: str) -> tuple:
+def _load_simulation_inputs(cur, ta_name: str, brand: str) -> tuple:
     """
-    Returns (months, base_demand, comp_mean) where:
-      base_demand[i] = sum over all (brand, indication, lot) of
-                       total_patients[i] * avg_vials_per_dose[i]
-      comp_mean      = average compliance from raw.fact_vials_compliance (0-1 scale)
-
-    Compliance mean is read from DB so the simulation is grounded in real data.
-    Compliance std and demand std_pct remain user-controlled since the DB
-    has no historical variation to derive them from.
+    Returns (months, base_demand, db_price, comp_mean) where:
+      base_demand[i] = SUM(final_demand) from raw.revenue_output per month
+      db_price       = AVG(net_price)   from raw.revenue_output
+      comp_mean      = AVG(compliance)  from raw.vials_assumptions (0-1 scale)
     """
+    # ------------------------------------------------------------------
+    # 1. Demand + Price from raw.revenue_output
+    # ------------------------------------------------------------------
     if brand == "All Brands":
         cur.execute(
             """
-            SELECT brand, indication, lot, months, total_patients
-            FROM raw.persistency_outputs
+            SELECT month_date, SUM(final_demand), AVG(net_price)
+            FROM raw.revenue_outputs
             WHERE ta_name = %s
-            ORDER BY brand, indication, lot
+            GROUP BY month_date
+            ORDER BY month_date
             """,
             (ta_name,)
         )
     else:
         cur.execute(
             """
-            SELECT brand, indication, lot, months, total_patients
-            FROM raw.persistency_outputs
+            SELECT month_date, SUM(final_demand), AVG(net_price)
+            FROM raw.revenue_outputs
             WHERE ta_name = %s AND brand = %s
-            ORDER BY indication, lot
+            GROUP BY month_date
+            ORDER BY month_date
             """,
             (ta_name, brand)
         )
 
-    rows = cur.fetchall()
+    revenue_rows = cur.fetchall()
 
-    if not rows:
+    if not revenue_rows:
         raise ValueError(
-            "No persistency data found for this TA/brand. "
-            "Complete the persistency calculation step first."
+            "No revenue output data found for this TA/brand. "
+            "Run the Net Revenue calculation first."
         )
 
-    # Build a unified sorted month list from ALL rows so every row
-    # contributes regardless of its own date range.
-    all_months_set = set()
-    for _, _, _, row_months, _ in rows:
-        all_months_set.update(row_months)
-    months = sorted(all_months_set)
+    # month_date is a Python date object from psycopg2 — convert to "YYYY-MM-DD" string
+    months       = [r[0].strftime("%Y-%m-%d") for r in revenue_rows]
+    base_demand  = [float(r[1]) if r[1] is not None else 0.0 for r in revenue_rows]
+    price_values = [float(r[2]) for r in revenue_rows if r[2] is not None]
+    db_price     = float(np.mean(price_values)) if price_values else 0.0
 
-    # month → position index for O(1) lookup
-    month_to_idx = {m: i for i, m in enumerate(months)}
-    base_demand = [0.0] * len(months)
-
-    all_compliance_values = []
-
-    for row_brand, indication, lot, row_months, total_patients in rows:
+    # ------------------------------------------------------------------
+    # 2. Compliance from raw.vials_assumptions
+    # ------------------------------------------------------------------
+    if brand == "All Brands":
         cur.execute(
             """
-            SELECT year, month, avg_vials_per_dose, compliance
-            FROM raw.fact_vials_compliance
-            WHERE ta = %s AND indication = %s AND lot = %s AND brand = %s
-            ORDER BY year, month
+            SELECT AVG(compliance)
+            FROM raw.vials_assumptions
+            WHERE ta_name = %s
             """,
-            (ta_name, indication, lot, row_brand)
+            (ta_name,)
+        )
+    else:
+        cur.execute(
+            """
+            SELECT AVG(compliance)
+            FROM raw.vials_assumptions
+            WHERE ta_name = %s AND brand = %s
+            """,
+            (ta_name, brand)
         )
 
-        vials_rows = cur.fetchall()
-        avg_vials_map: dict = {}
-        latest_avg: float = 0.0
+    comp_row = cur.fetchone()
+    raw_comp = comp_row[0] if comp_row and comp_row[0] is not None else None
 
-        for yr, mo, avg_v, comp in vials_rows:
-            key = f"{int(yr)}-{int(mo):02d}-01"
-            avg_vials_map[key] = float(avg_v)
-            latest_avg = float(avg_v)
-            # compliance stored as 0-100 in DB, convert to 0-1
-            all_compliance_values.append(float(comp) / 100.0)
+    # compliance stored as 0–100 in DB → convert to 0–1
+    comp_mean = float(raw_comp) / 100.0 if raw_comp is not None else 0.85
 
-        # Align by month string — not by position — so mismatched
-        # date ranges across rows don't cause index errors.
-        for j, row_month in enumerate(row_months):
-            if j >= len(total_patients):
-                break
-            if row_month not in month_to_idx:
-                continue
-            idx = month_to_idx[row_month]
-            avg_v = avg_vials_map.get(row_month, latest_avg)
-            base_demand[idx] += float(total_patients[j]) * avg_v
-
-    # Calculate compliance mean from DB history.
-    # Fallback to 0.85 if no compliance data found.
-    comp_mean = float(np.mean(all_compliance_values)) if all_compliance_values else 0.85
-
-    return months, base_demand, comp_mean
+    return months, base_demand, db_price, comp_mean
 
 
 def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        months, base_demand, db_comp_mean = _load_base_demand(cur, payload.ta_name, payload.brand)
+        months, base_demand, db_price, db_comp_mean = _load_simulation_inputs(cur, payload.ta_name, payload.brand)
     finally:
         cur.close()
         conn.close()
@@ -193,7 +178,7 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
     if payload.pricing_params and payload.pricing_params.price_per_vial is not None:
         price = payload.pricing_params.price_per_vial
     else:
-        price = 0.0
+        price = db_price
 
     # 6. Pricing STD DEV — always 0 (Fixed distribution, never sampled)
     pricing_std_used = payload.pricing_params.std if payload.pricing_params else 0.0
