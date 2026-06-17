@@ -1,10 +1,8 @@
 from fastapi import HTTPException
+
 from app.db.connection import get_connection
 from datetime import datetime
 
-# ---------------------------------------------------
-# Avg_Vials per dose
-# ---------------------------------------------------
 def build_avg_vials_per_dose_table(
     cursor,
     ta_name: str,
@@ -24,18 +22,52 @@ def build_avg_vials_per_dose_table(
             if lot_actual_scenario_map
             else scenario_name
         )
-        if use_assumptions:
+
+        # -----------------------------
+        # 1. FACT DATA
+        # -----------------------------
+        cursor.execute("""
+            SELECT year, month, avg_vials_per_dose
+            FROM raw.fact_vials_compliance
+            WHERE ta = %s
+              AND indication = %s
+              AND brand = %s
+              AND lot = %s
+            ORDER BY year, month
+        """, (ta_name, indication, brand, lot))
+
+        fact_rows = cursor.fetchall()
+
+        if not fact_rows:
+            raise ValueError(
+                f"No Avg Vials Per Dose fact data found for lot {lot}, brand {brand}"
+            )
+
+        fact_map = {}
+        latest_fact_value = None
+
+        for year, month, avg_vials in fact_rows:
+            month_key = f"{int(year)}-{int(month):02d}-01"
+            value = float(avg_vials)
+            value = int(value) if value.is_integer() else value
+            fact_map[month_key] = value
+            latest_fact_value = value
+
+        # -----------------------------
+        # 2. ASSUMPTION DATA
+        # -----------------------------
+        assumption_map = {}
+
+        if use_assumptions and actual_scenario_name:
             cursor.execute("""
-                SELECT
-                    year,
-                    month,
-                    avg_vials_per_dose
+                SELECT year, month, avg_vials_per_dose
                 FROM raw.vials_assumptions
                 WHERE ta_name = %s
                   AND scenario_name = %s
                   AND indication = %s
                   AND brand = %s
                   AND lot = %s
+                  AND avg_vials_per_dose IS NOT NULL
                 ORDER BY year, month
             """, (
                 ta_name,
@@ -44,49 +76,32 @@ def build_avg_vials_per_dose_table(
                 brand,
                 lot
             ))
-        else:
-            cursor.execute("""
-                SELECT
-                    year,
-                    month,
-                    avg_vials_per_dose
-                FROM raw.fact_vials_compliance
-                WHERE ta = %s
-                  AND indication = %s
-                  AND brand = %s
-                  AND lot = %s
-                ORDER BY year, month
-            """, (
-                ta_name,
-                indication,
-                brand,
-                lot
-            ))
 
-        rows = cursor.fetchall()
+            for year, month, avg_vials in cursor.fetchall():
+                month_key = f"{int(year)}-{int(month):02d}-01"
+                value = float(avg_vials)
+                value = int(value) if value.is_integer() else value
+                assumption_map[month_key] = value
+        print("========== AVG FUNCTION DEBUG ==========")
+        print("lot:", lot)
+        print("actual_scenario_name:", actual_scenario_name)
+        print("use_assumptions:", use_assumptions)
+        print("months requested:", months)
+        print("assumption_map:", assumption_map)
+        print("fact_map:", fact_map)
+        print("========================================")
+        # -----------------------------
+        # 3. FINAL VALUES
+        # assumption first, else fact
+        # -----------------------------
+        values = []
 
-        if not rows:
-            raise ValueError(
-                f"No Avg Vials Per Dose data found for lot {lot}, brand {brand}"
+        for month in months:
+            value = assumption_map.get(
+                month,
+                fact_map.get(month, latest_fact_value)
             )
-
-        avg_vials_map = {}
-        latest_value = None
-
-        for year, month, avg_vials in rows:
-            month_key = f"{int(year)}-{int(month):02d}-01"
-
-            value = float(avg_vials)
-            if value.is_integer():
-                value = int(value)
-
-            avg_vials_map[month_key] = value
-            latest_value = value
-
-        values = [
-            avg_vials_map.get(month, latest_value)
-            for month in months
-        ]
+            values.append(value)
 
         avg_vials_table.append({
             "lot": lot,

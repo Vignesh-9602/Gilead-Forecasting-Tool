@@ -11,142 +11,73 @@ import {
     TableHead,
     TableRow,
     IconButton,
+    Typography,
 } from "@mui/material";
 
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
 
-export default function OutputTable() {
+export default function OutputTable({ tableData }) {
 
-    const [activeTab, setActiveTab] = useState(0);
+    // const [activeTab, setActiveTab] = useState(0);
 
-    const [expandedRows, setExpandedRows] = useState({
-        "TNBC Total Demand": true,
-        "1L Total Demand": true,
-    });
+    const [expandedRows, setExpandedRows] =
+        useState({});
 
-    const months = [
-        "Jan 2025 ",
-        "Feb 2025 ",
-        "Mar 2025 ",
-        "Apr 2025 ",
-        "May 2025 ",
-        "Jun 2025 ",
-        "Jul 2025 ",
-        "Aug 2025 ",
-        "Sep 2025 ",
-        "Oct 2025 ",
-        "Nov 2025 ",
-    ];
+    if (!tableData) {
+        return (
+            <Paper
+                sx={{
+                    mt: 3,
+                    p: 4,
+                    textAlign: "center",
+                    borderRadius: "12px",
+                    border: "1px solid #D8DEE8",
+                    boxShadow: "none",
+                }}
+            >
+                <Typography>
+                    No table data available
+                </Typography>
+            </Paper>
+        );
+    }
 
-    const MOCK_TABLE_RESPONSE = {
-        indication_tab: {
-            hierarchy_label:
-                "Total Aggregated Demand (By Indication)",
+    const months =
+        tableData?.months?.map(
+            (month) =>
+                new Date(month).toLocaleDateString(
+                    "en-US",
+                    {
+                        month: "short",
+                        year: "numeric",
+                    }
+                )
+        ) || [];
 
-            rows: [
-                {
-                    label: "TNBC Total Demand",
+    // const indicationData =
+    //     outputData?.table?.indication_tab;
 
-                    values: [
-                        15000,
-                        15500,
-                        15800,
-                        16200,
-                        16600,
-                        17100,
-                        17500,
-                        18000,
-                        18400,
-                        18900,
-                        19300,
-                    ],
+    // const lotData =
+    //     outputData?.table?.lot_tab;
 
-                    children: [
-                        {
-                            label: "Trodelvy",
-
-                            values: [
-                                15000,
-                                15500,
-                                15800,
-                                16200,
-                                16600,
-                                17100,
-                                17500,
-                                18000,
-                                18400,
-                                18900,
-                                19300,
-                            ],
-                        },
-                    ],
-                },
-            ],
-        },
-
-        lot_tab: {
-            hierarchy_label:
-                "Total Aggregated Demand (By LOT)",
-
-            rows: [
-                {
-                    label: "1L Total Demand",
-
-                    values: [
-                        14000,
-                        14300,
-                        14600,
-                        14900,
-                        15200,
-                        15500,
-                        15800,
-                        16100,
-                        16400,
-                        16800,
-                        17100,
-                    ],
-
-                    children: [
-                        {
-                            label: "Trodelvy",
-
-                            values: [
-                                14000,
-                                14300,
-                                14600,
-                                14900,
-                                15200,
-                                15500,
-                                15800,
-                                16100,
-                                16400,
-                                16800,
-                                17100,
-                            ],
-                        },
-                    ],
-                },
-            ],
-        },
-    };
-
-    const currentData =
-        activeTab === 0
-            ? MOCK_TABLE_RESPONSE.indication_tab
-            : MOCK_TABLE_RESPONSE.lot_tab;
+    // const currentData =
+    //     activeTab === 0
+    //         ? indicationData
+    //         : lotData;
+    const currentData = tableData;
 
     return (
         <Paper
             sx={{
                 mt: 3,
-                borderRadius: "16px",
+                borderRadius: "8px",
                 border: "1px solid #D8DEE8",
                 boxShadow: "none",
                 overflow: "hidden",
             }}
         >
-            <Tabs
+            {/* <Tabs
                 value={activeTab}
                 onChange={(e, value) =>
                     setActiveTab(value)
@@ -162,10 +93,11 @@ export default function OutputTable() {
                 }}
             >
                 <Tab label="Demand Summary by Indication" />
-                <Tab label="Demand Summary by LOT" />
-            </Tabs>
 
-            <Box sx={{ p: 2 }}>
+                <Tab label="Demand Summary by LOT" />
+            </Tabs> */}
+
+            <Box>
                 <TableContainer
                     sx={{
                         overflowX: "auto",
@@ -175,7 +107,7 @@ export default function OutputTable() {
                     <Table
                         size="small"
                         sx={{
-                            minWidth: 1800,
+                            minWidth: 2200,
                         }}
                     >
                         <TableHead>
@@ -187,74 +119,90 @@ export default function OutputTable() {
                                         position: "sticky",
                                         left: 0,
                                         zIndex: 2,
-                                        backgroundColor: "#f1f5f9",
+                                        backgroundColor: "#f8fafc",
                                         color: "#64748b",
-                                        borderRight: "1px solid #E2E8F0",
-                                        py: "2px",
-                                        height: "28px",
+                                        borderRight:
+                                            "1px solid #E2E8F0",
                                     }}
                                 >
-                                    Hierarchy Segmentation (Demand Volume)
+                                    Hierarchy Segmentation
+                                    (Demand Volume)
                                 </TableCell>
 
-                                {months.map((month, index) => (
-                                    <TableCell
-                                        key={month}
-                                        align="center"
-                                        sx={{
-                                            fontWeight: 700,
-                                            minWidth: 110,
-                                            whiteSpace: "nowrap",
-                                            color: "#64748b",
-                                            backgroundColor:
-                                                index < 6
-                                                    ? "#f1f5f9"
-                                                    : "#ffffff",
-                                            borderRight: "1px solid #E2E8F0",
-                                            py: "2px",
-                                            height: "28px",
-                                        }}
-                                    >
-                                        {month}
-                                    </TableCell>
-                                ))}
+                                {months.map(
+                                    (
+                                        month,
+                                        index
+                                    ) => (
+                                        <TableCell
+                                            key={
+                                                month
+                                            }
+                                            align="center"
+                                            sx={{
+                                                fontWeight: 700,
+                                                minWidth: 110,
+                                                whiteSpace:
+                                                    "nowrap",
+                                                color: "#64748b",
+                                                backgroundColor:
+                                                    index <
+                                                        currentData
+                                                            ?.total_values
+                                                            ?.length -
+                                                        4
+                                                        ? "#f8fafc"
+                                                        : "#ffffff",
+                                                borderRight:
+                                                    "1px solid #E2E8F0",
+                                            }}
+                                        >
+                                            {month}
+                                        </TableCell>
+                                    )
+                                )}
                             </TableRow>
                         </TableHead>
 
                         <TableBody>
 
-                            {/* PARENT */}
+                            {/* TOTAL AGGREGATED */}
 
                             <TableRow>
                                 <TableCell
                                     sx={{
-                                        position: "sticky",
+                                        position:
+                                            "sticky",
                                         left: 0,
                                         zIndex: 1,
-                                        backgroundColor: "#f1f5f9",
-                                        color: "#000",
+                                        backgroundColor:
+                                            "#f1f5f9",
                                         fontWeight: 700,
-                                        borderRight: "1px solid #E2E8F0",
+                                        borderRight:
+                                            "1px solid #E2E8F0",
                                     }}
                                 >
-                                    {currentData.hierarchy_label}
+                                    {
+                                        currentData?.hierarchy_label
+                                    }
                                 </TableCell>
 
-                                {currentData.rows[0].values.map(
-                                    (value, index) => (
+                                {currentData?.total_values?.map(
+                                    (
+                                        value,
+                                        index
+                                    ) => (
                                         <TableCell
-                                            key={index}
+                                            key={
+                                                index
+                                            }
                                             align="center"
                                             sx={{
-                                                color: "#000",
                                                 fontWeight: 700,
                                                 backgroundColor:
-                                                    index < 6
-                                                        ? "#f1f5f9"
-                                                        : "#ffffff",
-                                                borderRight: "1px solid #E2E8F0",
-                                                py: "2px",
-                                                height: "28px",
+                                                    "#f1f5f9",
+                                                borderRight:
+                                                    "1px solid #E2E8F0",
                                             }}
                                         >
                                             {value.toLocaleString()}
@@ -263,139 +211,150 @@ export default function OutputTable() {
                                 )}
                             </TableRow>
 
-                            {/* CHILD */}
+                            {/* DEMAND ROWS */}
 
-                            {currentData.rows.map((row) => {
+                            {currentData?.rows?.map(
+                                (row) => {
 
-                                const isExpanded =
-                                    expandedRows[row.label];
+                                    const isExpanded =
+                                        expandedRows[
+                                        row.label
+                                        ] ??
+                                        true;
 
-                                return (
-                                    <React.Fragment
-                                        key={row.label}
-                                    >
-                                        <TableRow>
-                                            <TableCell
-                                                sx={{
-                                                    position: "sticky",
-                                                    left: 0,
-                                                    zIndex: 1,
-                                                    backgroundColor: "#f1f5f9",
-                                                    color: "#000",
-                                                    fontWeight: 700,
-                                                    borderRight: "1px solid #E2E8F0",
-                                                }}
-                                            >
-                                                <Box
+                                    return (
+                                        <React.Fragment
+                                            key={
+                                                row.label
+                                            }
+                                        >
+                                            <TableRow>
+                                                <TableCell
                                                     sx={{
-                                                        display: "flex",
-                                                        alignItems: "center",
+                                                        position:
+                                                            "sticky",
+                                                        left: 0,
+                                                        zIndex: 1,
+                                                        backgroundColor:
+                                                            "#ffffff",
+                                                        fontWeight: 700,
+                                                        borderRight:
+                                                            "1px solid #E2E8F0",
                                                     }}
                                                 >
-                                                    <IconButton
-                                                        size="small"
-                                                        onClick={() =>
-                                                            setExpandedRows(
-                                                                (prev) => ({
-                                                                    ...prev,
-                                                                    [row.label]:
-                                                                        !prev[
-                                                                        row.label
-                                                                        ],
-                                                                })
-                                                            )
-                                                        }
-                                                    >
-                                                        {isExpanded ? (
-                                                            <KeyboardArrowDownIcon />
-                                                        ) : (
-                                                            <KeyboardArrowRightIcon />
-                                                        )}
-                                                    </IconButton>
-
-                                                    {row.label}
-                                                </Box>
-                                            </TableCell>
-
-                                            {row.values.map(
-                                                (
-                                                    value,
-                                                    index
-                                                ) => (
-                                                    <TableCell
-                                                        key={index}
-                                                        align="center"
+                                                    <Box
                                                         sx={{
-                                                            color: "#000",
-                                                            fontWeight: 700,
-                                                            backgroundColor:
-                                                                index < 6
-                                                                    ? "#f1f5f9"
-                                                                    : "#ffffff",
-                                                            borderRight: "1px solid #E2E8F0",
-                                                            py: "2px",
-                                                            height: "28px",
+                                                            display:
+                                                                "flex",
+                                                            alignItems:
+                                                                "center",
                                                         }}
                                                     >
-                                                        {value.toLocaleString()}
-                                                    </TableCell>
-                                                )
-                                            )}
-                                        </TableRow>
+                                                        <IconButton
+                                                            size="small"
+                                                            onClick={() =>
+                                                                setExpandedRows(
+                                                                    (
+                                                                        prev
+                                                                    ) => ({
+                                                                        ...prev,
+                                                                        [row.label]:
+                                                                            !isExpanded,
+                                                                    })
+                                                                )
+                                                            }
+                                                        >
+                                                            {isExpanded ? (
+                                                                <KeyboardArrowDownIcon />
+                                                            ) : (
+                                                                <KeyboardArrowRightIcon />
+                                                            )}
+                                                        </IconButton>
 
-                                        {/* GRAND CHILD */}
-
-                                        {isExpanded &&
-                                            row.children?.map(
-                                                (
-                                                    child
-                                                ) => (
-                                                    <TableRow
-                                                        key={
-                                                            child.label
+                                                        {
+                                                            row.label
                                                         }
-                                                    >
+                                                    </Box>
+                                                </TableCell>
+
+                                                {row.values.map(
+                                                    (
+                                                        value,
+                                                        index
+                                                    ) => (
                                                         <TableCell
+                                                            key={
+                                                                index
+                                                            }
+                                                            align="center"
                                                             sx={{
-                                                                position: "sticky",
-                                                                left: 0,
-                                                                zIndex: 1,
-                                                                pl: 5,
-                                                                backgroundColor: "#ffffff",
-                                                                borderRight: "1px solid #E2E8F0",
+                                                                fontWeight: 700,
+                                                                borderRight:
+                                                                    "1px solid #E2E8F0",
                                                             }}
                                                         >
-                                                            {child.label}
+                                                            {value.toLocaleString()}
                                                         </TableCell>
+                                                    )
+                                                )}
+                                            </TableRow>
 
-                                                        {child.values.map(
-                                                            (
-                                                                value,
-                                                                index
-                                                            ) => (
-                                                                <TableCell
-                                                                    key={index}
-                                                                    align="center"
-                                                                    sx={{
-                                                                        backgroundColor:
-                                                                            index < 6
-                                                                                ? "#f8fafc"
-                                                                                : "#ffffff",
-                                                                        borderRight: "1px solid #E2E8F0",
-                                                                        py: "2px",
-                                                                        height: "28px",
-                                                                    }}
-                                                                >
-                                                                    {value.toLocaleString()}
-                                                                </TableCell>
-                                                            )
-                                                        )}
-                                                    </TableRow>
-                                                )
-                                            )}
-                                    </React.Fragment>
-                                );
-                            })}
+                                            {/* PRODUCT ROWS */}
+
+                                            {isExpanded &&
+                                                row.children?.map(
+                                                    (
+                                                        child
+                                                    ) => (
+                                                        <TableRow
+                                                            key={
+                                                                child.label
+                                                            }
+                                                        >
+                                                            <TableCell
+                                                                sx={{
+                                                                    position:
+                                                                        "sticky",
+                                                                    left: 0,
+                                                                    zIndex: 1,
+                                                                    pl: 5,
+                                                                    backgroundColor:
+                                                                        "#ffffff",
+                                                                    borderRight:
+                                                                        "1px solid #E2E8F0",
+                                                                }}
+                                                            >
+                                                                {
+                                                                    child.label
+                                                                }
+                                                            </TableCell>
+
+                                                            {child.values.map(
+                                                                (
+                                                                    value,
+                                                                    index
+                                                                ) => (
+                                                                    <TableCell
+                                                                        key={
+                                                                            index
+                                                                        }
+                                                                        align="center"
+                                                                        sx={{
+                                                                            borderRight:
+                                                                                "1px solid #E2E8F0",
+                                                                        }}
+                                                                    >
+                                                                        {value.toLocaleString()}
+                                                                    </TableCell>
+                                                                )
+                                                            )}
+                                                        </TableRow>
+                                                    )
+                                                )}
+                                        </React.Fragment>
+                                    );
+                                }
+                            )}
                         </TableBody>
                     </Table>
                 </TableContainer>

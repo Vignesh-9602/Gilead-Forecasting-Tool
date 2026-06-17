@@ -1,11 +1,10 @@
 import React, { useContext, useEffect, useState } from "react";
-import { Box, Paper, Typography, FormControl, Select, MenuItem, Button } from "@mui/material";
+import { Box, Paper, Typography, FormControl, Select, MenuItem, Button, Tab, Tabs, Checkbox, ListItemText } from "@mui/material";
 import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import OutputChart from "./OutputChart";
 import OutputTable from "./OutputTable";
-
-// import { getOutputFilters, applyOutputFilters,} from "../../../services/apiService";
+import { getOutputFilters, applyOutputFilters } from "../../../services/apiService";
 
 import { useSnackbarStore, useLoadingStore, } from "../../../stores";
 
@@ -26,11 +25,14 @@ export default function Output() {
 
     const [scenario, setScenario] = useState("");
 
-    const [indication, setIndication] = useState("");
+    const [indications, setIndications] =
+        useState([]);
 
-    const [lot, setLot] = useState("");
+    const [lots, setLots] =
+        useState([]);
 
-    const [product, setProduct] = useState("");
+    const [products, setProducts] =
+        useState([]);
 
     const [startDate, setStartDate] = useState("");
 
@@ -38,67 +40,9 @@ export default function Output() {
 
     const [outputData, setOutputData] = useState(null);
 
-    const MOCK_OUTPUT_RESPONSE = {
-        chart: {
-            months: [
-                "2024-12-01",
-                "2025-01-01",
-                "2025-02-01",
-                "2025-03-01",
-                "2025-04-01",
-                "2025-05-01",
-                "2025-06-01",
-                "2025-07-01",
-                "2025-08-01",
-                "2025-09-01",
-                "2025-10-01",
-                "2025-11-01",
-                "2025-12-01",
-                "2026-01-01",
-                "2026-02-01",
-                "2026-03-01",
-                "2026-04-01",
-                "2026-05-01",
-                "2026-06-01",
-            ],
-
-            forecast_start_index: 15,
-
-            series: [
-                {
-                    scenario: "BASE",
-                    label: "Demand Volume",
-
-                    train_values: [
-                        64643,
-                        68113,
-                        77994,
-                        85456,
-                        85025,
-                        89566,
-                        102370,
-                        87668,
-                        97228,
-                        106020,
-                        113350,
-                        108800,
-                        109910,
-                        124670,
-                        123920,
-                    ],
-
-                    forecast_values: [
-                        124550,
-                        126590,
-                        128890,
-                        130400,
-                    ],
-                },
-            ],
-        },
-    };
-
-    const [chartData, setChartData] = useState(MOCK_OUTPUT_RESPONSE.chart);
+    // const [chartData, setChartData] = useState(null);
+    const [activeTab, setActiveTab] =
+        useState("indication");
 
     useEffect(() => {
         if (therapyArea) {
@@ -106,231 +50,91 @@ export default function Output() {
         }
     }, [therapyArea]);
 
-    const OUTPUT_FILTER_RESPONSE = {
-        ta_name: "Oncology",
-
-        scenario_names: [
-            "Finalised",
-            "BASE",
-            "test_01",
-        ],
-
-        data: {
-            BASE: {
-                "mHR+": {
-                    "1L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                    "2L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                    "3L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                },
-
-                mTNBC: {
-                    "1L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-
-                    "2L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-
-                    "3L+": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                },
-
-                mUC: {
-                    "1L": [
-                        "Brand 1",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-
-                    "2L": [
-                        "Brand 1",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                },
-            },
-
-            Finalised: {
-                mTNBC: {
-                    "1L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-
-                    "2L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                },
-            },
-
-            test_01: {
-                mTNBC: {
-                    "1L": [
-                        "Brand 1",
-                        "Brand 2",
-                        "Competitor 1",
-                        "Competitor 2",
-                        "TPC",
-                        "Trodelvy",
-                    ],
-                },
-            },
-        },
-
-        available_months: [
-            "2024-01-01",
-            "2024-02-01",
-            "2024-03-01",
-            "2024-04-01",
-            "2024-05-01",
-            "2024-06-01",
-            "2024-07-01",
-            "2024-08-01",
-            "2024-09-01",
-            "2024-10-01",
-            "2024-11-01",
-            "2024-12-01",
-            "2025-01-01",
-            "2025-02-01",
-            "2025-03-01",
-            "2025-04-01",
-            "2025-05-01",
-            "2025-06-01",
-            "2025-07-01",
-            "2025-08-01",
-            "2025-09-01",
-            "2025-10-01",
-            "2025-11-01",
-            "2025-12-01",
-            "2026-01-01",
-            "2026-02-01",
-            "2026-03-01",
-            "2026-04-01",
-            "2026-05-01",
-            "2026-06-01",
-        ],
-
-        selected_filter: {
-            scenario_name: "BASE",
-            indication: "mTNBC",
-            lots: ["1L", "2L", "3L+"],
-            brand: "Brand 1",
-            start_date: "2025-01-01",
-            end_date: "2026-06-01",
-        },
-    };
-
     const fetchFilters = async () => {
         try {
             setLoading(true);
 
-            // const response =
-            //     await getOutputFilters(
-            //         therapyArea
-            //     );
+            const response = await getOutputFilters(therapyArea);
 
-            // const resData =
-            //     response?.data;
-
-            const resData = OUTPUT_FILTER_RESPONSE;
+            const resData = response?.data;
 
             setMappingData(resData?.data || {});
 
-            setScenarioOptions(resData?.scenario_names || []);
+            setScenarioOptions(
+                resData?.scenario_names || []
+            );
 
-            setAvailableMonths(resData?.available_months || []);
+            setAvailableMonths(
+                resData?.available_months || []
+            );
 
-            const defaultFilter = resData?.selected_filter;
+            const defaultFilter =
+                resData?.selected_filter;
 
             if (defaultFilter) {
-                const defaultScenario = defaultFilter.scenario_name;
+                const defaultScenario =
+                    defaultFilter.scenario_name;
 
-                const defaultIndication = defaultFilter.indication;
+                const defaultIndication =
+                    defaultFilter.indication;
 
-                const defaultLot = defaultFilter?.lots?.[0] || "";
+                const defaultLot =
+                    defaultFilter?.lots?.[0] || "";
 
-                const defaultProduct = defaultFilter.brand;
+                const defaultProduct =
+                    defaultFilter.brand;
 
                 setScenario(defaultScenario);
+                setIndications(
+                    defaultFilter.indications || []
+                );
 
-                setIndication(defaultIndication);
+                setLots(
+                    defaultFilter.lots || []
+                );
 
-                setLot(defaultLot);
-
-                setProduct(defaultProduct);
-
+                setProducts(
+                    defaultFilter.brands || []
+                );
                 setStartDate(defaultFilter.start_date);
-
                 setEndDate(defaultFilter.end_date);
 
-                // const payload = {
-                //     ta_name: therapyArea,
-                //     scenario_name:
-                //         defaultScenario,
-                //     indication:
-                //         defaultIndication,
-                //     lot: defaultLot,
-                //     product:
-                //         defaultProduct,
-                //     start_date:
-                //         defaultFilter.start_date,
-                //     end_date:
-                //         defaultFilter.end_date,
-                // };
+                // Auto-load chart + table on page load
 
-                // const applyResponse =
-                //     await applyOutputFilters(
-                //         payload
-                //     );
+                const payload = {
+                    ta_name: therapyArea,
+                    scenario_name: defaultScenario,
+                    indications:
+                        defaultFilter.indications || [],
 
-                // setOutputData(
-                //     applyResponse?.data || null
+                    lots:
+                        defaultFilter.lots || [],
+
+                    brands:
+                        defaultFilter.brands || [],
+                    start_date: defaultFilter.start_date,
+                    end_date: defaultFilter.end_date,
+                };
+
+                const applyResponse =
+                    await applyOutputFilters(payload);
+
+                const applyData =
+                    applyResponse?.data;
+
+                setOutputData(applyData);
+
+                // setChartData(
+                //     applyData?.chart || null
                 // );
             }
         } catch (error) {
             console.error(error);
-            showSnackbar("Failed to load filters", "error");
+
+            showSnackbar(
+                "Failed to load filters",
+                "error"
+            );
         } finally {
             setLoading(false);
         }
@@ -340,70 +144,87 @@ export default function Output() {
         ? Object.keys(mappingData?.[scenario] ?? {})
         : [];
 
-    const lotOptions = scenario && indication
-        ? Object.keys(mappingData?.[scenario]?.[indication] || {})
-        : [];
+    const lotOptions =
+        scenario &&
+            indications.length > 0
+            ? [
+                ...new Set(
+                    indications.flatMap(
+                        (indication) =>
+                            Object.keys(
+                                mappingData?.[
+                                scenario
+                                ]?.[
+                                indication
+                                ] || {}
+                            )
+                    )
+                ),
+            ]
+            : [];
 
-    const productOptions = scenario && indication && lot
-        ? mappingData?.[scenario]?.[indication]?.[lot] || []
-        : [];
+    const productOptions =
+        scenario &&
+            indications.length > 0
+            ? [
+                ...new Set(
+                    indications.flatMap(
+                        (indication) =>
+                            Object.values(
+                                mappingData?.[
+                                scenario
+                                ]?.[
+                                indication
+                                ] || {}
+                            ).flat()
+                    )
+                ),
+            ]
+            : [];
 
-    // const handleApplyFilter =
-    //     async () => {
-    //         try {
-    //             setLoading(true);
+    const handleApplyFilter = async () => {
+        try {
+            setLoading(true);
 
-    //             const payload = {
-    //                 ta_name:
-    //                     therapyArea,
-    //                 scenario_name:
-    //                     scenario,
-    //                 indication,
-    //                 lot,
-    //                 product,
-    //                 start_date:
-    //                     startDate,
-    //                 end_date:
-    //                     endDate,
-    //             };
+            const payload = {
+                ta_name: therapyArea,
 
-    //             const response =
-    //                 await applyOutputFilters(
-    //                     payload
-    //                 );
+                scenario_name: scenario,
 
-    //             setOutputData(
-    //                 response?.data || null
-    //             );
+                indications,
 
-    //             showSnackbar(
-    //                 "Filters applied successfully",
-    //                 "success"
-    //             );
-    //         } catch (error) {
-    //             console.error(error);
+                lots,
 
-    //             showSnackbar(
-    //                 "Failed to apply filters",
-    //                 "error"
-    //             );
-    //         } finally {
-    //             setLoading(false);
-    //         }
-    //     };
+                brands: products,
 
-    const handleApplyFilter = () => {
-        const payload = {
-            ta_name: therapyArea,
-            scenario_name: scenario,
-            indication,
-            lot,
-            product,
-            start_date: startDate,
-            end_date: endDate,
-        };
+                start_date: startDate,
 
-        console.log("Apply Filter Payload", payload);
+                end_date: endDate,
+            };
+
+            const response =
+                await applyOutputFilters(payload);
+
+            const resData = response?.data;
+
+            setOutputData(resData);
+
+            // setChartData(resData?.chart || null);
+
+            showSnackbar(
+                "Filters applied successfully",
+                "success"
+            );
+        } catch (error) {
+            console.error(error);
+
+            showSnackbar(
+                "Failed to apply filters",
+                "error"
+            );
+        } finally {
+            setLoading(false);
+        }
     };
 
     const labelStyle = {
@@ -424,6 +245,9 @@ export default function Output() {
             backgroundColor: "#fcfcfd",
         },
     };
+
+    const currentView =
+        outputData?.views?.[activeTab];
 
     return (
         <Box sx={{ p: 3 }}>
@@ -484,15 +308,19 @@ export default function Output() {
                         <FormControl sx={inputStyle}>
                             <Select
                                 value={scenario}
+                                displayEmpty
                                 onChange={(e) => {
                                     const value = e.target.value;
 
                                     setScenario(value);
-                                    setIndication("");
-                                    setLot("");
-                                    setProduct("");
+                                    setIndications([]);
+                                    setLots([]);
+                                    setProducts([]);
                                 }}
                             >
+                                <MenuItem value="" disabled>
+                                    Select Scenario
+                                </MenuItem>
                                 {scenarioOptions.map((item) => (
                                     <MenuItem key={item} value={item}>
                                         {item}
@@ -508,22 +336,74 @@ export default function Output() {
                             INDICATION
                         </Typography>
 
-                        <FormControl sx={inputStyle}>
+                        <FormControl sx={{ ...inputStyle, maxWidth: 180 }}>
                             <Select
-                                value={indication}
+                                multiple
+                                value={indications}
+                                disabled={!scenario}
+                                displayEmpty
                                 onChange={(e) => {
-                                    const value = e.target.value;
 
-                                    setIndication(value);
-                                    setLot("");
-                                    setProduct("");
+                                    const value =
+                                        e.target.value;
+
+                                    if (
+                                        value.includes(
+                                            "SELECT_ALL"
+                                        )
+                                    ) {
+                                        setIndications(
+                                            indications.length ===
+                                                indicationOptions.length
+                                                ? []
+                                                : indicationOptions
+                                        );
+                                    } else {
+                                        setIndications(value);
+                                    }
+
+                                    setLots([]);
+                                    setProducts([]);
                                 }}
+                                renderValue={(selected) =>
+                                    selected.length
+                                        ? selected.join(", ")
+                                        : "Select Indication"
+                                }
                             >
-                                {indicationOptions.map((item) => (
-                                    <MenuItem key={item} value={item}>
-                                        {item}
-                                    </MenuItem>
-                                ))}
+                                <MenuItem value="SELECT_ALL">
+                                    <Checkbox
+                                        checked={
+                                            indications.length ===
+                                            indicationOptions.length &&
+                                            indicationOptions.length > 0
+                                        }
+                                        indeterminate={
+                                            indications.length > 0 &&
+                                            indications.length <
+                                            indicationOptions.length
+                                        }
+                                    />
+                                    <ListItemText primary="Select All" />
+                                </MenuItem>
+
+                                {indicationOptions.map(
+                                    (option) => (
+                                        <MenuItem
+                                            key={option}
+                                            value={option}
+                                        >
+                                            <Checkbox
+                                                checked={indications.includes(
+                                                    option
+                                                )}
+                                            />
+                                            <ListItemText
+                                                primary={option}
+                                            />
+                                        </MenuItem>
+                                    )
+                                )}
                             </Select>
                         </FormControl>
                     </Box>
@@ -534,19 +414,71 @@ export default function Output() {
                             LOT
                         </Typography>
 
-                        <FormControl sx={inputStyle}>
+                        <FormControl sx={{ ...inputStyle, maxWidth: 180 }}>
                             <Select
-                                value={lot}
+                                multiple
+                                value={lots}
+                                disabled={
+                                    indications.length === 0
+                                }
+                                displayEmpty
                                 onChange={(e) => {
-                                    const value = e.target.value;
 
-                                    setLot(value);
-                                    setProduct("");
+                                    const value =
+                                        e.target.value;
+
+                                    if (
+                                        value.includes(
+                                            "SELECT_ALL"
+                                        )
+                                    ) {
+                                        setLots(
+                                            lots.length ===
+                                                lotOptions.length
+                                                ? []
+                                                : lotOptions
+                                        );
+                                    } else {
+                                        setLots(value);
+                                    }
+
+                                    setProducts([]);
                                 }}
+                                renderValue={(selected) =>
+                                    selected.length
+                                        ? selected.join(", ")
+                                        : "Select LOT"
+                                }
                             >
-                                {lotOptions.map((item) => (
-                                    <MenuItem key={item} value={item}>
-                                        {item}
+                                <MenuItem value="SELECT_ALL">
+                                    <Checkbox
+                                        checked={
+                                            lots.length ===
+                                            lotOptions.length &&
+                                            lotOptions.length > 0
+                                        }
+                                        indeterminate={
+                                            lots.length > 0 &&
+                                            lots.length <
+                                            lotOptions.length
+                                        }
+                                    />
+                                    <ListItemText primary="Select All" />
+                                </MenuItem>
+
+                                {lotOptions.map((option) => (
+                                    <MenuItem
+                                        key={option}
+                                        value={option}
+                                    >
+                                        <Checkbox
+                                            checked={lots.includes(
+                                                option
+                                            )}
+                                        />
+                                        <ListItemText
+                                            primary={option}
+                                        />
                                     </MenuItem>
                                 ))}
                             </Select>
@@ -559,20 +491,73 @@ export default function Output() {
                             PRODUCT
                         </Typography>
 
-                        <FormControl sx={inputStyle}>
+                        <FormControl sx={{ ...inputStyle, maxWidth: 180 }}>
                             <Select
-                                value={product}
+                                multiple
+                                value={products}
+                                disabled={
+                                    lots.length === 0
+                                }
+                                displayEmpty
                                 onChange={(e) => {
-                                    const value = e.target.value;
 
-                                    setProduct(value);
+                                    const value =
+                                        e.target.value;
+
+                                    if (
+                                        value.includes(
+                                            "SELECT_ALL"
+                                        )
+                                    ) {
+                                        setProducts(
+                                            products.length ===
+                                                productOptions.length
+                                                ? []
+                                                : productOptions
+                                        );
+                                    } else {
+                                        setProducts(value);
+                                    }
                                 }}
+                                renderValue={(selected) =>
+                                    selected.length
+                                        ? selected.join(", ")
+                                        : "Select Product"
+                                }
                             >
-                                {productOptions.map((item) => (
-                                    <MenuItem key={item} value={item}>
-                                        {item}
-                                    </MenuItem>
-                                ))}
+                                <MenuItem value="SELECT_ALL">
+                                    <Checkbox
+                                        checked={
+                                            products.length ===
+                                            productOptions.length &&
+                                            productOptions.length > 0
+                                        }
+                                        indeterminate={
+                                            products.length > 0 &&
+                                            products.length <
+                                            productOptions.length
+                                        }
+                                    />
+                                    <ListItemText primary="Select All" />
+                                </MenuItem>
+
+                                {productOptions.map(
+                                    (option) => (
+                                        <MenuItem
+                                            key={option}
+                                            value={option}
+                                        >
+                                            <Checkbox
+                                                checked={products.includes(
+                                                    option
+                                                )}
+                                            />
+                                            <ListItemText
+                                                primary={option}
+                                            />
+                                        </MenuItem>
+                                    )
+                                )}
                             </Select>
                         </FormControl>
                     </Box>
@@ -591,10 +576,18 @@ export default function Output() {
 
                                     setStartDate(value);
                                 }}
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths.map((month) => (
                                     <MenuItem key={month} value={month}>
-                                        {dayjs(month).format("MMM YYYY")}
+                                        {dayjs(month).format("MMM YY")}
                                     </MenuItem>
                                 ))}
                             </Select>
@@ -615,6 +608,14 @@ export default function Output() {
 
                                     setEndDate(value);
                                 }}
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths
                                     .filter(
@@ -623,7 +624,7 @@ export default function Output() {
                                     )
                                     .map((month) => (
                                         <MenuItem key={month} value={month}>
-                                            {dayjs(month).format("MMM YYYY")}
+                                            {dayjs(month).format("MMM YY")}
                                         </MenuItem>
                                     ))}
                             </Select>
@@ -645,11 +646,66 @@ export default function Output() {
                     </Button>
                 </Box>
 
-                <OutputChart chartData={chartData} />
-                <OutputTable />
+                <Box
+                    sx={{
+                        mt: 3,
+                        p: 1,
+                        bgcolor: "#E2E8F0",
+                        borderRadius: "12px",
+                        // display: "inline-flex",
+                    }}
+                >
+                    <Tabs
+                        value={activeTab}
+                        onChange={(e, value) => setActiveTab(value)}
+                        TabIndicatorProps={{
+                            style: {
+                                display: "none",
+                            },
+                        }}
+                        sx={{
+                            minHeight: "40px",
 
-                {/* OUTPUT TABLE / CHART COMPONENT HERE */}
-                {/* <OutputTable outputData={outputData} /> */}
+                            "& .MuiTab-root": {
+                                textTransform: "none",
+                                fontWeight: 600,
+                                fontSize: "14px",
+                                minHeight: "40px",
+                                borderRadius: "10px",
+                                color: "#475569",
+                                transition: "all 0.2s ease",
+                                px: 3,
+                            },
+
+                            "& .Mui-selected": {
+                                backgroundColor: "#FFFFFF",
+                                color: "#2563EB",
+                                boxShadow:
+                                    "0 1px 3px rgba(0,0,0,0.08)",
+                            },
+                        }}
+                    >
+                        <Tab
+                            label="Demand Summary by Indication"
+                            value="indication"
+                        />
+
+                        <Tab
+                            label="Demand Summary by LOT"
+                            value="lot"
+                        />
+                    </Tabs>
+                </Box>
+                {/* 
+                <OutputChart chartData={chartData} />
+                <OutputTable outputData={outputData} /> */}
+                <OutputChart
+                    chartData={currentView?.chart}
+                />
+
+                <OutputTable
+                    tableData={currentView?.table}
+                />
             </Paper >
         </Box >
     );
