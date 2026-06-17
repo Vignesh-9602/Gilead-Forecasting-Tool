@@ -202,6 +202,19 @@ export const editNetRevenue = (payload) => {
   );
 };
 
+export const getOutputFilters = (taName) => {
+  return httpClient.get(
+    `/api/Output_screen/new-screen/filters/${taName}`
+  );
+};
+
+export const applyOutputFilters = (payload) => {
+  return httpClient.post(
+    "/api/Output_screen/demand-output/apply",
+    payload
+  );
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

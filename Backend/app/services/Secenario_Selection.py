@@ -752,4 +752,3 @@ def clear_scenario_selections(payload):
         cursor.close()
         conn.close()
 
- 

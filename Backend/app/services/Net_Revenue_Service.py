@@ -612,7 +612,72 @@ def get_revenue_service(payload):
             net_revenue = (
                 final_demand + inventory
             ) * net_price
-
+            cursor.execute("""
+                INSERT INTO raw.revenue_outputs (
+                    ta_name,
+                    scenario_name,
+                    brand,
+                    month_date,
+                    forecasted_demand,
+                    adjustment,
+                    actual_demand,
+                    derived_factor,
+                    final_factor,
+                    final_demand,
+                    inventory_vials,
+                    wac_price_usd,
+                    price_increase,
+                    gtn,
+                    net_price,
+                    net_demand_revenue,
+                    net_revenue
+                )
+                VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (
+                    ta_name,
+                    scenario_name,
+                    brand,
+                    month_date
+                )
+                DO UPDATE SET
+                    forecasted_demand = EXCLUDED.forecasted_demand,
+                    adjustment = EXCLUDED.adjustment,
+                    actual_demand = EXCLUDED.actual_demand,
+                    derived_factor = EXCLUDED.derived_factor,
+                    final_factor = EXCLUDED.final_factor,
+                    final_demand = EXCLUDED.final_demand,
+                    inventory_vials = EXCLUDED.inventory_vials,
+                    wac_price_usd = EXCLUDED.wac_price_usd,
+                    price_increase = EXCLUDED.price_increase,
+                    gtn = EXCLUDED.gtn,
+                    net_price = EXCLUDED.net_price,
+                    net_demand_revenue = EXCLUDED.net_demand_revenue,
+                    net_revenue = EXCLUDED.net_revenue,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                ta_name,
+                display_scenario_name,
+                product,
+                month_str,
+                forecasted_demand,
+                adjustment,
+                actual_demand,
+                derived_factor,
+                final_factor,
+                final_demand,
+                inventory,
+                wac_price,
+                price_increase,
+                gtn,
+                net_price,
+                net_demand_revenue,
+                net_revenue
+            ))
             forecasted_demand_values.append(round(forecasted_demand))
             adjustment_values.append(round(adjustment))
             actual_demand_values.append(round(actual_demand))

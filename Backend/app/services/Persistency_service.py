@@ -489,7 +489,7 @@ def validate_date_range(start_date, end_date):
             status_code=400,
             detail="Start date cannot be greater than end date."
         )
-
+    
 def get_actual_scenario_for_finalised_lot(
     cursor,
     ta_name: str,
@@ -569,7 +569,7 @@ def apply_persistency_service(payload):
                 brand=brand
             )
 
-
+           
             if not scenario_data:
                 raise ValueError(
                     f"No data found for scenario {display_scenario_name}, indication {indication}, lot {lot}"
@@ -763,7 +763,7 @@ def apply_persistency_service(payload):
                 json.dumps(continuing_patients),
                 json.dumps(total_patients)
             ))
-
+            
             response_table.append({
                 "lot": lot,
                 "source": scenario_data["source"],
@@ -783,16 +783,18 @@ def apply_persistency_service(payload):
                 ]
             })
 
-
+        
         ############ avg_vials_per_dose helper fucnction ###############
         avg_vials_table = build_avg_vials_per_dose_table(
-        cursor=cursor,
-        ta_name=ta_name,
-        indication=indication,
-        brand=brand,
-        lots=lots,
-        months=response_months or [],
-        use_assumptions=False
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            lots=lots,
+            months=response_months or [],
+            use_assumptions=True,
+            scenario_name=db_scenario_name,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
 
@@ -807,7 +809,7 @@ def apply_persistency_service(payload):
         persistency_table=response_table,
         avg_vials_per_dose_table=avg_vials_table
         )
-
+        
 
         ############ save avg vials + compliance into raw.vials_assumptions ###############
 
@@ -975,7 +977,7 @@ def apply_persistency_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
-
+        
         save_user_filter(
             cur=cursor,
             user_id="system",
@@ -1766,7 +1768,7 @@ def apply_persistency_curve_service(
             indication=indication,
             brand=brand,
             lots=lots,
-            months=response_months or [],
+            months=response_months or []
             # lot_actual_scenario_map=lot_actual_scenario_map
         )
 
