@@ -800,14 +800,17 @@ def apply_persistency_service(payload):
 
         ############ ex factory demand helper fucnction ###############    
         demand_vials_table = build_demand_vials_table(
-        cursor=cursor,
-        ta_name=ta_name,
-        indication=indication,
-        brand=brand,
-        lots=lots,
-        months=response_months or [],
-        persistency_table=response_table,
-        avg_vials_per_dose_table=avg_vials_table
+            cursor=cursor,
+            ta_name=ta_name,
+            indication=indication,
+            brand=brand,
+            lots=lots,
+            months=response_months,
+            persistency_table=response_table,
+            avg_vials_per_dose_table=avg_vials_table,
+            use_assumptions=True,
+            scenario_name=db_scenario_name,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
         
 
@@ -967,6 +970,7 @@ def apply_persistency_service(payload):
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         save_ex_factory_output(
             cursor=cursor,
             ta_name=ta_name,
@@ -1395,6 +1399,162 @@ def delete_persistency_curve_service(
         conn.close()
 
 
+def fetch_curve_values_map(cursor, ta_name, curve_names):
+    cursor.execute("""
+        SELECT
+            curve_name,
+            curve_values
+        FROM raw.persistency_curve_master
+        WHERE ta_name = %s
+          AND curve_name = ANY(%s)
+    """, (
+        ta_name,
+        curve_names
+    ))
+
+    rows = cursor.fetchall()
+
+    curve_values_map = {}
+
+    for curve_name, curve_values in rows:
+        values = curve_values.get("values", [])
+
+        if not values:
+            raise ValueError(
+                f"No persistency values found for curve '{curve_name}'"
+            )
+
+        curve_values_map[curve_name] = {
+            idx + 1: float(value)
+            for idx, value in enumerate(values)
+        }
+
+    missing_curves = set(curve_names) - set(curve_values_map.keys())
+
+    if missing_curves:
+        raise ValueError(
+            f"Persistency curve(s) not found: {', '.join(missing_curves)}"
+        )
+
+    return curve_values_map
+
+
+def build_month_curve_map(filtered_months, lot_curve):
+    """
+    Builds month-wise curve assignment for one LOT.
+
+    Example:
+    Jan-25 to Oct-25 -> Linear Curve
+    Nov-25 to Jun-26 -> S Curve
+
+    If same month gets two curves, API fails.
+    If any selected month has no curve, API fails.
+    """
+
+    month_curve_map = {}
+
+    if not lot_curve.curves:
+        raise ValueError(
+            f"No curves provided for lot {lot_curve.lot}"
+        )
+
+    for curve_config in lot_curve.curves:
+        curve_name = curve_config.curve_name
+
+        curve_start_date = normalize_to_month_start(
+            curve_config.start_date
+        )
+        curve_end_date = normalize_to_month_start(
+            curve_config.end_date
+        )
+
+        if curve_start_date > curve_end_date:
+            raise ValueError(
+                f"Invalid curve period for lot {lot_curve.lot}, curve {curve_name}. "
+                f"start_date cannot be greater than end_date."
+            )
+
+        for month in filtered_months:
+            if curve_start_date <= month <= curve_end_date:
+
+                if month in month_curve_map:
+                    raise ValueError(
+                        f"Overlapping curve dates found for lot {lot_curve.lot}. "
+                        f"Month {month} is assigned to both "
+                        f"'{month_curve_map[month]}' and '{curve_name}'."
+                    )
+
+                month_curve_map[month] = curve_name
+
+    missing_months = [
+        month
+        for month in filtered_months
+        if month not in month_curve_map
+    ]
+
+    if missing_months:
+        raise ValueError(
+            f"Curve not assigned for lot {lot_curve.lot} for months: "
+            + ", ".join(missing_months)
+        )
+
+    return month_curve_map
+
+
+def calculate_persistency_with_curve_periods(
+    new_patients,
+    filtered_months,
+    month_curve_map,
+    curve_values_map
+):
+    """
+    Excel logic:
+    - Cohort gets curve based on cohort entry month.
+    - Cohort continues with same curve M1-M24.
+    """
+
+    continuing_patients = []
+
+    for current_month_idx in range(len(new_patients)):
+
+        continuing = 0.0
+
+        for cohort_idx in range(current_month_idx):
+
+            cohort_month = filtered_months[cohort_idx]
+            cohort_curve_name = month_curve_map[cohort_month]
+
+            persistency_map = curve_values_map[cohort_curve_name]
+
+            persist_month = current_month_idx - cohort_idx
+
+            persist_percent = persistency_map.get(
+                persist_month,
+                0
+            )
+
+            cohort_new_patients = new_patients[cohort_idx]
+
+            continuing += (
+                cohort_new_patients
+                * persist_percent
+                / 100.0
+            )
+
+        continuing_patients.append(
+            round(continuing)
+        )
+
+    total_patients = [
+        round(new_val + cont_val)
+        for new_val, cont_val in zip(
+            new_patients,
+            continuing_patients
+        )
+    ]
+
+    return continuing_patients, total_patients
+
 def apply_persistency_curve_service(
     payload: PersistencyApplyCurveRequest
 ):
@@ -1408,8 +1568,6 @@ def apply_persistency_curve_service(
         display_scenario_name = payload.scenario_name.strip()
         db_scenario_name = clean_scenario_name(display_scenario_name)
         is_finalised_view = db_scenario_name.strip().upper() == "FINALISED"
-
-
 
         indication = payload.indication
         brand = payload.brand
@@ -1425,6 +1583,9 @@ def apply_persistency_curve_service(
         lot_actual_scenario_map = {}
         all_lots = payload.lots or []
 
+        # -------------------------------------------------
+        # Finalised scenario mapping per LOT
+        # -------------------------------------------------
         for lot in all_lots:
             actual_scenario_name = (
                 get_actual_scenario_for_finalised_lot(
@@ -1440,14 +1601,17 @@ def apply_persistency_curve_service(
 
             lot_actual_scenario_map[lot] = actual_scenario_name
 
+        # -------------------------------------------------
+        # Apply persistency curve per LOT
+        # -------------------------------------------------
         for lot_curve in payload.lot_curve_mapping:
 
             lot = lot_curve.lot
-            curve_name = lot_curve.curve_name
+
             actual_scenario_name = lot_actual_scenario_map.get(
-                    lot,
-                    db_scenario_name
-                )
+                lot,
+                db_scenario_name
+            )
 
             scenario_data = fetch_scenario_data(
                 cursor=cursor,
@@ -1547,87 +1711,38 @@ def apply_persistency_curve_service(
                 ]
             ]
 
-            cursor.execute("""
-                SELECT
-                    curve_values
-                FROM raw.persistency_curve_master
-                WHERE ta_name = %s
-                  AND curve_name = %s
-                LIMIT 1
-            """, (
-                ta_name,
-                curve_name
-            ))
-
-            curve_row = cursor.fetchone()
-
-            if not curve_row:
-                raise ValueError(
-                    f"Persistency curve '{curve_name}' not found"
-                )
-
-            curve_values = curve_row[0]
-
-            persistency_values = curve_values.get(
-                "values",
-                []
+            # -------------------------------------------------
+            # Build month-wise curve map
+            # Example:
+            # Jan-25 -> Linear Curve
+            # Feb-25 -> Linear Curve
+            # Nov-25 -> S Curve
+            # -------------------------------------------------
+            month_curve_map = build_month_curve_map(
+                filtered_months=filtered_months,
+                lot_curve=lot_curve
             )
 
-            if not persistency_values:
-                raise ValueError(
-                    f"No persistency values found for curve '{curve_name}'"
-                )
+            curve_names = list(
+                set(month_curve_map.values())
+            )
 
-            persistency_map = {
-                idx + 1: float(value)
-                for idx, value in enumerate(
-                    persistency_values
-                )
-            }
+            curve_values_map = fetch_curve_values_map(
+                cursor=cursor,
+                ta_name=ta_name,
+                curve_names=curve_names
+            )
 
-            continuing_patients = []
+            continuing_patients, total_patients = calculate_persistency_with_curve_periods(
+                new_patients=new_patients,
+                filtered_months=filtered_months,
+                month_curve_map=month_curve_map,
+                curve_values_map=curve_values_map
+            )
 
-            for current_month_idx in range(
-                len(new_patients)
-            ):
-
-                continuing = 0.0
-
-                for cohort_idx in range(
-                    current_month_idx
-                ):
-
-                    persist_month = max(
-                        1,
-                        current_month_idx - cohort_idx
-                    )
-
-                    persist_percent = persistency_map.get(
-                        persist_month,
-                        0
-                    )
-
-                    cohort_new_patients = new_patients[
-                        cohort_idx
-                    ]
-
-                    continuing += (
-                        cohort_new_patients
-                        * persist_percent
-                        / 100.0
-                    )
-
-                continuing_patients.append(
-                    round(continuing)
-                )
-
-            total_patients = [
-                round(new_val + cont_val)
-                for new_val, cont_val in zip(
-                    new_patients,
-                    continuing_patients
-                )
-            ]
+            curve_name_for_output = ", ".join(
+                sorted(curve_names)
+            )
 
             cursor.execute("""
                 INSERT INTO raw.persistency_outputs (
@@ -1670,14 +1785,16 @@ def apply_persistency_curve_service(
                 indication,
                 brand,
                 lot,
-                curve_name,
+                curve_name_for_output,
                 json.dumps(filtered_months),
                 json.dumps(new_patients),
                 json.dumps(continuing_patients),
                 json.dumps(total_patients)
             ))
 
-
+        # -------------------------------------------------
+        # Build response
+        # -------------------------------------------------
         response_lots = payload.lots
 
         output_rows = []
@@ -1698,10 +1815,10 @@ def apply_persistency_curve_service(
                     total_patients
                 FROM raw.persistency_outputs
                 WHERE ta_name = %s
-                AND scenario_name = %s
-                AND indication = %s
-                AND brand = %s
-                AND lot = %s
+                  AND scenario_name = %s
+                  AND indication = %s
+                  AND brand = %s
+                  AND lot = %s
                 LIMIT 1
             """, (
                 ta_name,
@@ -1715,6 +1832,7 @@ def apply_persistency_curve_service(
 
             if row:
                 output_rows.append(row)
+
         response_table = []
         response_months = None
 
@@ -1764,12 +1882,13 @@ def apply_persistency_curve_service(
         avg_vials_table = build_avg_vials_per_dose_table(
             cursor=cursor,
             ta_name=ta_name,
-            scenario_name=db_scenario_name,
             indication=indication,
             brand=brand,
             lots=lots,
-            months=response_months or []
-            # lot_actual_scenario_map=lot_actual_scenario_map
+            months=response_months or [],
+            use_assumptions=True,
+            scenario_name=db_scenario_name,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         demand_vials_table = build_demand_vials_table(
@@ -1778,20 +1897,23 @@ def apply_persistency_curve_service(
             indication=indication,
             brand=brand,
             lots=lots,
-            months=response_months or [],
+            months=response_months,
             persistency_table=response_table,
-            avg_vials_per_dose_table=avg_vials_table
+            avg_vials_per_dose_table=avg_vials_table,
+            use_assumptions=True,
+            scenario_name=db_scenario_name,
+            lot_actual_scenario_map=lot_actual_scenario_map
         )
 
         save_ex_factory_output(
-        cursor=cursor,
-        ta_name=ta_name,
-        scenario_name=display_scenario_name,
-        indication=indication,
-        brand=brand,
-        months=response_months or [],
-        demand_vials_table=demand_vials_table,
-        stock_percentage=1
+            cursor=cursor,
+            ta_name=ta_name,
+            scenario_name=display_scenario_name,
+            indication=indication,
+            brand=brand,
+            months=response_months or [],
+            demand_vials_table=demand_vials_table,
+            stock_percentage=1
         )
 
         inventory_table = build_inventory_table(
@@ -1799,6 +1921,7 @@ def apply_persistency_curve_service(
             demand_vials_table=demand_vials_table,
             stock_percentage=1
         )
+
         conn.commit()
 
         return {

@@ -1,4 +1,4 @@
-import React, { useContext, useState } from "react";
+import React, { useContext, useState, useEffect } from "react";
 
 import {
     Box,
@@ -16,6 +16,8 @@ import {
 import { GlobalContext } from "../../../context/Provider";
 import MCSChart from "./MCSChart";
 import MCSInputParametersDialog from "./MCSInputParameter";
+import { getMonteCarloFilters, runMonteCarloSimulation } from "../../../services/apiService";
+import { useSnackbarStore, useLoadingStore, } from "../../../stores";
 
 export default function MonteCarloSimulation() {
 
@@ -23,87 +25,13 @@ export default function MonteCarloSimulation() {
 
     const therapyArea = favState?.selectedTherapyArea;
 
-    const [products, setProducts] = useState([]);
+    const [products, setProducts] = useState("");
 
     const [simulationIterations, setSimulationIterations] = useState("100");
 
     const [confidenceInterval, setConfidenceInterval] = useState("");
 
-    const [simulationResult, setSimulationResult] = useState({
-        histogram: [
-            {
-                range: "112.6M-115.7M",
-                count: 4,
-            },
-            {
-                range: "115.7M-118.8M",
-                count: 12,
-            },
-            {
-                range: "118.8M-121.9M",
-                count: 27,
-            },
-            {
-                range: "121.9M-125.0M",
-                count: 58,
-            },
-            {
-                range: "125.0M-128.1M",
-                count: 96,
-            },
-            {
-                range: "128.1M-131.2M",
-                count: 142,
-            },
-            {
-                range: "131.2M-134.3M",
-                count: 186,
-            },
-            {
-                range: "134.3M-137.4M",
-                count: 173,
-            },
-            {
-                range: "137.4M-140.5M",
-                count: 121,
-            },
-            {
-                range: "140.5M-143.6M",
-                count: 72,
-            },
-            {
-                range: "143.6M-146.7M",
-                count: 44,
-            },
-            {
-                range: "146.7M-149.8M",
-                count: 23,
-            },
-            {
-                range: "149.8M-152.9M",
-                count: 8,
-            },
-        ],
-
-        summary: {
-            number_of_simulations: 1000,
-            mean_revenue: 134571999,
-            median_revenue: 134717174,
-            std_dev_revenue: 7454883,
-            min_revenue: 112563720,
-            max_revenue: 159422903,
-            percentile_5: 122406758,
-            percentile_25: 129354026,
-            percentile_75: 139681491,
-            percentile_95: 146894460,
-        },
-
-        input_parameters: {
-            demand_volatility: 0.15,
-            compliance_mean: 0.85,
-            compliance_volatility: 0.05,
-        },
-    });
+    const [simulationResult, setSimulationResult] = useState(null);
 
     const [inputParameterOpen, setInputParameterOpen] =
         useState(false);
@@ -120,52 +48,23 @@ export default function MonteCarloSimulation() {
             pricing_volatility: 0.0,
         });
 
-    // Replace with API response
-    const filterOptions = {
-        brands: [
-            "Taxanes",
-            "Taxanes+",
-            "TPC",
-            "TPC+",
-            "Trodelvy",
-            "Trodelvy Combo",
-        ],
+    const [filterOptions, setFilterOptions] =
+        useState({
+            brands: [],
+            confidence_interval_options: [],
+        });
 
-        confidence_intervals: [
-            "Standard (90%)",
-            "High (95%)",
-            "Very High (99%)",
-        ],
-    };
+    const { showSnackbar } =
+        useSnackbarStore();
 
-    // const [filterOptions, setFilterOptions] = useState({
-    //     brands: [],
-    //     confidence_intervals: [],
-    // });
-
-    // useEffect(() => {
-    //     fetchMonteCarloFilters();
-    // }, [therapyArea]);
-
-    // const fetchMonteCarloFilters = async () => {
-    //     try {
-    //         const response =
-    //             await getMonteCarloFilters(
-    //                 therapyArea
-    //             );
-
-    //         setFilterOptions(
-    //             response?.data || {}
-    //         );
-    //     } catch (error) {
-    //         console.error(error);
-    //     }
-    // };
+    const { setLoading } =
+        useLoadingStore();
 
     const brandOptions = filterOptions?.brands || [];
 
     const confidenceOptions =
-        filterOptions?.confidence_intervals || [];
+        filterOptions?.confidence_interval_options ||
+        [];
 
     const inputStyle = {
         bgcolor: "#fcfcfd",
@@ -186,63 +85,227 @@ export default function MonteCarloSimulation() {
         color: "#64748b",
     };
 
-    const handleApplyFilter = async () => {
-        const payload = {
-            ta_name: therapyArea,
-            brands: products,
-            simulation_iterations: Number(simulationIterations),
-            confidence_interval: confidenceInterval,
+    const formatNumber = (value) =>
+        Number(value).toLocaleString(
+            "en-US",
+            {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            }
+        );
+
+    useEffect(() => {
+        if (therapyArea) {
+            fetchMonteCarloFilters();
+        }
+    }, [therapyArea]);
+
+    const fetchMonteCarloFilters =
+        async () => {
+            try {
+                setLoading(true);
+
+                const response =
+                    await getMonteCarloFilters(
+                        therapyArea
+                    );
+
+                const resData =
+                    response?.data;
+
+                setFilterOptions(
+                    resData || {
+                        brands: [],
+                        confidence_interval_options:
+                            [],
+                    }
+                );
+
+                const defaultFilter =
+                    resData?.selected_filter;
+
+                if (defaultFilter) {
+
+                    setProducts(
+                        defaultFilter.brand || ""
+                    );
+
+                    setConfidenceInterval(
+                        defaultFilter.confidence_interval ||
+                        ""
+                    );
+
+                    setSimulationIterations(
+                        String(
+                            defaultFilter.n_iterations ||
+                            100
+                        )
+                    );
+
+                    // Auto Run Projection Engine
+
+                    await runSimulation(
+                        null,
+                        {
+                            ta_name:
+                                therapyArea,
+
+                            brand:
+                                defaultFilter.brand,
+
+                            n_iterations:
+                                defaultFilter.n_iterations,
+
+                            confidence_interval:
+                                defaultFilter.confidence_interval,
+                        }
+                    );
+                }
+            } catch (error) {
+                console.error(
+                    "Failed to fetch Monte Carlo filters",
+                    error
+                );
+
+                showSnackbar(
+                    "Failed to fetch Monte Carlo filters",
+                    "error"
+                );
+            } finally {
+                setLoading(false);
+            }
         };
 
-        try {
-            // const response = await runMonteCarloSimulation(payload);
+    const runSimulation = async (
+        overrideParams = null,
+        customFilters = null
+    ) => {
+        const payload =
+            customFilters || {
+                ta_name: therapyArea,
+                brand: products,
+                n_iterations: Number(
+                    simulationIterations
+                ),
+                confidence_interval:
+                    confidenceInterval,
 
-            // mock response for now
-            const response = {
-                data: {
-                    histogram: [
-                        {
-                            range: "112.6M-115.7M",
-                            count: 4,
-                        },
-                        {
-                            range: "115.7M-118.8M",
-                            count: 12,
-                        },
-                        {
-                            range: "118.8M-121.9M",
-                            count: 27,
-                        },
-                    ],
-                    summary: {
-                        number_of_simulations: 1000,
-                        mean_revenue: 134571999,
-                        median_revenue: 134717174,
-                        std_dev_revenue: 7454883,
-                        min_revenue: 112563720,
-                        max_revenue: 159422903,
-                        percentile_5: 122406758,
-                        percentile_25: 129354026,
-                        percentile_75: 139681491,
-                        percentile_95: 146894460,
-                    },
-                    input_parameters: {
-                        demand_volatility: 0.15,
-                        compliance_mean: 0.85,
-                        compliance_volatility: 0.05,
-                    },
-                },
+                ...(overrideParams || {}),
             };
 
-            setSimulationResult(response.data);
+        try {
+            setLoading(true);
+
+            const response =
+                await runMonteCarloSimulation(
+                    payload
+                );
+
+            const result =
+                response?.data;
+
+            setSimulationResult(result);
+
+            if (
+                result?.input_parameters
+            ) {
+                setInputParameters({
+                    demand_mean: formatNumber(
+                        result.input_parameters
+                            .demand_base_mean
+                    ),
+
+                    demand_volatility:
+                        formatNumber(
+                            result.input_parameters
+                                .demand_volatility
+                        ),
+
+                    compliance_mean:
+                        formatNumber(
+                            result.input_parameters
+                                .compliance_mean
+                        ),
+
+                    compliance_volatility:
+                        formatNumber(
+                            result.input_parameters
+                                .compliance_volatility
+                        ),
+
+                    pricing_mean:
+                        formatNumber(
+                            result.input_parameters
+                                .price_per_vial
+                        ),
+
+                    pricing_volatility:
+                        formatNumber(
+                            result.input_parameters
+                                .pricing_std
+                        ),
+                });
+            }
         } catch (error) {
             console.error(error);
+
+            showSnackbar(
+                "Failed to run Monte Carlo simulation",
+                "error"
+            );
+        } finally {
+            setLoading(false);
         }
     };
 
+    const handleApplyFilter =
+        async () => {
+            await runSimulation();
+        };
+
+    const handleReRun =
+        async () => {
+            const payload = {
+                demand_params: {
+                    base_mean: Number(
+                        inputParameters.demand_mean
+                    ),
+                    std_pct: Number(
+                        inputParameters.demand_volatility
+                    ),
+                },
+
+                compliance_params: {
+                    mean: Number(
+                        inputParameters.compliance_mean
+                    ),
+                    std: Number(
+                        inputParameters.compliance_volatility
+                    ),
+                },
+
+                pricing_params: {
+                    price_per_vial: Number(
+                        inputParameters.pricing_mean
+                    ),
+                    std: Number(
+                        inputParameters.pricing_volatility
+                    ),
+                },
+            };
+
+            await runSimulation(
+                payload
+            );
+
+            setInputParameterOpen(
+                false
+            );
+        };
+
     const isApplyEnabled =
         !!therapyArea &&
-        products.length > 0 &&
+        !!products &&
         !!simulationIterations &&
         !!confidenceInterval;
 
@@ -317,82 +380,22 @@ export default function MonteCarloSimulation() {
 
                             <FormControl sx={{ ...inputStyle, maxWidth: 220 }}>
                                 <Select
-                                    multiple
                                     value={products}
-                                    onChange={(e) => {
-
-                                        const value =
-                                            e.target.value;
-
-                                        if (
-                                            value.includes(
-                                                "SELECT_ALL"
-                                            )
-                                        ) {
-                                            if (
-                                                products.length ===
-                                                brandOptions.length
-                                            ) {
-                                                setProducts([]);
-                                            } else {
-                                                setProducts(
-                                                    brandOptions
-                                                );
-                                            }
-                                        } else {
-                                            setProducts(value);
-                                        }
-                                    }}
+                                    onChange={(e) => setProducts(e.target.value)}
                                     displayEmpty
-                                    renderValue={(selected) =>
-                                        selected.length === 0
-                                            ? "Select Products"
-                                            : selected.join(
-                                                ", "
-                                            )
-                                    }
                                 >
-                                    <MenuItem value="SELECT_ALL">
-                                        <Checkbox
-                                            checked={
-                                                products.length ===
-                                                brandOptions.length &&
-                                                brandOptions.length >
-                                                0
-                                            }
-                                            indeterminate={
-                                                products.length >
-                                                0 &&
-                                                products.length <
-                                                brandOptions.length
-                                            }
-                                        />
-
-                                        <ListItemText
-                                            primary="Select All"
-                                        />
+                                    <MenuItem value="" disabled>
+                                        Select Product
                                     </MenuItem>
 
-                                    {brandOptions.map(
-                                        (item) => (
-                                            <MenuItem
-                                                key={item}
-                                                value={item}
-                                            >
-                                                <Checkbox
-                                                    checked={products.includes(
-                                                        item
-                                                    )}
-                                                />
-
-                                                <ListItemText
-                                                    primary={
-                                                        item
-                                                    }
-                                                />
-                                            </MenuItem>
-                                        )
-                                    )}
+                                    {brandOptions.map((item) => (
+                                        <MenuItem
+                                            key={item}
+                                            value={item}
+                                        >
+                                            {item}
+                                        </MenuItem>
+                                    ))}
                                 </Select>
                             </FormControl>
                         </Box>
@@ -454,16 +457,14 @@ export default function MonteCarloSimulation() {
                                         Select Interval
                                     </MenuItem>
 
-                                    {confidenceOptions.map(
-                                        (item) => (
-                                            <MenuItem
-                                                key={item}
-                                                value={item}
-                                            >
-                                                {item}
-                                            </MenuItem>
-                                        )
-                                    )}
+                                    {confidenceOptions.map((item) => (
+                                        <MenuItem
+                                            key={item.value}
+                                            value={item.value}
+                                        >
+                                            {item.label}
+                                        </MenuItem>
+                                    ))}
                                 </Select>
                             </FormControl>
                         </Box>
@@ -471,9 +472,9 @@ export default function MonteCarloSimulation() {
                         {/* APPLY FILTER */}
                         <Button
                             variant="contained"
-                            // onClick={
-                            //     handleApplyFilter
-                            // }
+                            onClick={
+                                handleApplyFilter
+                            }
                             // disabled={!isApplyEnabled}
                             sx={{
                                 height: "40px",
@@ -518,7 +519,10 @@ export default function MonteCarloSimulation() {
                     data={simulationResult}
                 />
             )} */}
+            {/* {simulationResult && ( */}
             <MCSChart data={simulationResult} />
+            {/* )} */}
+
             <MCSInputParametersDialog
                 open={inputParameterOpen}
                 onClose={() =>
@@ -526,6 +530,9 @@ export default function MonteCarloSimulation() {
                 }
                 inputParameters={inputParameters}
                 setInputParameters={setInputParameters}
+                onApplyReRun={
+                    handleReRun
+                }
             />
         </Box>
     );

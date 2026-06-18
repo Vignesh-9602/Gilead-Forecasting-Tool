@@ -215,6 +215,19 @@ export const applyOutputFilters = (payload) => {
   );
 };
 
+export const getMonteCarloFilters = (taName) => {
+  return httpClient.get(
+    `/api/monte-carlo/filters/${taName}`
+  );
+};
+
+export const runMonteCarloSimulation = (payload) => {
+  return httpClient.post(
+    "/api/monte-carlo/run",
+    payload
+  );
+};
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

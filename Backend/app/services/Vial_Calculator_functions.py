@@ -82,14 +82,6 @@ def build_avg_vials_per_dose_table(
                 value = float(avg_vials)
                 value = int(value) if value.is_integer() else value
                 assumption_map[month_key] = value
-        print("========== AVG FUNCTION DEBUG ==========")
-        print("lot:", lot)
-        print("actual_scenario_name:", actual_scenario_name)
-        print("use_assumptions:", use_assumptions)
-        print("months requested:", months)
-        print("assumption_map:", assumption_map)
-        print("fact_map:", fact_map)
-        print("========================================")
         # -----------------------------
         # 3. FINAL VALUES
         # assumption first, else fact
@@ -152,6 +144,7 @@ def build_demand_vials_table(
             if lot_actual_scenario_map
             else scenario_name
         )
+
         lot_persistency = next(
             (item for item in persistency_table if item["lot"] == lot),
             None
@@ -182,7 +175,61 @@ def build_demand_vials_table(
 
         avg_vials = lot_avg_vials["children"][0]["values"]
 
-        if use_assumptions:
+        # -----------------------------
+        # FACT DATA - inside lot loop
+        # -----------------------------
+        cursor.execute("""
+            SELECT
+                year,
+                month,
+                compliance
+            FROM raw.fact_vials_compliance
+            WHERE ta = %s
+              AND indication = %s
+              AND lot = %s
+              AND brand = %s
+            ORDER BY year, month
+        """, (
+            ta_name,
+            indication,
+            lot,
+            brand
+        ))
+
+        fact_rows = cursor.fetchall()
+
+        if not fact_rows:
+            raise ValueError(
+                f"No compliance fact data found for lot {lot}, brand {brand}"
+            )
+
+        fact_compliance_map = {}
+        latest_fact_compliance = None
+
+        for year, month, compliance in fact_rows:
+            month_key = f"{int(year)}-{int(month):02d}-01"
+
+            compliance_value = float(
+                compliance if compliance is not None else 100
+            )
+
+            compliance_value = (
+                int(compliance_value)
+                if compliance_value.is_integer()
+                else compliance_value
+            )
+
+            fact_compliance_map[month_key] = compliance_value
+            latest_fact_compliance = compliance_value
+
+        # -----------------------------
+        # ASSUMPTION DATA
+        # -----------------------------
+        assumption_compliance_map = {}
+        absolute_adjustment_map = {}
+        adjustment_percent_map = {}
+
+        if use_assumptions and actual_scenario_name:
             cursor.execute("""
                 SELECT
                     year,
@@ -192,99 +239,82 @@ def build_demand_vials_table(
                     adjustment_percent
                 FROM raw.vials_assumptions
                 WHERE ta_name = %s
-                  AND indication = %s
                   AND scenario_name = %s
+                  AND indication = %s
                   AND brand = %s
                   AND lot = %s
                 ORDER BY year, month
             """, (
                 ta_name,
-                indication,
                 actual_scenario_name,
+                indication,
                 brand,
                 lot
             ))
-        else:
-            cursor.execute("""
-                SELECT
-                    year,
-                    month,
-                    compliance,
-                    0 AS absolute_adjustment,
-                    0 AS adjustment_percent
-                FROM raw.fact_vials_compliance
-                WHERE ta = %s
-                  AND indication = %s
-                  AND lot = %s
-                  AND brand = %s
-                ORDER BY year, month
-            """, (
-                ta_name,
-                indication,
-                lot,
-                brand
-            ))
 
-        rows = cursor.fetchall()
+            for year, month, compliance, absolute_adjustment, adjustment_percent in cursor.fetchall():
+                month_key = f"{int(year)}-{int(month):02d}-01"
 
-        if not rows:
-            raise ValueError(
-                f"No compliance data found for lot {lot}, brand {brand}"
-            )
+                if compliance is not None:
+                    compliance_value = float(compliance)
 
-        compliance_map = {}
-        absolute_adjustment_map = {}
-        adjustment_percent_map = {}
+                    compliance_value = (
+                        int(compliance_value)
+                        if compliance_value.is_integer()
+                        else compliance_value
+                    )
 
-        latest_compliance = None
+                    assumption_compliance_map[month_key] = compliance_value
 
-        for year, month, compliance, absolute_adjustment, adjustment_percent in rows:
-            month_key = f"{int(year)}-{int(month):02d}-01"
+                abs_value = float(absolute_adjustment or 0)
+                pct_value = float(adjustment_percent or 0)
 
-            compliance_value = float(
-                    compliance if compliance is not None else 100
+                abs_value = (
+                    int(abs_value)
+                    if abs_value.is_integer()
+                    else abs_value
                 )
-            absolute_value = float(absolute_adjustment)
-            percent_value = float(adjustment_percent)
 
-            if compliance_value.is_integer():
-                compliance_value = int(compliance_value)
+                pct_value = (
+                    int(pct_value)
+                    if pct_value.is_integer()
+                    else pct_value
+                )
 
-            if absolute_value.is_integer():
-                absolute_value = int(absolute_value)
+                absolute_adjustment_map[month_key] = abs_value
+                adjustment_percent_map[month_key] = pct_value
 
-            if percent_value.is_integer():
-                percent_value = int(percent_value)
-
-            compliance_map[month_key] = compliance_value
-            absolute_adjustment_map[month_key] = absolute_value
-            adjustment_percent_map[month_key] = percent_value
-
-            latest_compliance = compliance_value
-
+        # -----------------------------
+        # FINAL VALUES
+        # -----------------------------
         compliance_values = []
+        absolute_adjustment = []
+        adjustment_percent = []
 
         for month in months:
-            value = compliance_map.get(month)
+            compliance_value = assumption_compliance_map.get(
+                month,
+                fact_compliance_map.get(month, latest_fact_compliance)
+            )
 
-            if value is None:
-                value = latest_compliance if latest_compliance is not None else 90
+            if compliance_value is None:
+                compliance_value = 100
 
-            compliance_values.append(value)
+            compliance_values.append(compliance_value)
 
+            absolute_adjustment.append(
+                absolute_adjustment_map.get(month, 0)
+            )
+
+            adjustment_percent.append(
+                adjustment_percent_map.get(month, 0)
+            )
+
+        # IMPORTANT:
+        # These should be outside for month loop
         vials = [
             round(float(tp) * float(av))
             for tp, av in zip(total_patients, avg_vials)
-        ]
-
-        absolute_adjustment = [
-            absolute_adjustment_map.get(month, 0)
-            for month in months
-        ]
-
-        adjustment_percent = [
-            adjustment_percent_map.get(month, 0)
-            for month in months
         ]
 
         after_adjustment = []

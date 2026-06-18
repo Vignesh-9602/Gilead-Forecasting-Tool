@@ -15,14 +15,58 @@ import Plot from "react-plotly.js";
 const PlotComponent = Plot.default || Plot;
 
 const formatCurrency = (value) =>
-    `$${Number(value).toLocaleString()}`;
+    `$${Number(value).toLocaleString(
+        "en-US",
+        {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        }
+    )}`;
 
 export default function MCSChart({
     data,
 }) {
-    if (!data) return null;
+    if (!data) {
+        return (
+            <Paper
+                sx={{
+                    mt: 3,
+                    p: 8,
+                    borderRadius: "16px",
+                    border: "1px solid #D8DEE8",
+                    boxShadow: "none",
+                    textAlign: "center",
+                }}
+            >
+                {/* <Typography sx={{ fontSize: "48px", mb: 2 }}>
+                    📊
+                </Typography> */}
+
+                <Typography
+                    sx={{
+                        fontSize: "20px",
+                        fontWeight: 700,
+                        color: "#334155",
+                        mb: 1,
+                    }}
+                >
+                    No Chart Data Available
+                </Typography>
+
+                <Typography
+                    sx={{
+                        color: "#64748B",
+                    }}
+                >
+                    Run the Projection Engine to generate
+                    simulation results and summary metrics.
+                </Typography>
+            </Paper>
+        );
+    }
 
     const { histogram, summary } = data;
+    const peakBar = summary?.peak_bar;
 
     const ranges =
         histogram?.map(
@@ -152,7 +196,7 @@ export default function MCSChart({
                         height: 550,
 
                         margin: {
-                            l: 60,
+                            l: 80,
                             r: 20,
                             t: 20,
                             b: 120,
@@ -216,6 +260,121 @@ export default function MCSChart({
                     SIMULATION RESULTS
                     SUMMARY
                 </Box>
+
+                {peakBar && (
+                    <Box
+                        sx={{
+                            px: 2,
+                            pb: 2,
+                            borderBottom: "1px solid #E2E8F0",
+                        }}
+                    >
+                        {/* <Typography
+                            sx={{
+                                fontSize: "13px",
+                                fontWeight: 700,
+                                color: "#64748B",
+                                mb: 1,
+                                textTransform: "uppercase",
+                            }}
+                        >
+                            Peak Scenario
+                        </Typography>
+
+                        <Typography
+                            sx={{
+                                fontSize: "15px",
+                                fontWeight: 700,
+                                mb: 2,
+                            }}
+                        >
+                            {peakBar.revenue_range}
+                        </Typography> */}
+
+                        <Box
+                            sx={{
+                                display: "flex",
+                                justifyContent:
+                                    "space-between",
+                                mb: 1,
+                            }}
+                        >
+                            <Typography
+                                sx={{
+                                    fontSize: "14px",
+                                }}
+                            >
+                                Mean Demand
+                            </Typography>
+
+                            <Typography
+                                sx={{
+                                    fontWeight: 700,
+                                    color: "#4F46E5",
+                                }}
+                            >
+                                {Math.round(
+                                    peakBar.mean_demand
+                                ).toLocaleString()}
+                            </Typography>
+                        </Box>
+
+                        <Box
+                            sx={{
+                                display: "flex",
+                                justifyContent:
+                                    "space-between",
+                                mb: 1,
+                            }}
+                        >
+                            <Typography
+                                sx={{
+                                    fontSize: "14px",
+                                }}
+                            >
+                                Mean Compliance
+                            </Typography>
+
+                            <Typography
+                                sx={{
+                                    fontWeight: 700,
+                                    color: "#4F46E5",
+                                }}
+                            >
+                                {Number(
+                                    peakBar.mean_compliance
+                                ).toFixed(3)}
+                            </Typography>
+                        </Box>
+
+                        <Box
+                            sx={{
+                                display: "flex",
+                                justifyContent:
+                                    "space-between",
+                            }}
+                        >
+                            <Typography
+                                sx={{
+                                    fontSize: "14px",
+                                }}
+                            >
+                                Price Per Vial
+                            </Typography>
+
+                            <Typography
+                                sx={{
+                                    fontWeight: 700,
+                                    color: "#4F46E5",
+                                }}
+                            >
+                                {formatCurrency(
+                                    peakBar.price_per_vial
+                                )}
+                            </Typography>
+                        </Box>
+                    </Box>
+                )}
 
                 <Table>
                     <TableBody>

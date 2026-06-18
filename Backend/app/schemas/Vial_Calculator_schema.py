@@ -147,9 +147,15 @@ class DeletePersistencyCurveResponse(BaseModel):
     message: str
     curve_list: List[PersistencyCurveListItem]
 
+class PersistencyCurvePeriod(BaseModel):
+    curve_name: str
+    start_date: str
+    end_date: str
+
+
 class PersistencyApplyCurveMapping(BaseModel):
     lot: str
-    curve_name: str
+    curves: List[PersistencyCurvePeriod]
 
 
 class PersistencyApplyCurveRequest(BaseModel):

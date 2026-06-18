@@ -7,6 +7,7 @@ import EditValuesDialog from "./EditValuesDialog";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import Tooltip from "@mui/material/Tooltip";
 import { useLoadingStore } from "../../../stores";
+import ConfigureCurveDialog from "./ConfigureCurveDialog";
 
 export default function PersistencyTable({
     persistencyData,
@@ -42,6 +43,11 @@ export default function PersistencyTable({
 
     const [selectedCurves, setSelectedCurves] = useState({});
 
+    const [openCurveDialog, setOpenCurveDialog] = useState(false);
+
+    const [selectedLotForCurve, setSelectedLotForCurve] =
+        useState(null);
+
     const [selectedLots, setSelectedLots] = useState([]);
     const [selectedDemandLots, setSelectedDemandLots] = useState([]);
 
@@ -63,8 +69,11 @@ export default function PersistencyTable({
     const isDataLoaded = persistencyData?.months?.length > 0;
 
     const isApplyCurveEnabled =
-        selectedLots.some(
-            (lot) => selectedCurves[lot]
+        selectedLots.length > 0 &&
+        selectedLots.every(
+            (lot) =>
+                selectedCurves[lot] &&
+                selectedCurves[lot].length > 0
         );
 
     useEffect(() => {
@@ -547,11 +556,11 @@ export default function PersistencyTable({
                 selectedLots
                     .filter(
                         (lot) =>
-                            selectedCurves[lot]
+                            selectedCurves[lot]?.length
                     )
                     .map((lot) => ({
                         lot,
-                        curve_name:
+                        curves:
                             selectedCurves[lot],
                     }));
 
@@ -690,48 +699,27 @@ export default function PersistencyTable({
                                                     {persistencyData?.brand}{" "} - {row.lot}
                                                 </Typography>
 
-                                                <FormControl size="small">
-                                                    <Select
-                                                        value={
-                                                            selectedCurves[row.lot] ||
-                                                            row.curve_name ||
-                                                            ""
-                                                        }
-                                                        displayEmpty
-                                                        onChange={(e) => {
-                                                            setSelectedCurves((prev) => ({
-                                                                ...prev,
-                                                                [row.lot]: e.target.value,
-                                                            }));
-                                                        }}
-                                                        renderValue={(selected) => {
-                                                            if (!selected) {
-                                                                return "Linear";
-                                                            }
+                                                <Button
+                                                    variant="outlined"
+                                                    size="small"
+                                                    onClick={() => {
+                                                        setSelectedLotForCurve(
+                                                            row.lot
+                                                        );
 
-                                                            return selected;
-                                                        }}
-                                                        sx={{
-                                                            height: 32,
-                                                            minWidth: 140,
-                                                            borderRadius: "10px",
-                                                            backgroundColor: "#fff",
-                                                        }}
-                                                    >
-                                                        <MenuItem value="" disabled>
-                                                            Curves
-                                                        </MenuItem>
-
-                                                        {curveOptions.map((option) => (
-                                                            <MenuItem
-                                                                key={option.curve_name}
-                                                                value={option.curve_name}
-                                                            >
-                                                                {option.curve_name}
-                                                            </MenuItem>
-                                                        ))}
-                                                    </Select>
-                                                </FormControl>
+                                                        setOpenCurveDialog(true);
+                                                    }}
+                                                    sx={{
+                                                        height: 32,
+                                                        borderRadius: "8px",
+                                                        textTransform: "none",
+                                                        minWidth: "150px",
+                                                    }}
+                                                >
+                                                    {selectedCurves[row.lot]?.length
+                                                        ? `${selectedCurves[row.lot].length} Curves Configured`
+                                                        : "Configure Curve"}
+                                                </Button>
                                             </Box>
                                         </TableCell>
 
@@ -1731,6 +1719,20 @@ export default function PersistencyTable({
                 onApply={
                     handleEditValuesApply
                 }
+            />
+
+            <ConfigureCurveDialog
+                open={openCurveDialog}
+                onClose={() =>
+                    setOpenCurveDialog(false)
+                }
+                lot={selectedLotForCurve}
+                curveOptions={curveOptions}
+                months={
+                    persistencyData?.months || []
+                }
+                selectedCurves={selectedCurves}
+                setSelectedCurves={setSelectedCurves}
             />
         </Box >
     );
