@@ -38,6 +38,13 @@ class HistogramBin(BaseModel):
     count: int
 
 
+class PeakBarContributors(BaseModel):
+    revenue_range: str
+    mean_demand: float
+    mean_compliance: float
+    price_per_vial: float
+
+
 class SimulationSummary(BaseModel):
     number_of_simulations: int
     mean_revenue: float
@@ -49,6 +56,7 @@ class SimulationSummary(BaseModel):
     percentile_25: float
     percentile_75: float
     percentile_95: float
+    peak_bar: PeakBarContributors
 
 
 class InputParameters(BaseModel):
@@ -71,6 +79,13 @@ class ConfidenceIntervalOption(BaseModel):
     value: float
 
 
+class MonteCarloSelectedFilter(BaseModel):
+    brand: str
+    confidence_interval: float
+    n_iterations: int
+
+
 class MonteCarloFiltersResponse(BaseModel):
     brands: List[str]
     confidence_interval_options: List[ConfidenceIntervalOption]
+    selected_filter: MonteCarloSelectedFilter
