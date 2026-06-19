@@ -27,7 +27,7 @@ export default function MonteCarloSimulation() {
 
     const [products, setProducts] = useState("");
 
-    const [simulationIterations, setSimulationIterations] = useState("100");
+    const [simulationIterations, setSimulationIterations] = useState("1000");
 
     const [confidenceInterval, setConfidenceInterval] = useState("");
 
@@ -270,7 +270,7 @@ export default function MonteCarloSimulation() {
                     base_mean: Number(
                         inputParameters.demand_mean
                     ),
-                    std_pct: Number(
+                    std: Number(
                         inputParameters.demand_volatility
                     ),
                 },

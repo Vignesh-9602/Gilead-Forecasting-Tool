@@ -180,22 +180,17 @@ def _load_simulation_inputs(cur, ta_name: str, brand: str) -> tuple:
     # compliance stored as 0–100 in DB → convert to 0–1
     comp_mean = float(raw_comp_avg) / 100.0 if raw_comp_avg is not None else 0.85
 
-    # volatility as % of mean (same approach as demand: STDDEV/AVG × 100)
-    comp_avg_for_pct   = float(raw_comp_avg) if raw_comp_avg else 1.0
-    comp_volatility_pct = (
-        float(raw_comp_std) / comp_avg_for_pct * 100
-        if raw_comp_std is not None and comp_avg_for_pct > 0
-        else 5.0
-    )
+    # absolute std on 0–100 scale (same scale as compliance_mean in response)
+    comp_std_abs = float(raw_comp_std) if raw_comp_std is not None else 5.0
 
-    return months, base_demand, db_price, comp_mean, comp_volatility_pct
+    return months, base_demand, db_price, comp_mean, comp_std_abs
 
 
 def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        _, base_demand, db_price, db_comp_mean, db_comp_volatility_pct = _load_simulation_inputs(
+        _, base_demand, db_price, db_comp_mean, db_comp_std_abs = _load_simulation_inputs(
             cur, payload.ta_name, payload.brand
         )
 
@@ -221,20 +216,21 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
         #    (std of monthly values / mean of monthly values × 100).
         #    This matches what you would calculate in Excel on the same data.
         # ------------------------------------------------------------------
-        if payload.demand_params and payload.demand_params.std_pct is not None:
-            demand_std_total       = total_demand_base * (payload.demand_params.std_pct / 100.0)
-            demand_volatility_used = float(payload.demand_params.std_pct)
+        if payload.demand_params and payload.demand_params.std is not None:
+            demand_std_total = float(payload.demand_params.std)
         else:
             monthly_mean = float(np.mean(base_arr)) if len(base_arr) > 0 else 1.0
             monthly_std  = float(np.std(base_arr, ddof=1)) if len(base_arr) > 1 else 0.0
-            demand_volatility_used = (monthly_std / monthly_mean * 100) if monthly_mean > 0 else 0.0
-            demand_std_total       = total_demand_base * (demand_volatility_used / 100.0)
+            cv            = (monthly_std / monthly_mean) if monthly_mean > 0 else 0.0
+            demand_std_total = total_demand_base * cv
+
+        demand_volatility_used = demand_std_total
 
         # ------------------------------------------------------------------
         # 3. Compliance Base Mean
         # ------------------------------------------------------------------
         if payload.compliance_params and payload.compliance_params.mean is not None:
-            comp_mean = payload.compliance_params.mean
+            comp_mean = payload.compliance_params.mean / 100.0
         else:
             comp_mean = db_comp_mean
 
@@ -243,11 +239,14 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
         #    Same pattern as demand: store/display as %, convert for use.
         # ------------------------------------------------------------------
         if payload.compliance_params and payload.compliance_params.std is not None:
-            comp_volatility_used = float(payload.compliance_params.std) / comp_mean * 100 if comp_mean > 0 else 5.0
+            comp_std_abs_used = float(payload.compliance_params.std)
         else:
-            comp_volatility_used = db_comp_volatility_pct
+            comp_std_abs_used = db_comp_std_abs
 
-        comp_std = comp_mean * (comp_volatility_used / 100.0)
+        comp_mean_pct     = comp_mean * 100
+        max_comp_std      = min(comp_mean_pct, 100 - comp_mean_pct) * 0.99
+        comp_std_abs_used = min(comp_std_abs_used, max_comp_std)
+        comp_std = comp_std_abs_used / 100.0
 
         # ------------------------------------------------------------------
         # 5. Price per vial
@@ -339,7 +338,7 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
                 "demand_base_mean":      demand_base_mean_used,
                 "demand_volatility":     demand_volatility_used,
                 "compliance_mean":       round(comp_mean * 100, 4),
-                "compliance_volatility": comp_volatility_used,
+                "compliance_volatility": comp_std_abs_used,
                 "price_per_vial":        price,
                 "pricing_std":           pricing_std_used,
             },
