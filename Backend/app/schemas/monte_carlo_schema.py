@@ -4,16 +4,16 @@ from typing import List, Optional
 
 class DemandParams(BaseModel):
     base_mean: Optional[float] = Field(default=None, ge=0,
-        description="Override base demand per month. If None → dynamic from DB per month.")
-    std_pct: Optional[float] = Field(default=None, ge=0,
-        description="Std dev as % of mean. If None → auto-calculated using Poisson (sqrt of mean).")
+        description="Override total demand (sum across all months). If None → calculated from DB.")
+    std: Optional[float] = Field(default=None, ge=0,
+        description="Override demand std dev as absolute value (same scale as demand_volatility in response). If None → calculated from DB.")
 
 
 class ComplianceParams(BaseModel):
-    mean: Optional[float] = Field(default=None, ge=0, le=1,
-        description="Compliance base mean (0–1). If None → calculated from DB (fact_vials_compliance).")
-    std: Optional[float] = Field(default=None, ge=0,
-        description="Compliance std dev. If None → defaults to 0.05.")
+    mean: Optional[float] = Field(default=None, ge=0, le=100,
+        description="Compliance base mean (0–100 scale, same as DB). If None → calculated from DB.")
+    std: Optional[float] = Field(default=None, ge=0, le=50,
+        description="Compliance std dev on 0–100 scale (same as compliance_volatility in response). Max 50. If None → calculated from DB.")
 
 
 class PricingParams(BaseModel):
