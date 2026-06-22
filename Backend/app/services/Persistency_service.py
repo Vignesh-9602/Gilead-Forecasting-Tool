@@ -1832,7 +1832,17 @@ def apply_persistency_curve_service(
 
             if row:
                 output_rows.append(row)
-
+        lot_curve_payload_map = {
+            item.lot: [
+                {
+                    "curve_name": curve.curve_name,
+                    "start_date": normalize_to_month_start(curve.start_date),
+                    "end_date": normalize_to_month_start(curve.end_date)
+                }
+                for curve in item.curves
+            ]
+            for item in payload.lot_curve_mapping
+        }
         response_table = []
         response_months = None
 
@@ -1857,7 +1867,7 @@ def apply_persistency_curve_service(
 
             response_table.append({
                 "lot": lot,
-                "curve_name": curve_name,
+                "curve_mapping": lot_curve_payload_map.get(lot, []),
                 "children": [
                     {
                         "label": "New Patients",

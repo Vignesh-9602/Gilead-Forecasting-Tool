@@ -59,6 +59,9 @@ export default function ModelInput() {
     const therapyArea = favState?.selectedTherapyArea;
     // const [metricUnit, setMetricUnit] = useState("");
 
+    const [marketShareView, setMarketShareView] =
+        useState("market_share");
+
     const metricUnit =
         allMetricsData?.[metric]?.unit || "";
 
@@ -262,6 +265,10 @@ export default function ModelInput() {
 
             // show only selected metric in UI
             const selectedMetricData = data?.metrics_data?.[metric];
+
+            if (metric === "market_share") {
+                setMarketShareView("market_share");
+            }
 
             setChartData(selectedMetricData?.chart || null);
             setTableData(selectedMetricData?.table || []);
@@ -1275,8 +1282,11 @@ export default function ModelInput() {
                     selectedProduct={appliedBrand}
                     selectedLot={appliedLot}
                     metricUnit={metricUnit}
-                // scenarioName={scenarioName}
-                // setScenarioName={setScenarioName}
+                    // scenarioName={scenarioName}
+                    // setScenarioName={setScenarioName}
+                    marketShareView={marketShareView}
+                    setMarketShareView={setMarketShareView}
+                    allMetricsData={allMetricsData}
                 />
             </Paper>
         </Box>

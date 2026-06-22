@@ -12,7 +12,7 @@ import {
     TableHead,
     TableRow,
     Button,
-    Box, TextField
+    Box, TextField, FormControl, Select, MenuItem
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import Plot from "react-plotly.js";
@@ -47,7 +47,10 @@ export default function ForecastTrendChart({
     onUpdateScenario,
     onSaveScenario,
     scenarioSelector,
-    metricUnit
+    metricUnit,
+    marketShareView,
+    setMarketShareView,
+    allMetricsData
 }) {
     const allMonths =
         chartData?.months?.map((month) =>
@@ -56,6 +59,10 @@ export default function ForecastTrendChart({
                 year: "2-digit",
             })
         ) || [];
+
+    const isVolumeMode =
+        metric === "market_share" &&
+        marketShareView === "overall_market_volume";
 
     // const trainValues = chartData?.train_values || [];
     // const forecastValues = chartData?.forecast_values || [];
@@ -74,29 +81,49 @@ export default function ForecastTrendChart({
     const formatValue = (value) => {
         if (value === null || value === undefined) return "-";
 
-        if (metric === "market_share") {
+        if (
+            metric === "market_share" &&
+            !isVolumeMode
+        ) {
             return `${parseFloat(value)}%`;
         }
+
+        return Number(value).toLocaleString();
 
         return value;
     };
 
+    const displayTableData =
+        metric === "market_share" &&
+            marketShareView === "overall_market_volume"
+            ? allMetricsData?.market_share?.volume_data?.table || []
+            : tableData;
+
     useEffect(() => {
-        if (tableData?.length) {
-            const clonedRows = JSON.parse(JSON.stringify(tableData));
+        if (displayTableData?.length) {
+            const clonedRows =
+                JSON.parse(
+                    JSON.stringify(displayTableData)
+                );
 
             setTableRows(clonedRows);
-            setOriginalRows(JSON.parse(JSON.stringify(clonedRows)));
+            setOriginalRows(
+                JSON.parse(JSON.stringify(clonedRows))
+            );
 
             if (metric === "market_share") {
                 const grouped = {};
+
                 clonedRows.forEach((row) => {
                     grouped[row.lot] = true;
                 });
+
                 setExpandedLots(grouped);
             }
         }
-    }, [tableData]); // remove metric from here
+    }, [displayTableData]);
+
+
 
     useEffect(() => {
         // Reset immediately on metric change
@@ -122,6 +149,33 @@ export default function ForecastTrendChart({
             }));
         }
     }, [metric]);
+
+    // useEffect(() => {
+    //     if (metric !== "market_share") return;
+
+    //     const marketData =
+    //         allMetricsData?.market_share;
+
+    //     if (!marketData) return;
+
+    //     if (marketShareView === "overall_market_volume") {
+
+    //         updateTableData(
+    //             marketData?.volume_data?.table || []
+    //         );
+
+    //     } else {
+
+    //         updateTableData(
+    //             marketData?.table || []
+    //         );
+    //     }
+
+    // }, [
+    //     marketShareView,
+    //     metric,
+    //     allMetricsData
+    // ]);
 
     const toggleLot = (lot) => {
         setExpandedLots((prev) => ({
@@ -344,13 +398,37 @@ export default function ForecastTrendChart({
             const updatedMetricData = data?.metrics_data?.[metric];
 
             if (updatedMetricData) {
-                // update table after backend recalculation
-                setTableRows(updatedMetricData.table || []);
-                setOriginalRows(updatedMetricData.table || []);
+
+                if (
+                    metric === "market_share" &&
+                    marketShareView === "overall_market_volume"
+                ) {
+                    setTableRows(
+                        updatedMetricData?.volume_data?.table || []
+                    );
+
+                    setOriginalRows(
+                        updatedMetricData?.volume_data?.table || []
+                    );
+                } else {
+                    setTableRows(
+                        updatedMetricData?.table || []
+                    );
+
+                    setOriginalRows(
+                        updatedMetricData?.table || []
+                    );
+                }
 
                 // update chart
                 if (typeof updateChartData === "function") {
                     updateChartData(updatedMetricData.chart || null);
+                }
+
+                if (typeof updateTableData === "function") {
+                    updateTableData(
+                        updatedMetricData?.table || []
+                    );
                 }
 
                 // update parent metrics_data
@@ -360,7 +438,9 @@ export default function ForecastTrendChart({
                         [metric]: {
                             unit: updatedMetricData.unit || "",
                             chart: updatedMetricData.chart || null,
-                            table: updatedMetricData.table || []
+                            table: updatedMetricData.table || [],
+                            volume_data:
+                                updatedMetricData.volume_data || null
                         }
                     }));
                 }
@@ -383,7 +463,8 @@ export default function ForecastTrendChart({
         index,
         highlight = false
     ) => {
-        return editable ? (
+        return editable &&
+            !isVolumeMode ? (
             <input
                 value={value}
                 onChange={(e) => {
@@ -682,6 +763,29 @@ export default function ForecastTrendChart({
 
                 {/* RIGHT SIDE BUTTONS */}
                 <Box sx={{ display: "flex", gap: 2 }}>
+                    {metric === "market_share" && (
+                        <FormControl
+                            size="small"
+                            sx={{ minWidth: 220 }}
+                        >
+                            <Select
+                                value={marketShareView}
+                                onChange={(e) =>
+                                    setMarketShareView(
+                                        e.target.value
+                                    )
+                                }
+                            >
+                                <MenuItem value="market_share">
+                                    Market Share (%)
+                                </MenuItem>
+
+                                <MenuItem value="overall_market_volume">
+                                    Overall Market Volume
+                                </MenuItem>
+                            </Select>
+                        </FormControl>
+                    )}
                     <Tooltip title="Download Table">
                         <IconButton onClick={handleDownloadExcel} disabled={!tableRows.length}>
                             <DownloadIcon />
@@ -690,7 +794,12 @@ export default function ForecastTrendChart({
                     <Button
                         variant="contained"
                         sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
-                        disabled={editable || !tableData.length || !tableRows.length}
+                        disabled={
+                            editable ||
+                            !tableData.length ||
+                            !tableRows.length ||
+                            isVolumeMode
+                        }
                         onClick={() => {
                             if (scenarioSelector?.toUpperCase() === "BASE") {
                                 setOpenDialog(true);   // open save modal
@@ -704,7 +813,10 @@ export default function ForecastTrendChart({
                     <Button
                         variant="outlined"
                         sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
-                        disabled={!tableRows.length}
+                        disabled={
+                            !tableRows.length ||
+                            isVolumeMode
+                        }
                         onClick={() => setEditable(true)}
                     >
                         {editable ? "Editing..." : "Edit Changes"}
@@ -714,14 +826,17 @@ export default function ForecastTrendChart({
                         <Button
                             variant="contained"
                             sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
-                            disabled={!tableRows.length}
+                            disabled={
+                                !tableRows.length ||
+                                isVolumeMode
+                            }
                             onClick={handleRefresh}
                         >
                             Refresh
                         </Button>
                     )}
 
-                    {metric === "market_share" && editable && (
+                    {metric === "market_share" && editable && !isVolumeMode && (
                         <Button
                             variant="outlined"
                             sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
@@ -735,7 +850,7 @@ export default function ForecastTrendChart({
                     <Button
                         variant="outlined"
                         sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
-                        disabled={!tableRows.length}
+                        disabled={!tableRows.length || isVolumeMode}
                         onClick={handleCancel}
                     >
                         Cancel

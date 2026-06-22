@@ -520,7 +520,12 @@ export default function MonteCarloSimulation() {
                 />
             )} */}
             {/* {simulationResult && ( */}
-            <MCSChart data={simulationResult} />
+            <MCSChart
+                data={simulationResult}
+                product={products}
+                simulationIterations={simulationIterations}
+                confidenceInterval={confidenceInterval}
+            />
             {/* )} */}
 
             <MCSInputParametersDialog

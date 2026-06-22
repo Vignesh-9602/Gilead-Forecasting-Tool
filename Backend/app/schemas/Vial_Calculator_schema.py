@@ -174,9 +174,15 @@ class PersistencyApplyCurveChild(BaseModel):
     values: List[int]
 
 
+class PersistencyCurveMappingResponse(BaseModel):
+    curve_name: str
+    start_date: str
+    end_date: str
+
+
 class PersistencyApplyCurveLotTable(BaseModel):
     lot: str
-    curve_name: Optional[str] = None
+    curve_mapping: List[PersistencyCurveMappingResponse] = []
     children: List[PersistencyApplyCurveChild]
 
 

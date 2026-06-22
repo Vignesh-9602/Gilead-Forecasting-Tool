@@ -62,7 +62,7 @@ def build_factors(chart, trajectory_input=None):
 # =====================================================
 # APPLY
 # =====================================================
-@router.post("/metrics/apply",tags=["Model_Input"])
+@router.post("/metrics/apply", tags=["Model_Input"])
 def apply_metrics(payload: MetricSelectionRequest):
 
     ta = payload.ta_name
@@ -76,7 +76,7 @@ def apply_metrics(payload: MetricSelectionRequest):
 
     try:
         # =====================================================
-        # FETCH INDICATION + BASE FACTORS (NPS default)
+        # FETCH INDICATION + BASE FACTORS
         # =====================================================
         cur.execute("""
             SELECT
@@ -99,7 +99,7 @@ def apply_metrics(payload: MetricSelectionRequest):
         indication = row[1] if row else payload.indications[0]
 
         # =====================================================
-        # NPS DATA (ALL LOTS)
+        # NPS DATA
         # =====================================================
         cur.execute("""
             SELECT fs.lot, fs.chart
@@ -116,6 +116,8 @@ def apply_metrics(payload: MetricSelectionRequest):
 
         nps_series = []
         nps_table = {}
+        nps_values_by_lot = {}
+
         months = None
         forecast_start_index = None
 
@@ -123,11 +125,24 @@ def apply_metrics(payload: MetricSelectionRequest):
             months = chart["months"]
             forecast_start_index = chart["forecast_start_index"]
 
+            full_nps_values = [
+                round(float(v or 0))
+                for v in chart["train_values"] + chart["forecast_values"]
+            ]
+
+            nps_values_by_lot[lot] = full_nps_values
+
             nps_series.append({
                 "lot": lot,
                 "label": "NPS",
-                "train_values": [round(v) for v in chart["train_values"]],
-                "forecast_values": [round(v) for v in chart["forecast_values"]],
+                "train_values": [
+                    round(float(v or 0))
+                    for v in chart["train_values"]
+                ],
+                "forecast_values": [
+                    round(float(v or 0))
+                    for v in chart["forecast_values"]
+                ],
             })
 
             nps_table.setdefault(lot, {
@@ -136,10 +151,7 @@ def apply_metrics(payload: MetricSelectionRequest):
                 "children": []
             })["children"].append({
                 "label": "NPS",
-                "values": [
-                    round(v)
-                    for v in (chart["train_values"] + chart["forecast_values"])
-                ]
+                "values": full_nps_values
             })
 
         # =====================================================
@@ -152,9 +164,9 @@ def apply_metrics(payload: MetricSelectionRequest):
                 im.brand_name
             FROM raw.forecast_scenarios fs
             JOIN raw.indication_master im
-            ON im.ta = fs.ta_name
-            AND LOWER(im.indications) = LOWER(fs.indication)
-            AND LOWER(im.brand_name) = LOWER(fs.product)
+              ON im.ta = fs.ta_name
+             AND LOWER(im.indications) = LOWER(fs.indication)
+             AND LOWER(im.brand_name) = LOWER(fs.product)
             WHERE
                 fs.ta_name = %s
                 AND fs.scenario_name = %s
@@ -168,35 +180,48 @@ def apply_metrics(payload: MetricSelectionRequest):
         ms_series = []
         ms_table = {}
 
-        # =====================================================
-        # STEP 1 → GROUP DATA LOT WISE
-        # =====================================================
+        ms_volume_series = []
+        ms_volume_table = {}
+
         lot_product_values = {}
 
         for lot, chart, product in ms_rows:
 
-            values = chart["train_values"] + chart["forecast_values"]
+            train_values = [
+                float(v or 0)
+                for v in chart["train_values"]
+            ]
+
+            forecast_values = [
+                float(v or 0)
+                for v in chart["forecast_values"]
+            ]
+
+            values = train_values + forecast_values
 
             lot_product_values.setdefault(lot, []).append({
                 "product": product,
                 "values": values,
-                "train_values": chart["train_values"],
-                "forecast_values": chart["forecast_values"]
+                "train_values": train_values,
+                "forecast_values": forecast_values
             })
 
         # =====================================================
-        # STEP 2 → NORMALIZE TO 100
+        # NORMALIZE MARKET SHARE + BUILD VOLUME DATA
+        # volume = normalized market share % * NPS / 100
         # =====================================================
         for lot, products_data in lot_product_values.items():
 
-            total_months = max(len(item["values"]) for item in products_data)
+            total_months = max(
+                len(item["values"])
+                for item in products_data
+            )
 
             monthly_totals = [0.0] * total_months
 
             for item in products_data:
                 for idx, val in enumerate(item["values"]):
-                    if idx < total_months:
-                        monthly_totals[idx] += float(val or 0)
+                    monthly_totals[idx] += float(val or 0)
 
             ms_table[lot] = {
                 "lot": lot,
@@ -204,24 +229,51 @@ def apply_metrics(payload: MetricSelectionRequest):
                 "children": []
             }
 
+            ms_volume_table[lot] = {
+                "lot": lot,
+                "total": [0] * total_months,
+                "children": []
+            }
+
+            lot_nps_values = nps_values_by_lot.get(lot, [])
+
             for item in products_data:
 
                 normalized_values = []
+                volume_values = []
 
                 for idx in range(total_months):
-                    val = item["values"][idx] if idx < len(item["values"]) else 0
+
+                    val = (
+                        item["values"][idx]
+                        if idx < len(item["values"])
+                        else 0
+                    )
+
                     total = monthly_totals[idx]
 
                     normalized_val = (
                         round((float(val or 0) / total) * 100, 2)
-                        if total > 0 else 0
+                        if total > 0
+                        else 0
+                    )
+
+                    nps_value = (
+                        lot_nps_values[idx]
+                        if idx < len(lot_nps_values)
+                        else 0
+                    )
+
+                    volume_value = round(
+                        (normalized_val / 100) * float(nps_value or 0)
                     )
 
                     normalized_values.append(normalized_val)
+                    volume_values.append(volume_value)
+
+                train_len = len(item["train_values"])
 
                 if lot.lower() == selected_lot_code:
-
-                    train_len = len(item["train_values"])
 
                     ms_series.append({
                         "lot": lot,
@@ -230,12 +282,33 @@ def apply_metrics(payload: MetricSelectionRequest):
                         "forecast_values": normalized_values[train_len:],
                     })
 
+                    ms_volume_series.append({
+                        "lot": lot,
+                        "label": item["product"],
+                        "train_values": volume_values[:train_len],
+                        "forecast_values": volume_values[train_len:],
+                    })
+
                 ms_table[lot]["children"].append({
                     "label": item["product"],
                     "values": normalized_values
                 })
+
+                ms_volume_table[lot]["children"].append({
+                    "label": item["product"],
+                    "values": volume_values
+                })
+
+                for idx, volume_value in enumerate(volume_values):
+                    ms_volume_table[lot]["total"][idx] += volume_value
+
+            ms_volume_table[lot]["total"] = [
+                round(v)
+                for v in ms_volume_table[lot]["total"]
+            ]
+
         # =====================================================
-        # MARKET SHARE FACTORS (SELECTED PRODUCT)
+        # MARKET SHARE FACTORS SELECTED PRODUCT
         # =====================================================
         if selected_product_code:
             cur.execute("""
@@ -249,18 +322,38 @@ def apply_metrics(payload: MetricSelectionRequest):
                     AND LOWER(fs.product) = %s
                 ORDER BY fs.lot
                 LIMIT 1
-            """, (ta, scenario, indication_code, selected_product_code))
+            """, (
+                ta,
+                scenario,
+                indication_code,
+                selected_product_code
+            ))
 
             row = cur.fetchone()
+
             if row:
                 factors = row[0]
-                
+
         # =====================================================
         # SAVE USER FILTER PREFERENCE
         # =====================================================
-        selected_indication = payload.indications[0] if payload.indications else None
-        selected_lot = payload.lots[0] if payload.lots else None
-        selected_product = payload.product.strip() if payload.product and payload.product.strip() else None
+        selected_indication = (
+            payload.indications[0]
+            if payload.indications
+            else None
+        )
+
+        selected_lot = (
+            payload.lots[0]
+            if payload.lots
+            else None
+        )
+
+        selected_product = (
+            payload.product.strip()
+            if payload.product and payload.product.strip()
+            else None
+        )
 
         cur.execute("""
             UPDATE raw.user_filter_preferences
@@ -272,7 +365,7 @@ def apply_metrics(payload: MetricSelectionRequest):
                 product      = COALESCE(%s, product),
                 updated_at   = CURRENT_TIMESTAMP
             WHERE user_id = %s
-            AND ta_name = %s
+              AND ta_name = %s
         """, (
             scenario,
             selected_indication,
@@ -305,20 +398,21 @@ def apply_metrics(payload: MetricSelectionRequest):
             ))
 
         conn.commit()
+
     finally:
         cur.close()
         conn.close()
 
     # =====================================================
-    #   FINAL RESPONSE
+    # FINAL RESPONSE
     # =====================================================
     return {
         "therapy_area": ta,
         "indication": indication,
-        "factors": factors,  # includes multiplier_horizon
+        "factors": factors,
         "metrics_data": {
             "nps": {
-                "unit": "",
+                "unit": "count",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -334,10 +428,19 @@ def apply_metrics(payload: MetricSelectionRequest):
                     "series": ms_series,
                 },
                 "table": list(ms_table.values()),
+                "volume_data": {
+                    "unit": "count",
+                    "editable": False,
+                    "chart": {
+                        "months": months,
+                        "forecast_start_index": forecast_start_index,
+                        "series": ms_volume_series,
+                    },
+                    "table": list(ms_volume_table.values()),
+                }
             },
         }
     }
-
 # =====================================================
 # RECALCULATE
 # =====================================================
@@ -524,7 +627,7 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                     total_growth_pct=growth.get("total_growth", 0),
                     duration=growth.get("duration", forecast_periods),
                     k=growth.get("k_value"),
-                    trajectory_start=growth.get("trajectory_start")   
+                    trajectory_start=growth.get("trajectory_start")
                 )
 
         else:
@@ -543,15 +646,15 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
             "lot": lot,
             "label": product if metric_l == "market_share" else "NPS",
             "train_values": (
-                    [round(v) for v in row["train_values"]]
-                    if metric_l == "nps"
-                    else list(row["train_values"])
-                ),
-                "forecast_values": (
-                    [round(v) for v in row["forecast_values"]]
-                    if metric_l == "nps"
-                    else list(row["forecast_values"])
-                )
+                [round(float(v or 0)) for v in row["train_values"]]
+                if metric_l == "nps"
+                else list(row["train_values"])
+            ),
+            "forecast_values": (
+                [round(float(v or 0)) for v in row["forecast_values"]]
+                if metric_l == "nps"
+                else list(row["forecast_values"])
+            )
         }
 
         if metric_l == "nps":
@@ -575,19 +678,33 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
     nps_table = {}
     ms_table = {}
 
-    num_months = len(months) if months else 0
+    ms_volume_table = {}
+    ms_volume_chart_series = {}
+
+    nps_values_by_lot = {}
 
     for s in nps_series:
+
+        full_values = (
+            list(s["train_values"])
+            + list(s["forecast_values"])
+        )
+
+        nps_values_by_lot[s["lot"]] = full_values
+
         nps_table.setdefault(s["lot"], {
             "lot": s["lot"],
             "total": [],
             "children": []
         })["children"].append({
             "label": "NPS",
-            "values": list(s["train_values"]) + list(s["forecast_values"])
+            "values": full_values
         })
 
-    # Normalize market share values lot-wise, month-wise to total 100
+    # -----------------------------------------------------
+    # NORMALIZE MARKET SHARE + BUILD VOLUME DATA
+    # volume = normalized market share % * NPS / 100
+    # -----------------------------------------------------
     ms_grouped = {}
 
     for s in ms_table_series:
@@ -609,30 +726,84 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                 if idx < total_months:
                     monthly_totals[idx] += float(val or 0)
 
+        lot_nps_values = nps_values_by_lot.get(lot, [])
+
         ms_table[lot] = {
             "lot": lot,
             "total": [100.0] * total_months,
             "children": []
         }
 
+        ms_volume_table[lot] = {
+            "lot": lot,
+            "total": [0] * total_months,
+            "children": []
+        }
+
         for s in series_list:
+
             values = list(s["train_values"]) + list(s["forecast_values"])
 
             normalized_values = []
+            volume_values = []
 
             for idx in range(total_months):
+
                 val = values[idx] if idx < len(values) else 0
                 total = monthly_totals[idx]
 
-                normalized_values.append(
+                normalized_val = (
                     round((float(val or 0) / total) * 100, 2)
-                    if total > 0 else 0
+                    if total > 0
+                    else 0
                 )
+
+                nps_value = (
+                    lot_nps_values[idx]
+                    if idx < len(lot_nps_values)
+                    else 0
+                )
+
+                volume_value = round(
+                    (normalized_val / 100) * float(nps_value or 0)
+                )
+
+                normalized_values.append(normalized_val)
+                volume_values.append(volume_value)
+
+            train_len = len(s["train_values"])
 
             ms_table[lot]["children"].append({
                 "label": s["label"],
                 "values": normalized_values
             })
+
+            ms_volume_table[lot]["children"].append({
+                "label": s["label"],
+                "values": volume_values
+            })
+
+            for idx, volume_value in enumerate(volume_values):
+                ms_volume_table[lot]["total"][idx] += volume_value
+
+            if lot.lower() == selected_lot_l:
+
+                ms_volume_chart_series.setdefault(lot, []).append({
+                    "lot": lot,
+                    "label": s["label"],
+                    "train_values": volume_values[:train_len],
+                    "forecast_values": volume_values[train_len:]
+                })
+
+        ms_volume_table[lot]["total"] = [
+            round(v)
+            for v in ms_volume_table[lot]["total"]
+        ]
+
+    ms_volume_series = []
+
+    for series_list in ms_volume_chart_series.values():
+        ms_volume_series.extend(series_list)
 
     # -----------------------------------------------------
     # BUILD RESPONSE FACTORS
@@ -727,7 +898,7 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
         "factors": response_factors,
         "metrics_data": {
             "nps": {
-                "unit": "",
+                "unit": "count",
                 "chart": {
                     "months": months,
                     "forecast_start_index": forecast_start_index,
@@ -742,7 +913,17 @@ def recalculate_metrics(payload: MetricRecalculateRequest):
                     "forecast_start_index": forecast_start_index,
                     "series": ms_chart_series
                 },
-                "table": list(ms_table.values())
+                "table": list(ms_table.values()),
+                "volume_data": {
+                    "unit": "count",
+                    "editable": False,
+                    "chart": {
+                        "months": months,
+                        "forecast_start_index": forecast_start_index,
+                        "series": ms_volume_series
+                    },
+                    "table": list(ms_volume_table.values())
+                }
             }
         }
     }
@@ -843,6 +1024,93 @@ def normalize_market_share_table(
         })
 
     return normalized_table
+def build_market_share_volume_data(
+    market_share_table,
+    nps_table,
+    selected_lot: str,
+    months,
+    forecast_start_index
+):
+    nps_by_lot = {}
+
+    for lot_group in nps_table:
+        lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+        children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+
+        if children:
+            child = children[0]
+            values = child["values"] if isinstance(child, dict) else child.values
+            nps_by_lot[lot] = values
+
+    volume_table = []
+    volume_series = []
+
+    for lot_group in market_share_table:
+        lot = lot_group["lot"] if isinstance(lot_group, dict) else lot_group.lot
+        children = lot_group["children"] if isinstance(lot_group, dict) else lot_group.children
+
+        nps_values = nps_by_lot.get(lot, [])
+
+        total_months = max(
+            len(child["values"] if isinstance(child, dict) else child.values)
+            for child in children
+        ) if children else 0
+
+        lot_volume_group = {
+            "lot": lot,
+            "total": [0] * total_months,
+            "children": []
+        }
+
+        for child in children:
+            label = child["label"] if isinstance(child, dict) else child.label
+            ms_values = child["values"] if isinstance(child, dict) else child.values
+
+            volume_values = []
+
+            for idx in range(total_months):
+                ms_value = ms_values[idx] if idx < len(ms_values) else 0
+                nps_value = nps_values[idx] if idx < len(nps_values) else 0
+
+                volume_value = round(
+                    float(nps_value or 0) * float(ms_value or 0) / 100
+                )
+
+                volume_values.append(volume_value)
+                lot_volume_group["total"][idx] += volume_value
+
+            lot_volume_group["children"].append({
+                "label": label,
+                "values": volume_values
+            })
+
+            if lot.lower() == selected_lot.lower():
+                train_len = forecast_start_index
+
+                volume_series.append({
+                    "lot": lot,
+                    "label": label,
+                    "train_values": volume_values[:train_len],
+                    "forecast_values": volume_values[train_len:]
+                })
+
+        lot_volume_group["total"] = [
+            round(v)
+            for v in lot_volume_group["total"]
+        ]
+
+        volume_table.append(lot_volume_group)
+
+    return {
+        "unit": "count",
+        "editable": False,
+        "chart": {
+            "months": months,
+            "forecast_start_index": forecast_start_index,
+            "series": volume_series
+        },
+        "table": volume_table
+    }
 
 @router.post("/metrics/refresh", tags=["Model_Input"])
 def refresh_changes(payload: Refreshchangerequest):
@@ -1108,29 +1376,48 @@ def refresh_changes(payload: Refreshchangerequest):
         },
         "table": list(other_table.values())
     }
-
     # --------------------------------------------------
+    # Build market_share volume_data
+    # --------------------------------------------------
+    if metric == "market_share":
+        market_share_table_for_volume = updated_metric_block["table"]
+        nps_table_for_volume = list(other_table.values())
+
+    else:
+        market_share_table_for_volume = list(other_table.values())
+        nps_table_for_volume = updated_metric_block["table"]
+
+    market_share_volume_data = build_market_share_volume_data(
+        market_share_table=market_share_table_for_volume,
+        nps_table=nps_table_for_volume,
+        selected_lot=payload.lot,
+        months=months,
+        forecast_start_index=forecast_start_index
+    )
+        # --------------------------------------------------
     # Final response
     # --------------------------------------------------
     if metric == "nps":
         metrics_data = {
             "nps": {
-                "unit": "",
+                "unit": "count",
                 **updated_metric_block
             },
             "market_share": {
                 "unit": "%",
-                **other_metric_block
+                **other_metric_block,
+                "volume_data": market_share_volume_data
             }
         }
     else:
         metrics_data = {
             "market_share": {
                 "unit": "%",
-                **updated_metric_block
+                **updated_metric_block,
+                "volume_data": market_share_volume_data
             },
             "nps": {
-                "unit": "",
+                "unit": "count",
                 **other_metric_block
             }
         }
@@ -1804,7 +2091,35 @@ def update_scenario(payload: UpdateScenarioRequest):
     finally:
         cur.close()
         conn.close()
+    nps_response_block = (
+            payload.metrics_data.get("nps", {})
+            if payload.metrics_data
+            else {}
+        )
 
+    market_share_response_block = (
+            payload.metrics_data.get("market_share", {})
+            if payload.metrics_data
+            else {}
+        )
+
+    nps_table_for_volume = nps_response_block.get("table", []) or []
+    market_share_table_for_volume = market_share_response_block.get("table", []) or []
+
+    market_share_chart = market_share_response_block.get("chart", {}) or {}
+
+    volume_months = market_share_chart.get("months", []) or []
+    volume_forecast_start_index = (
+        market_share_chart.get("forecast_start_index", 0) or 0
+    )
+
+    market_share_volume_data = build_market_share_volume_data(
+        market_share_table=market_share_table_for_volume,
+        nps_table=nps_table_for_volume,
+        selected_lot=payload.lot,
+        months=volume_months,
+        forecast_start_index=volume_forecast_start_index
+    )
     return {
     "therapy_area": payload.ta_name,
     "indication": payload.indication,
@@ -1817,12 +2132,13 @@ def update_scenario(payload: UpdateScenarioRequest):
     "factors": payload.factors,
     "metrics_data": {
         "nps": {
-            "unit": "",
-            **(payload.metrics_data.get("nps", {}) if payload.metrics_data else {})
+            "unit": "count",
+            **nps_response_block
         },
         "market_share": {
             "unit": "%",
-            **(payload.metrics_data.get("market_share", {}) if payload.metrics_data else {})
+            **market_share_response_block,
+            "volume_data": market_share_volume_data
         }
     },
     "message": "Scenario updated successfully"

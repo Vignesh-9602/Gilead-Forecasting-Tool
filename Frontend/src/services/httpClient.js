@@ -22,6 +22,22 @@ httpClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// httpClient.interceptors.request.use(
+//   (config) => {
+//     const user = JSON.parse(
+//       localStorage.getItem("user")
+//     );
+
+//     if (user?.email) {
+//       config.headers["X-User-Email"] =
+//         user.email;
+//     }
+
+//     return config;
+//   },
+//   (error) => Promise.reject(error)
+// );
+
 // Response interceptor (handle errors globally)
 httpClient.interceptors.response.use(
   (response) => response,

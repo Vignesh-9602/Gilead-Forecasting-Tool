@@ -11,6 +11,11 @@ import {
 } from "@mui/material";
 
 import Plot from "react-plotly.js";
+import DownloadIcon from "@mui/icons-material/Download";
+import IconButton from "@mui/material/IconButton";
+import Tooltip from "@mui/material/Tooltip";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 
 const PlotComponent = Plot.default || Plot;
 
@@ -25,6 +30,9 @@ const formatCurrency = (value) =>
 
 export default function MCSChart({
     data,
+    product,
+    simulationIterations,
+    confidenceInterval,
 }) {
     if (!data) {
         return (
@@ -139,6 +147,158 @@ export default function MCSChart({
         ],
     ];
 
+    const handleDownloadExcel = async () => {
+        if (!data) return;
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet("Monte Carlo");
+
+        // Filters
+        worksheet.addRow(["Product", product]);
+        worksheet.addRow([
+            "Simulation Iterations",
+            simulationIterations,
+        ]);
+        worksheet.addRow([
+            "Confidence Interval",
+            confidenceInterval,
+        ]);
+        worksheet.addRow([]);
+
+        // Summary
+        worksheet.addRow(["Simulation Summary"]);
+
+        worksheet.addRow([
+            "Number of Simulations",
+            summary?.number_of_simulations,
+        ]);
+
+        worksheet.addRow([
+            "Mean Revenue",
+            summary?.mean_revenue,
+        ]);
+
+        worksheet.addRow([
+            "Median Revenue",
+            summary?.median_revenue,
+        ]);
+
+        worksheet.addRow([
+            "Std Dev Revenue",
+            summary?.std_dev_revenue,
+        ]);
+
+        worksheet.addRow([
+            "Min Revenue",
+            summary?.min_revenue,
+        ]);
+
+        worksheet.addRow([
+            "Max Revenue",
+            summary?.max_revenue,
+        ]);
+
+        worksheet.addRow([
+            "5th Percentile",
+            summary?.percentile_5,
+        ]);
+
+        worksheet.addRow([
+            "25th Percentile",
+            summary?.percentile_25,
+        ]);
+
+        worksheet.addRow([
+            "75th Percentile",
+            summary?.percentile_75,
+        ]);
+
+        worksheet.addRow([
+            "95th Percentile",
+            summary?.percentile_95,
+        ]);
+
+        worksheet.addRow([]);
+
+        // Peak Bar
+        if (summary?.peak_bar) {
+            worksheet.addRow(["Peak Bar"]);
+
+            worksheet.addRow([
+                "Revenue Range",
+                summary.peak_bar.revenue_range,
+            ]);
+
+            worksheet.addRow([
+                "Mean Demand",
+                summary.peak_bar.mean_demand,
+            ]);
+
+            worksheet.addRow([
+                "Mean Compliance",
+                summary.peak_bar.mean_compliance,
+                // `${summary.peak_bar.mean_compliance}%`,
+            ]);
+
+            worksheet.addRow([
+                "Price Per Vial",
+                summary.peak_bar.price_per_vial,
+            ]);
+
+            worksheet.addRow([]);
+        }
+
+        // Histogram Table
+        const histogramHeaderRow =
+            worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Revenue Range",
+            "Count",
+        ]);
+
+        histogram.forEach((item) => {
+            worksheet.addRow([
+                item.range,
+                item.count,
+            ]);
+        });
+
+        // Styling
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal: "center",
+                    vertical: "middle",
+                };
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    bottom: { style: "thin" },
+                    right: { style: "thin" },
+                };
+            });
+        });
+
+        worksheet.getRow(
+            histogramHeaderRow
+        ).font = {
+            bold: true,
+        };
+
+        worksheet.getColumn(1).width = 30;
+        worksheet.getColumn(2).width = 25;
+
+        const buffer =
+            await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `Monte_Carlo_${product}.xlsx`
+        );
+    };
+
     return (
         <Box
             sx={{
@@ -160,17 +320,29 @@ export default function MCSChart({
                     boxShadow: "none",
                 }}
             >
-                <Typography
+                <Box
                     sx={{
-                        textAlign: "center",
-                        fontWeight: 700,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
                         mb: 2,
-                        fontSize: "20px",
                     }}
                 >
-                    Monte Carlo Revenue
-                    Probability Distribution
-                </Typography>
+                    <Typography
+                        sx={{
+                            fontWeight: 700,
+                            fontSize: "20px",
+                        }}
+                    >
+                        Monte Carlo Revenue Probability Distribution
+                    </Typography>
+
+                    <Tooltip title="Download Results">
+                        <IconButton onClick={handleDownloadExcel}>
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
+                </Box>
 
                 <PlotComponent
                     data={[
@@ -341,9 +513,10 @@ export default function MCSChart({
                                     color: "#4F46E5",
                                 }}
                             >
-                                {Number(
+                                {/* {Number(
                                     peakBar.mean_compliance
-                                ).toFixed(3)}
+                                ).toFixed(3)} */}
+                                {Number(peakBar.mean_compliance).toFixed(3)}%
                             </Typography>
                         </Box>
 

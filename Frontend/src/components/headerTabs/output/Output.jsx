@@ -705,6 +705,13 @@ export default function Output() {
 
                 <OutputTable
                     tableData={currentView?.table}
+                    activeTab={activeTab}
+                    scenario={scenario}
+                    indications={indications}
+                    lots={lots}
+                    products={products}
+                    startDate={startDate}
+                    endDate={endDate}
                 />
             </Paper >
         </Box >
