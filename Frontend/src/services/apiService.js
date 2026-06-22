@@ -228,6 +228,9 @@ export const runMonteCarloSimulation = (payload) => {
   );
 };
 
+export const loginApi = (payload) =>
+  httpClient.post("/api/login", payload);
+
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
 // };

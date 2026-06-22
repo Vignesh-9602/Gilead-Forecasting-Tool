@@ -590,6 +590,30 @@ export default function PersistencyTable({
         }
     };
 
+    const getCurveSpans = (curveMapping = []) => {
+        return curveMapping.map((curve) => {
+            const startIndex =
+                persistencyData?.months?.findIndex(
+                    (month) =>
+                        month === curve.start_date
+                );
+
+            const endIndex =
+                persistencyData?.months?.findIndex(
+                    (month) =>
+                        month === curve.end_date
+                );
+
+            return {
+                ...curve,
+                colSpan:
+                    endIndex -
+                    startIndex +
+                    1,
+            };
+        });
+    };
+
     return (
         <Box sx={{ mt: 3 }}>
             {/* Header */}
@@ -723,15 +747,54 @@ export default function PersistencyTable({
                                             </Box>
                                         </TableCell>
 
-                                        {formattedMonths.map((month, idx) => (
-                                            <TableCell
-                                                key={idx}
-                                                sx={{
-                                                    backgroundColor: "#f1f5f9",
-                                                    borderRight: "1px solid #CBD5E1",
-                                                }}
-                                            />
-                                        ))}
+                                        {row.curve_mapping?.length > 0 ? (
+
+                                            getCurveSpans(
+                                                row.curve_mapping
+                                            ).map((curve, index) => (
+
+                                                <TableCell
+                                                    key={`${curve.curve_name}-${index}`}
+                                                    colSpan={curve.colSpan}
+                                                    align="center"
+                                                    sx={{
+                                                        // backgroundColor:
+                                                        //     index % 2 === 0
+                                                        //         ? "#DBEAFE"
+                                                        //         : "#DCFCE7",
+                                                        // backgroundColor: "#fff",
+                                                        color: "#1E293B",
+
+                                                        fontWeight: 700,
+
+                                                        fontSize: "13px",
+
+                                                        borderRight:
+                                                            "1px solid #CBD5E1",
+
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    {curve.curve_name}
+                                                </TableCell>
+                                            ))
+
+                                        ) : (
+
+                                            formattedMonths.map((_, idx) => (
+                                                <TableCell
+                                                    key={idx}
+                                                    sx={{
+                                                        backgroundColor:
+                                                            "#f1f5f9",
+
+                                                        borderRight:
+                                                            "1px solid #CBD5E1",
+                                                    }}
+                                                />
+                                            ))
+
+                                        )}
                                     </TableRow>
 
                                     {row.children.map(
