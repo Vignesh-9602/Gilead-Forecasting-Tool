@@ -57,13 +57,14 @@ def liver_save_configuration(payload: SaveLiverConfigRequest):
 # ---------------------------------------------------------------------------
 
 @router.get("/filters", response_model=LiverFiltersResponse)
-def liver_filters():
+def liver_filters(ta: str = "HCV"):
     """
     Called on page load.
-    Returns payers, products, scenarios, metric options, available date range.
+    Returns payers, products, scenarios, metric options, available date range,
+    and forecast to_date derived from saved config for the given TA.
     """
     try:
-        return get_liver_filters()
+        return get_liver_filters(ta)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
