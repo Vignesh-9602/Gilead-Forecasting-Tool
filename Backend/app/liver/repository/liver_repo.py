@@ -54,9 +54,13 @@ def get_scenarios(cur) -> list:
 
 
 def get_transaction_date_range(cur) -> tuple:
-    """Returns (min_year, min_month, max_year, max_month)"""
+    """Returns (min_year, min_month, max_year, max_month) using composite year*100+month sort."""
     cur.execute("""
-        SELECT MIN(year), MIN(month), MAX(year), MAX(month)
+        SELECT
+            (MIN(year * 100 + month) / 100)::int,
+            (MIN(year * 100 + month) % 100)::int,
+            (MAX(year * 100 + month) / 100)::int,
+            (MAX(year * 100 + month) % 100)::int
         FROM raw_liver.transaction_data
     """)
     return cur.fetchone()
@@ -396,7 +400,7 @@ def get_payer_wise_product_yearly(cur, ta: str, from_year: int, to_year: int,
         cur.execute(base_query.format(payer_filter=""), (ta, from_year, to_year))
 
     col_idx = 4 if metric == "market_share" else 3
-    return [(r[0], 0, r[2], r[3], float(r[col_idx])) for r in cur.fetchall()]
+    return [(r[0], 0, r[1], r[2], float(r[col_idx])) for r in cur.fetchall()]
 
 
 def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
