@@ -133,9 +133,10 @@ export default function LandingPage() {
                             <CardActionArea
                                 sx={{ height: "100%" }}
                                 onClick={() => {
+                                     
                                     favDispatch({
                                         type: "SELECTED_THERAPY_AREA",
-                                        payload: item,
+                                        payload: item === "PBC" ? "HCV" : item,
                                     });
 
                                     localStorage.setItem("activeTab", "Configurations");
@@ -159,7 +160,7 @@ export default function LandingPage() {
                                             color: "#0A2342",
                                         }}
                                     >
-                                        {item}
+                                        {item === "Oncology" ? "Oncology" : item === "PBC" ? "HCV" : item}
                                     </Typography>
 
                                     {/* <Box

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import { Box } from "@mui/material";
 import Header from "../components/Header";
 import SnackbarNotification from "../components/snackBar/SnackBar";
-import PBCGlobalConfigurations from "../components/pbc/GlobalConfigurations";
+import PBCGlobalConfigurations from "../components/pbc/GlobalConfiguration/GlobalConfigurations";
+import PBCModelInput from "../components/pbc/ModelInput/ModelInput";
 
 const tabs = [
     "Configurations",
@@ -11,19 +12,22 @@ const tabs = [
     "Output",
 ];
 
-export default function PBCLayout() {
+export default function HCVLayout() {
     const [activeTab, setActiveTab] = useState(
         localStorage.getItem("pbcActiveTab") || "Configurations"
     );
 
     useEffect(() => {
-        localStorage.setItem("pbcActiveTab", activeTab);
+        localStorage.setItem("hcvActiveTab", activeTab);
     }, [activeTab]);
 
     const renderContent = () => {
         switch (activeTab) {
             case "Configurations":
                 return <PBCGlobalConfigurations />;
+
+            case "Model Inputs":
+                return <PBCModelInput />;
 
             default:
                 return (

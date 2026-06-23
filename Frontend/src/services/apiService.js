@@ -1,3 +1,4 @@
+import axios from "axios";
 import { httpClient } from "./httpClient";
 
 export const getTherapyAreaList = () => {
@@ -230,6 +231,54 @@ export const runMonteCarloSimulation = (payload) => {
 
 export const loginApi = (payload) =>
   httpClient.post("/api/login", payload);
+
+
+
+
+
+
+
+
+// Liver APIs
+
+
+// GET — loads existing config + available date options
+export const getConfigurationByTherapyAreaPBC = (taName) => {
+    return axios.get(`/api/liver/configurations/${taName}`);
+};
+
+// POST — saves / updates config
+export const saveConfigurationsPBC = (payload) => {
+    return axios.post(`/api/liver/configurations`, payload);
+};
+
+// Liver filters
+export const getLiverFilters = () => {
+  return axios.get(`/api/liver/filters`);
+};
+
+// POST — apply liver filters and return chart/table data
+export const applyLiverFilters = (payload) => {
+  return axios.post(`/api/liver/apply-filters`, payload);
+};
+
+// POST — recalculate liver with new ETS factors
+export const recalculateLiver = (payload) => {
+  return axios.post(`/api/liver/recalculate`, payload);
+};
+
+// POST — create/update liver configurations with required envelope { config: { ... } }
+export const postLiverConfigurations = (config) => {
+  return axios.post(`/api/liver/configurations`, { config });
+};
+
+// POST — save a liver scenario
+export const saveLiverScenario = (payload) => {
+  return axios.post(`/api/liver/save-scenario`, payload);
+};
+
+
+
 
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
