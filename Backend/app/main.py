@@ -9,11 +9,8 @@ from app.api.Vial_Calculator_Route import router as Vial_Calculator_router
 from app.api.Net_Revenue_Route import router as Net_Revenue_Router
 from app.api.Output_Route import router as Output_Router
 from app.api.monte_carlo_route import router as monte_carlo_router
-<<<<<<< HEAD
 from app.api.auth import router as login
-=======
 from app.liver.api.liver_route import router as liver_router
->>>>>>> feature/backend-development
 app = FastAPI(title="TA Forecast API")
 
 # Allow all CORS (frontend can be any origin)
