@@ -13,6 +13,10 @@ from app.liver.schemas.liver_schema import (
     TabChart,
     TabTable,
     TabData,
+    ChildRow,
+    HierarchicalRow,
+    HierarchicalTabTable,
+    HierarchicalTabData,
 )
 from app.liver.repository.liver_repo import (
     get_liver_config,
@@ -215,6 +219,59 @@ def _build_tab_data(series_dict, month_range, month_labels, forecast_start_index
     )
 
 
+def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start_index, factors):
+    """
+    Builds HierarchicalTabData for tabs where rows are (year, month, parent, child, value).
+    Table has one HierarchicalRow per parent with a summed total and individual child rows.
+    """
+    # Group: {parent: {child: {(year, month): value}}}
+    grouped = {}
+    for r in rows:
+        key  = (r[0], r[1])
+        parent, child, value = r[2], r[3], float(r[4])
+        grouped.setdefault(parent, {}).setdefault(child, {})[key] = value
+
+    chart_series = []
+    table_rows   = []
+
+    for parent, children in grouped.items():
+        # Sum children per month to get parent total
+        parent_map = {}
+        for child_map in children.values():
+            for k, v in child_map.items():
+                parent_map[k] = parent_map.get(k, 0.0) + v
+
+        parent_train, parent_forecast = _build_series_with_forecast(
+            month_range, parent_map, forecast_start_index, factors
+        )
+        chart_series.append(ChartSeries(
+            label=parent, train_values=parent_train, forecast_values=parent_forecast
+        ))
+
+        child_rows = []
+        for child, child_map in children.items():
+            child_train, child_forecast = _build_series_with_forecast(
+                month_range, child_map, forecast_start_index, factors
+            )
+            chart_series.append(ChartSeries(
+                label=f"{parent} - {child}",
+                train_values=child_train,
+                forecast_values=child_forecast,
+            ))
+            child_rows.append(ChildRow(label=child, values=child_train + child_forecast))
+
+        table_rows.append(HierarchicalRow(
+            hierarchy=parent,
+            total=parent_train + parent_forecast,
+            children=child_rows,
+        ))
+
+    return HierarchicalTabData(
+        chart=TabChart(series=chart_series),
+        table=HierarchicalTabTable(headers=month_labels, rows=table_rows),
+    )
+
+
 def _rows_to_series(rows, label_col_index, value_col_index):
     series = {}
     for row in rows:
@@ -332,19 +389,15 @@ def _build_all_tabs(cur, ta, payer, product, metric, from_year, from_month,
 
         # Tab 4
         pwp_rows = get_payer_wise_product_yearly(cur, ta, from_year, train_end_year, payer, metric)
-        pwp_series = {}
-        for r in pwp_rows:
-            label = f"{r[2]} - {r[3]}"
-            pwp_series.setdefault(label, {})[(r[0], r[1])] = float(r[4])
-        tabs["payer_wise_product"] = _build_tab_data(pwp_series, month_range, month_labels, forecast_start_index, factors)
+        tabs["payer_wise_product"] = _build_hierarchical_tab_data(
+            pwp_rows, month_range, month_labels, forecast_start_index, factors
+        )
 
         # Tab 5
         pwpy_rows = get_product_wise_payer_yearly(cur, ta, from_year, train_end_year, product, metric)
-        pwpy_series = {}
-        for r in pwpy_rows:
-            label = f"{r[2]} - {r[3]}"
-            pwpy_series.setdefault(label, {})[(r[0], r[1])] = float(r[4])
-        tabs["product_wise_payer"] = _build_tab_data(pwpy_series, month_range, month_labels, forecast_start_index, factors)
+        tabs["product_wise_payer"] = _build_hierarchical_tab_data(
+            pwpy_rows, month_range, month_labels, forecast_start_index, factors
+        )
 
     else:
         # Tab 1
@@ -362,19 +415,15 @@ def _build_all_tabs(cur, ta, payer, product, metric, from_year, from_month,
 
         # Tab 4
         pwp_rows  = get_payer_wise_product(cur, ta, from_year, from_month, train_end_year, train_end_month, payer, metric)
-        pwp_series = {}
-        for r in pwp_rows:
-            label = f"{r[2]} - {r[3]}"
-            pwp_series.setdefault(label, {})[(r[0], r[1])] = float(r[4])
-        tabs["payer_wise_product"] = _build_tab_data(pwp_series, month_range, month_labels, forecast_start_index, factors)
+        tabs["payer_wise_product"] = _build_hierarchical_tab_data(
+            pwp_rows, month_range, month_labels, forecast_start_index, factors
+        )
 
         # Tab 5
         pwpy_rows  = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, product, metric)
-        pwpy_series = {}
-        for r in pwpy_rows:
-            label = f"{r[2]} - {r[3]}"
-            pwpy_series.setdefault(label, {})[(r[0], r[1])] = float(r[4])
-        tabs["product_wise_payer"] = _build_tab_data(pwpy_series, month_range, month_labels, forecast_start_index, factors)
+        tabs["product_wise_payer"] = _build_hierarchical_tab_data(
+            pwpy_rows, month_range, month_labels, forecast_start_index, factors
+        )
 
     return month_labels, forecast_start_index, tabs
 
