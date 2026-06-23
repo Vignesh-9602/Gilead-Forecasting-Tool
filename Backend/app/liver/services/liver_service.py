@@ -161,7 +161,18 @@ def save_liver_configuration(payload) -> dict:
         # Return forecast_periods as date string (same as GET)
         return_config = dict(config_to_save)
         return_config["forecast_periods"] = forecast_end.isoformat()
-        return {"ta_name": cfg.ta_name, "exists": True, "config": return_config}
+        # Also return available_train_months to satisfy response model
+        rows = get_transaction_distinct_months(cur, cfg.ta_name)
+        available_train_months = [
+            date_type(int(r[0]), int(r[1]), 1).isoformat() for r in rows
+        ]
+
+        return {
+            "ta_name": cfg.ta_name,
+            "exists": True,
+            "config": return_config,
+            "available_train_months": available_train_months,
+        }
     finally:
         cur.close()
         conn.close()

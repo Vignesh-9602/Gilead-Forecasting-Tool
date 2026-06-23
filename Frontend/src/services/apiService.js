@@ -243,12 +243,12 @@ export const loginApi = (payload) =>
 
 
 // GET — loads existing config + available date options
-export const getConfigurationByTherapyAreaPBC = (taName) => {
+export const getConfigurationByTherapyAreaHCV = (taName) => {
     return axios.get(`/api/liver/configurations/${taName}`);
 };
 
 // POST — saves / updates config
-export const saveConfigurationsPBC = (payload) => {
+export const saveConfigurationsHCV = (payload) => {
     return axios.post(`/api/liver/configurations`, payload);
 };
 

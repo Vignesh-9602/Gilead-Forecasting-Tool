@@ -4,7 +4,7 @@ import {
     TextField, Button, ToggleButton, ToggleButtonGroup,
 } from "@mui/material";
 import {
-    LineChart, Line, XAxis, YAxis, CartesianGrid,
+    LineChart, Line, XAxis, YAxis,
     Tooltip as RechartsTooltip, Legend, ReferenceLine, ResponsiveContainer,
 } from "recharts";
 import { GlobalContext } from "../../../context/Provider";
@@ -90,17 +90,21 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
         <Box sx={{ width: "100%", height: 300 }}>
             <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={rows} margin={{ top: 10, right: 24, bottom: 4, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    {/* Hide axis lines and grid — only data distribution should show */}
                     <XAxis
                         dataKey="month"
                         tick={{ fontSize: 10, fill: "#64748b" }}
                         interval="preserveStartEnd"
                         minTickGap={20}
+                        axisLine={false}
+                        tickLine={false}
                     />
                     <YAxis
                         tick={{ fontSize: 10, fill: "#64748b" }}
                         tickFormatter={(v) => formatChartValue(v, metricUnit)}
                         width={60}
+                        axisLine={false}
+                        tickLine={false}
                     />
                     <RechartsTooltip
                         formatter={(v, name) => [formatChartValue(v, metricUnit), name.replace(/__[hf]$/, "")]}
@@ -401,8 +405,16 @@ export default function PBCModelInput() {
 
                 if (!payerFilter   && resData?.payers?.length)          setPayerFilter(resData.payers[0]);
                 if (!productFilter && resData?.products?.length)        setProductFilter(resData.products[0]);
-                if (!fromDate      && resData?.available_dates?.length) setFromDate(resData.available_dates[0]);
-                if (!metric        && resData?.metric_options?.length)  setMetric(resData.metric_options[0].value);
+                // Prefer explicit from_date/to_date from API when provided (ISO strings)
+                if (resData?.from_date) {
+                    setFromDate(resData.from_date);
+                } else if (!fromDate && resData?.available_dates?.length) {
+                    setFromDate(resData.available_dates[0]);
+                }
+                if (resData?.to_date) {
+                    setToDate(resData.to_date);
+                }
+                if (!metric && resData?.metric_options?.length) setMetric(resData.metric_options[0].value);
 
                 setFilterOptions({
                     indications: [],
@@ -705,7 +717,10 @@ export default function PBCModelInput() {
     const formatCellValue = (val) => {
         if (val == null) return "—";
         const num = Number(val);
-        if (isPercentTab) return `${num.toFixed(1)}%`;
+
+        // Show raw numeric values for percent metrics (remove the % sign)
+        if (metricUnit === "%") return num.toFixed(1);
+
         const fixed = num.toLocaleString(undefined, { maximumFractionDigits: 1 });
         return `${fixed}${metricUnit === "%" ? "%" : ""}`;
     };
@@ -743,11 +758,35 @@ export default function PBCModelInput() {
             }
         });
 
-        return Object.keys(brandsMap).map((brandKey) => ({
-            brandName: brandKey,
-            mainRow: brandsMap[brandKey].mainRow || { hierarchy: brandKey, monthly_data: {}, is_applied: false },
-            children: brandsMap[brandKey].children
-        }));
+        // If a brand has no explicit mainRow, synthesize totals from its children so parent shows total value
+        return Object.keys(brandsMap).map((brandKey) => {
+            const entry = brandsMap[brandKey];
+            let mainRow = entry.mainRow;
+            if (!mainRow) {
+                const children = entry.children || [];
+                const months = chartData?.months || (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
+                const monthly_data = {};
+                months.forEach((m) => {
+                    let sum = 0;
+                    let any = false;
+                    children.forEach((c) => {
+                        const v = c.monthly_data?.[m];
+                        if (v != null && !Number.isNaN(Number(v))) { sum += Number(v); any = true; }
+                    });
+                    monthly_data[m] = any ? sum : null;
+                });
+                mainRow = { hierarchy: brandKey, monthly_data, is_applied: children.some((c) => c.is_applied) };
+            } else {
+                // ensure monthly_data exists
+                mainRow.monthly_data = mainRow.monthly_data || {};
+            }
+
+            return {
+                brandName: brandKey,
+                mainRow,
+                children: entry.children,
+            };
+        });
     }, [tableData]);
 
     // ─── Derived ────────────────────────────────────────────────────────────
@@ -1233,7 +1272,6 @@ export default function PBCModelInput() {
                                         ))}
                                     </Box>
                                 </Box>
-
                                 <Box component="tbody">
                                     {tableData.length === 0 ? (
                                         <>
@@ -1382,14 +1420,6 @@ export default function PBCModelInput() {
                                                                     p: "10px 16px", pl: 4
                                                                 }}>
                                                                     <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-                                                                        <input
-                                                                            type="radio"
-                                                                            name="activeScenarioRadio"
-                                                                            value={childRow.hierarchy}
-                                                                            checked={tentativeRadioSelectedScenario === childRow.hierarchy}
-                                                                            onChange={() => handleActiveScenarioRadioChange(childRow.hierarchy)}
-                                                                            style={{ accentColor: "#4F46E5", width: 14, height: 14, margin: 0 }}
-                                                                        />
                                                                         <Typography sx={{
                                                                             fontSize: "13px",
                                                                             fontWeight: isChildApplied ? 700 : 400,

@@ -13,8 +13,12 @@ import { useSnackbarStore } from "../../../stores";
 import { useLoadingStore } from "../../../stores";
 import AverageVialsModal from "../../headerTabs/AvgVialsDialog";
 import {
-  saveConfigurationsPBC,
-  getConfigurationByTherapyAreaPBC,
+  // generic configuration API (used for non-HCV flows)
+  saveConfigurations,
+  getConfigurationByTherapyArea,
+  // HCV-specific API wrappers (frontend names changed to HCV)
+  saveConfigurationsHCV,
+  getConfigurationByTherapyAreaHCV,
 } from "../../../services/apiService";
 import { LocalizationProvider } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
@@ -52,7 +56,11 @@ export default function GlobalConfiguration() {
     try {
       setLoading(true);
 
-      const response = await getConfigurationByTherapyAreaPBC(taName);
+      // Use HCV-specific configuration API when TA is HCV
+      const response =
+        taName === "HCV"
+          ? await getConfigurationByTherapyAreaHCV(taName)
+          : await getConfigurationByTherapyArea(taName);
 
       console.log("response.data:", response.data); // check actual shape
 
@@ -129,7 +137,12 @@ export default function GlobalConfiguration() {
 
     try {
       setLoading(true);
-      await saveConfigurationsPBC(payload);
+      // Use HCV-specific configuration API when TA is HCV
+      if (therapyArea === "HCV") {
+        await saveConfigurationsHCV(payload);
+      } else {
+        await saveConfigurations(payload);
+      }
       showSnackbar("Configurations saved successfully", "success");
     } catch (error) {
       console.error("Save configuration failed:", error);
