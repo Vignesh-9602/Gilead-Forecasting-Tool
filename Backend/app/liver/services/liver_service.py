@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date as date_type
 from dateutil.relativedelta import relativedelta
 
 from app.db.connection import get_connection
@@ -21,6 +21,7 @@ from app.liver.repository.liver_repo import (
     get_products,
     get_scenarios,
     get_transaction_date_range,
+    get_transaction_distinct_months,
     get_total_market_volume,
     get_product_distribution,
     get_payer_distribution,
@@ -46,13 +47,9 @@ def _parse_ym(date_str: str) -> tuple:
 
 
 def _month_label(year: int, month: int, granularity: str = "monthly") -> str:
-    """
-    monthly → 'Apr-20'
-    yearly  → '2020'   (month is ignored — use 0 as placeholder for yearly)
-    """
     if granularity == "yearly":
         return str(year)
-    return datetime(year, month, 1).strftime("%b-%y")
+    return date_type(year, month, 1).isoformat()
 
 
 def _generate_months(from_year, from_month, to_year, to_month,
@@ -77,15 +74,43 @@ def _generate_months(from_year, from_month, to_year, to_month,
 # Configuration service
 # ---------------------------------------------------------------------------
 
+def _add_months(d: date_type, months: int) -> date_type:
+    month = d.month - 1 + months
+    year  = d.year + month // 12
+    month = month % 12 + 1
+    return date_type(year, month, 1)
+
+
 def get_liver_configuration(ta_name: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
+        rows = get_transaction_distinct_months(cur, ta_name)
+        available_train_months = [
+            date_type(int(r[0]), int(r[1]), 1).isoformat() for r in rows
+        ]
+
         row = get_liver_config(cur, ta_name)
-        print(row)
-        if row:
-            return {"ta_name": ta_name, "exists": True, "config": row[0]}
-        return {"ta_name": ta_name, "exists": False, "config": None}
+        if not row:
+            return {
+                "ta_name": ta_name,
+                "exists": False,
+                "config": None,
+                "available_train_months": available_train_months,
+            }
+
+        config = dict(row[0])
+        # Convert stored int forecast_periods → date string for frontend
+        train_end = date_type.fromisoformat(config["train_end_date"][:10])
+        forecast_end = _add_months(train_end, int(config["forecast_periods"]))
+        config["forecast_periods"] = forecast_end.isoformat()
+
+        return {
+            "ta_name": ta_name,
+            "exists": True,
+            "config": config,
+            "available_train_months": available_train_months,
+        }
     finally:
         cur.close()
         conn.close()
@@ -96,34 +121,47 @@ def save_liver_configuration(payload) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Validate train dates against actual DB data
-        from_year, from_month = _parse_ym(cfg.train_start_date)
-        to_year, to_month     = _parse_ym(cfg.train_end_date)
+        train_start = date_type.fromisoformat(cfg.train_start_date[:10])
+        train_end   = date_type.fromisoformat(cfg.train_end_date[:10])
+        forecast_end = date_type.fromisoformat(cfg.forecast_periods[:10])
 
-        if datetime(from_year, from_month, 1) > datetime(to_year, to_month, 1):
+        if train_start > train_end:
             raise ValueError("train_start_date cannot be after train_end_date")
 
+        if forecast_end <= train_end:
+            raise ValueError("forecast_periods date must be after train_end_date")
+
+        # Convert forecast end date → int periods before saving
+        forecast_periods_int = (
+            (forecast_end.year - train_end.year) * 12
+            + (forecast_end.month - train_end.month)
+        )
+
         min_year, min_month, max_year, max_month = get_transaction_date_range(cur)
+        min_dt = date_type(min_year, min_month, 1)
+        max_dt = date_type(max_year, max_month, 1)
 
-        min_dt = datetime(min_year, min_month, 1)
-        max_dt = datetime(max_year, max_month, 1)
-        start_dt = datetime(from_year, from_month, 1)
-        end_dt   = datetime(to_year, to_month, 1)
-
-        if start_dt < min_dt or start_dt > max_dt:
+        if train_start < min_dt or train_start > max_dt:
             raise ValueError(
                 f"train_start_date is outside available data range "
                 f"({_month_label(min_year, min_month)} – {_month_label(max_year, max_month)})"
             )
-        if end_dt < min_dt or end_dt > max_dt:
+        if train_end < min_dt or train_end > max_dt:
             raise ValueError(
                 f"train_end_date is outside available data range "
                 f"({_month_label(min_year, min_month)} – {_month_label(max_year, max_month)})"
             )
 
-        save_liver_config(cur, cfg.dict())
+        config_to_save = cfg.dict()
+        config_to_save["forecast_periods"] = forecast_periods_int
+
+        save_liver_config(cur, config_to_save)
         conn.commit()
-        return {"ta_name": cfg.ta_name, "exists": True, "config": cfg.dict()}
+
+        # Return forecast_periods as date string (same as GET)
+        return_config = dict(config_to_save)
+        return_config["forecast_periods"] = forecast_end.isoformat()
+        return {"ta_name": cfg.ta_name, "exists": True, "config": return_config}
     finally:
         cur.close()
         conn.close()
@@ -215,17 +253,23 @@ def _load_config(cur, ta: str) -> dict:
 # Get filters
 # ---------------------------------------------------------------------------
 
-def get_liver_filters() -> dict:
+def get_liver_filters(ta: str = "HCV") -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        payers   = get_payers(cur)
-        products = get_products(cur)
+        payers    = get_payers(cur)
+        products  = get_products(cur)
         scenarios = get_scenarios(cur)
         min_year, min_month, max_year, max_month = get_transaction_date_range(cur)
 
         all_months  = _generate_months(min_year, min_month, max_year, max_month)
         date_labels = [_month_label(y, m) for y, m in all_months]
+
+        # Load from_date and to_date from saved config
+        cfg        = _load_config(cur, ta)
+        from_date  = cfg["train_start_date"][:10]
+        train_end  = date_type.fromisoformat(cfg["train_end_date"][:10])
+        to_date    = _add_months(train_end, int(cfg["forecast_periods"])).isoformat()
 
         return {
             "payers":   ["All"] + payers,
@@ -236,6 +280,8 @@ def get_liver_filters() -> dict:
                 {"label": "Market Share",  "value": "market_share"},
             ],
             "available_dates": date_labels,
+            "from_date": from_date,
+            "to_date":   to_date,
         }
     finally:
         cur.close()

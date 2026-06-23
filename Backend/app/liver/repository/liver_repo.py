@@ -62,6 +62,17 @@ def get_transaction_date_range(cur) -> tuple:
     return cur.fetchone()
 
 
+def get_transaction_distinct_months(cur, ta: str) -> list:
+    """Returns [(year, month), ...] ordered ascending for a given TA."""
+    cur.execute("""
+        SELECT DISTINCT year, month
+        FROM raw_liver.transaction_data
+        WHERE LOWER(TRIM(ta)) = LOWER(TRIM(%s))
+        ORDER BY year, month
+    """, (ta,))
+    return cur.fetchall()
+
+
 # ---------------------------------------------------------------------------
 # Tab 1 — Total Market Volume (on the fly from transaction_data)
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ class LiverConfiguration(BaseModel):
     train_start_date: str           # "2020-04-01"
     train_end_date: str             # "2025-12-01"
     model_granularity: str = "monthly"
-    forecast_periods: int = 24
+    forecast_periods: str           # frontend sends/receives as date "2026-06-01"; DB stores as int
 
 
 class SaveLiverConfigRequest(BaseModel):
@@ -24,6 +24,7 @@ class LiverConfigResponse(BaseModel):
     ta_name: str
     exists: bool
     config: Optional[LiverConfiguration]
+    available_train_months: List[str]   # ["2020-01-01", "2020-02-01", ...]
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,8 @@ class LiverFiltersResponse(BaseModel):
     scenarios: List[str]
     metric_options: List[MetricOption]
     available_dates: List[str]          # ["Apr-20", "May-20", ...]
+    from_date: str                      # train_start_date from saved config
+    to_date: str                        # train_end_date from saved config
 
 
 # ---------------------------------------------------------------------------
