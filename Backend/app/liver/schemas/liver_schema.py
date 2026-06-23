@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,29 @@ class TabData(BaseModel):
     table: TabTable
 
 
+# Hierarchical table for payer_wise_product and product_wise_payer tabs
+
+class ChildRow(BaseModel):
+    label: str
+    values: List[float]
+
+
+class HierarchicalRow(BaseModel):
+    hierarchy: str          # parent label (payer or product)
+    total: List[float]      # sum across all children per month
+    children: List[ChildRow]
+
+
+class HierarchicalTabTable(BaseModel):
+    headers: List[str]
+    rows: List[HierarchicalRow]
+
+
+class HierarchicalTabData(BaseModel):
+    chart: TabChart
+    table: HierarchicalTabTable
+
+
 # ---------------------------------------------------------------------------
 # ETS factors
 # ---------------------------------------------------------------------------
@@ -106,10 +129,10 @@ class EtsFactors(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LiverApplyFiltersResponse(BaseModel):
-    months: List[str]               # ["Apr-20", "May-20", ...]
+    months: List[str]               # ISO dates ["2020-04-01", ...]
     forecast_start_index: int
     factors: EtsFactors
-    tabs: Dict[str, TabData]
+    tabs: Dict[str, Any]            # tabs 1-3: TabData, tabs 4-5: HierarchicalTabData
 
 
 # ---------------------------------------------------------------------------
