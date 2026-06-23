@@ -256,7 +256,11 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
         else:
             price = db_price
 
-        pricing_std_used = payload.pricing_params.std if payload.pricing_params else 0.0
+        pricing_std_used = (
+            float(payload.pricing_params.std)
+            if payload.pricing_params and payload.pricing_params.std is not None
+            else 0.0
+        )
 
         # ------------------------------------------------------------------
         # Sample total demand for each iteration directly
@@ -266,15 +270,28 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
 
         # ------------------------------------------------------------------
         # Sample compliance: one draw per iteration from Truncated Normal [0,1]
+        # If std is 0, compliance is fixed — all iterations use comp_mean.
         # ------------------------------------------------------------------
-        a_comp = (0.0 - comp_mean) / comp_std
-        b_comp = (1.0 - comp_mean) / comp_std
-        sampled_compliance = truncnorm.rvs(a_comp, b_comp, loc=comp_mean, scale=comp_std, size=n)
+        if comp_std != 0:
+            a_comp = (0.0 - comp_mean) / comp_std
+            b_comp = (1.0 - comp_mean) / comp_std
+            sampled_compliance = truncnorm.rvs(a_comp, b_comp, loc=comp_mean, scale=comp_std, size=n)
+        else:
+            sampled_compliance = np.full(n, comp_mean)
+
+        # ------------------------------------------------------------------
+        # Sample price: Truncated Normal (price ≥ 0), or fixed if std == 0
+        # ------------------------------------------------------------------
+        if pricing_std_used > 0:
+            a_price = (0.0 - price) / pricing_std_used
+            sampled_price = truncnorm.rvs(a_price, np.inf, loc=price, scale=pricing_std_used, size=n)
+        else:
+            sampled_price = np.full(n, price)
 
         # ------------------------------------------------------------------
         # Revenue = total_demand × compliance × price_per_vial
         # ------------------------------------------------------------------
-        revenues = total_demand_per_iter * sampled_compliance * price
+        revenues = total_demand_per_iter * sampled_compliance * sampled_price
 
         mean_r   = float(np.mean(revenues))
         median_r = float(np.median(revenues))
@@ -312,7 +329,8 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
             peak_mask = (revenues >= peak_lo) & (revenues < peak_hi)
 
         peak_demand     = float(np.mean(total_demand_per_iter[peak_mask])) if peak_mask.any() else 0.0
-        peak_compliance = float(np.mean(sampled_compliance[peak_mask]))    if peak_mask.any() else 0.0
+        peak_compliance = float(np.mean(sampled_compliance[peak_mask])) if peak_mask.any() else comp_mean
+        peak_price      = float(np.mean(sampled_price[peak_mask]))      if peak_mask.any() else price
 
         result = {
             "histogram": histogram,
@@ -331,7 +349,7 @@ def run_monte_carlo_simulation(payload: MonteCarloRunRequest) -> dict:
                     "revenue_range":   f"{fmt_m(peak_lo)}-{fmt_m(peak_hi)}",
                     "mean_demand":     peak_demand,
                     "mean_compliance": round(peak_compliance * 100, 4),
-                    "price_per_vial":  price,
+                    "price_per_vial":  peak_price,
                 },
             },
             "input_parameters": {
