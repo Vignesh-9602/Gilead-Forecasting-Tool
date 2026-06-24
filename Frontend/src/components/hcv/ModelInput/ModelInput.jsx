@@ -1,17 +1,16 @@
 import React, { useState, useEffect, useContext, useMemo } from "react";
 import {
     Box, Paper, Typography, FormControl, Select, MenuItem,
-    TextField, Button, ToggleButton, ToggleButtonGroup,
+    TextField, Button, ToggleButton, ToggleButtonGroup, Checkbox, ListItemText,
 } from "@mui/material";
-import {
-    LineChart, Line, XAxis, YAxis,
-    Tooltip as RechartsTooltip, Legend, ReferenceLine, ResponsiveContainer,
-} from "recharts";
+import Plot from "react-plotly.js";
+const PlotComponent = Plot.default || Plot;
 import { GlobalContext } from "../../../context/Provider";
 import {
     getLiverFilters, applyLiverFilters, recalculateLiver, saveLiverScenario,
     getMetricFilters, applyMetricFilters, recalculateMetrics,
     saveScenario, updateScenario,
+    getConfigurationByTherapyAreaHCV,
 } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
@@ -55,27 +54,7 @@ const formatChartValue = (v, unit) => {
 };
 
 const ForecastChart = ({ chartData, metricUnit = "" }) => {
-    const rows = useMemo(() => {
-        if (!chartData?.months?.length || !chartData?.series?.length) return [];
-        const { months, forecast_start_index: fsi = 0, series } = chartData;
-
-        return months.map((month, i) => {
-            const row = { month: formatMonthLabel(month) };
-            series.forEach((s) => {
-                const histKey = `${s.label}__h`;
-                const fcstKey = `${s.label}__f`;
-                const trainV = s.train_values?.[i];
-                const forecastV = i >= fsi ? s.forecast_values?.[i - fsi] : null;
-
-                row[histKey] = i < fsi ? (trainV ?? null) : null;
-                row[fcstKey] = i >= fsi ? (forecastV ?? null) : null;
-                if (i === fsi - 1 && trainV != null) row[fcstKey] = trainV;
-            });
-            return row;
-        });
-    }, [chartData]);
-
-    if (!rows.length) {
+    if (!chartData?.months?.length || !chartData?.series?.length) {
         return (
             <Box sx={{ p: 4, textAlign: "center", color: "#94a3b8", fontSize: "14px" }}>
                 No chart data available. Please select filters and apply.
@@ -83,73 +62,74 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
         );
     }
 
-    const { months, forecast_start_index: fsi = 0, series } = chartData;
-    const cutoffLabel = fsi > 0 && fsi < months.length ? formatMonthLabel(months[fsi]) : null;
+    const months = chartData.months || [];
+    const fsi = chartData.forecast_start_index || 0;
+    const series = chartData.series || [];
+
+    const allMonths = months.map((m) => {
+        const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
+        return parsed.isValid()
+            ? parsed.format("MMM-YY")
+            : new Date(m).toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+    });
+
+    const traces = series.flatMap((s, idx) => {
+        const color = CHART_COLORS[idx % CHART_COLORS.length];
+
+        const trainX = allMonths.slice(0, fsi);
+        const trainY = Array.isArray(s.train_values) ? s.train_values.slice(0, fsi) : [];
+
+        const forecastX = fsi > 0 ? [allMonths[fsi - 1], ...allMonths.slice(fsi)] : allMonths.slice(fsi);
+        const lastTrain = (s.train_values && s.train_values.length) ? s.train_values[s.train_values.length - 1] : null;
+        const forecastY = fsi > 0 ? [(lastTrain ?? null), ...(Array.isArray(s.forecast_values) ? s.forecast_values : [])] : (Array.isArray(s.forecast_values) ? s.forecast_values : []);
+
+        return [
+            // Historical
+            {
+                x: trainX,
+                y: trainY,
+                type: "scatter",
+                mode: "lines",
+                name: s.label,
+                legendgroup: s.label,
+                line: { color, width: 3 },
+            },
+            // Forecast
+            {
+                x: forecastX,
+                y: forecastY,
+                type: "scatter",
+                mode: "lines",
+                name: s.label,
+                legendgroup: s.label,
+                showlegend: false,
+                line: { color, width: 3, dash: "dot" },
+            },
+        ];
+    });
+
+    const allValues = series.flatMap((s) => [ ...(s.train_values || []), ...(s.forecast_values || []) ]);
+    const maxValue = allValues.length ? Math.max(...allValues.map(v => v || 0)) : 0;
+    const yMax = Math.ceil(maxValue * 1.15);
 
     return (
         <Box sx={{ width: "100%", height: 300 }}>
-            <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={rows} margin={{ top: 10, right: 24, bottom: 4, left: 0 }}>
-                    {/* Hide axis lines and grid — only data distribution should show */}
-                    <XAxis
-                        dataKey="month"
-                        tick={{ fontSize: 10, fill: "#64748b" }}
-                        interval="preserveStartEnd"
-                        minTickGap={20}
-                        axisLine={false}
-                        tickLine={false}
-                    />
-                    <YAxis
-                        tick={{ fontSize: 10, fill: "#64748b" }}
-                        tickFormatter={(v) => formatChartValue(v, metricUnit)}
-                        width={60}
-                        axisLine={false}
-                        tickLine={false}
-                    />
-                    <RechartsTooltip
-                        formatter={(v, name) => [formatChartValue(v, metricUnit), name.replace(/__[hf]$/, "")]}
-                        contentStyle={{ fontSize: 11, borderRadius: 6, border: "1px solid #e2e8f0" }}
-                    />
-                    <Legend
-                        wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
-                        formatter={(value) => value.replace(/__h$/, " (History)").replace(/__f$/, " (Forecast)")}
-                    />
-                    {cutoffLabel && (
-                        <ReferenceLine
-                            x={cutoffLabel}
-                            stroke="#94a3b8"
-                            strokeDasharray="4 4"
-                            label={{ value: "Forecast →", fontSize: 10, fill: "#64748b", position: "insideTopRight" }}
-                        />
-                    )}
-                    {series.flatMap((s, idx) => {
-                        const color = CHART_COLORS[idx % CHART_COLORS.length];
-                        return [
-                            <Line
-                                key={`${s.label}-h`}
-                                type="monotone"
-                                dataKey={`${s.label}__h`}
-                                stroke={color}
-                                strokeWidth={2}
-                                dot={false}
-                                connectNulls
-                                isAnimationActive={false}
-                            />,
-                            <Line
-                                key={`${s.label}-f`}
-                                type="monotone"
-                                dataKey={`${s.label}__f`}
-                                stroke={color}
-                                strokeWidth={2}
-                                strokeDasharray="5 5"
-                                dot={false}
-                                connectNulls
-                                isAnimationActive={false}
-                            />,
-                        ];
-                    })}
-                </LineChart>
-            </ResponsiveContainer>
+            <PlotComponent
+                data={traces}
+                layout={{
+                    autosize: true,
+                    height: 300,
+                    margin: { l: 50, r: 30, t: 8, b: 60 },
+                    legend: { orientation: "h", x: 0.35, y: -0.2 },
+                    showlegend: true,
+                    xaxis: { tickangle: -45, showgrid: true },
+                    yaxis: { showgrid: false, range: [0, yMax] },
+                    paper_bgcolor: "white",
+                    plot_bgcolor: "white",
+                }}
+                style={{ width: "100%", height: "100%" }}
+                config={{ responsive: true, displayModeBar: false }}
+            />
         </Box>
     );
 };
@@ -205,6 +185,8 @@ export default function PBCModelInput() {
         metric_filters: [],
         scenario_names: [],
     });
+    const [filtersLoaded, setFiltersLoaded] = useState(false);
+    const [autoAppliedOnMount, setAutoAppliedOnMount] = useState(false);
     const [payerOptions, setPayerOptions]     = useState([]);
     const [productOptions, setProductOptions] = useState([]);
 
@@ -293,16 +275,138 @@ export default function PBCModelInput() {
             forecast_values: Array.isArray(s.forecast_values) ? s.forecast_values : [],
         }));
 
-        const headers = tab.table?.headers || months;
-        const table = (tab.table?.rows || []).map((r) => {
-            const vals = r.values || [];
-            const monthly_data = {};
-            headers.forEach((m, i) => {
-                const v = vals[i];
-                monthly_data[m] = (v === null || v === undefined ? null : Number(v));
+        // If the series are all zeros (backend may omit total market aggregation), try to synthesize
+        const isAllZeroSeries = (arrSeries) => {
+            if (!arrSeries || !arrSeries.length) return true;
+            return arrSeries.every((s) => {
+                const train = Array.isArray(s.train_values) ? s.train_values : [];
+                const fore = Array.isArray(s.forecast_values) ? s.forecast_values : [];
+                const anyTrainNonZero = train.some((v) => v != null && Number(v) !== 0);
+                const anyForeNonZero = fore.some((v) => v != null && Number(v) !== 0);
+                return !(anyTrainNonZero || anyForeNonZero);
             });
-            return { hierarchy: r.hierarchy, monthly_data, is_applied: !!r.is_applied };
+        };
+
+        if (isAllZeroSeries(series)) {
+            // prefer product_distribution or product_wise_payer as source for aggregation
+            const candidateKeys = ["product_distribution", "product_wise_payer", "payer_wise_product", "payer_distribution"];
+            let candidate = null;
+            for (const k of candidateKeys) {
+                if (tabs[k] && Array.isArray(tabs[k].chart?.series) && tabs[k].chart.series.length) { candidate = tabs[k].chart.series; break; }
+            }
+
+            if (candidate) {
+                // sum child series element-wise
+                const maxTrainLen = Math.max(...candidate.map((s) => (Array.isArray(s.train_values) ? s.train_values.length : 0)), 0);
+                const maxForeLen = Math.max(...candidate.map((s) => (Array.isArray(s.forecast_values) ? s.forecast_values.length : 0)), 0);
+
+                const sumTrain = Array.from({ length: maxTrainLen }, (_, i) => {
+                    return candidate.reduce((acc, s) => acc + (Number((s.train_values || [])[i]) || 0), 0);
+                });
+                const sumFore = Array.from({ length: maxForeLen }, (_, i) => {
+                    return candidate.reduce((acc, s) => acc + (Number((s.forecast_values || [])[i]) || 0), 0);
+                });
+
+                // replace series with a synthesized total
+                const synthLabel = tab.chart?.series?.[0]?.label || "Total Market Volume";
+                series.length = 0; // clear
+                series.push({ label: synthLabel, lot: synthLabel, train_values: sumTrain, forecast_values: sumFore });
+            }
+        }
+
+        const headers = tab.table?.headers || months;
+        // Backend may return either flat TableRow { hierarchy, values }
+        // or HierarchicalRow { hierarchy, total, children: [{ label, values }] }
+        const table = [];
+        (tab.table?.rows || []).forEach((r) => {
+            if (r && Array.isArray(r.total)) {
+                // parent row with totals and children
+                const parentVals = r.total || [];
+                const parentMonthly = {};
+                headers.forEach((m, i) => {
+                    const v = parentVals[i];
+                    parentMonthly[m] = (v === null || v === undefined ? null : Number(v));
+                });
+                table.push({ hierarchy: r.hierarchy, monthly_data: parentMonthly, is_applied: !!r.is_applied });
+
+                const children = r.children || [];
+                children.forEach((c) => {
+                    const childVals = c.values || [];
+                    const childMonthly = {};
+                    headers.forEach((m, i) => {
+                        const v = childVals[i];
+                        childMonthly[m] = (v === null || v === undefined ? null : Number(v));
+                    });
+                    table.push({ hierarchy: `${r.hierarchy} - ${c.label}`, monthly_data: childMonthly, is_applied: false });
+                });
+            } else {
+                const vals = r.values || [];
+                const monthly_data = {};
+                headers.forEach((m, i) => {
+                    const v = vals[i];
+                    monthly_data[m] = (v === null || v === undefined ? null : Number(v));
+                });
+                table.push({ hierarchy: r.hierarchy, monthly_data, is_applied: !!r.is_applied });
+            }
         });
+
+        // If the table appears to be all zeros (backend didn't provide totals), try to synthesize
+        const isAllZeroTable = (tbl) => {
+            if (!tbl || !tbl.length) return true;
+            return tbl.every((row) => {
+                const vals = Object.values(row.monthly_data || {});
+                if (!vals.length) return true;
+                return vals.every((v) => v == null || Number(v) === 0);
+            });
+        };
+
+        if (isAllZeroTable(table)) {
+            const candidateKeys = ["product_distribution", "product_wise_payer", "payer_wise_product", "payer_distribution"];
+            let cand = null;
+            for (const k of candidateKeys) {
+                if (tabs[k] && Array.isArray(tabs[k].table?.rows) && tabs[k].table.rows.length) { cand = tabs[k].table; break; }
+            }
+
+            if (cand) {
+                const headersCand = cand.headers || months;
+                const synthesized = [];
+                (cand.rows || []).forEach((r) => {
+                    if (r && Array.isArray(r.total)) {
+                        const parentVals = r.total || [];
+                        const parentMonthly = {};
+                        headersCand.forEach((m, i) => {
+                            const v = parentVals[i];
+                            parentMonthly[m] = (v === null || v === undefined ? null : Number(v));
+                        });
+                        synthesized.push({ hierarchy: r.hierarchy, monthly_data: parentMonthly, is_applied: !!r.is_applied });
+
+                        const children = r.children || [];
+                        children.forEach((c) => {
+                            const childVals = c.values || [];
+                            const childMonthly = {};
+                            headersCand.forEach((m, i) => {
+                                const v = childVals[i];
+                                childMonthly[m] = (v === null || v === undefined ? null : Number(v));
+                            });
+                            synthesized.push({ hierarchy: `${r.hierarchy} - ${c.label}`, monthly_data: childMonthly, is_applied: false });
+                        });
+                    } else {
+                        const vals = r.values || [];
+                        const monthly_data = {};
+                        headersCand.forEach((m, i) => {
+                            const v = vals[i];
+                            monthly_data[m] = (v === null || v === undefined ? null : Number(v));
+                        });
+                        synthesized.push({ hierarchy: r.hierarchy, monthly_data, is_applied: !!r.is_applied });
+                    }
+                });
+
+                if (synthesized.length) {
+                    // replace table with synthesized version
+                    return { chart: { months, forecast_start_index: fsi, series }, table: synthesized };
+                }
+            }
+        }
 
         return { chart: { months, forecast_start_index: fsi, series }, table };
     };
@@ -317,8 +421,8 @@ export default function PBCModelInput() {
         product: metric === "market_share" ? brand : "",
         from_date: fromDate,
         to_date: toDate,
-        payer: payerFilter,
-        product_filter: productFilter,
+        payer: payerFilter || "",
+        product_filter: productFilter || "",
     });
 
     const buildFullFactors = () => ({
@@ -348,6 +452,22 @@ export default function PBCModelInput() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [therapyArea]);
 
+    // Auto-apply filters once after HCV filter options finish loading
+    useEffect(() => {
+        if (!filtersLoaded) return;
+        if (autoAppliedOnMount) return;
+
+        (async () => {
+            try {
+                await handleApplyFilter();
+                setAutoAppliedOnMount(true);
+            } catch (e) {
+                console.warn("Auto-apply filters failed", e);
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filtersLoaded, autoAppliedOnMount]);
+
     useEffect(() => {
         if (!allFactors || !Object.keys(allFactors).length) return;
         if (modelSelection === "ets") {
@@ -367,6 +487,8 @@ export default function PBCModelInput() {
     useEffect(() => {
         if (!liverTabsRaw) return;
         const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab);
+        console.debug("[ModelInput] activeTab ->", activeTab, "mapped table length:", (table || []).length, "chart months:", chart?.months?.length);
+        if (table && table.length) console.debug("[ModelInput] first table row:", table[0]);
         setChartData(chart);
         setTableData(table);
         setExpandedBrands({});
@@ -396,24 +518,64 @@ export default function PBCModelInput() {
             setLoading(true);
 
             if (isHCV) {
+                // First load saved HCV configuration so we can set from/to dates
+                let cfg = null;
+                let savedFlag = null;
+                try {
+                    savedFlag = localStorage.getItem("hcvConfigSaved");
+                } catch (e) { savedFlag = null; }
+
+                // use locals to avoid stale state updates while fetching
+                let localFrom = fromDate || "";
+                let localTo = toDate || "";
+                let localPayer = payerFilter || "";
+                let localProduct = productFilter || "";
+
+                try {
+                    const cfgRes = await getConfigurationByTherapyAreaHCV(therapyArea);
+                    const cfgData = cfgRes?.data;
+                    if (cfgData?.exists && cfgData?.config) {
+                        cfg = cfgData.config;
+                        if (cfg.train_start_date) localFrom = cfg.train_start_date;
+                        // prefer train_end_date for TO DATE; fall back to forecast_periods if not present
+                        if (cfg.train_end_date) localTo = cfg.train_end_date;
+                        else if (cfg.forecast_periods) localTo = cfg.forecast_periods;
+                        // IMPORTANT: do NOT take payer/brand from global config here — keep payer/product driven by liver filters API
+                    }
+                } catch (err) {
+                    console.warn("Failed to load saved HCV configuration", err);
+                }
+
+                // Then load available filters (dates, payers, products)
                 const response = await getLiverFilters();
                 const resData = response?.data || {};
 
                 setPayerOptions(resData?.payers || []);
                 setProductOptions(resData?.products || []);
-                setAvailableDates(resData?.available_dates || []);
+                const availDates = resData?.available_dates || [];
+                setAvailableDates(availDates);
 
-                if (!payerFilter   && resData?.payers?.length)          setPayerFilter(resData.payers[0]);
-                if (!productFilter && resData?.products?.length)        setProductFilter(resData.products[0]);
-                // Prefer explicit from_date/to_date from API when provided (ISO strings)
-                if (resData?.from_date) {
-                    setFromDate(resData.from_date);
-                } else if (!fromDate && resData?.available_dates?.length) {
-                    setFromDate(resData.available_dates[0]);
+                // If config didn't provide payer/product, fall back to API lists
+                if (!localPayer && resData?.payers?.length) localPayer = resData.payers[0];
+                if (!localProduct && resData?.products?.length) localProduct = resData.products[0];
+
+                // Prefer explicit from_date/to_date from API when provided (ISO strings) if not set by config
+                if (!localFrom && resData?.from_date && availDates.includes(resData.from_date)) localFrom = resData.from_date;
+                if (!localTo) {
+                    if (resData?.to_date) localTo = (availDates.includes(resData.to_date) ? resData.to_date : (availDates[availDates.length - 1] || ""));
                 }
-                if (resData?.to_date) {
-                    setToDate(resData.to_date);
+
+                // If current local dates contain values outside available range, clamp them
+                if (availDates.length) {
+                    if (localFrom && !availDates.includes(localFrom)) localFrom = "";
+                    if (localTo && !availDates.includes(localTo)) localTo = availDates[availDates.length - 1];
                 }
+
+                // finally set state once with computed local values
+                setFromDate(localFrom);
+                setToDate(localTo);
+                setPayerFilter(localPayer);
+                setProductFilter(localProduct);
                 if (!metric && resData?.metric_options?.length) setMetric(resData.metric_options[0].value);
 
                 setFilterOptions({
@@ -422,7 +584,48 @@ export default function PBCModelInput() {
                     scenario_names: resData?.scenarios || [],
                 });
 
+
                 if (resData?.scenarios?.length) setScenarioSelector(resData.scenarios[0]);
+
+                // If we have a saved config, or the config was just saved (flag), apply it to populate the chart/table
+                if (cfg || savedFlag) {
+                    try {
+                                const autoPayload = {
+                                    ta: therapyArea || "HCV",
+                                    payer: localPayer ? [localPayer] : ["All"],
+                                    brand: localProduct ? [localProduct] : ["All"],
+                                    product: localProduct || "All",
+                                    metric: metric || (resData?.metric_options?.[0]?.value || "market_volume"),
+                                    from_date: (cfg?.train_start_date || localFrom || (resData.available_dates?.[0] || "")),
+                                    scenario: resData?.scenarios?.[0] || "Base",
+                                };
+                                console.debug("[ModelInput] auto-apply payload:", autoPayload);
+                                const applyResp = await applyLiverFilters(autoPayload);
+                        const data = applyResp?.data || {};
+                        const f = data?.factors || {};
+                        setAlpha(f?.level ?? 0);
+                        setBeta(f?.trend ?? 0);
+                        setGamma(f?.damping ?? 0);
+                        setMultiplier(f?.multiplier ?? 1);
+
+                        setLiverTabsRaw({
+                            months: data?.months || [],
+                            forecast_start_index: data?.forecast_start_index ?? 0,
+                            tabs: data?.tabs || {},
+                        });
+                        console.debug("[ModelInput] setLiverTabsRaw (auto-apply):", Object.keys(data?.tabs || {}));
+                        setEditable(false);
+                        setAutoAppliedOnMount(true);
+                        // clear the one-time saved flag so this only auto-applies once
+                        try { localStorage.removeItem("hcvConfigSaved"); } catch (e) { /* ignore */ }
+                    } catch (err) {
+                        console.warn("Failed to apply saved HCV configuration", err);
+                    }
+                }
+
+                // mark that filters finished loading so we can auto-apply once on mount
+                setFiltersLoaded(true);
+
                 return;
             }
 
@@ -430,7 +633,8 @@ export default function PBCModelInput() {
             const resData = response?.data;
 
             setMappingData(resData?.data || {});
-            setAvailableDates(resData?.available_dates || []);
+            const avail = resData?.available_dates || [];
+            setAvailableDates(avail);
 
             const defaultFilter = resData?.selected_filter;
             if (!defaultFilter) {
@@ -447,16 +651,35 @@ export default function PBCModelInput() {
             setLot(defaultFilter.lot);
             setMetric(defaultFilter.metric);
             setBrand(defaultFilter.product || "");
-            setFromDate(defaultFilter.from_date || "");
-            setToDate(defaultFilter.to_date || "");
-            setPayerFilter(defaultFilter.payer || "");
-            setProductFilter(defaultFilter.product_filter || "");
+            setFromDate((defaultFilter.from_date && avail.includes(defaultFilter.from_date)) ? defaultFilter.from_date : "");
+            setToDate((defaultFilter.to_date && avail.includes(defaultFilter.to_date)) ? defaultFilter.to_date : (avail[avail.length - 1] || ""));
+            setPayerFilter(Array.isArray(defaultFilter.payer) ? (defaultFilter.payer[0] || "") : (defaultFilter.payer || ""));
+            setProductFilter(Array.isArray(defaultFilter.product_filter) ? (defaultFilter.product_filter[0] || "") : (defaultFilter.product_filter || ""));
 
             setFilterOptions({
                 indications: Object.keys(resData?.data?.[defaultFilter.scenario_name] || {}),
                 metric_filters: resData?.metric_filters || [],
                 scenario_names: resData?.scenario_names || [],
             });
+
+            // If there's a saved HCV global configuration, prefer its train_end_date for TO DATE
+            if (therapyArea && therapyArea.toLowerCase() === "hcv") {
+                try {
+                    const cfgRes = await getConfigurationByTherapyAreaHCV(therapyArea);
+                    const cfgData = cfgRes?.data;
+                    const cfg = cfgData?.config || null;
+                    if (cfg && cfg.train_end_date) {
+                        const t = cfg.train_end_date;
+                        if (avail.includes(t)) {
+                            setToDate(t);
+                        } else {
+                            // if train_end_date not in available list, keep API default (already set)
+                        }
+                    }
+                } catch (err) {
+                    console.warn("Failed to fetch saved HCV configuration for TO DATE override", err);
+                }
+            }
 
             const payload = {
                 ...buildBasePayload(),
@@ -495,7 +718,9 @@ export default function PBCModelInput() {
             setLoading(true);
 
             if (isHCV) {
-                const response = await applyLiverFilters(buildLiverBasePayload());
+                const payload = buildLiverBasePayload();
+                console.debug("[ModelInput] apply payload:", payload);
+                const response = await applyLiverFilters(payload);
                 const data = response?.data || {};
 
                 setAppliedLot(lot);
@@ -512,6 +737,7 @@ export default function PBCModelInput() {
                     forecast_start_index: data?.forecast_start_index ?? 0,
                     tabs: data?.tabs || {},
                 });
+                console.debug("[ModelInput] setLiverTabsRaw (apply):", Object.keys(data?.tabs || {}));
 
                 setEditable(false);
                 showSnackbar("Liver filters applied successfully", "success");
@@ -570,6 +796,7 @@ export default function PBCModelInput() {
                     forecast_start_index: data?.forecast_start_index ?? 0,
                     tabs: data?.tabs || {},
                 });
+                console.debug("[ModelInput] setLiverTabsRaw (recalc):", Object.keys(data?.tabs || {}));
 
                 showSnackbar("Liver recalculated successfully", "success");
                 return;
@@ -640,7 +867,7 @@ export default function PBCModelInput() {
         try {
             setLoading(true);
 
-            if (isHCV) {
+                    if (isHCV) {
                 const payload = {
                     scenario_name: scenarioNameFromDialog,
                     ta: therapyArea || "HCV",
@@ -807,6 +1034,10 @@ export default function PBCModelInput() {
     };
     const recalculateInputStyle = recalcStyle;
 
+    // sanitize selected dates against availableDates to avoid MUI Select warnings
+    const safeFrom = (availableDates || []).includes(fromDate) ? fromDate : "";
+    const safeTo = (availableDates || []).includes(toDate) ? toDate : "";
+
     // ─── Render ─────────────────────────────────────────────────────────────
     return (
         <Box sx={{ p: 3 }}>
@@ -826,7 +1057,7 @@ export default function PBCModelInput() {
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>FROM DATE</Typography>
                             <FormControl sx={inputStyle}>
-                                <Select value={fromDate} onChange={(e) => { setFromDate(e.target.value); setToDate(""); }} displayEmpty>
+                                <Select value={safeFrom} onChange={(e) => { setFromDate(e.target.value); setToDate(""); }} displayEmpty>
                                     <MenuItem value="" disabled>Select</MenuItem>
                                     {availableDates.map((d) => (
                                         <MenuItem key={d} value={d}>{formatDateLabel(d)}</MenuItem>
@@ -838,7 +1069,7 @@ export default function PBCModelInput() {
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>TO DATE</Typography>
                             <FormControl sx={inputStyle}>
-                                <Select value={toDate} onChange={(e) => setToDate(e.target.value)} displayEmpty disabled={!fromDate}>
+                                <Select value={safeTo} onChange={(e) => setToDate(e.target.value)} displayEmpty disabled={!fromDate}>
                                     <MenuItem value="" disabled>Select</MenuItem>
                                     {availableDates.filter((d) => {
                                         const pd = parseDateString(d);
@@ -870,16 +1101,26 @@ export default function PBCModelInput() {
 
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>PAYER FILTER</Typography>
-                            <FormControl sx={inputStyle}>
-                                <Select value={payerFilter} onChange={(e) => setPayerFilter(e.target.value)} displayEmpty>
-                                    <MenuItem value="" disabled>Select</MenuItem>
-                                    {(payerOptions && payerOptions.length ? payerOptions : ["Commercial", "Medicare", "Medicaid"]).map((p) => {
-                                        const val = typeof p === "string" ? p : (p.value || p.name || p.id || JSON.stringify(p));
-                                        const label = typeof p === "string" ? p : (p.label || p.name || p.value || JSON.stringify(p));
-                                        return <MenuItem key={val} value={val}>{label}</MenuItem>;
-                                    })}
-                                </Select>
-                            </FormControl>
+                                <FormControl sx={inputStyle}>
+                                    <Select
+                                        value={payerFilter}
+                                        onChange={(e) => setPayerFilter(e.target.value)}
+                                        displayEmpty
+                                        renderValue={(selected) => {
+                                            if (!selected) return "Select";
+                                            const opts = (payerOptions && payerOptions.length ? payerOptions : ["Commercial", "Medicare", "Medicaid"]);
+                                            const found = opts.find((p) => (typeof p === 'string' ? p === selected : (p.value === selected || p.name === selected || p.id === selected)));
+                                            if (!found) return String(selected);
+                                            return typeof found === 'string' ? found : (found.label || found.name || found.value || JSON.stringify(found));
+                                        }}
+                                    >
+                                        {(payerOptions && payerOptions.length ? payerOptions : ["Commercial", "Medicare", "Medicaid"]).map((p) => {
+                                            const val = typeof p === "string" ? p : (p.value || p.name || p.id || JSON.stringify(p));
+                                            const label = typeof p === "string" ? p : (p.label || p.name || p.value || JSON.stringify(p));
+                                            return <MenuItem key={val} value={val}>{label}</MenuItem>;
+                                        })}
+                                    </Select>
+                                </FormControl>
                         </Box>
 
                         <Box>
@@ -895,8 +1136,18 @@ export default function PBCModelInput() {
                         <Box>
                             <Typography sx={{ mb: 1, fontSize: "14px", fontWeight: 700, color: "#64748b" }}>PRODUCT FILTER</Typography>
                             <FormControl sx={inputStyle}>
-                                <Select value={productFilter} onChange={(e) => setProductFilter(e.target.value)} displayEmpty>
-                                    <MenuItem value="" disabled>Select</MenuItem>
+                                    <Select
+                                        value={productFilter}
+                                        onChange={(e) => setProductFilter(e.target.value)}
+                                        displayEmpty
+                                        renderValue={(selected) => {
+                                            if (!selected) return "Select";
+                                            const opts = (productOptions && productOptions.length ? productOptions : ["GILD", "ASGA", "others"]);
+                                            const found = opts.find((p) => (typeof p === 'string' ? p === selected : (p.value === selected || p.name === selected || p.id === selected)));
+                                            if (!found) return String(selected);
+                                            return typeof found === 'string' ? found : (found.label || found.name || found.value || JSON.stringify(found));
+                                        }}
+                                    >
                                     {(productOptions && productOptions.length ? productOptions : ["GILD", "ASGA", "others"]).map((p) => {
                                         const val = typeof p === "string" ? p : (p.value || p.name || p.id || JSON.stringify(p));
                                         const label = typeof p === "string" ? p : (p.label || p.name || p.value || JSON.stringify(p));

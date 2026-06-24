@@ -2,8 +2,8 @@ import React, { useState, useEffect } from "react";
 import { Box } from "@mui/material";
 import Header from "../components/Header";
 import SnackbarNotification from "../components/snackBar/SnackBar";
-import PBCGlobalConfigurations from "../components/pbc/GlobalConfiguration/GlobalConfigurations";
-import PBCModelInput from "../components/pbc/ModelInput/ModelInput";
+import PBCGlobalConfigurations from "../components/hcv/GlobalConfiguration/GlobalConfigurations";
+import PBCModelInput from "../components/hcv/ModelInput/ModelInput";
 
 const tabs = [
     "Configurations",

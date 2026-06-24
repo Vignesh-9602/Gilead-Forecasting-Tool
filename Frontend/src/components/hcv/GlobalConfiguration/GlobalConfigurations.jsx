@@ -8,6 +8,8 @@ import {
   MenuItem,
   Button,
   FormHelperText,
+  Checkbox,
+  ListItemText,
 } from "@mui/material";
 import { useSnackbarStore } from "../../../stores";
 import { useLoadingStore } from "../../../stores";
@@ -144,6 +146,8 @@ export default function GlobalConfiguration() {
         await saveConfigurations(payload);
       }
       showSnackbar("Configurations saved successfully", "success");
+      // Signal ModelInput to auto-apply the saved config on next open
+      try { localStorage.setItem("hcvConfigSaved", String(Date.now())); } catch (e) { /* ignore */ }
     } catch (error) {
       console.error("Save configuration failed:", error);
       const errorMessage =
@@ -263,7 +267,16 @@ export default function GlobalConfiguration() {
               <Select
                 multiple
                 value={payer}
-                onChange={(e) => setPayer(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  const opts = ["commercial", "medicare", "medicaid"];
+                  if (value.includes("SELECT_ALL")) {
+                    if (payer.length === opts.length) setPayer([]);
+                    else setPayer(opts);
+                  } else {
+                    setPayer(value);
+                  }
+                }}
                 sx={inputStyle}
                 displayEmpty
                 renderValue={(selected) =>
@@ -280,9 +293,17 @@ export default function GlobalConfiguration() {
                         .join(", ")
                 }
               >
-                <MenuItem value="commercial">Commercial</MenuItem>
-                <MenuItem value="medicare">Medicare</MenuItem>
-                <MenuItem value="medicaid">Medicaid</MenuItem>
+                <MenuItem value="SELECT_ALL">
+                  <Checkbox
+                    checked={payer.length === 3 && payer.length > 0}
+                    indeterminate={payer.length > 0 && payer.length < 3}
+                  />
+                  <ListItemText primary="Select All" />
+                </MenuItem>
+
+                <MenuItem value="commercial"> <Checkbox checked={payer.includes("commercial")} /> <ListItemText primary="Commercial" /> </MenuItem>
+                <MenuItem value="medicare"> <Checkbox checked={payer.includes("medicare")} /> <ListItemText primary="Medicare" /> </MenuItem>
+                <MenuItem value="medicaid"> <Checkbox checked={payer.includes("medicaid")} /> <ListItemText primary="Medicaid" /> </MenuItem>
               </Select>
               <FormHelperText>{errors.payer}</FormHelperText>
             </FormControl>
@@ -303,16 +324,33 @@ export default function GlobalConfiguration() {
               <Select
                 multiple
                 value={product}
-                onChange={(e) => setProduct(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  const opts = ["GILD", "ASGA", "others"];
+                  if (value.includes("SELECT_ALL")) {
+                    if (product.length === opts.length) setProduct([]);
+                    else setProduct(opts);
+                  } else {
+                    setProduct(value);
+                  }
+                }}
                 sx={inputStyle}
                 displayEmpty
                 renderValue={(selected) =>
                   selected.length === 0 ? "Select Product" : selected.join(", ")
                 }
               >
-                <MenuItem value="GILD">GILD</MenuItem>
-                <MenuItem value="ASGA">ASGA</MenuItem>
-                <MenuItem value="others">Others</MenuItem>
+                <MenuItem value="SELECT_ALL">
+                  <Checkbox
+                    checked={product.length === 3 && product.length > 0}
+                    indeterminate={product.length > 0 && product.length < 3}
+                  />
+                  <ListItemText primary="Select All" />
+                </MenuItem>
+
+                <MenuItem value="GILD"> <Checkbox checked={product.includes("GILD")} /> <ListItemText primary="GILD" /> </MenuItem>
+                <MenuItem value="ASGA"> <Checkbox checked={product.includes("ASGA")} /> <ListItemText primary="ASGA" /> </MenuItem>
+                <MenuItem value="others"> <Checkbox checked={product.includes("others")} /> <ListItemText primary="Others" /> </MenuItem>
               </Select>
               <FormHelperText>{errors.product}</FormHelperText>
             </FormControl>
