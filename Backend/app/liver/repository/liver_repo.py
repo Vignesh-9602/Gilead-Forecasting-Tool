@@ -5,28 +5,39 @@ import json
 # Configuration queries
 # ---------------------------------------------------------------------------
 
-def get_liver_config(cur, ta_name: str):
-    """Returns (config_dict,) or None if no config saved yet for this TA."""
+def get_liver_configs_for_ta(cur, ta_name: str) -> list:
+    """Returns all (payer, brand, config) rows for a TA, ordered payer→brand."""
+    cur.execute("""
+        SELECT payer, brand, config
+        FROM raw_liver.liver_configurations
+        WHERE LOWER(TRIM(ta_name)) = LOWER(TRIM(%s))
+        ORDER BY payer, brand
+    """, (ta_name,))
+    return cur.fetchall()
+
+
+def get_liver_config_by_payer_brand(cur, ta_name: str, payer: str, brand: str):
+    """Returns (config,) for a specific (ta, payer, brand) combination, or None."""
     cur.execute("""
         SELECT config
         FROM raw_liver.liver_configurations
-        WHERE config->>'ta_name' = %s
-        ORDER BY updated_at DESC
-        LIMIT 1
-    """, (ta_name,))
+        WHERE LOWER(TRIM(ta_name)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(payer))   = LOWER(TRIM(%s))
+          AND LOWER(TRIM(brand))   = LOWER(TRIM(%s))
+    """, (ta_name, payer, brand))
     return cur.fetchone()
 
 
-def save_liver_config(cur, config: dict):
-    """Upsert configuration for a TA (one config per TA stores selected payers/brands as lists)."""
+def upsert_liver_config(cur, ta_name: str, payer: str, brand: str, config: dict):
+    """Upsert one (ta_name, payer, brand) row with the given config."""
     cur.execute("""
-        INSERT INTO raw_liver.liver_configurations (config)
-        VALUES (%s::jsonb)
-        ON CONFLICT ((config->>'ta_name'))
+        INSERT INTO raw_liver.liver_configurations (ta_name, payer, brand, config)
+        VALUES (%s, %s, %s, %s::jsonb)
+        ON CONFLICT (ta_name, payer, brand)
         DO UPDATE SET
             config     = EXCLUDED.config,
             updated_at = CURRENT_TIMESTAMP
-    """, (json.dumps(config),))
+    """, (ta_name, payer, brand, json.dumps(config)))
 
 
 # ---------------------------------------------------------------------------
