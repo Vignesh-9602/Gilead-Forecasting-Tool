@@ -123,6 +123,15 @@ def get_liver_configuration(ta_name: str) -> dict:
                     "model_granularity": "monthly",
                     "forecast_periods":  forecast_dt.isoformat(),
                 },
+                # `config` key for frontend compatibility
+                "config": {
+                    "payer":             ["Medicaid"],
+                    "brand":             ["GILD"],
+                    "train_start_date":  start_dt.isoformat(),
+                    "train_end_date":    max_dt.isoformat(),
+                    "model_granularity": "monthly",
+                    "forecast_periods":  forecast_dt.isoformat(),
+                },
             }
 
         entries = []
@@ -138,11 +147,22 @@ def get_liver_configuration(ta_name: str) -> dict:
                 "forecast_periods":   forecast_end.isoformat(),
             })
 
+        # Collect all unique payers/brands; use first entry's dates for the `config` key
+        first = entries[0]
         return {
             "ta_name": ta_name,
             "exists": True,
             "entries": entries,
             "available_train_months": available_train_months,
+            # `config` key for frontend compatibility
+            "config": {
+                "payer":             list({e["payer"] for e in entries}),
+                "brand":             list({e["brand"] for e in entries}),
+                "train_start_date":  first["train_start_date"],
+                "train_end_date":    first["train_end_date"],
+                "model_granularity": first["model_granularity"],
+                "forecast_periods":  first["forecast_periods"],
+            },
         }
     finally:
         cur.close()
@@ -377,6 +397,13 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
+def _override_model(factors: LiverFactors, active_model: str) -> LiverFactors:
+    """Return a copy of LiverFactors with a different active_model."""
+    d = factors.model_dump()
+    d["active_model"] = active_model
+    return LiverFactors(**d)
+
+
 def _rows_to_series(rows, label_col_index, value_col_index):
     series = {}
     for row in rows:
@@ -486,77 +513,81 @@ def _build_all_tabs(cur, ta, payer, product, metric, from_year, from_month,
     sel_payer   = _first(payer) if isinstance(payer, list) else (None if payer == "All" else payer)
     sel_product = None if (not product or product == "All") else product
 
+    # Tab 1 always uses ETS; tabs 2-5 always use linear
+    ets_factors    = _override_model(factors, "ets")
+    linear_factors = _override_model(factors, "linear")
+
     tabs = {}
 
     if is_yearly:
-        # Tab 1 — all payers, user factors on the single aggregate series
+        # Tab 1 — ETS
         tmv_rows = get_total_market_volume_yearly(cur, ta, from_year, train_end_year, None)
         tmv_map  = {"Total Market Volume": {(r[0], r[1]): float(r[2]) for r in tmv_rows}}
         tabs["total_market_volume"] = _build_tab_data(
-            tmv_map, month_range, month_labels, forecast_start_index, factors
+            tmv_map, month_range, month_labels, forecast_start_index, ets_factors
         )
 
-        # Tab 2 — all products; user factors only for sel_product
+        # Tab 2 — linear, user factors only for sel_product
         pd_rows = get_product_distribution_yearly(cur, ta, from_year, train_end_year, "All", metric)
         tabs["product_distribution"] = _build_tab_data(
-            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
             selected_label=sel_product,
         )
 
-        # Tab 3 — all payers; user factors only for sel_payer
+        # Tab 3 — linear, user factors only for sel_payer
         pyd_rows = get_payer_distribution_yearly(cur, ta, from_year, train_end_year, None, metric)
         tabs["payer_distribution"] = _build_tab_data(
-            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
             selected_label=sel_payer,
         )
 
-        # Tab 4 — all payer→product; user factors for sel_payer parent, sel_product child
+        # Tab 4 — linear
         pwp_rows = get_payer_wise_product_yearly(cur, ta, from_year, train_end_year, None, metric)
         tabs["payer_wise_product"] = _build_hierarchical_tab_data(
-            pwp_rows, month_range, month_labels, forecast_start_index, factors,
+            pwp_rows, month_range, month_labels, forecast_start_index, linear_factors,
             selected_parent=sel_payer, selected_child=sel_product,
         )
 
-        # Tab 5 — all product→payer; user factors for sel_product parent, sel_payer child
+        # Tab 5 — linear
         pwpy_rows = get_product_wise_payer_yearly(cur, ta, from_year, train_end_year, "All", metric)
         tabs["product_wise_payer"] = _build_hierarchical_tab_data(
-            pwpy_rows, month_range, month_labels, forecast_start_index, factors,
+            pwpy_rows, month_range, month_labels, forecast_start_index, linear_factors,
             selected_parent=sel_product, selected_child=sel_payer,
         )
 
     else:
-        # Tab 1
+        # Tab 1 — ETS
         tmv_rows = get_total_market_volume(cur, ta, from_year, from_month, train_end_year, train_end_month, None)
         tmv_map  = {"Total Market Volume": {(r[0], r[1]): float(r[2]) for r in tmv_rows}}
         tabs["total_market_volume"] = _build_tab_data(
-            tmv_map, month_range, month_labels, forecast_start_index, factors
+            tmv_map, month_range, month_labels, forecast_start_index, ets_factors
         )
 
-        # Tab 2
+        # Tab 2 — linear, user factors only for sel_product
         pd_rows = get_product_distribution(cur, ta, from_year, from_month, train_end_year, train_end_month, "All", metric)
         tabs["product_distribution"] = _build_tab_data(
-            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
             selected_label=sel_product,
         )
 
-        # Tab 3
+        # Tab 3 — linear, user factors only for sel_payer
         pyd_rows = get_payer_distribution(cur, ta, from_year, from_month, train_end_year, train_end_month, None, metric)
         tabs["payer_distribution"] = _build_tab_data(
-            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
             selected_label=sel_payer,
         )
 
-        # Tab 4
+        # Tab 4 — linear
         pwp_rows = get_payer_wise_product(cur, ta, from_year, from_month, train_end_year, train_end_month, None, metric)
         tabs["payer_wise_product"] = _build_hierarchical_tab_data(
-            pwp_rows, month_range, month_labels, forecast_start_index, factors,
+            pwp_rows, month_range, month_labels, forecast_start_index, linear_factors,
             selected_parent=sel_payer, selected_child=sel_product,
         )
 
-        # Tab 5
+        # Tab 5 — linear
         pwpy_rows = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, "All", metric)
         tabs["product_wise_payer"] = _build_hierarchical_tab_data(
-            pwpy_rows, month_range, month_labels, forecast_start_index, factors,
+            pwpy_rows, month_range, month_labels, forecast_start_index, linear_factors,
             selected_parent=sel_product, selected_child=sel_payer,
         )
 
@@ -627,8 +658,13 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         return {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
-            "factors":              factors,
-            "tabs":                 tabs,
+            "factors": {
+                "level":      factors.ets.alpha,
+                "trend":      factors.ets.beta,
+                "damping":    factors.ets.gamma,
+                "multiplier": factors.multiplier,
+            },
+            "tabs": tabs,
         }
     finally:
         cur.close()
@@ -663,8 +699,13 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         return {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
-            "factors":              payload.factors,
-            "tabs":                 tabs,
+            "factors": {
+                "level":      payload.factors.ets.alpha,
+                "trend":      payload.factors.ets.beta,
+                "damping":    payload.factors.ets.gamma,
+                "multiplier": payload.factors.multiplier,
+            },
+            "tabs": tabs,
         }
     finally:
         cur.close()
