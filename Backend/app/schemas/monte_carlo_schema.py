@@ -18,9 +18,9 @@ class ComplianceParams(BaseModel):
 
 class PricingParams(BaseModel):
     price_per_vial: Optional[float] = Field(default=None, ge=0,
-        description="USD price per vial. If None → revenue calculated as 0 (no price set).")
-    std: float = Field(default=0.0, ge=0,
-        description="Pricing std dev. Always 0 (Fixed distribution) — shown in modal but not sampled.")
+        description="USD price per vial. If None → falls back to DB average net price.")
+    std: Optional[float] = Field(default=None, ge=0,
+        description="Pricing std dev in USD. If None or 0 → price is fixed (no randomness).")
 
 
 class MonteCarloRunRequest(BaseModel):
@@ -64,8 +64,8 @@ class InputParameters(BaseModel):
     demand_volatility: float        # effective std_pct used
     compliance_mean: float          # from DB or user override
     compliance_volatility: float    # std used
-    price_per_vial: float           # from user or 0 if not set
-    pricing_std: float              # always 0.00
+    price_per_vial: float           # from user or DB average
+    pricing_std: float              # 0 if fixed, else USD std dev used
 
 
 class MonteCarloRunResponse(BaseModel):

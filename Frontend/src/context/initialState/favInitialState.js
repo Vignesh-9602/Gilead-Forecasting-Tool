@@ -1,5 +1,9 @@
+
+const storedTA = localStorage.getItem("selectedTherapyArea");
 export default {
-    selectedTherapyArea: localStorage.getItem("selectedTherapyArea") || "",
+    selectedTherapyArea: storedTA === "PBC" ? "HCV" : (storedTA || ""),
+    // selectedTherapyArea: localStorage.getItem("selectedTherapyArea") || "",
+    
     // userId: [],
     // loggedInUserId: "",
     // chatTitles: [],

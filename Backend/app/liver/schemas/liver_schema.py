@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -13,7 +13,7 @@ class LiverConfiguration(BaseModel):
     train_start_date: str           # "2020-04-01"
     train_end_date: str             # "2025-12-01"
     model_granularity: str = "monthly"
-    forecast_periods: int = 24
+    forecast_periods: str           # frontend sends/receives as date "2026-06-01"; DB stores as int
 
 
 class SaveLiverConfigRequest(BaseModel):
@@ -24,6 +24,7 @@ class LiverConfigResponse(BaseModel):
     ta_name: str
     exists: bool
     config: Optional[LiverConfiguration]
+    available_train_months: List[str]   # ["2020-01-01", "2020-02-01", ...]
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,8 @@ class LiverFiltersResponse(BaseModel):
     scenarios: List[str]
     metric_options: List[MetricOption]
     available_dates: List[str]          # ["Apr-20", "May-20", ...]
+    from_date: str                      # train_start_date from saved config
+    to_date: str                        # train_end_date from saved config
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +90,29 @@ class TabData(BaseModel):
     table: TabTable
 
 
+# Hierarchical table for payer_wise_product and product_wise_payer tabs
+
+class ChildRow(BaseModel):
+    label: str
+    values: List[float]
+
+
+class HierarchicalRow(BaseModel):
+    hierarchy: str          # parent label (payer or product)
+    total: List[float]      # sum across all children per month
+    children: List[ChildRow]
+
+
+class HierarchicalTabTable(BaseModel):
+    headers: List[str]
+    rows: List[HierarchicalRow]
+
+
+class HierarchicalTabData(BaseModel):
+    chart: TabChart
+    table: HierarchicalTabTable
+
+
 # ---------------------------------------------------------------------------
 # ETS factors
 # ---------------------------------------------------------------------------
@@ -103,10 +129,10 @@ class EtsFactors(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LiverApplyFiltersResponse(BaseModel):
-    months: List[str]               # ["Apr-20", "May-20", ...]
+    months: List[str]               # ISO dates ["2020-04-01", ...]
     forecast_start_index: int
     factors: EtsFactors
-    tabs: Dict[str, TabData]
+    tabs: Dict[str, Any]            # tabs 1-3: TabData, tabs 4-5: HierarchicalTabData
 
 
 # ---------------------------------------------------------------------------

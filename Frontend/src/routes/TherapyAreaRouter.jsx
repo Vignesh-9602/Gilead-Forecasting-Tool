@@ -2,7 +2,7 @@ import React, { useContext } from "react";
 import { Navigate } from "react-router-dom";
 import { GlobalContext } from "../context/Provider";
 import MainLayout from "../layouts/MainLayout";
-import PBCLayout from "../layouts/PBCLayout";
+import HCVLayout from "../layouts/HCVLayout";
 
 export default function TherapyAreaRouter() {
     const { favState } = useContext(GlobalContext);
@@ -11,8 +11,8 @@ export default function TherapyAreaRouter() {
         case "Oncology":
             return <MainLayout />;
 
-        case "PBC":
-            return <PBCLayout />;
+        case "HCV":
+            return <HCVLayout />;
 
         default:
             return <Navigate to="/landingpage" />;
