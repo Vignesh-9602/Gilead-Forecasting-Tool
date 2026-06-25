@@ -671,10 +671,7 @@ def apply_market_event_filters_service(payload):
                     if total == 0:
                         normalized_val = 0
                     else:
-                        normalized_val = round(
-                            (val / total) * 100,
-                            2
-                        )
+                        normalized_val = (val / total) * 100
 
                     market_share_values.append(normalized_val)
 
@@ -698,23 +695,22 @@ def apply_market_event_filters_service(payload):
                     market_share_total_values = [0] * len(market_share_values)
 
                 market_share_total_values = [
-                    round(a + b, 2)
+                    a + b
                     for a, b in zip(
                         market_share_total_values,
                         market_share_values
                     )
                 ]
-
                 market_share_children.append({
                     "label": product,
-                    "values": market_share_values
+                    "values": [round(v, 2) for v in market_share_values]
                 })
 
                 market_share_chart_series.append({
                     "lot": lot,
                     "label": product,
-                    "train_values": ms_train_values,
-                    "forecast_values": ms_forecast_values
+                    "train_values": [round(v, 2) for v in ms_train_values],
+                    "forecast_values": [round(v, 2) for v in ms_forecast_values]
                 })
 
             market_share_total_values = [
@@ -731,7 +727,7 @@ def apply_market_event_filters_service(payload):
 
             market_share_table.append({
                 "lot": lot,
-                "total": market_share_total_values or [],
+                 "total": [round(v, 2) for v in (market_share_total_values or [])],
                 "children": market_share_children
             })
 
@@ -812,6 +808,44 @@ def apply_market_event_filters_service(payload):
         cursor.close()
         conn.close()
         
+def normalize_display_values(children):
+    if not children:
+        return children
+
+    num_months = len(children[0]["values"])
+    num_products = len(children)
+
+    for month_idx in range(num_months):
+        month_sum = round(
+            sum(child["values"][month_idx] for child in children),
+            2
+        )
+
+        diff = round(100.0 - month_sum, 2)
+
+        if abs(diff) < 0.01:
+            continue
+
+        cents = int(round(diff * 100))
+
+        idx = 0
+        while cents != 0:
+            child = children[idx % num_products]
+
+            if cents > 0:
+                child["values"][month_idx] += 0.01
+                cents -= 1
+            else:
+                if child["values"][month_idx] >= 0.01:
+                    child["values"][month_idx] -= 0.01
+                    cents += 1
+
+            idx += 1
+
+    for child in children:
+        child["values"] = [round(v, 2) for v in child["values"]]
+
+    return children
 def run_market_event_calculation_service(payload):
 
     conn = get_connection()
@@ -1057,7 +1091,7 @@ def run_market_event_calculation_service(payload):
                     total = month_totals[idx]
 
                     market_share_values.append(
-                        round((val / total) * 100, 2)
+                        (val / total) * 100
                         if total > 0 else 0
                     )
 
@@ -1246,11 +1280,6 @@ def run_market_event_calculation_service(payload):
                     )
 
                     if abs(total_now - 100.0) < 1e-6:
-                        for k in keys:
-                            product_values_map[k][idx] = round(
-                                float(product_values_map[k][idx]),
-                                2
-                            )
                         return
 
                     if total_now > 100.0:
@@ -1326,12 +1355,9 @@ def run_market_event_calculation_service(payload):
                                 )
 
                     for k in keys:
-                        product_values_map[k][idx] = round(
-                            max(
-                                0.0,
-                                min(100.0, float(product_values_map[k][idx]))
-                            ),
-                            2
+                        product_values_map[k][idx] = max(
+                            0.0,
+                            min(100.0, float(product_values_map[k][idx]))
                         )
 
                 for offset, desired_target in enumerate(desired_target_shares):
@@ -1408,13 +1434,23 @@ def run_market_event_calculation_service(payload):
                 event_id += 1
             for product, values in product_values_map.items():
 
-                values = [
-                    round(float(v or 0), 2)
+                raw_values = [
+                    float(v or 0)
                     for v in values
                 ]
 
+                display_values = [
+                    round(v, 2)
+                    for v in raw_values
+                ]
+
+                filtered_raw_values = filter_values_by_indices(
+                    raw_values,
+                    selected_indices
+                )
+
                 filtered_values = filter_values_by_indices(
-                    values,
+                    display_values,
                     selected_indices
                 )
 
@@ -1433,13 +1469,13 @@ def run_market_event_calculation_service(payload):
 
                 patient_metrics = {
                     "final_nps": overall_nps_values,
-                    "final_market_share": values,
+                    "final_market_share": display_values,
                     "final_patient_share": [
                         round(
                             float(nps or 0) * (float(ms or 0) / 100),
                             2
                         )
-                        for nps, ms in zip(overall_nps_values, values)
+                        for nps, ms in zip(overall_nps_values, raw_values)
                     ]
                 }
 
@@ -1461,8 +1497,11 @@ def run_market_event_calculation_service(payload):
                 })
 
                 market_share_total_values = [
-                    round(a + b, 2)
-                    for a, b in zip(market_share_total_values, filtered_values)
+                    a + b
+                    for a, b in zip(
+                        market_share_total_values,
+                        filtered_raw_values
+                    )
                 ]
 
                 nps_children.append({
@@ -1478,8 +1517,8 @@ def run_market_event_calculation_service(payload):
                 row_chart = {
                     "months": original_months,
                     "forecast_start_index": original_forecast_start_index,
-                    "train_values": values[:original_forecast_start_index],
-                    "forecast_values": values[original_forecast_start_index:]
+                    "train_values": display_values[:original_forecast_start_index],
+                    "forecast_values": display_values[original_forecast_start_index:]
                 }
 
                 product_table = [{
@@ -1488,7 +1527,7 @@ def run_market_event_calculation_service(payload):
                     "children": [
                         {
                             "label": product,
-                            "values": values
+                            "values": display_values
                         }
                     ]
                 }]
@@ -1518,10 +1557,12 @@ def run_market_event_calculation_service(payload):
                     selected_scenario,
                     product
                 ))
-
+            market_share_children = normalize_display_values(
+                market_share_children
+            )
             lot_market_share_table = {
                 "lot": lot,
-                "total": market_share_total_values,
+                "total": [round(v, 2) for v in market_share_total_values],
                 "children": market_share_children
             }
 
@@ -2474,3 +2515,4 @@ def delete_market_event_service(payload):
     finally:
         cursor.close()
         conn.close()
+        

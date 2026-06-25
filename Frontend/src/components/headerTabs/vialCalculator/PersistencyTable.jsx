@@ -8,6 +8,11 @@ import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import Tooltip from "@mui/material/Tooltip";
 import { useLoadingStore } from "../../../stores";
 import ConfigureCurveDialog from "./ConfigureCurveDialog";
+import DownloadIcon from "@mui/icons-material/Download";
+import IconButton from "@mui/material/IconButton";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
+import dayjs from "dayjs";
 
 export default function PersistencyTable({
     persistencyData,
@@ -584,10 +589,69 @@ export default function PersistencyTable({
             showSnackbar("Persistency curve applied successfully", "success");
         } catch (error) {
             console.error("Failed to apply persistency curve", error);
-            showSnackbar("Failed to apply persistency curve", "error");
+
+            const errorMessage =
+                error?.response?.data?.detail ||
+                "Failed to apply persistency curve";
+
+            showSnackbar(errorMessage, "error");
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleDownloadExcel = async () => {
+        if (!persistencyData) return;
+
+        const workbook = new ExcelJS.Workbook();
+
+        const addCommonHeader = (worksheet) => {
+            worksheet.addRow(["Scenario", scenarioSelector]);
+            worksheet.addRow(["Indication", indication]);
+            worksheet.addRow(["Product", brand]);
+            worksheet.addRow(["Lots", lots.join(", ")]);
+            worksheet.addRow([
+                "Start Date",
+                dayjs(startDate).format("MMM YY")
+            ]);
+            worksheet.addRow([
+                "End Date",
+                dayjs(endDate).format("MMM YY")
+            ]);
+            worksheet.addRow([]);
+        };
+
+        // Sheet 1
+        createPersistencySheet(
+            workbook,
+            addCommonHeader
+        );
+
+        // Sheet 2
+        createAvgVialsSheet(
+            workbook,
+            addCommonHeader
+        );
+
+        // Sheet 3
+        createDemandVialsSheet(
+            workbook,
+            addCommonHeader
+        );
+
+        // Sheet 4
+        createInventorySheet(
+            workbook,
+            addCommonHeader
+        );
+
+        const buffer =
+            await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `Vial_Calculator_${scenarioSelector}_${brand}.xlsx`
+        );
     };
 
     const getCurveSpans = (curveMapping = []) => {
@@ -614,6 +678,195 @@ export default function PersistencyTable({
         });
     };
 
+    const applySheetStyle = (worksheet) => {
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal: "center",
+                    vertical: "middle",
+                };
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    bottom: { style: "thin" },
+                    right: { style: "thin" },
+                };
+            });
+        });
+
+        worksheet.columns.forEach((column) => {
+            column.width = 15;
+        });
+
+        worksheet.getColumn(1).width = 35;
+    };
+
+    const createPersistencySheet = (
+        workbook,
+        addCommonHeader
+    ) => {
+
+        const ws =
+            workbook.addWorksheet(
+                "Persistency"
+            );
+
+        addCommonHeader(ws);
+
+        ws.addRow([
+            "Metric",
+            ...formattedMonths
+        ]);
+
+        persistencyRows.forEach((lotRow) => {
+
+            const lotExcelRow =
+                ws.addRow([
+                    `${brand} - ${lotRow.lot}`
+                ]);
+
+            lotExcelRow.font = {
+                bold: true
+            };
+
+            lotRow.children.forEach(
+                (child) => {
+
+                    ws.addRow([
+                        child.label,
+                        ...child.values
+                    ]);
+
+                }
+            );
+        });
+
+        applySheetStyle(ws);
+    };
+
+    const createAvgVialsSheet = (
+        workbook,
+        addCommonHeader
+    ) => {
+
+        const ws =
+            workbook.addWorksheet(
+                "Avg Vials"
+            );
+
+        addCommonHeader(ws);
+
+        ws.addRow([
+            "Metric",
+            ...formattedMonths
+        ]);
+
+        avgVialsRows.forEach(
+            (row) => {
+
+                row.children.forEach(
+                    (child) => {
+
+                        ws.addRow([
+                            child.label,
+                            ...child.values
+                        ]);
+
+                    }
+                );
+            }
+        );
+
+        applySheetStyle(ws);
+    };
+
+    const createDemandVialsSheet = (
+        workbook,
+        addCommonHeader
+    ) => {
+
+        const ws =
+            workbook.addWorksheet(
+                "Demand Vials"
+            );
+
+        addCommonHeader(ws);
+
+        ws.addRow([
+            "Metric",
+            ...formattedMonths
+        ]);
+
+        demandVialsRows.forEach(
+            (row) => {
+
+                const lotRow =
+                    ws.addRow([
+                        row.lot
+                    ]);
+
+                lotRow.font = {
+                    bold: true
+                };
+
+                row.children.forEach(
+                    (child) => {
+
+                        ws.addRow([
+                            child.label,
+                            ...child.values
+                        ]);
+
+                    }
+                );
+            }
+        );
+
+        applySheetStyle(ws);
+    };
+
+    const createInventorySheet = (
+        workbook,
+        addCommonHeader
+    ) => {
+
+        const ws =
+            workbook.addWorksheet(
+                "Inventory"
+            );
+
+        addCommonHeader(ws);
+
+        // Stock %
+        ws.addRow([
+            "Stock Percentage",
+            `${inventoryTable?.stock_percentage}%`
+        ]);
+
+        ws.addRow([]);
+
+        // Header
+        ws.addRow([
+            "Metric",
+            ...formattedMonths
+        ]);
+
+        // Inventory rows
+        inventoryTable?.children?.forEach(
+            (child) => {
+
+                ws.addRow([
+                    child.label,
+                    ...(child.values || [])
+                ]);
+
+            }
+        );
+
+        applySheetStyle(ws);
+    };
+
     return (
         <Box sx={{ mt: 3 }}>
             {/* Header */}
@@ -623,6 +876,14 @@ export default function PersistencyTable({
                 </Typography>
 
                 <Box sx={{ display: "flex", gap: 2 }}>
+                    <Tooltip title="Download Table">
+                        <IconButton
+                            onClick={handleDownloadExcel}
+                            disabled={!isDataLoaded}
+                        >
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
                     <Button
                         variant="outlined"
                         onClick={() => setOpenPersistencyDialog(true)}

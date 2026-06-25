@@ -452,6 +452,8 @@ export default function NetDemandRevenue() {
                 ta_name={therapyArea}
                 scenario_name={scenarioName}
                 product={product}
+                startDate={startDate}
+                endDate={endDate}
                 onRevenueUpdated={(response) => {
                     setChartData(response.chart);
                     setTableData(response.table);
