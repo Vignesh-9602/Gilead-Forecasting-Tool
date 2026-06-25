@@ -19,6 +19,11 @@ import {
 import dayjs from "dayjs";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 import { editNetRevenue } from "../../../services/apiService";
+import DownloadIcon from "@mui/icons-material/Download";
+import IconButton from "@mui/material/IconButton";
+import Tooltip from "@mui/material/Tooltip";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 
 export default function RevenueTable({
     tableData,
@@ -26,7 +31,9 @@ export default function RevenueTable({
     ta_name,
     scenario_name,
     product,
-    onRevenueUpdated
+    onRevenueUpdated,
+    startDate,
+    endDate,
 }) {
 
     const months =
@@ -48,6 +55,18 @@ export default function RevenueTable({
         // "Derived Factor",
         "Final Factor",
         "WAC Price ($)",
+        "Price Increase (%)",
+        "GTN (%)",
+    ];
+
+    const currencyMetrics = [
+        "WAC Price ($)",
+        "Net Price",
+        "Net Demand Revenue",
+        "Net Revenue",
+    ];
+
+    const percentageMetrics = [
         "Price Increase (%)",
         "GTN (%)",
     ];
@@ -291,6 +310,203 @@ export default function RevenueTable({
         );
     };
 
+    const handleDownloadExcel = async () => {
+        if (!tableData?.rows?.length) return;
+
+        const workbook = new ExcelJS.Workbook();
+
+        const worksheet = workbook.addWorksheet(
+            "Net Demand Revenue"
+        );
+
+        // ======================
+        // Filters
+        // ======================
+        worksheet.addRow([
+            "Therapy Area",
+            ta_name,
+        ]);
+
+        worksheet.addRow([
+            "Scenario",
+            scenario_name,
+        ]);
+
+        worksheet.addRow([
+            "Product",
+            product,
+        ]);
+
+        worksheet.addRow([
+            "Start Date",
+            dayjs(startDate).format(
+                "MMM YY"
+            ),
+        ]);
+
+        worksheet.addRow([
+            "End Date",
+            dayjs(endDate).format(
+                "MMM YY"
+            ),
+        ]);
+
+        worksheet.addRow([]);
+
+        // ======================
+        // Header
+        // ======================
+        const headerRowNumber =
+            worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Metric",
+            ...months,
+        ]);
+
+        // ======================
+        // Data Rows
+        // ======================
+
+        editableRows.forEach((row) => {
+            const excelRow =
+                worksheet.addRow([
+                    row.metric,
+                    ...(row.values || []),
+                ]);
+
+            // Net Revenue row bold
+            if (
+                row.metric ===
+                "Net Revenue"
+            ) {
+                excelRow.font = {
+                    bold: true,
+                };
+            }
+
+            // Currency formatting
+            if (
+                [
+                    "WAC Price ($)",
+                    "Net Price",
+                    "Net Demand Revenue",
+                    "Net Revenue",
+                ].includes(row.metric)
+            ) {
+                excelRow.eachCell(
+                    (
+                        cell,
+                        colNumber
+                    ) => {
+                        if (
+                            colNumber > 1 &&
+                            typeof cell.value ===
+                            "number"
+                        ) {
+                            cell.numFmt =
+                                "$#,##0.00";
+                        }
+                    }
+                );
+            }
+
+            // Percentage formatting
+            if (
+                [
+                    "Price Increase (%)",
+                    "GTN (%)",
+                ].includes(row.metric)
+            ) {
+                excelRow.eachCell(
+                    (
+                        cell,
+                        colNumber
+                    ) => {
+                        if (
+                            colNumber > 1 &&
+                            typeof cell.value ===
+                            "number"
+                        ) {
+                            // convert 14 -> 0.14
+                            cell.value =
+                                Number(
+                                    cell.value
+                                ) / 100;
+
+                            cell.numFmt =
+                                "0%";
+                        }
+                    }
+                );
+            }
+        });
+
+        // ======================
+        // Styling
+        // ======================
+
+        worksheet.eachRow((row) => {
+            row.eachCell((cell) => {
+                cell.alignment = {
+                    horizontal:
+                        "center",
+                    vertical:
+                        "middle",
+                };
+
+                cell.border = {
+                    top: {
+                        style: "thin",
+                    },
+                    left: {
+                        style: "thin",
+                    },
+                    bottom: {
+                        style: "thin",
+                    },
+                    right: {
+                        style: "thin",
+                    },
+                };
+            });
+        });
+
+        // Header row bold
+        worksheet.getRow(
+            headerRowNumber
+        ).font = {
+            bold: true,
+        };
+
+        // Column widths
+        worksheet.getColumn(
+            1
+        ).width = 30;
+
+        for (
+            let i = 2;
+            i <= months.length + 1;
+            i++
+        ) {
+            worksheet.getColumn(
+                i
+            ).width = 14;
+        }
+
+        // ======================
+        // Download
+        // ======================
+
+        const buffer =
+            await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `Net_Revenue_${scenario_name}_${product}.xlsx`
+        );
+    };
+
     return (
         <Paper
             sx={{
@@ -333,6 +549,14 @@ export default function RevenueTable({
                         gap: 2,
                     }}
                 >
+                    <Tooltip title="Download Table">
+                        <IconButton
+                            onClick={handleDownloadExcel}
+                            disabled={!editableRows.length}
+                        >
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
                     <Button
                         variant="contained"
                         disabled={

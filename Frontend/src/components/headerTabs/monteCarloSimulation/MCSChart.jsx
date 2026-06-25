@@ -166,60 +166,37 @@ export default function MCSChart({
         worksheet.addRow([]);
 
         // Summary
+        // Summary
         worksheet.addRow(["Simulation Summary"]);
 
-        worksheet.addRow([
-            "Number of Simulations",
-            summary?.number_of_simulations,
-        ]);
+        const summaryFields = [
+            ["Number of Simulations", summary?.number_of_simulations, null],
+            ["Mean Revenue", summary?.mean_revenue, "$#,##0.00"],
+            ["Median Revenue", summary?.median_revenue, "$#,##0.00"],
+            ["Std Dev Revenue", summary?.std_dev_revenue, "$#,##0.00"],
+            ["Min Revenue", summary?.min_revenue, "$#,##0.00"],
+            ["Max Revenue", summary?.max_revenue, "$#,##0.00"],
+            ["5th Percentile", summary?.percentile_5, "$#,##0.00"],
+            ["25th Percentile", summary?.percentile_25, "$#,##0.00"],
+            ["75th Percentile", summary?.percentile_75, "$#,##0.00"],
+            ["95th Percentile", summary?.percentile_95, "$#,##0.00"],
+        ];
 
-        worksheet.addRow([
-            "Mean Revenue",
-            summary?.mean_revenue,
-        ]);
-
-        worksheet.addRow([
-            "Median Revenue",
-            summary?.median_revenue,
-        ]);
-
-        worksheet.addRow([
-            "Std Dev Revenue",
-            summary?.std_dev_revenue,
-        ]);
-
-        worksheet.addRow([
-            "Min Revenue",
-            summary?.min_revenue,
-        ]);
-
-        worksheet.addRow([
-            "Max Revenue",
-            summary?.max_revenue,
-        ]);
-
-        worksheet.addRow([
-            "5th Percentile",
-            summary?.percentile_5,
-        ]);
-
-        worksheet.addRow([
-            "25th Percentile",
-            summary?.percentile_25,
-        ]);
-
-        worksheet.addRow([
-            "75th Percentile",
-            summary?.percentile_75,
-        ]);
-
-        worksheet.addRow([
-            "95th Percentile",
-            summary?.percentile_95,
-        ]);
+        summaryFields.forEach(([label, value, format]) => {
+            const row = worksheet.addRow([
+                label,
+                format
+                    ? `$${Number(value).toLocaleString("en-US", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                    })}`
+                    : value,
+            ]);
+        });
 
         worksheet.addRow([]);
 
+        // Peak Bar
         // Peak Bar
         if (summary?.peak_bar) {
             worksheet.addRow(["Peak Bar"]);
@@ -229,21 +206,39 @@ export default function MCSChart({
                 summary.peak_bar.revenue_range,
             ]);
 
-            worksheet.addRow([
+            const demandRow = worksheet.addRow([
                 "Mean Demand",
                 summary.peak_bar.mean_demand,
             ]);
 
-            worksheet.addRow([
+            demandRow.getCell(2).value =
+                Number(summary.peak_bar.mean_demand).toLocaleString("en-US");
+
+            const complianceRow = worksheet.addRow([
                 "Mean Compliance",
-                summary.peak_bar.mean_compliance,
-                // `${summary.peak_bar.mean_compliance}%`,
+                summary.peak_bar.mean_compliance / 100,
             ]);
 
-            worksheet.addRow([
+            complianceRow.getCell(2).value =
+                `${Number(
+                    summary.peak_bar.mean_compliance
+                ).toLocaleString("en-US", {
+                    minimumFractionDigits: 3,
+                    maximumFractionDigits: 3,
+                })}%`;
+
+            const priceRow = worksheet.addRow([
                 "Price Per Vial",
                 summary.peak_bar.price_per_vial,
             ]);
+
+            priceRow.getCell(2).value =
+                `$${Number(
+                    summary.peak_bar.price_per_vial
+                ).toLocaleString("en-US", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                })}`;
 
             worksheet.addRow([]);
         }
