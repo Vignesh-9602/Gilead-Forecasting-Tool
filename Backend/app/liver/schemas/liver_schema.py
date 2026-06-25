@@ -128,14 +128,51 @@ class HierarchicalTabData(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# ETS factors
+# Factors — mirrors oncology structure
 # ---------------------------------------------------------------------------
 
-class EtsFactors(BaseModel):
-    level: float
-    trend: float
-    damping: float
+class EtsParams(BaseModel):
+    alpha: float
+    beta: float
+    gamma: float
+
+
+class LinearParams(BaseModel):
+    duration: int
+    total_growth: float
+    trajectory_start: str
+
+
+class SCurveParams(BaseModel):
+    k_value: float
+    duration: int
+    total_growth: float
+    trajectory_start: str
+
+
+class ExponentialParams(BaseModel):
+    k_value: float
+    duration: int
+    total_growth: float
+    trajectory_start: str
+
+
+class LogarithmicParams(BaseModel):
+    k_value: float
+    duration: int
+    total_growth: float
+    trajectory_start: str
+
+
+class LiverFactors(BaseModel):
+    ets: EtsParams
+    linear: LinearParams
+    scurve: SCurveParams
+    exponential: ExponentialParams
+    logarithmic: LogarithmicParams
     multiplier: float = 1.0
+    multiplier_horizon: str = "Forecast"
+    active_model: str = "ets"
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +182,7 @@ class EtsFactors(BaseModel):
 class LiverApplyFiltersResponse(BaseModel):
     months: List[str]               # ISO dates ["2020-04-01", ...]
     forecast_start_index: int
-    factors: EtsFactors
+    factors: LiverFactors
     tabs: Dict[str, Any]            # tabs 1-3: TabData, tabs 4-5: HierarchicalTabData
 
 
@@ -161,7 +198,7 @@ class LiverRecalculateRequest(BaseModel):
     metric: str = "market_volume"
     from_date: str
     to_date: Optional[str] = None       # overrides config forecast end if provided
-    factors: EtsFactors
+    factors: LiverFactors
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +213,7 @@ class LiverSaveScenarioRequest(BaseModel):
     product: str = "All"
     metric: str = "market_volume"
     from_date: str
-    factors: EtsFactors
+    factors: LiverFactors
     chart_data: Dict[str, Any]
 
 
