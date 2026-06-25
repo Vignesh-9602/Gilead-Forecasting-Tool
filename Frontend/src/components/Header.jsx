@@ -10,7 +10,8 @@ export default function Header({ tabs, activeTab, setActiveTab }) {
     const handleGoToLanding = () => {
         localStorage.removeItem("selectedTherapyArea");
         localStorage.removeItem("activeTab");
-        localStorage.removeItem("pbcActiveTab");
+        localStorage.removeItem("hcvActiveTab");
+        localStorage.removeItem("hivActiveTab");
 
         favDispatch({
             type: "SELECTED_THERAPY_AREA",

@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from "react";
 import {
     Paper,
+    Accordion,
+    AccordionSummary,
+    AccordionDetails,
     Typography,
     Table,
     TableBody,
@@ -11,6 +14,7 @@ import {
     Button,
     Box, TextField, FormControl, Select, MenuItem
 } from "@mui/material";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import Plot from "react-plotly.js";
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
@@ -44,20 +48,17 @@ export default function ForecastTrendChart({
     onSaveScenario,
     scenarioSelector,
     metricUnit,
-    marketShareView = "market_share",
-    setMarketShareView = () => {},
-    allMetricsData = {},
+    marketShareView,
+    setMarketShareView,
+    allMetricsData
 }) {
-    const monthsArray = Array.isArray(chartData?.months) ? chartData.months : [];
-    const allMonths = monthsArray.map((month) => {
-        const date = new Date(month);
-        return Number.isNaN(date.getTime())
-            ? String(month)
-            : date.toLocaleDateString("en-US", {
+    const allMonths =
+        chartData?.months?.map((month) =>
+            new Date(month).toLocaleDateString("en-US", {
                 month: "short",
                 year: "2-digit",
-            });
-    });
+            })
+        ) || [];
 
     const isVolumeMode =
         metric === "market_share" &&
@@ -286,8 +287,8 @@ export default function ForecastTrendChart({
     //     ...forecastValues,
     // ];
 
-    const forecastStartIndex = Number.isFinite(chartData?.forecast_start_index) ? chartData.forecast_start_index : 0;
-    const series = Array.isArray(chartData?.series) ? chartData.series : [];
+    const forecastStartIndex = chartData?.forecast_start_index || 0;
+    const series = chartData?.series || [];
 
     const traces = series.flatMap((item) => {
         const trainX = allMonths.slice(0, forecastStartIndex);
@@ -506,12 +507,12 @@ export default function ForecastTrendChart({
         );
     };
 
-    const allValues = series.flatMap((item) => [
-        ...(Array.isArray(item.train_values) ? item.train_values : []),
-        ...(Array.isArray(item.forecast_values) ? item.forecast_values : []),
+    const allValues = series.flatMap(item => [
+        ...item.train_values,
+        ...item.forecast_values
     ]);
 
-    const maxValue = allValues.length ? Math.max(...allValues.filter((v) => typeof v === "number" && !Number.isNaN(v))) : 0;
+    const maxValue = Math.max(...allValues);
 
     // Option 1: simple buffer
     const yMax = maxValue + 800;
@@ -654,151 +655,208 @@ export default function ForecastTrendChart({
 
     return (
         <>
-            {!chartData?.months?.length ? (
-                <Box sx={{ p: 4, textAlign: "center", color: "#94a3b8", fontSize: "14px" }}>
-                    No chart data available. Please select filters and apply.
-                </Box>
-            ) : (
-                <Paper sx={{ boxShadow: "none", mb: 3 }}>
-                    <PlotComponent
-                        data={traces}
-                        layout={{
-                            autosize: true,
-                            height: 350,
-                            margin: {
-                                l: 50,
-                                r: 30,
-                                t: 5,
-                                b: 60,
-                            },
-                            legend: {
-                                orientation: "h",
-                                x: 0.35,
-                                y: -0.2,
-                            },
-                            xaxis: {
-                                tickangle: -45,
-                                showgrid: true,
-                            },
-                            yaxis: yAxisConfig
-                        }}
-                        style={{ width: "100%" }}
-                        config={{
-                            responsive: true,
-                            displayModeBar: false,
-                        }}
-                    />
-                </Paper>
-            )}
+            <Accordion
+                defaultExpanded
+                sx={{
+                    mt: 3,
+                    borderRadius: "12px !important",
+                    border: "1px solid #D8DEE8",
+                    boxShadow: "none",
+                    overflow: "hidden",
+                }}
+            >
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Typography sx={{ fontWeight: 700, fontSize: "16px" }}>
+                        Forecast Trend Chart
+                    </Typography>
+                </AccordionSummary>
 
-            {tableRows.length > 0 && (
-                <Box sx={{ mt: 3, mb: 2, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    {/* LEFT SIDE */}
-                    <Box sx={{ display: "flex", gap: 1, minWidth: 80 }}>
-                        {metric === "market_share" && (
-                            <>
-                                <Tooltip title="Expand All">
-                                    <IconButton onClick={handleExpandAll}>
-                                        <UnfoldMoreIcon />
-                                    </IconButton>
-                                </Tooltip>
-
-                                <Tooltip title="Collapse All">
-                                    <IconButton onClick={handleCollapseAll}>
-                                        <UnfoldLessIcon />
-                                    </IconButton>
-                                </Tooltip>
-                            </>
-                        )}
-                    </Box>
-
-                    {/* RIGHT SIDE */}
-                    <Box sx={{ display: "flex", gap: 2 }}>
-                        {metric === "market_share" && (
-                            <FormControl size="small" sx={{ minWidth: 220 }}>
-                                <Select
-                                    value={marketShareView}
-                                    onChange={(e) => setMarketShareView(e.target.value)}
-                                >
-                                    <MenuItem value="market_share">Market Share (%)</MenuItem>
-                                    <MenuItem value="overall_market_volume">Overall Market Volume</MenuItem>
-                                </Select>
-                            </FormControl>
-                        )}
-                        <Tooltip title="Download Table">
-                            <IconButton onClick={handleDownloadExcel} disabled={!tableRows.length}>
-                                <DownloadIcon />
-                            </IconButton>
-                        </Tooltip>
-                        <Button
-                            variant="outlined"
-                            size="small"
-                            sx={{ height: "32px", borderRadius: "6px", textTransform: "none", fontSize: "12px" }}
-                            disabled={!tableRows.length || isVolumeMode}
-                            onClick={() => setEditable(true)}
+                <AccordionDetails sx={{ pt: 0, pb: 1, px: 1 }}>
+                    {!chartData?.months?.length ? (
+                        <Box
+                            sx={{
+                                mt: 3,
+                                p: 4,
+                                textAlign: "center",
+                                // height: 280,
+                                // display: "flex",
+                                // justifyContent: "center",
+                                // alignItems: "center",
+                                // color: "#94a3b8",
+                                // fontSize: "15px",
+                                fontWeight: 500,
+                            }}
                         >
-                            {editable ? "Editing..." : "Edit"}
-                        </Button>
+                            No chart data available. Please select filters and apply.
+                        </Box>
+                    ) : (
+                        <Paper sx={{ boxShadow: "none" }}>
+                            <PlotComponent
+                                data={traces}
+                                layout={{
+                                    autosize: true,
+                                    height: 350,
+                                    margin: {
+                                        l: 50,
+                                        r: 30,
+                                        t: 5,
+                                        b: 60,
+                                    },
+                                    legend: {
+                                        orientation: "h",
+                                        x: 0.35,
+                                        y: -0.2,
+                                    },
+                                    xaxis: {
+                                        tickangle: -45,
+                                        showgrid: true,
+                                    },
+                                    yaxis: yAxisConfig
+                                }}
+                                style={{ width: "100%" }}
+                                config={{
+                                    responsive: true,
+                                    displayModeBar: false,
+                                }}
+                            />
+                        </Paper>
+                    )}
+                </AccordionDetails>
+            </Accordion>
 
-                        {editable && (
-                            <Button
-                                variant="contained"
-                                size="small"
-                                sx={{ height: "32px", borderRadius: "6px", textTransform: "none", fontSize: "12px", backgroundColor: "#4F46E5" }}
-                                disabled={!tableRows.length || isVolumeMode}
-                                onClick={handleRefresh}
+            <Box
+                sx={{
+                    mt: 3,
+                    mb: 1,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                }}
+            >
+                {/* LEFT SIDE ICONS */}
+                <Box sx={{ display: "flex", gap: 1, minWidth: 80 }}>
+                    {metric === "market_share" && (
+                        <>
+                            <Tooltip title="Expand All">
+                                <IconButton onClick={handleExpandAll}>
+                                    <UnfoldMoreIcon />
+                                </IconButton>
+                            </Tooltip>
+
+                            <Tooltip title="Collapse All">
+                                <IconButton onClick={handleCollapseAll}>
+                                    <UnfoldLessIcon />
+                                </IconButton>
+                            </Tooltip>
+                        </>
+                    )}
+                    <Button
+                        variant="contained"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        onClick={() => setOpenDialog(true)}
+                        disabled={!tableRows.length}
+                    // disabled={scenarioSelector !== "BASE"}
+                    >
+                        Save Scenario
+                    </Button>
+                </Box>
+
+                {/* RIGHT SIDE BUTTONS */}
+                <Box sx={{ display: "flex", gap: 2 }}>
+                    {metric === "market_share" && (
+                        <FormControl
+                            size="small"
+                            sx={{ minWidth: 220 }}
+                        >
+                            <Select
+                                value={marketShareView}
+                                onChange={(e) =>
+                                    setMarketShareView(
+                                        e.target.value
+                                    )
+                                }
                             >
-                                Refresh
-                            </Button>
-                        )}
+                                <MenuItem value="market_share">
+                                    Market Share (%)
+                                </MenuItem>
 
-                        {metric === "market_share" && editable && !isVolumeMode && (
-                            <Button
-                                variant="outlined"
-                                size="small"
-                                sx={{ height: "32px", borderRadius: "6px", textTransform: "none", fontSize: "12px" }}
-                                disabled={!tableRows.length}
-                                onClick={handleNormalize}
-                            >
-                                Normalize
-                            </Button>
-                        )}
+                                <MenuItem value="overall_market_volume">
+                                    Overall Market Volume
+                                </MenuItem>
+                            </Select>
+                        </FormControl>
+                    )}
+                    <Tooltip title="Download Table">
+                        <IconButton onClick={handleDownloadExcel} disabled={!tableRows.length}>
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
+                    <Button
+                        variant="contained"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        disabled={
+                            editable ||
+                            !tableData.length ||
+                            !tableRows.length ||
+                            isVolumeMode
+                        }
+                        onClick={() => {
+                            if (scenarioSelector?.toUpperCase() === "BASE") {
+                                setOpenDialog(true);   // open save modal
+                            } else {
+                                onUpdateScenario();    // normal update
+                            }
+                        }}
+                    >
+                        Save
+                    </Button>
+                    <Button
+                        variant="outlined"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        disabled={
+                            !tableRows.length ||
+                            isVolumeMode
+                        }
+                        onClick={() => setEditable(true)}
+                    >
+                        {editable ? "Editing..." : "Edit Changes"}
+                    </Button>
 
+                    {editable && (
                         <Button
                             variant="contained"
-                            size="small"
-                            sx={{ height: "32px", borderRadius: "6px", textTransform: "none", fontSize: "12px", backgroundColor: "#4F46E5" }}
+                            sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
                             disabled={
-                                editable ||
-                                !tableData.length ||
                                 !tableRows.length ||
                                 isVolumeMode
                             }
-                            onClick={() => {
-                                if (scenarioSelector?.toUpperCase() === "BASE") {
-                                    setOpenDialog(true);
-                                } else {
-                                    onUpdateScenario();
-                                }
-                            }}
+                            onClick={handleRefresh}
                         >
-                            Apply
+                            Refresh
                         </Button>
+                    )}
 
-                        {editable && (
-                            <Button
-                                variant="outlined"
-                                size="small"
-                                sx={{ height: "32px", borderRadius: "6px", textTransform: "none", fontSize: "12px" }}
-                                disabled={!tableRows.length || isVolumeMode}
-                                onClick={handleCancel}
-                            >
-                                Cancel
-                            </Button>
-                        )}
-                    </Box>
+                    {metric === "market_share" && editable && !isVolumeMode && (
+                        <Button
+                            variant="outlined"
+                            sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                            disabled={!tableRows.length}
+                            onClick={handleNormalize}
+                        >
+                            Normalize
+                        </Button>
+                    )}
+
+                    <Button
+                        variant="outlined"
+                        sx={{ height: "35px", borderRadius: "10px", textTransform: "none" }}
+                        disabled={!tableRows.length || isVolumeMode}
+                        onClick={handleCancel}
+                    >
+                        Cancel
+                    </Button>
                 </Box>
-            )}
+            </Box>
 
             {!tableRows.length ? (
                 <Paper sx={{ mt: 3, p: 4, textAlign: "center" }}>
