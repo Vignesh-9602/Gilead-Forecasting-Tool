@@ -133,7 +133,7 @@ export default function LandingPage() {
                             <CardActionArea
                                 sx={{ height: "100%" }}
                                 onClick={() => {
-                                     
+
                                     favDispatch({
                                         type: "SELECTED_THERAPY_AREA",
                                         payload: item === "PBC" ? "HCV" : item,
