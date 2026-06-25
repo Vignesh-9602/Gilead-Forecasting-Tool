@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Union
 
 class LiverConfiguration(BaseModel):
     ta_name: str = "HCV"
-    payer: List[str] = ["All"]      # multi-select — ["All"] means no payer filter
-    brand: List[str] = ["All"]      # multi-select — ["All"] means no brand filter
+    payer: List[str] = ["All"]      # payers to save config for (expanded to rows per combination)
+    brand: List[str] = ["All"]      # brands to save config for
     train_start_date: str           # "2020-04-01"
     train_end_date: str             # "2025-12-01"
     model_granularity: str = "monthly"
@@ -20,11 +20,22 @@ class SaveLiverConfigRequest(BaseModel):
     config: LiverConfiguration
 
 
+class ConfigEntry(BaseModel):
+    """One saved (payer, brand) combination with its date config."""
+    payer: str
+    brand: str
+    train_start_date: str
+    train_end_date: str
+    model_granularity: str
+    forecast_periods: str           # returned as date string
+
+
 class LiverConfigResponse(BaseModel):
     ta_name: str
     exists: bool
-    config: Optional[LiverConfiguration]
-    available_train_months: List[str]   # ["2020-01-01", "2020-02-01", ...]
+    entries: List[ConfigEntry]          # one entry per saved (payer, brand) combination
+    available_train_months: List[str]
+    default_config: Optional[ConfigEntry] = None  # pre-filled values when exists=False
 
 
 # ---------------------------------------------------------------------------
@@ -41,9 +52,11 @@ class LiverFiltersResponse(BaseModel):
     products: List[str]
     scenarios: List[str]
     metric_options: List[MetricOption]
-    available_dates: List[str]          # ["Apr-20", "May-20", ...]
-    from_date: str                      # train_start_date from saved config
-    to_date: str                        # train_end_date from saved config
+    available_dates: List[str]
+    from_date: str                      # train_start_date from saved config for selected payer+brand
+    to_date: str                        # forecast end date from saved config
+    default_payer: str                  # pre-selected payer on page load
+    default_brand: str                  # pre-selected brand on page load
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +70,8 @@ class LiverApplyFiltersRequest(BaseModel):
     brand: List[str] = ["All"]          # multi-select
     product: str = "All"
     metric: str = "market_volume"       # "market_volume" | "market_share"
-    from_date: str                      # "2020-04" — start of view window
+    from_date: str                      # "2020-04-01" — start of view window
+    to_date: Optional[str] = None       # "2027-12-01" — end of view; falls back to config forecast end
     scenario: str = "Base"
 
 
@@ -137,7 +151,6 @@ class LiverApplyFiltersResponse(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Recalculate request
-# to_date and forecast_periods come from config — not in request
 # ---------------------------------------------------------------------------
 
 class LiverRecalculateRequest(BaseModel):
@@ -147,6 +160,7 @@ class LiverRecalculateRequest(BaseModel):
     product: str = "All"
     metric: str = "market_volume"
     from_date: str
+    to_date: Optional[str] = None       # overrides config forecast end if provided
     factors: EtsFactors
 
 

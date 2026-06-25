@@ -38,7 +38,7 @@ def liver_get_configuration(ta_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/configurations", response_model=LiverConfigResponse)
+@router.post("/configurations")
 def liver_save_configuration(payload: SaveLiverConfigRequest):
     """
     Save or update configuration for a TA.
@@ -57,14 +57,14 @@ def liver_save_configuration(payload: SaveLiverConfigRequest):
 # ---------------------------------------------------------------------------
 
 @router.get("/filters", response_model=LiverFiltersResponse)
-def liver_filters(ta: str = "HCV"):
+def liver_filters(ta: str = "HCV", payer: str = "Medicaid", brand: str = "GILD"):
     """
-    Called on page load.
-    Returns payers, products, scenarios, metric options, available date range,
-    and forecast to_date derived from saved config for the given TA.
+    Called on page load and whenever payer/brand selection changes.
+    Returns from_date and to_date from the saved config for the given (ta, payer, brand).
+    Falls back to 5-year default if no config saved for that combination.
     """
     try:
-        return get_liver_filters(ta)
+        return get_liver_filters(ta, payer, brand)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
