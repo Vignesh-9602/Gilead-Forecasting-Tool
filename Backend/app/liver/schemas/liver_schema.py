@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Any, Dict, List, Optional, Union
 
 
@@ -174,6 +174,27 @@ class LiverFactors(BaseModel):
     multiplier_horizon: str = "Forecast"
     active_model: str = "ets"
 
+    @model_validator(mode="before")
+    @classmethod
+    def handle_legacy_format(cls, data):
+        """Accept old frontend format {level, trend, damping, multiplier} and convert."""
+        if isinstance(data, dict) and "level" in data:
+            alpha = data.get("level", 0.3)
+            beta  = data.get("trend", 0.2)
+            gamma = data.get("damping", 0.98)
+            mult  = data.get("multiplier", 1.0)
+            return {
+                "ets":         {"alpha": alpha, "beta": beta, "gamma": gamma},
+                "linear":      {"duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
+                "scurve":      {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
+                "exponential": {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
+                "logarithmic": {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
+                "multiplier":         mult,
+                "multiplier_horizon": "Forecast",
+                "active_model":       "ets",
+            }
+        return data
+
 
 # ---------------------------------------------------------------------------
 # Apply filters response
@@ -182,7 +203,7 @@ class LiverFactors(BaseModel):
 class LiverApplyFiltersResponse(BaseModel):
     months: List[str]               # ISO dates ["2020-04-01", ...]
     forecast_start_index: int
-    factors: LiverFactors
+    factors: Dict[str, Any]         # flat {level, trend, damping, multiplier} for frontend
     tabs: Dict[str, Any]            # tabs 1-3: TabData, tabs 4-5: HierarchicalTabData
 
 

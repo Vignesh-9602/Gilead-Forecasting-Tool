@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
 from app.liver.schemas.liver_schema import (
-    LiverConfigResponse,
     SaveLiverConfigRequest,
     LiverFiltersResponse,
     LiverApplyFiltersRequest,
@@ -26,7 +25,7 @@ router = APIRouter(prefix="/api/liver", tags=["Liver"])
 # Configuration endpoints (mirrors oncology /api/configurations)
 # ---------------------------------------------------------------------------
 
-@router.get("/configurations/{ta_name}", response_model=LiverConfigResponse)
+@router.get("/configurations/{ta_name}")
 def liver_get_configuration(ta_name: str):
     """
     Load saved configuration for a TA. Config stores selected payers/brands as lists.
