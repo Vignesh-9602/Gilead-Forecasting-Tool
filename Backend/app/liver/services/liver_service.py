@@ -25,6 +25,8 @@ from app.liver.schemas.liver_schema import (
     HierarchicalRow,
     HierarchicalTabTable,
     HierarchicalTabData,
+    LiverRecalculateFactors,
+    LiverGrowthFactors,
 )
 from app.liver.repository.liver_repo import (
     get_liver_configs_for_ta,
@@ -233,49 +235,75 @@ def save_liver_configuration(payload) -> dict:
 
 # ---------------------------------------------------------------------------
 # Core: build a single series with multi-model forecast
-# is_selected=True  → apply user's factors (active_model dispatch)
-# is_selected=False → auto-estimate ETS from the series' own history
+# is_selected=True        → apply user's factors (active_model dispatch)
+# is_selected=False + ets → auto-estimate ETS params from the series' own history
+# is_selected=False + linear → auto-estimate linear growth from the series' own history
 # ---------------------------------------------------------------------------
 
+def _estimate_linear_growth(values: list) -> float:
+    """
+    Estimate total_growth by comparing the average of the first few points
+    to the average of the last few points.
+    Window size = up to 3 months (or fewer if data is short).
+    This is more stable than first-to-last because endpoint spikes don't dominate.
+    """
+    non_zero = [v for v in values if v > 0]
+    if len(non_zero) < 2:
+        return 0.0
+    window    = max(1, min(3, len(non_zero) // 4))
+    start_avg = sum(non_zero[:window]) / window
+    end_avg   = sum(non_zero[-window:]) / window
+    if start_avg == 0:
+        return 0.0
+    # Return as percentage (×100) because forecast_linear expects total_growth_pct
+    return round(((end_avg - start_avg) / start_avg) * 100, 4)
+
+
 def _build_series_with_forecast(month_range, data_map, forecast_start_index, factors,
-                                 is_selected: bool = True):
-    historical_months = month_range[:forecast_start_index]
-    forecast_months   = month_range[forecast_start_index:]
-    forecast_count    = len(forecast_months)
+                                 is_selected: bool = True, auto_model: str = "linear"):
+    historical_months   = month_range[:forecast_start_index]
+    forecast_months     = month_range[forecast_start_index:]
+    forecast_count      = len(forecast_months)
 
-    train_values = [float(data_map.get((y, m), 0)) for y, m in historical_months]
+    original_train      = [float(data_map.get((y, m), 0)) for y, m in historical_months]
 
-    if not train_values or all(v == 0 for v in train_values):
-        return train_values, [0.0] * forecast_count
+    if not original_train or all(v == 0 for v in original_train):
+        return original_train, [0.0] * forecast_count
 
+    # Non-selected series: auto-estimate from data, NO multiplier applied.
+    # Multiplier only affects the selected payer/brand (oncology pattern).
     if not is_selected:
-        alpha, beta, gamma = estimate_parameters(train_values) if len(train_values) >= 4 else (0.30, 0.20, 0.98)
-        return train_values, forecast_ets(
-            values=train_values, forecast_periods=forecast_count,
-            alpha=alpha, beta=beta, gamma=gamma, metric="nps",
-        )
+        if auto_model == "ets":
+            alpha, beta, gamma = (
+                estimate_parameters(original_train) if len(original_train) >= 4
+                else (0.30, 0.20, 0.98)
+            )
+            fc = forecast_ets(values=original_train, forecast_periods=forecast_count,
+                              alpha=alpha, beta=beta, gamma=gamma, metric="nps")
+        else:
+            total_growth = _estimate_linear_growth(original_train)
+            fc = forecast_linear(original_train[-1], forecast_count,
+                                 total_growth, forecast_count, "nps")
+        return original_train, fc
 
-    active     = factors.active_model.lower()
-    multiplier = factors.multiplier
-    mh         = (factors.multiplier_horizon or "Forecast").lower()
-    apply_hist = mh in ("history", "both history & forecast")
-    apply_fcast = mh in ("forecast", "both history & forecast")
+    # Selected series: user's factors + multiplier applied to display values only.
+    # Model ALWAYS runs on original data (oncology pattern).
+    multiplier        = factors.multiplier
+    mh                = (factors.multiplier_horizon or "Forecast").lower()
+    apply_to_history  = mh in ("history", "both history & forecast")
+    apply_to_forecast = mh in ("forecast", "both history & forecast")
 
-    model_input = [v * multiplier for v in train_values] if apply_hist else list(train_values)
+    active   = factors.active_model.lower()
+    f_params = getattr(factors, active, None)
 
     if active == "ets":
-        f = factors.ets
-        forecast_values = forecast_ets(
-            values=model_input, forecast_periods=forecast_count,
-            alpha=f.alpha, beta=f.beta, gamma=f.gamma, metric="nps",
-        )
+        f  = factors.ets
+        fc = forecast_ets(values=original_train, forecast_periods=forecast_count,
+                          alpha=f.alpha, beta=f.beta, gamma=f.gamma, metric="nps")
     else:
-        base_value = model_input[-1]
-        f_params   = getattr(factors, active)
-
-        # Resolve trajectory_start offset into an index within forecast_months
-        traj_idx = 0
-        if forecast_months and hasattr(f_params, "trajectory_start") and f_params.trajectory_start:
+        base_value = original_train[-1]
+        traj_idx   = 0
+        if forecast_months and f_params and hasattr(f_params, "trajectory_start") and f_params.trajectory_start:
             try:
                 tstart = datetime.fromisoformat(f_params.trajectory_start[:10])
                 for i, (fy, fm) in enumerate(forecast_months):
@@ -299,14 +327,14 @@ def _build_series_with_forecast(month_range, data_map, forecast_start_index, fac
                 growth = forecast_s_curve(base_value, remaining, f_params.total_growth, f_params.duration, f_params.k_value, "nps")
             else:
                 growth = [0.0] * remaining
-            forecast_values = pre_values + growth
+            fc = pre_values + growth
         else:
-            forecast_values = list(pre_values)
+            fc = list(pre_values)
 
-    if apply_fcast:
-        forecast_values = [round(v * multiplier, 2) for v in forecast_values]
-
-    return train_values, forecast_values
+    # Apply multiplier to display values only (never to model input)
+    display_train    = [round(v * multiplier, 2) for v in original_train] if apply_to_history  else original_train
+    display_forecast = [round(v * multiplier, 2) for v in fc]             if apply_to_forecast else fc
+    return display_train, display_forecast
 
 
 # ---------------------------------------------------------------------------
@@ -314,16 +342,19 @@ def _build_series_with_forecast(month_range, data_map, forecast_start_index, fac
 # ---------------------------------------------------------------------------
 
 def _build_tab_data(series_dict, month_range, month_labels, forecast_start_index, factors,
-                    selected_label=None):
+                    selected_label=None, auto_model="linear", add_total=False):
     """
-    selected_label: apply user factors only to this series label.
-    None means apply to all (single-series tabs like total_market_volume).
+    selected_label: label whose series gets user factors; all others use auto_model.
+    None → all series use user factors (is_selected=True for all).
+    ""  → no series matches → all series use auto_model (used for Tab 1 ETS).
+    add_total: if True, prepend a Total row that sums all series values.
     """
     chart_series, table_rows = [], []
     for label, data_map in series_dict.items():
         is_sel = (selected_label is None or label == selected_label)
         train_vals, forecast_vals = _build_series_with_forecast(
-            month_range, data_map, forecast_start_index, factors, is_selected=is_sel
+            month_range, data_map, forecast_start_index, factors,
+            is_selected=is_sel, auto_model=auto_model,
         )
         chart_series.append(ChartSeries(
             label=label, train_values=train_vals, forecast_values=forecast_vals
@@ -331,6 +362,16 @@ def _build_tab_data(series_dict, month_range, month_labels, forecast_start_index
         table_rows.append(TableRow(
             hierarchy=label, values=train_vals + forecast_vals
         ))
+
+    if add_total and len(table_rows) > 0:
+        n = len(month_range)
+        total_vals = [0.0] * n
+        for row in table_rows:
+            for i, v in enumerate(row.values):
+                if i < n:
+                    total_vals[i] += v
+        table_rows.insert(0, TableRow(hierarchy="Total", values=[round(v, 4) for v in total_vals]))
+
     return TabData(
         chart=TabChart(series=chart_series),
         table=TabTable(headers=month_labels, rows=table_rows),
@@ -338,11 +379,11 @@ def _build_tab_data(series_dict, month_range, month_labels, forecast_start_index
 
 
 def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start_index, factors,
-                                  selected_parent=None, selected_child=None):
+                                  selected_parent=None, selected_child=None, auto_model="linear"):
     """
-    selected_parent: apply user factors to this parent's children.
-    selected_child:  within a selected parent, apply user factors only to this child.
-    Parent totals are computed as sum of individually-forecasted children (stays consistent).
+    selected_parent/selected_child: the combination that gets user factors.
+    None for both → all series use auto_model.
+    Parent totals are sum of individually-forecasted children.
     """
     grouped = {}
     for r in rows:
@@ -360,7 +401,8 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
         for child, child_map in children.items():
             child_is_sel = parent_is_sel and (selected_child is None or child == selected_child)
             child_train, child_forecast = _build_series_with_forecast(
-                month_range, child_map, forecast_start_index, factors, is_selected=child_is_sel
+                month_range, child_map, forecast_start_index, factors,
+                is_selected=child_is_sel, auto_model=auto_model,
             )
             child_trains.append(child_train)
             child_forecasts.append(child_forecast)
@@ -397,11 +439,42 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
-def _override_model(factors: LiverFactors, active_model: str) -> LiverFactors:
-    """Return a copy of LiverFactors with a different active_model."""
-    d = factors.model_dump()
-    d["active_model"] = active_model
-    return LiverFactors(**d)
+
+def _build_response_factors(factors: LiverFactors) -> dict:
+    """Return full oncology-format factors dict for the API response."""
+    return {
+        "active_model":       factors.active_model,
+        "multiplier":         factors.multiplier,
+        "multiplier_horizon": factors.multiplier_horizon,
+        "ets": {
+            "alpha": factors.ets.alpha,
+            "beta":  factors.ets.beta,
+            "gamma": factors.ets.gamma,
+        },
+        "linear": {
+            "total_growth":      factors.linear.total_growth,
+            "duration":          factors.linear.duration,
+            "trajectory_start":  factors.linear.trajectory_start,
+        },
+        "exponential": {
+            "total_growth":      factors.exponential.total_growth,
+            "duration":          factors.exponential.duration,
+            "trajectory_start":  factors.exponential.trajectory_start,
+            "k_value":           factors.exponential.k_value,
+        },
+        "logarithmic": {
+            "total_growth":      factors.logarithmic.total_growth,
+            "duration":          factors.logarithmic.duration,
+            "trajectory_start":  factors.logarithmic.trajectory_start,
+            "k_value":           factors.logarithmic.k_value,
+        },
+        "scurve": {
+            "total_growth":      factors.scurve.total_growth,
+            "duration":          factors.scurve.duration,
+            "trajectory_start":  factors.scurve.trajectory_start,
+            "k_value":           factors.scurve.k_value,
+        },
+    }
 
 
 def _rows_to_series(rows, label_col_index, value_col_index):
@@ -487,13 +560,17 @@ def get_liver_filters(ta: str = "HCV", payer: str = "All", brand: str = "All") -
 # Core query + build logic (shared by apply and recalculate)
 # ---------------------------------------------------------------------------
 
-def _build_all_tabs(cur, ta, payer, product, metric, from_year, from_month,
+def _build_all_tabs(cur, ta, metric, from_year, from_month,
                     train_end_year, train_end_month, forecast_periods, factors,
-                    granularity: str = "monthly"):
+                    granularity: str = "monthly",
+                    sel_payer: str = None, sel_product: str = None,
+                    scenario_name: str = "Base"):
     """
-    Returns all payers/products in every tab (no SQL filter on payer/product).
-    User factors are applied only to the selected payer/product series;
-    all other series get auto-estimated ETS.
+    Tab 1 always uses auto-ETS on the aggregate.
+    Tabs 2-5:
+      - If sel_payer/sel_product are given (recalculate): only that series uses user factors,
+        all others use auto-estimated linear.
+      - If both are None (apply_filters base): all series use auto-estimated linear.
     """
     is_yearly = granularity == "yearly"
 
@@ -509,89 +586,98 @@ def _build_all_tabs(cur, ta, payer, product, metric, from_year, from_month,
     month_labels         = [_month_label(y, m, granularity) for y, m in month_range]
     forecast_start_index = len(actual_range)
 
-    # Which series should get user factors vs auto-ETS
-    sel_payer   = _first(payer) if isinstance(payer, list) else (None if payer == "All" else payer)
-    sel_product = None if (not product or product == "All") else product
+    # Pre-estimate ETS for Tab 1 from training data so:
+    #   a) the same params used in the chart are returned in the response (pre-fed to sliders)
+    #   b) is_selected=True can be used → multiplier horizon is applied correctly
+    # Tabs 2-5: sel_product/sel_payer gets user factors; others get auto-linear.
+    tab2_label = sel_product if sel_product else ""
+    tab3_label = sel_payer  if sel_payer  else ""
 
-    # Tab 1 always uses ETS; tabs 2-5 always use linear
-    ets_factors    = _override_model(factors, "ets")
-    linear_factors = _override_model(factors, "linear")
+    if is_yearly:
+        _tmv_train = get_total_market_volume_yearly(cur, ta, from_year, train_end_year, None)
+    else:
+        _tmv_train = get_total_market_volume(cur, ta, from_year, from_month, train_end_year, train_end_month, None)
+    _tmv_values = [float(r[-1]) for r in _tmv_train if r[-1] is not None]
+    if len(_tmv_values) >= 4:
+        _t1a, _t1b, _t1g = estimate_parameters(_tmv_values)
+    else:
+        _t1a, _t1b, _t1g = 0.30, 0.20, 0.98
+    tab1_ets     = EtsParams(alpha=round(_t1a, 4), beta=round(_t1b, 4), gamma=round(_t1g, 4))
+    tab1_factors = factors.model_copy(update={"active_model": "ets", "ets": tab1_ets})
 
     tabs = {}
 
     if is_yearly:
-        # Tab 1 — ETS
-        tmv_rows = get_total_market_volume_yearly(cur, ta, from_year, train_end_year, None)
-        tmv_map  = {"Total Market Volume": {(r[0], r[1]): float(r[2]) for r in tmv_rows}}
+        # Tab 1 — auto-ETS with is_selected=True so multiplier is applied
+        tmv_map = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
         tabs["total_market_volume"] = _build_tab_data(
-            tmv_map, month_range, month_labels, forecast_start_index, ets_factors
+            tmv_map, month_range, month_labels, forecast_start_index, tab1_factors,
         )
 
-        # Tab 2 — linear, user factors only for sel_product
+        # Tab 2 — sel_product gets user factors; others get auto-linear
         pd_rows = get_product_distribution_yearly(cur, ta, from_year, train_end_year, "All", metric)
         tabs["product_distribution"] = _build_tab_data(
-            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
-            selected_label=sel_product,
+            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            selected_label=tab2_label, auto_model="linear", add_total=True,
         )
 
-        # Tab 3 — linear, user factors only for sel_payer
+        # Tab 3 — sel_payer gets user factors; others get auto-linear
         pyd_rows = get_payer_distribution_yearly(cur, ta, from_year, train_end_year, None, metric)
         tabs["payer_distribution"] = _build_tab_data(
-            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
-            selected_label=sel_payer,
+            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            selected_label=tab3_label, auto_model="linear", add_total=True,
         )
 
-        # Tab 4 — linear
+        # Tab 4
         pwp_rows = get_payer_wise_product_yearly(cur, ta, from_year, train_end_year, None, metric)
         tabs["payer_wise_product"] = _build_hierarchical_tab_data(
-            pwp_rows, month_range, month_labels, forecast_start_index, linear_factors,
-            selected_parent=sel_payer, selected_child=sel_product,
+            pwp_rows, month_range, month_labels, forecast_start_index, factors,
+            selected_parent=tab3_label, selected_child=tab2_label, auto_model="linear",
         )
 
-        # Tab 5 — linear
+        # Tab 5
         pwpy_rows = get_product_wise_payer_yearly(cur, ta, from_year, train_end_year, "All", metric)
         tabs["product_wise_payer"] = _build_hierarchical_tab_data(
-            pwpy_rows, month_range, month_labels, forecast_start_index, linear_factors,
-            selected_parent=sel_product, selected_child=sel_payer,
+            pwpy_rows, month_range, month_labels, forecast_start_index, factors,
+            selected_parent=tab2_label, selected_child=tab3_label, auto_model="linear",
         )
 
     else:
-        # Tab 1 — ETS
-        tmv_rows = get_total_market_volume(cur, ta, from_year, from_month, train_end_year, train_end_month, None)
-        tmv_map  = {"Total Market Volume": {(r[0], r[1]): float(r[2]) for r in tmv_rows}}
+        # Tab 1 — auto-ETS with is_selected=True so multiplier is applied
+        tmv_map = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
         tabs["total_market_volume"] = _build_tab_data(
-            tmv_map, month_range, month_labels, forecast_start_index, ets_factors
+            tmv_map, month_range, month_labels, forecast_start_index, tab1_factors,
         )
 
-        # Tab 2 — linear, user factors only for sel_product
+        # Tab 2 — sel_product gets user factors; others get auto-linear
         pd_rows = get_product_distribution(cur, ta, from_year, from_month, train_end_year, train_end_month, "All", metric)
         tabs["product_distribution"] = _build_tab_data(
-            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
-            selected_label=sel_product,
+            _rows_to_series(pd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            selected_label=tab2_label, auto_model="linear", add_total=True,
         )
 
-        # Tab 3 — linear, user factors only for sel_payer
+        # Tab 3 — sel_payer gets user factors; others get auto-linear
         pyd_rows = get_payer_distribution(cur, ta, from_year, from_month, train_end_year, train_end_month, None, metric)
         tabs["payer_distribution"] = _build_tab_data(
-            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, linear_factors,
-            selected_label=sel_payer,
+            _rows_to_series(pyd_rows, 2, 3), month_range, month_labels, forecast_start_index, factors,
+            selected_label=tab3_label, auto_model="linear", add_total=True,
         )
 
-        # Tab 4 — linear
+        # Tab 4
         pwp_rows = get_payer_wise_product(cur, ta, from_year, from_month, train_end_year, train_end_month, None, metric)
         tabs["payer_wise_product"] = _build_hierarchical_tab_data(
-            pwp_rows, month_range, month_labels, forecast_start_index, linear_factors,
-            selected_parent=sel_payer, selected_child=sel_product,
+            pwp_rows, month_range, month_labels, forecast_start_index, factors,
+            selected_parent=tab3_label, selected_child=tab2_label, auto_model="linear",
         )
 
-        # Tab 5 — linear
+        # Tab 5
         pwpy_rows = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, "All", metric)
         tabs["product_wise_payer"] = _build_hierarchical_tab_data(
-            pwpy_rows, month_range, month_labels, forecast_start_index, linear_factors,
-            selected_parent=sel_product, selected_child=sel_payer,
+            pwpy_rows, month_range, month_labels, forecast_start_index, factors,
+            selected_parent=tab2_label, selected_child=tab3_label, auto_model="linear",
         )
 
-    return month_labels, forecast_start_index, tabs
+    return month_labels, forecast_start_index, tabs, tab1_ets
 
 
 # ---------------------------------------------------------------------------
@@ -649,22 +735,21 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         else:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
-        month_labels, forecast_start_index, tabs = _build_all_tabs(
-            cur, payload.ta, payload.payer, payload.product, payload.metric,
+        # apply_filters (Base): no selected payer/brand → all series use auto-linear
+        month_labels, forecast_start_index, tabs, tab1_ets = _build_all_tabs(
+            cur, payload.ta, payload.metric,
             from_year, from_month, train_end_year, train_end_month, forecast_periods, factors,
-            granularity
+            granularity,
+            scenario_name=payload.scenario or "Base",
         )
 
+        response_factors = _build_response_factors(factors)
+        response_factors["ets"] = {"alpha": tab1_ets.alpha, "beta": tab1_ets.beta, "gamma": tab1_ets.gamma}
         return {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
-            "factors": {
-                "level":      factors.ets.alpha,
-                "trend":      factors.ets.beta,
-                "damping":    factors.ets.gamma,
-                "multiplier": factors.multiplier,
-            },
-            "tabs": tabs,
+            "factors":              response_factors,
+            "tabs":                 tabs,
         }
     finally:
         cur.close()
@@ -675,8 +760,35 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
 # Recalculate with user-provided factors
 # ---------------------------------------------------------------------------
 
+def _factors_from_request(f: LiverRecalculateFactors, model_type: str,
+                           default_traj: str, default_duration: int) -> LiverFactors:
+    """
+    Build internal LiverFactors from the oncology-style recalculate request.
+    Mirrors oncology's recalculate route which unpacks ets / growth separately.
+    """
+    ets_p  = f.ets    or EtsParams(alpha=0.3, beta=0.2, gamma=0.98)
+    growth = f.growth
+
+    tg   = growth.total_growth                                          if growth else 0.0
+    dur  = growth.duration                                              if growth else default_duration
+    traj = (growth.trajectory_start or default_traj)                   if growth else default_traj
+    k    = (growth.k_value if growth and growth.k_value is not None else 1.0)
+
+    return LiverFactors(
+        active_model      = model_type,
+        multiplier        = f.multiplier,
+        multiplier_horizon= f.multiplier_horizon,
+        ets               = EtsParams(alpha=ets_p.alpha, beta=ets_p.beta, gamma=ets_p.gamma),
+        linear            = LinearParams(total_growth=tg,  duration=dur, trajectory_start=traj),
+        exponential       = ExponentialParams(k_value=k, total_growth=tg, duration=dur, trajectory_start=traj),
+        logarithmic       = LogarithmicParams(k_value=k, total_growth=tg, duration=dur, trajectory_start=traj),
+        scurve            = SCurveParams(k_value=k,     total_growth=tg, duration=dur, trajectory_start=traj),
+    )
+
+
 def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
     from_year, from_month = _parse_ym(payload.from_date)
+    model_type = payload.model_type.lower()
 
     conn = get_connection()
     cur = conn.cursor()
@@ -688,24 +800,47 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         forecast_periods = _resolve_forecast_periods(
             payload.to_date, train_end_year, train_end_month, cfg["forecast_periods"]
         )
-        granularity      = cfg.get("model_granularity", "monthly")
+        granularity = cfg.get("model_granularity", "monthly")
 
-        month_labels, forecast_start_index, tabs = _build_all_tabs(
-            cur, payload.ta, payload.payer, payload.product, payload.metric,
-            from_year, from_month, train_end_year, train_end_month, forecast_periods, payload.factors,
-            granularity
+        to_month_safe = train_end_month if granularity != "yearly" else 1
+        default_traj  = date_type(train_end_year, to_month_safe, 1).isoformat()
+
+        factors = _factors_from_request(
+            payload.factors, model_type, default_traj, forecast_periods
         )
 
+        # recalculate: selected payer+brand gets user factors; all others get auto-linear
+        month_labels, forecast_start_index, tabs, tab1_ets = _build_all_tabs(
+            cur, payload.ta, payload.metric,
+            from_year, from_month, train_end_year, train_end_month, forecast_periods, factors,
+            granularity,
+            sel_payer=_first(payload.payer),
+            sel_product=_first(payload.brand),
+            scenario_name=payload.scenario or "Base",
+        )
+
+        response_factors = _build_response_factors(factors)
+        # Match oncology: for ETS recalculate, echo back user's ETS values so sliders
+        # show what was used for the selected series.
+        # For non-ETS recalculate, show Tab 1's auto-estimated ETS (like oncology shows
+        # stored DB ETS when model is not ETS).
+        if model_type == "ets":
+            response_factors["ets"] = {
+                "alpha": factors.ets.alpha,
+                "beta":  factors.ets.beta,
+                "gamma": factors.ets.gamma,
+            }
+        else:
+            response_factors["ets"] = {
+                "alpha": tab1_ets.alpha,
+                "beta":  tab1_ets.beta,
+                "gamma": tab1_ets.gamma,
+            }
         return {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
-            "factors": {
-                "level":      payload.factors.ets.alpha,
-                "trend":      payload.factors.ets.beta,
-                "damping":    payload.factors.ets.gamma,
-                "multiplier": payload.factors.multiplier,
-            },
-            "tabs": tabs,
+            "factors":              response_factors,
+            "tabs":                 tabs,
         }
     finally:
         cur.close()
@@ -759,8 +894,10 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
 
     if len(values) >= 4:
         alpha, beta, gamma = estimate_parameters(values)
+        est_growth         = round(_estimate_linear_growth(values), 2)
     else:
         alpha, beta, gamma = 0.30, 0.20, 0.98
+        est_growth         = 0.0
 
     to_month_safe      = to_month if granularity != "yearly" else 1
     trajectory_start   = date_type(to_year, to_month_safe, 1).isoformat()
@@ -768,11 +905,11 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
 
     return LiverFactors(
         ets=EtsParams(alpha=round(alpha, 2), beta=round(beta, 2), gamma=round(gamma, 2)),
-        linear=LinearParams(duration=default_duration, total_growth=0, trajectory_start=trajectory_start),
-        scurve=SCurveParams(k_value=1, duration=default_duration, total_growth=0, trajectory_start=trajectory_start),
-        exponential=ExponentialParams(k_value=1, duration=default_duration, total_growth=0, trajectory_start=trajectory_start),
-        logarithmic=LogarithmicParams(k_value=1, duration=default_duration, total_growth=0, trajectory_start=trajectory_start),
+        linear=LinearParams(duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
+        scurve=SCurveParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
+        exponential=ExponentialParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
+        logarithmic=LogarithmicParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
         multiplier=1.0,
         multiplier_horizon="Forecast",
-        active_model="ets",
+        active_model="linear",
     )
