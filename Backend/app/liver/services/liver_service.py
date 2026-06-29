@@ -489,7 +489,7 @@ def _rows_to_series(rows, label_col_index, value_col_index):
 
 
 def _fmt_flat(tab, month_labels, forecast_start_index):
-    """Convert TabData to HIV-style { chart, table: {type: flat} } dict."""
+   
     return {
         "chart": {
             "months":               month_labels,
@@ -507,7 +507,7 @@ def _fmt_flat(tab, month_labels, forecast_start_index):
 
 
 def _fmt_hier(tab, month_labels, forecast_start_index):
-    """Convert HierarchicalTabData to HIV-style { chart, table: {type: hierarchy} } dict."""
+    
     return {
         "chart": {
             "months":               month_labels,
@@ -850,7 +850,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
 def _factors_from_request(f: LiverRecalculateFactors, model_type: str,
                            default_traj: str, default_duration: int) -> LiverFactors:
     """
-    Build internal LiverFactors from the HIV-style recalculate request.
+    Build internal LiverFactors from the recalculate request.
     Only the active model's params are required; defaults fill in the rest.
     """
     ets_p = f.ets or EtsParams(alpha=0.3, beta=0.2, gamma=0.98)

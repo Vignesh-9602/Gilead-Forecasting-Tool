@@ -187,7 +187,7 @@ class LiverGrowthFactors(BaseModel):
 
 class LiverRecalculateFactors(BaseModel):
     """
-    HIV-style factors: only the active model's params need to be provided.
+    factors: only the active model's params need to be provided.
     Also accepts legacy {level, trend, damping} ETS format.
     """
     multiplier: float = 1.0
@@ -228,7 +228,7 @@ class LiverApplyFiltersResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Recalculate request  (HIV-style payload)
+# Recalculate request
 # ---------------------------------------------------------------------------
 
 class LiverRecalculateRequest(BaseModel):
