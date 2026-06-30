@@ -68,12 +68,10 @@ const CHART_COLORS = [
 ];
 
 // ─── ForecastChart ────────────────────────────────────────────────────────────
-const ForecastChart = ({ chartData, metricUnit = "" }) => {
+const ForecastChart = ({ chartData, productFilter, payerFilter, appliedBrand, activeTab }) => {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
-      <Box
-        sx={{ p: 4, textAlign: "center", color: "#94a3b8", fontSize: "14px" }}
-      >
+      <Box sx={{ p: 4, textAlign: "center", color: "#94a3b8", fontSize: "14px" }}>
         No chart data available. Please select filters and apply.
       </Box>
     );
@@ -94,27 +92,36 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
   });
 
   const traces = series.flatMap((s, idx) => {
-    const color = CHART_COLORS[idx % CHART_COLORS.length];
+    const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
+    const currentPayer = (payerFilter || "").toLowerCase();
+    const seriesLabel = (s.label || "").toLowerCase();
+
+    let isSelectedTrace = false;
+    if (activeTab === "prod_dist" && currentBrand) {
+      isSelectedTrace = seriesLabel === currentBrand;
+    } else if (activeTab === "payer_dist" && currentPayer) {
+      isSelectedTrace = seriesLabel === currentPayer;
+    } else if (activeTab === "payer_prod" && currentPayer && currentBrand) {
+      isSelectedTrace = seriesLabel.includes(currentPayer) && seriesLabel.includes(currentBrand);
+    } else if (activeTab === "prod_payer" && currentPayer && currentBrand) {
+      isSelectedTrace = seriesLabel.includes(currentBrand) && seriesLabel.includes(currentPayer);
+    } else if (activeTab === "total_market") {
+      isSelectedTrace = true;
+    } else {
+      isSelectedTrace = (currentBrand && seriesLabel.includes(currentBrand)) || (currentPayer && seriesLabel.includes(currentPayer));
+    }
+
+    const color = isSelectedTrace ? CHART_COLORS[idx % CHART_COLORS.length] : "#e2e8f0";
+    const width = isSelectedTrace ? 3.5 : 1.5;
+
     const trainX = allMonths.slice(0, fsi);
-    const trainY = Array.isArray(s.train_values)
-      ? s.train_values.slice(0, fsi)
-      : [];
-    const forecastX =
-      fsi > 0
-        ? [allMonths[fsi - 1], ...allMonths.slice(fsi)]
-        : allMonths.slice(fsi);
-    const lastTrain = s.train_values?.length
-      ? s.train_values[s.train_values.length - 1]
-      : null;
-    const forecastY =
-      fsi > 0
-        ? [
-            lastTrain ?? null,
-            ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
-          ]
-        : Array.isArray(s.forecast_values)
-          ? s.forecast_values
-          : [];
+    const trainY = Array.isArray(s.train_values) ? s.train_values.slice(0, fsi) : [];
+    const forecastX = fsi > 0 ? [allMonths[fsi - 1], ...allMonths.slice(fsi)] : allMonths.slice(fsi);
+    const lastTrain = s.train_values?.length ? s.train_values[s.train_values.length - 1] : null;
+    const forecastY = fsi > 0
+        ? [lastTrain ?? null, ...(Array.isArray(s.forecast_values) ? s.forecast_values : [])]
+        : Array.isArray(s.forecast_values) ? s.forecast_values : [];
+
     return [
       {
         x: trainX,
@@ -123,7 +130,7 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
         mode: "lines",
         name: s.label,
         legendgroup: s.label,
-        line: { color, width: 3 },
+        line: { color, width },
       },
       {
         x: forecastX,
@@ -133,19 +140,10 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
         name: s.label,
         legendgroup: s.label,
         showlegend: false,
-        line: { color, width: 3, dash: "dot" },
+        line: { color, width, dash: "dot" },
       },
     ];
   });
-
-  const allValues = series.flatMap((s) => [
-    ...(s.train_values || []),
-    ...(s.forecast_values || []),
-  ]);
-  const maxValue = allValues.length
-    ? Math.max(...allValues.map((v) => v || 0))
-    : 0;
-  const yMax = Math.ceil(maxValue * 1.15);
 
   return (
     <Box sx={{ width: "100%", height: 300 }}>
@@ -158,7 +156,7 @@ const ForecastChart = ({ chartData, metricUnit = "" }) => {
           legend: { orientation: "h", x: 0.35, y: -0.2 },
           showlegend: true,
           xaxis: { tickangle: -45, showgrid: true },
-          yaxis: { showgrid: false, range: [0, yMax] },
+          yaxis: { showgrid: false },
           paper_bgcolor: "white",
           plot_bgcolor: "white",
         }}
@@ -329,14 +327,17 @@ export default function PBCModelInput() {
         table: [],
       };
 
-    const series = (tab.chart?.series || []).map((s) => ({
-      label: s.label || "",
-      lot: s.lot || s.label || "",
-      train_values: Array.isArray(s.train_values) ? s.train_values : [],
-      forecast_values: Array.isArray(s.forecast_values)
-        ? s.forecast_values
-        : [],
-    }));
+    const series = (tab.chart?.series || [])
+      .filter((s) => {
+        const lbl = (s.label || "").toLowerCase();
+        return !lbl.includes("total") && !lbl.includes("market volume") && !lbl.includes("market share");
+      })
+      .map((s) => ({
+        label: s.label || "",
+        lot: s.lot || s.label || "",
+        train_values: Array.isArray(s.train_values) ? s.train_values : [],
+        forecast_values: Array.isArray(s.forecast_values) ? s.forecast_values : [],
+      }));
 
     const isAllZeroSeries = (arr) => {
       if (!arr?.length) return true;
@@ -365,34 +366,29 @@ export default function PBCModelInput() {
         }
       }
       if (candidate) {
-        const maxTL = Math.max(
-          ...candidate.map((s) => s.train_values?.length || 0),
-          0,
-        );
-        const maxFL = Math.max(
-          ...candidate.map((s) => s.forecast_values?.length || 0),
-          0,
-        );
-        const sumT = Array.from({ length: maxTL }, (_, i) =>
-          candidate.reduce(
-            (a, s) => a + (Number((s.train_values || [])[i]) || 0),
-            0,
-          ),
-        );
-        const sumF = Array.from({ length: maxFL }, (_, i) =>
-          candidate.reduce(
-            (a, s) => a + (Number((s.forecast_values || [])[i]) || 0),
-            0,
-          ),
-        );
-        const lbl = tab.chart?.series?.[0]?.label || "Total Market Volume";
-        series.length = 0;
-        series.push({
-          label: lbl,
-          lot: lbl,
-          train_values: sumT,
-          forecast_values: sumF,
+        const filteredCandidate = candidate.filter((s) => {
+          const lbl = (s.label || "").toLowerCase();
+          return !lbl.includes("total") && !lbl.includes("market volume") && !lbl.includes("market share");
         });
+
+        if (filteredCandidate.length) {
+          const maxTL = Math.max(...filteredCandidate.map((s) => s.train_values?.length || 0), 0);
+          const maxFL = Math.max(...filteredCandidate.map((s) => s.forecast_values?.length || 0), 0);
+          const sumT = Array.from({ length: maxTL }, (_, i) =>
+            filteredCandidate.reduce((a, s) => a + (Number((s.train_values || [])[i]) || 0), 0)
+          );
+          const sumF = Array.from({ length: maxFL }, (_, i) =>
+            filteredCandidate.reduce((a, s) => a + (Number((s.forecast_values || [])[i]) || 0), 0)
+          );
+          const lbl = tab.chart?.series?.[0]?.label || "Summary Metrics";
+          series.length = 0;
+          series.push({
+            label: lbl,
+            lot: lbl,
+            train_values: sumT,
+            forecast_values: sumF,
+          });
+        }
       }
     }
 
@@ -429,61 +425,6 @@ export default function PBCModelInput() {
         });
       }
     });
-
-    const isAllZeroTable = (tbl) => {
-      if (!tbl?.length) return true;
-      return tbl.every((row) => {
-        const vals = Object.values(row.monthly_data || {});
-        return !vals.length || vals.every((v) => v == null || Number(v) === 0);
-      });
-    };
-
-    if (isAllZeroTable(table)) {
-      const ck = [
-        "product_distribution",
-        "product_wise_payer",
-        "payer_wise_product",
-        "payer_distribution",
-      ];
-      let cand = null;
-      for (const k of ck) {
-        if (tabs[k]?.table?.rows?.length) {
-          cand = tabs[k].table;
-          break;
-        }
-      }
-      if (cand) {
-        const hc = cand.headers || months;
-        const syn = [];
-        (cand.rows || []).forEach((r) => {
-          if (r && Array.isArray(r.total)) {
-            syn.push({
-              hierarchy: r.hierarchy,
-              monthly_data: mkMonthly(r.total, hc),
-              is_applied: !!r.is_applied,
-            });
-            (r.children || []).forEach((c) =>
-              syn.push({
-                hierarchy: `${r.hierarchy} - ${c.label}`,
-                monthly_data: mkMonthly(c.values || [], hc),
-                is_applied: false,
-              }),
-            );
-          } else {
-            syn.push({
-              hierarchy: r.hierarchy,
-              monthly_data: mkMonthly(r.values || [], hc),
-              is_applied: !!r.is_applied,
-            });
-          }
-        });
-        if (syn.length)
-          return {
-            chart: { months, forecast_start_index: fsi, series },
-            table: syn,
-          };
-      }
-    }
 
     return { chart: { months, forecast_start_index: fsi, series }, table };
   };
@@ -562,6 +503,23 @@ export default function PBCModelInput() {
   useEffect(() => {
     if (therapyArea) fetchMetricFilters();
   }, [therapyArea]);
+
+  useEffect(() => {
+    if (!filtersLoaded) return;
+    
+    let targetMetric = "market_volume";
+    if (activeTab === "prod_dist" || activeTab === "payer_dist") {
+      targetMetric = "market_share";
+    } else if (activeTab === "payer_prod" || activeTab === "prod_payer" || activeTab === "total_market") {
+      targetMetric = "market_volume";
+    }
+
+    if (metric !== targetMetric) {
+      setMetric(targetMetric);
+      if (targetMetric !== "market_share") setBrand("");
+      handleApplyFilterWithMetric(targetMetric);
+    }
+  }, [activeTab, filtersLoaded]);
 
   useEffect(() => {
     if (!filtersLoaded || autoAppliedOnMount) return;
@@ -738,17 +696,10 @@ export default function PBCModelInput() {
               tabs: data?.tabs || {},
             });
             setEditable(false);
-            setAutoAppliedOnMount(true);
-            try {
-              localStorage.removeItem("hcvConfigSaved");
-            } catch (e) {
-              /* ignore */
-            }
           } catch (err) {
             console.warn("Failed to auto-apply HCV config", err);
           }
         }
-        setFiltersLoaded(true);
         return;
       }
 
@@ -830,6 +781,7 @@ export default function PBCModelInput() {
       showSnackbar("Failed to fetch metric filters", "error");
     } finally {
       setLoading(false);
+      setFiltersLoaded(true);
     }
   };
 
@@ -858,10 +810,6 @@ export default function PBCModelInput() {
           [newMetric]: { unit: newMetric === "market_share" ? "%" : "" },
         });
         setEditable(false);
-        showSnackbar(
-          `Switched to ${newMetric === "market_share" ? "Market Share" : "Market Volume"}`,
-          "success",
-        );
         return;
       }
       const response = await applyMetricFilters({
@@ -877,10 +825,6 @@ export default function PBCModelInput() {
       syncFactors(factors, am);
       syncMetrics(data?.metrics_data, newMetric);
       setEditable(false);
-      showSnackbar(
-        `Switched to ${newMetric === "market_share" ? "Market Share" : "Market Volume"}`,
-        "success",
-      );
     } catch (error) {
       const msg = error?.response?.data || error?.message || "Unknown error";
       showSnackbar(
@@ -1180,7 +1124,7 @@ export default function PBCModelInput() {
       }
       return { brandName: brandKey, mainRow, children: entry.children };
     });
-  }, [tableData]);
+  }, [tableData, chartData]);
 
   const safeFrom = (availableDates || []).includes(fromDate) ? fromDate : "";
   const safeTo = toDate;
@@ -1912,6 +1856,10 @@ export default function PBCModelInput() {
             <ForecastChart
               chartData={chartData}
               metricUnit={isPercentTab ? "%" : metricUnit}
+              productFilter={productFilter}
+              payerFilter={payerFilter}
+              appliedBrand={appliedBrand}
+              activeTab={activeTab}
             />
           </Paper>
 
@@ -2155,7 +2103,7 @@ export default function PBCModelInput() {
                   fontSize: "12px",
                 }}
               >
-                {/* THEAD — uniform, no forecast colors on headers */}
+                {/* THEAD */}
                 <Box component="thead">
                   <Box component="tr">
                     <Box
@@ -2271,10 +2219,8 @@ export default function PBCModelInput() {
                                 textAlign: "center",
                                 fontSize: "13px",
                                 fontWeight: 700,
-                                backgroundColor: isF
-                                  ? "#fffbeb"
-                                  : "transparent",
-                                color: isF ? "#f59e0b" : "#0f172a",
+                                backgroundColor: isF ? "#ffffff" : "#f8fafc",
+                                color: isF ? "#0ea5e9" : "#0f172a",
                                 borderBottom: "1px solid #f1f5f9",
                               }}
                             >
@@ -2363,10 +2309,8 @@ export default function PBCModelInput() {
                                     textAlign: "center",
                                     fontSize: "13px",
                                     fontWeight: 400,
-                                    backgroundColor: isF
-                                      ? "#fffbeb"
-                                      : "transparent",
-                                    color: isF ? "#f59e0b" : "#475569",
+                                    backgroundColor: isF ? "#ffffff" : "#f8fafc",
+                                    color: isF ? "#0ea5e9" : "#475569",
                                     borderBottom: "1px solid #f1f5f9",
                                   }}
                                 >
@@ -2383,43 +2327,23 @@ export default function PBCModelInput() {
                       const isExpanded = !!expandedBrands[group.brandName];
                       const hasChildren = group.children.length > 0;
                       const mainRowApplied = group.mainRow?.is_applied;
-                      const isSelected =
-                        tentativeRadioSelectedScenario === group.brandName;
+                      const isSelected = tentativeRadioSelectedScenario === group.brandName;
 
-                      // TRUE when this brand matches the applied product filter
-                      const isAppliedProduct =
-                        group.brandName?.toLowerCase() ===
-                        (appliedBrand || productFilter)?.toLowerCase();
-                      // NEW DYNAMIC CONDITION
-                      const isAppliedProduct = useMemo(() => {
-                        const currentBrand = (
-                          productFilter ||
-                          appliedBrand ||
-                          ""
-                        ).toLowerCase();
-                        const currentPayer = (payerFilter || "").toLowerCase();
-                        const targetLabel =
-                          group.brandName?.toLowerCase() || "";
+                      const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
+                      const currentPayer = (payerFilter || "").toLowerCase();
+                      const targetParentLabel = (group.brandName || "").toLowerCase();
 
-                        // If both filters are active, highlight if the row encompasses both or matches either based on the tab context
-                        if (currentBrand && currentPayer) {
-                          return (
-                            targetLabel.includes(currentBrand) ||
-                            targetLabel.includes(currentPayer)
-                          );
-                        }
-                        if (currentBrand)
-                          return targetLabel.includes(currentBrand);
-                        if (currentPayer)
-                          return targetLabel.includes(currentPayer);
+                      let isAppliedParent = false;
+                      if (activeTab === "prod_dist") {
+                        isAppliedParent = targetParentLabel === currentBrand;
+                      } else if (activeTab === "payer_dist") {
+                        isAppliedParent = targetParentLabel === currentPayer;
+                      } else if (activeTab === "payer_prod") {
+                        isAppliedParent = targetParentLabel === currentPayer;
+                      } else if (activeTab === "prod_payer") {
+                        isAppliedParent = targetParentLabel === currentBrand;
+                      }
 
-                        return false;
-                      }, [
-                        group.brandName,
-                        productFilter,
-                        appliedBrand,
-                        payerFilter,
-                      ]);
                       return (
                         <React.Fragment key={group.brandName}>
                           {/* ── Parent row ── */}
@@ -2430,18 +2354,9 @@ export default function PBCModelInput() {
                             }
                             sx={{
                               cursor: hasChildren ? "pointer" : "default",
-                              // Amber bg for entire applied product row; else gray/white
-                              backgroundColor: isAppliedProduct
-                                ? "#fffbeb"
-                                : hasChildren
-                                  ? "#f8fafc"
-                                  : "white",
+                              backgroundColor: hasChildren ? "#f8fafc" : "white",
                               "&:hover": {
-                                backgroundColor: isAppliedProduct
-                                  ? "#fef3c7"
-                                  : hasChildren
-                                    ? "#f1f5f9"
-                                    : "#f8fafc",
+                                backgroundColor: hasChildren ? "#f1f5f9" : "#f8fafc",
                               },
                             }}
                           >
@@ -2452,12 +2367,7 @@ export default function PBCModelInput() {
                                 position: "sticky",
                                 left: 0,
                                 zIndex: 1,
-                                // Amber bg on sticky col for applied product
-                                backgroundColor: isAppliedProduct
-                                  ? "#fffbeb"
-                                  : hasChildren
-                                    ? "#f8fafc"
-                                    : "white",
+                                backgroundColor: hasChildren ? "#f8fafc" : "white",
                                 borderRight: "1px solid #e2e8f0",
                                 borderBottom: hasChildren
                                   ? "1px solid #cbd5e1"
@@ -2472,7 +2382,6 @@ export default function PBCModelInput() {
                                   gap: 1,
                                 }}
                               >
-                                {/* Radio — total_market only */}
                                 {activeTab === "total_market" && (
                                   <input
                                     type="radio"
@@ -2505,14 +2414,11 @@ export default function PBCModelInput() {
                                   </Typography>
                                 )}
 
-                                {/* Brand name — amber if applied product */}
                                 <Typography
                                   sx={{
                                     fontSize: "13px",
-                                    fontWeight: hasChildren ? 700 : 500,
-                                    color: isAppliedProduct
-                                      ? "#f59e0b"
-                                      : "#0f172a",
+                                    fontWeight: 700,
+                                    color: isAppliedParent ? "#f59e0b" : "#0f172a", 
                                   }}
                                 >
                                   {group.brandName}
@@ -2547,22 +2453,13 @@ export default function PBCModelInput() {
                                     p: "10px 8px",
                                     textAlign: "center",
                                     fontSize: "13px",
-                                    fontWeight: hasChildren ? 700 : 400,
-                                    // ── Color logic matching screenshot ──
-                                    // Applied product row: amber bg + amber text for ALL columns
-                                    // Other rows: forecast = blue text + amber bg; history = dark text
-                                    backgroundColor: isAppliedProduct
-                                      ? "#fffbeb"
-                                      : isF
-                                        ? "#fffbeb"
-                                        : "transparent",
-                                    color: isAppliedProduct
-                                      ? "#f59e0b" // amber entire row
-                                      : isF
-                                        ? "#0ea5e9" // blue for forecast of others
-                                        : val != null
-                                          ? "#0f172a"
-                                          : "#cbd5e1", // dark for history
+                                    fontWeight: 700,
+                                    backgroundColor: isF ? (isAppliedParent ? "#fffbeb" : "#ffffff") : "#f8fafc", 
+                                    color: isF
+                                      ? (isAppliedParent ? "#f59e0b" : "#0ea5e9") 
+                                      : val != null
+                                        ? "#0f172a"
+                                        : "#cbd5e1",
                                     borderBottom: hasChildren
                                       ? "1px solid #cbd5e1"
                                       : "1px solid #f1f5f9",
@@ -2577,29 +2474,24 @@ export default function PBCModelInput() {
                           {/* ── Child rows ── */}
                           {isExpanded &&
                             group.children.map((childRow, childIdx) => {
-                              const childLabel =
-                                childRow.cleanLabel?.toLowerCase() || "";
-                              const currentPayer = (
-                                payerFilter || ""
-                              ).toLowerCase();
+                              const isChildApplied = childRow.is_applied;
+                              const cleanChildLabel = (childRow.cleanLabel || "").toLowerCase();
+                              
+                              let isAppliedChild = false;
+                              if (activeTab === "payer_prod") {
+                                isAppliedChild = (targetParentLabel === currentPayer) && (cleanChildLabel === currentBrand);
+                              } else if (activeTab === "prod_payer") {
+                                isAppliedChild = (targetParentLabel === currentBrand) && (cleanChildLabel === currentPayer);
+                              }
 
-                              // If the sub-row corresponds to the selected sub-filter, apply the amber treatment explicitly
-                              const isAppliedChild =
-                                isAppliedProduct ||
-                                childLabel.includes(currentPayer);
                               return (
                                 <Box
                                   component="tr"
                                   key={childIdx}
                                   sx={{
-                                    // Amber bg for children of applied product row
-                                    backgroundColor: childIsAppliedProduct
-                                      ? "#fffbeb"
-                                      : "white",
+                                    backgroundColor: "white",
                                     "&:hover": {
-                                      backgroundColor: childIsAppliedProduct
-                                        ? "#fef3c7"
-                                        : "#f8fafc",
+                                      backgroundColor: "#f8fafc",
                                     },
                                   }}
                                 >
@@ -2610,9 +2502,7 @@ export default function PBCModelInput() {
                                       position: "sticky",
                                       left: 0,
                                       zIndex: 1,
-                                      backgroundColor: childIsAppliedProduct
-                                        ? "#fffbeb"
-                                        : "white",
+                                      backgroundColor: "white",
                                       borderRight: "1px solid #e2e8f0",
                                       borderBottom: "1px solid #f1f5f9",
                                       p: "10px 16px",
@@ -2629,13 +2519,8 @@ export default function PBCModelInput() {
                                       <Typography
                                         sx={{
                                           fontSize: "13px",
-                                          fontWeight: isChildApplied
-                                            ? 700
-                                            : 400,
-                                          // Amber for child label if parent is applied product
-                                          color: childIsAppliedProduct
-                                            ? "#f59e0b"
-                                            : "#334155",
+                                          fontWeight: 500,
+                                          color: isAppliedChild ? "#f59e0b" : "#334155", 
                                         }}
                                       >
                                         {childRow.cleanLabel}
@@ -2667,24 +2552,15 @@ export default function PBCModelInput() {
                                           p: "10px 8px",
                                           textAlign: "center",
                                           fontSize: "13px",
-                                          fontWeight: isChildApplied
-                                            ? 700
-                                            : 400,
-                                          // Same logic as parent: applied product = full amber; others = blue forecast
-                                          backgroundColor: childIsAppliedProduct
-                                            ? "#fffbeb"
-                                            : isF
-                                              ? "#fffbeb"
-                                              : "transparent",
-                                          color: childIsAppliedProduct
-                                            ? "#f59e0b" // amber entire child row
-                                            : isF
-                                              ? "#0ea5e9" // blue for forecast of others
-                                              : isChildApplied
-                                                ? "#0f172a"
-                                                : val != null
-                                                  ? "#475569"
-                                                  : "#cbd5e1",
+                                          fontWeight: 500,
+                                          backgroundColor: isF ? (isAppliedChild ? "#fffbeb" : "#ffffff") : "#f8fafc",
+                                          color: isF
+                                            ? (isAppliedChild ? "#f59e0b" : "#0ea5e9") 
+                                            : isChildApplied
+                                              ? "#0f172a"
+                                              : val != null
+                                                ? "#475569"
+                                                : "#cbd5e1",
                                           borderBottom: "1px solid #f1f5f9",
                                         }}
                                       >

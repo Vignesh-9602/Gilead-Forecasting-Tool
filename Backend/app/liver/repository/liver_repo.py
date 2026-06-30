@@ -93,12 +93,12 @@ def get_transaction_distinct_months(cur, ta: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _payer_filter(payer) -> bool:
-    """Returns True if a real payer filter should be applied (not All/empty)."""
+    """Returns True if a real payer filter should be applied."""
     if not payer:
         return False
     if isinstance(payer, list):
-        return payer and payer != ["All"] and "All" not in payer
-    return payer != "All"
+        return len(payer) > 0
+    return bool(payer)
 
 
 def _to_list(val) -> list:
@@ -138,7 +138,7 @@ def get_total_market_volume(cur, ta: str, from_year: int, from_month: int,
 
 def get_product_distribution(cur, ta: str, from_year: int, from_month: int,
                               to_year: int, to_month: int,
-                              product: str = "All", metric: str = "market_volume") -> list:
+                              product: str = None, metric: str = "market_volume") -> list:
     """Returns [(year, month, product, volume, distribution_pct), ...]"""
     value_col = "distribution_pct" if metric == "market_share" else "volume"
 
@@ -160,7 +160,7 @@ def get_product_distribution(cur, ta: str, from_year: int, from_month: int,
         ORDER BY product, year, month
     """
 
-    if product and product != "All":
+    if product:
         cur.execute(
             base_query.format(product_filter="WHERE product = %s"),
             (ta, from_year, from_month, to_year, to_month, product)
@@ -269,7 +269,7 @@ def get_payer_wise_product(cur, ta: str, from_year: int, from_month: int,
 
 def get_product_wise_payer(cur, ta: str, from_year: int, from_month: int,
                             to_year: int, to_month: int,
-                            product: str = "All", metric: str = "market_volume") -> list:
+                            product: str = None, metric: str = "market_volume") -> list:
     """Returns [(year, month, product, payer, value), ...]"""
     base_query = """
         SELECT year, month, product, payer, volume, pct_within_product
@@ -289,7 +289,7 @@ def get_product_wise_payer(cur, ta: str, from_year: int, from_month: int,
         ORDER BY product, payer, year, month
     """
 
-    if product and product != "All":
+    if product:
         cur.execute(
             base_query.format(product_filter="WHERE product = %s"),
             (ta, from_year, from_month, to_year, to_month, product)
@@ -331,7 +331,7 @@ def get_total_market_volume_yearly(cur, ta: str, from_year: int, to_year: int,
 
 
 def get_product_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
-                                     product: str = "All", metric: str = "market_volume") -> list:
+                                     product: str = None, metric: str = "market_volume") -> list:
     """Returns [(year, 0, product, value), ...]"""
     base_query = """
         SELECT year, product, volume, distribution_pct
@@ -348,7 +348,7 @@ def get_product_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
         {product_filter}
         ORDER BY product, year
     """
-    if product and product != "All":
+    if product:
         cur.execute(base_query.format(product_filter="WHERE product = %s"),
                     (ta, from_year, to_year, product))
     else:
@@ -415,7 +415,7 @@ def get_payer_wise_product_yearly(cur, ta: str, from_year: int, to_year: int,
 
 
 def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
-                                   product: str = "All", metric: str = "market_volume") -> list:
+                                   product: str = None, metric: str = "market_volume") -> list:
     """Returns [(year, 0, product, payer, value), ...]"""
     base_query = """
         SELECT year, product, payer, volume, pct_within_product
@@ -432,7 +432,7 @@ def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
         {product_filter}
         ORDER BY product, payer, year
     """
-    if product and product != "All":
+    if product:
         cur.execute(base_query.format(product_filter="WHERE product = %s"),
                     (ta, from_year, to_year, product))
     else:
@@ -445,6 +445,14 @@ def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
 # ---------------------------------------------------------------------------
 # Save / load scenario
 # ---------------------------------------------------------------------------
+
+def scenario_exists(cur, scenario_name: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM raw_liver.liver_scenarios WHERE scenario_name = %s LIMIT 1",
+        (scenario_name,)
+    )
+    return cur.fetchone() is not None
+
 
 def save_scenario(cur, payload, chart_data: dict):
     cur.execute("""
@@ -464,11 +472,11 @@ def save_scenario(cur, payload, chart_data: dict):
     """, (
         payload.scenario_name,
         payload.ta,
-        payload.payer,
-        payload.product,
+        payload.payer[0] if payload.payer else None,
+        payload.brand[0] if payload.brand else None,
         payload.metric,
         payload.from_date,
         getattr(payload, "to_date", None),
         json.dumps(chart_data),
-        json.dumps(payload.factors.dict()),
+        json.dumps(payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()),
     ))
