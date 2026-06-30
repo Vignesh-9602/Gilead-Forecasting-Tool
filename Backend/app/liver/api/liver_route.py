@@ -8,6 +8,7 @@ from app.liver.schemas.liver_schema import (
     LiverRecalculateRequest,
     LiverSaveScenarioRequest,
     LiverSaveScenarioResponse,
+    LiverRefreshTableRequest,
 )
 from app.liver.services.liver_service import (
     get_liver_configuration,
@@ -16,6 +17,8 @@ from app.liver.services.liver_service import (
     apply_liver_filters,
     recalculate_liver,
     save_liver_scenario,
+    update_liver_scenario,
+    refresh_liver_table,
 )
 
 router = APIRouter(prefix="/api/liver", tags=["Liver"])
@@ -98,11 +101,33 @@ def liver_recalculate(payload: LiverRecalculateRequest):
 @router.post("/save-scenario", response_model=LiverSaveScenarioResponse)
 def liver_save_scenario(payload: LiverSaveScenarioRequest):
     """
-    Called when user clicks Save Scenario.
-    Saves chart data and ETS factors to raw_liver.liver_scenarios.
-    Saved scenario then appears in the Scenario Selector dropdown.
+    Create a new scenario. Rejects if scenario_name already exists or equals 'Base'.
     """
     try:
         return save_liver_scenario(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/update-scenario", response_model=LiverSaveScenarioResponse)
+def liver_update_scenario(payload: LiverSaveScenarioRequest):
+    """
+    Overwrite an existing non-Base scenario. Rejects if scenario doesn't exist or equals 'Base'.
+    """
+    try:
+        return update_liver_scenario(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/refresh-table")
+def liver_refresh_table(payload: LiverRefreshTableRequest):
+    try:
+        return refresh_liver_table(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

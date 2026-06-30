@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Union
 
 class LiverConfiguration(BaseModel):
     ta_name: str = "HCV"
-    payer: List[str] = ["All"]      # payers to save config for (expanded to rows per combination)
-    brand: List[str] = ["All"]      # brands to save config for
+    payer: List[str] = []
+    brand: List[str] = []
     train_start_date: str           # "2020-04-01"
     train_end_date: str             # "2025-12-01"
     model_granularity: str = "monthly"
@@ -42,21 +42,19 @@ class LiverConfigResponse(BaseModel):
 # Filter response
 # ---------------------------------------------------------------------------
 
-class MetricOption(BaseModel):
-    label: str
-    value: str
+class LiverSelectedFilter(BaseModel):
+    market: Optional[str] = None
+    product: Optional[str] = None
+    start_date: str
+    end_date: str
 
 
 class LiverFiltersResponse(BaseModel):
-    payers: List[str]
+    ta_name: str
+    markets: List[str]
     products: List[str]
-    scenarios: List[str]
-    metric_options: List[MetricOption]
-    available_dates: List[str]
-    from_date: str                      # train_start_date from saved config for selected payer+brand
-    to_date: str                        # forecast end date from saved config
-    default_payer: str                  # pre-selected payer on page load
-    default_brand: str                  # pre-selected brand on page load
+    available_months: List[str]
+    selected_filter: LiverSelectedFilter
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +64,8 @@ class LiverFiltersResponse(BaseModel):
 
 class LiverApplyFiltersRequest(BaseModel):
     ta: str = "HCV"
-    payer: List[str] = ["All"]          # multi-select
-    brand: List[str] = ["All"]          # multi-select
-    product: str = "All"
+    payer: List[str] = []
+    brand: List[str] = []
     metric: str = "market_volume"       # "market_volume" | "market_share"
     from_date: str                      # "2020-04-01" — start of view window
     to_date: Optional[str] = None       # "2027-12-01" — end of view; falls back to config forecast end
@@ -128,7 +125,7 @@ class HierarchicalTabData(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Factors — mirrors oncology structure
+# Factors — internal computation types (mirrors oncology structure)
 # ---------------------------------------------------------------------------
 
 class EtsParams(BaseModel):
@@ -165,6 +162,7 @@ class LogarithmicParams(BaseModel):
 
 
 class LiverFactors(BaseModel):
+    """Internal type used by the service layer."""
     ets: EtsParams
     linear: LinearParams
     scurve: SCurveParams
@@ -174,24 +172,45 @@ class LiverFactors(BaseModel):
     multiplier_horizon: str = "Forecast"
     active_model: str = "ets"
 
+
+# ---------------------------------------------------------------------------
+# Request factors — mirrors oncology's RecalculateFactors pattern
+# ---------------------------------------------------------------------------
+
+class LiverGrowthFactors(BaseModel):
+    """Parameters for linear / exponential / logarithmic / scurve models."""
+    total_growth: float
+    duration: int
+    k_value: Optional[float] = None        # required for exp/log/scurve; omit for linear
+    trajectory_start: Optional[str] = None
+
+
+class LiverRecalculateFactors(BaseModel):
+    """
+    factors: only the active model's params need to be provided.
+    Also accepts legacy {level, trend, damping} ETS format.
+    """
+    multiplier: float = 1.0
+    multiplier_horizon: str = "Forecast"
+    ets: Optional[EtsParams] = None
+    linear: Optional[LiverGrowthFactors] = None
+    exponential: Optional[LiverGrowthFactors] = None
+    logarithmic: Optional[LiverGrowthFactors] = None
+    scurve: Optional[LiverGrowthFactors] = None
+    growth: Optional[LiverGrowthFactors] = None  # legacy fallback
+
     @model_validator(mode="before")
     @classmethod
     def handle_legacy_format(cls, data):
-        """Accept old frontend format {level, trend, damping, multiplier} and convert."""
         if isinstance(data, dict) and "level" in data:
-            alpha = data.get("level", 0.3)
-            beta  = data.get("trend", 0.2)
-            gamma = data.get("damping", 0.98)
-            mult  = data.get("multiplier", 1.0)
             return {
-                "ets":         {"alpha": alpha, "beta": beta, "gamma": gamma},
-                "linear":      {"duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
-                "scurve":      {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
-                "exponential": {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
-                "logarithmic": {"k_value": 1, "duration": 12, "total_growth": 0, "trajectory_start": "2025-01-01"},
-                "multiplier":         mult,
+                "ets": {
+                    "alpha": data.get("level", 0.3),
+                    "beta":  data.get("trend", 0.2),
+                    "gamma": data.get("damping", 0.98),
+                },
+                "multiplier":         data.get("multiplier", 1.0),
                 "multiplier_horizon": "Forecast",
-                "active_model":       "ets",
             }
         return data
 
@@ -201,10 +220,11 @@ class LiverFactors(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LiverApplyFiltersResponse(BaseModel):
-    months: List[str]               # ISO dates ["2020-04-01", ...]
-    forecast_start_index: int
-    factors: Dict[str, Any]         # flat {level, trend, damping, multiplier} for frontend
-    tabs: Dict[str, Any]            # tabs 1-3: TabData, tabs 4-5: HierarchicalTabData
+    ta_name: str
+    selected_filter: LiverSelectedFilter
+    available_scenarios: List[str]
+    active_scenario: str
+    scenarios: Dict[str, Any]       # keyed by scenario name; active has factors + market_analysis
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +232,11 @@ class LiverApplyFiltersResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LiverRecalculateRequest(BaseModel):
-    ta: str = "HCV"
-    payer: List[str] = ["All"]          # multi-select
-    brand: List[str] = ["All"]          # multi-select
-    product: str = "All"
-    metric: str = "market_volume"
-    from_date: str
-    to_date: Optional[str] = None       # overrides config forecast end if provided
-    factors: LiverFactors
+    ta_name: str = "HCV"
+    selected_filter: LiverSelectedFilter
+    scenario_name: str = "Base"
+    model_type: str = "ets"             # "ets" | "linear" | "exponential" | "logarithmic" | "scurve"
+    factors: LiverRecalculateFactors
 
 
 # ---------------------------------------------------------------------------
@@ -229,15 +246,35 @@ class LiverRecalculateRequest(BaseModel):
 class LiverSaveScenarioRequest(BaseModel):
     scenario_name: str
     ta: str = "HCV"
-    payer: List[str] = ["All"]          # multi-select
-    brand: List[str] = ["All"]          # multi-select
-    product: str = "All"
+    payer: List[str] = []
+    brand: List[str] = []
     metric: str = "market_volume"
     from_date: str
-    factors: LiverFactors
+    factors: Dict[str, Any]
     chart_data: Dict[str, Any]
+    editable_table : Optional[List[LiverTableRow]] = None
 
 
 class LiverSaveScenarioResponse(BaseModel):
     scenario_name: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# Refresh table and make it editable
+# ---------------------------------------------------------------------------
+
+class LiverTableRow(BaseModel):
+    hierarchy: str
+    values: List[float]
+
+class LiverRefreshTableRequest(BaseModel):
+    ta: str = "HCV"
+    payer: List[str] = []
+    brand: List[str] = []
+    metric: str = "market_volume"
+    from_date: str
+    scenario: str = "Base"
+    tab_key: str                              # "total_market_volume" | "product_distribution" | "payer_distribution"
+    edited_hierarchy: Optional[str] = None   # which row the user last edited (used for redistribution)
+    table: List[LiverTableRow]
