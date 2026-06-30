@@ -17,3 +17,33 @@ class ConfigurationResponse(BaseModel):
 
 class SaveConfigRequest(BaseModel):
     config: Configuration
+
+class SelectedFilter(BaseModel):
+    market: str
+    product: str
+    start_date: str
+    end_date: str
+
+
+class ModelInputFilterResponse(BaseModel):
+    ta_name: str
+    markets: List[str]
+    products: List[str]
+    available_months: List[str]
+    selected_filter: SelectedFilter
+from pydantic import BaseModel
+from typing import Optional
+
+
+# selected filter
+class SelectedFilter(BaseModel):
+    start_date: str
+    end_date: str
+    market: Optional[str] = "All"
+    product: Optional[str] = "All"
+
+
+# main request
+class ApplyScenarioRequest(BaseModel):
+    ta_name: str
+    selected_filter: SelectedFilter
