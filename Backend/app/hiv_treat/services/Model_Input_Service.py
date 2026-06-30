@@ -352,7 +352,7 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
     market_vol_rows = []
     market_share_rows = []
 
-    overall_vol_row = {"label": "Overall", "values": total_vals}
+    overall_vol_row = {"label": "Overall",  "values": round_volume(total_vals)}
     overall_share_row = {"label": "Overall", "values": [100.0] * n}
 
     market_totals = {}
@@ -452,13 +452,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             if mkt == "Retail":
 
                 d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario
+                    cur, ta, mkt, None, prod, "market_share", scenario
                 )
 
                 if not d:
@@ -466,10 +460,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
 
                 s = build_series(d, start, end)
 
-                prod_vol = build_volume_from_share(
-                    mkt_vol,
-                    s["values"]
-                )
+                prod_vol = build_volume_from_share(mkt_vol, s["values"])
 
                 for i in range(min(len(prod_vol), n)):
                     prod_vol_map[prod][i] += prod_vol[i]
@@ -481,13 +472,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
                 for src in sources:
 
                     src_d = fetch_forecast_scenario(
-                        cur,
-                        ta,
-                        mkt,
-                        src,
-                        "ALL",
-                        "market_share",
-                        scenario
+                        cur, ta, mkt, src, "ALL", "market_share", scenario
                     )
 
                     if not src_d:
@@ -495,19 +480,10 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
 
                     src_series = build_series(src_d, start, end)
 
-                    src_vol = build_volume_from_share(
-                        mkt_vol,
-                        src_series["values"]
-                    )
+                    src_vol = build_volume_from_share(mkt_vol, src_series["values"])
 
                     prod_d = fetch_forecast_scenario(
-                        cur,
-                        ta,
-                        mkt,
-                        src,
-                        prod,
-                        "market_share",
-                        scenario
+                        cur, ta, mkt, src, prod, "market_share", scenario
                     )
 
                     if not prod_d:
@@ -515,10 +491,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
 
                     prod_series = build_series(prod_d, start, end)
 
-                    prod_vol = build_volume_from_share(
-                        src_vol,
-                        prod_series["values"]
-                    )
+                    prod_vol = build_volume_from_share(src_vol, prod_series["values"])
 
                     for i in range(min(len(prod_vol), n)):
                         prod_vol_map[prod][i] += prod_vol[i]
@@ -526,6 +499,10 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
     prod_labels = list(prod_vol_map.keys())
     raw_vols = [prod_vol_map[p] for p in prod_labels]
     norm_shares = normalize_shares_to_100(raw_vols, n)
+
+    #   ADDED: Overall row, matching the pattern used in build_market_distribution
+    overall_vol_row = {"label": "Overall", "values": round_volume(total_vals)}
+    overall_share_row = {"label": "Overall", "values": [100.0] * n}
 
     return {
         "market_volume": {
@@ -541,7 +518,8 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             },
             "table": {
                 "type": "flat",
-                "rows": [{"label": p, "values": prod_vol_map[p]} for p in prod_labels]
+                #   Overall row prepended
+                "rows": [overall_vol_row] + [{"label": p, "values": prod_vol_map[p]} for p in prod_labels]
             }
         },
         "market_share": {
@@ -557,7 +535,8 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             },
             "table": {
                 "type": "flat",
-                "rows": [{"label": p, "values": norm_shares[i]} for i, p in enumerate(prod_labels)]
+                #   Overall row prepended
+                "rows": [overall_share_row] + [{"label": p, "values": norm_shares[i]} for i, p in enumerate(prod_labels)]
             }
         }
     }
