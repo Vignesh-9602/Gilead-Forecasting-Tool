@@ -381,6 +381,7 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
         sources = get_sources(cur, ta, mkt)
         vol_children = []
         share_children_vals = []
+        share_children_labels = []  # FIX: track labels in lockstep with values
 
         for src in sources:
             sd = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
@@ -395,6 +396,7 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
 
             vol_children.append({"label": src, "values": src_vol})
             share_children_vals.append(src_vol)
+            share_children_labels.append(src)  # FIX: only appended when src succeeds
 
         vol_row = {"label": mkt, "values": vol}
         share_row = {"label": mkt, "values": share}
@@ -403,8 +405,12 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
             vol_row["children"] = vol_children
 
             norm = normalize_shares_to_100(share_children_vals, n)
+            # FIX: use share_children_labels (aligned with norm) instead of
+            # the original `sources` list, which may include sources that
+            # had no data and were skipped above — using `sources` directly
+            # would misalign labels with values whenever any source was skipped.
             share_row["children"] = [
-                {"label": sources[i], "values": norm[i]}
+                {"label": share_children_labels[i], "values": norm[i]}
                 for i in range(len(norm))
             ]
 
@@ -442,17 +448,80 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
         mkt_vol = build_volume_from_share(total_vals, mkt_series["values"])
 
         for prod in products:
-            d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
-            if not d:
-                continue
 
-            s = build_series(d, start, end)
+            if mkt == "Retail":
 
-            #   FIX: product from MARKET
-            prod_vol = build_volume_from_share(mkt_vol, s["values"])
+                d = fetch_forecast_scenario(
+                    cur,
+                    ta,
+                    mkt,
+                    None,
+                    prod,
+                    "market_share",
+                    scenario
+                )
 
-            for i in range(len(prod_vol)):
-                prod_vol_map[prod][i] += prod_vol[i]
+                if not d:
+                    continue
+
+                s = build_series(d, start, end)
+
+                prod_vol = build_volume_from_share(
+                    mkt_vol,
+                    s["values"]
+                )
+
+                for i in range(min(len(prod_vol), n)):
+                    prod_vol_map[prod][i] += prod_vol[i]
+
+            else:
+
+                sources = get_sources(cur, ta, mkt)
+
+                for src in sources:
+
+                    src_d = fetch_forecast_scenario(
+                        cur,
+                        ta,
+                        mkt,
+                        src,
+                        "ALL",
+                        "market_share",
+                        scenario
+                    )
+
+                    if not src_d:
+                        continue
+
+                    src_series = build_series(src_d, start, end)
+
+                    src_vol = build_volume_from_share(
+                        mkt_vol,
+                        src_series["values"]
+                    )
+
+                    prod_d = fetch_forecast_scenario(
+                        cur,
+                        ta,
+                        mkt,
+                        src,
+                        prod,
+                        "market_share",
+                        scenario
+                    )
+
+                    if not prod_d:
+                        continue
+
+                    prod_series = build_series(prod_d, start, end)
+
+                    prod_vol = build_volume_from_share(
+                        src_vol,
+                        prod_series["values"]
+                    )
+
+                    for i in range(min(len(prod_vol), n)):
+                        prod_vol_map[prod][i] += prod_vol[i]
 
     prod_labels = list(prod_vol_map.keys())
     raw_vols = [prod_vol_map[p] for p in prod_labels]
@@ -494,11 +563,13 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
     }
 
 
-def build_market_product(cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end):
+def build_market_product(cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end, selected_market):
     """
     market_product: grouped by market -> product children.
-      - Chart: all Market-Product combos (flat series).
-      - Table: hierarchy — market row (100%) with product children normalized to sum to 100.
+      - Chart: ONLY the selected market's product breakdown (Retail - Biktarvy,
+        Retail - Truvada, Retail - Descovy, etc. — not every market combo).
+      - Table: full hierarchy across all markets — market row (100%) with
+        product children normalized to sum to 100. (Unchanged.)
       - Volume: integers. Share: 2 decimals.
     """
     n = len(total_vals)
@@ -523,7 +594,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         for prod in products:
 
             if mkt == "Retail":
-                # ✅ Retail direct mapping (unchanged logic)
+                # Retail direct mapping (unchanged logic)
                 d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
                     continue
@@ -537,7 +608,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                 )
 
             else:
-                # ✅ Non-retail: go via SOURCE
+                # Non-retail: go via SOURCE
                 total_prod_vol = [0] * n
                 sources = get_sources(cur, ta, mkt)
 
@@ -581,21 +652,20 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
             vol = vol + [0] * (n - len(vol))
             mp_vol[mkt][prod] = vol
 
+    # ================= CHART (filtered to selected market only) =================
     vol_chart_series = []
     share_chart_series = []
 
-    for mkt in markets:
-        mkt_vol = market_totals[mkt]
+    if selected_market in mp_vol:
+        mkt = selected_market
+
         for prod in products:
             if prod not in mp_vol[mkt]:
                 continue
             vol = mp_vol[mkt][prod]
-
             h_v, f_v = split_series(vol, split_idx)
             vol_chart_series.append({"label": f"{mkt} - {prod}", "history": h_v, "forecast": f_v})
 
-    # Share chart: normalize per market so products sum to 100
-    for mkt in markets:
         prod_vols_in_mkt = []
         prod_labels_in_mkt = []
         for prod in products:
@@ -607,11 +677,10 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         norm_shares = normalize_shares_to_100(prod_vols_in_mkt, n) if prod_vols_in_mkt else []
 
         for c, prod in enumerate(prod_labels_in_mkt):
-            share = norm_shares[c]
-            sh, sf = split_series(share, split_idx)
+            sh, sf = split_series(norm_shares[c], split_idx)
             share_chart_series.append({"label": f"{mkt} - {prod}", "history": sh, "forecast": sf})
 
-    # Build hierarchy table
+    # ================= TABLE (full hierarchy, all markets — unchanged) =================
     vol_table_rows = []
     share_table_rows = []
 
@@ -677,12 +746,13 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
     }
 
 
-def build_product_market(cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end):
+def build_product_market(cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end, selected_product):
     """
     product_market: grouped by product -> market children.
-    Correct hierarchy:
-      - Retail → Product
-      - Non-retail → Source → Product
+      - Chart: ONLY the selected product's market breakdown (Truvada - Retail,
+        Truvada - Non-retail, etc. — not every product combo).
+      - Table: full hierarchy across all products — Retail → Product,
+        Non-retail → Source → Product. (Unchanged.)
     """
 
     n = len(total_vals)
@@ -697,7 +767,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         for mkt in markets:
 
             if mkt == "Retail":
-                # ✅ Retail: direct mapping
+                # Retail: direct mapping
 
                 d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
@@ -724,7 +794,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
                 )
 
             else:
-                # ✅ Non-retail: MUST go via SOURCE
+                # Non-retail: MUST go via SOURCE
 
                 total_prod_vol = [0] * n
 
@@ -781,7 +851,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
 
                 vol = total_prod_vol
 
-            # ✅ Padding
+            # Padding
             vol = vol + [0] * (n - len(vol))
 
             pm_vol[prod][mkt] = vol
@@ -791,26 +861,24 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
 
         product_totals[prod] = prod_total
 
-    # ================= CHART =================
+    # ================= CHART (filtered to selected product only) =================
     vol_chart_series = []
     share_chart_series = []
 
-    for prod in products:
+    if selected_product in pm_vol:
+        prod = selected_product
+
         for mkt in markets:
             if mkt not in pm_vol[prod]:
                 continue
-
             vol = pm_vol[prod][mkt]
             h_v, f_v = split_series(vol, split_idx)
-
             vol_chart_series.append({
                 "label": f"{prod} - {mkt}",
                 "history": h_v,
                 "forecast": f_v
             })
 
-    # ================= SHARE =================
-    for prod in products:
         mkt_vols = [pm_vol[prod][mkt] for mkt in markets if mkt in pm_vol[prod]]
         labels = [mkt for mkt in markets if mkt in pm_vol[prod]]
 
@@ -818,14 +886,13 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
 
         for i, mkt in enumerate(labels):
             sh, sf = split_series(norm_shares[i], split_idx)
-
             share_chart_series.append({
                 "label": f"{prod} - {mkt}",
                 "history": sh,
                 "forecast": sf
             })
 
-    # ================= TABLE =================
+    # ================= TABLE (full hierarchy, all products — unchanged) =================
     vol_table_rows = []
     share_table_rows = []
 
@@ -881,10 +948,12 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
     }
 
 
-def build_scenario_market_analysis(cur, ta, scenario, start, end):
+def build_scenario_market_analysis(cur, ta, scenario, start, end, selected_market, selected_product):
     """
     Build full market_analysis block for any scenario.
     All sub-builders receive the scenario and use fetch_forecast_scenario internally.
+    selected_market / selected_product are used only to filter the
+    market_product / product_market CHART series respectively.
     """
     total_data = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
     if not total_data:
@@ -909,10 +978,10 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end):
             cur, ta, scenario, markets, total_vals, months, split_idx, start, end
         ),
         "market_product": build_market_product(
-            cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end
+            cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end, selected_market
         ),
         "product_market": build_product_market(
-            cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end
+            cur, ta, scenario, markets, products, total_vals, months, split_idx, start, end, selected_product
         )
     }
 
@@ -944,7 +1013,9 @@ def build_apply_scenario_response(cur, payload, config):
         )
 
         if has_data:
-            market_analysis = build_scenario_market_analysis(cur, ta, scenario, start, end)
+            market_analysis = build_scenario_market_analysis(
+                cur, ta, scenario, start, end, flt.market, flt.product
+            )
 
             # Only BASE-equivalent scenario gets factors
             if scenario.upper() == "BASE":

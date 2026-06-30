@@ -231,6 +231,23 @@ def save_configuration(payload: SaveConfigRequest):
                 end_date.year, end_date.month,
                 metric="market_share"
             )
+            print("\n===== MARKET DISTRIBUTION ROWS =====")
+
+            for r in rows[:15]:
+                print(r)
+            
+            non_retail_totals = {}
+
+            for y, m, market, source, share in rows:
+
+                if market == "Non-retail":
+                    key = (y, m)
+
+                    if key not in non_retail_totals:
+                        non_retail_totals[key] = 0.0
+
+                    non_retail_totals[key] += float(share)
+
 
             # --- MARKET LEVEL (FIXED) ---
             market_data = {}
@@ -240,6 +257,16 @@ def save_configuration(payload: SaveConfigRequest):
             source_data = {}
 
             for y, m, market, source, share in rows:
+                
+                if market == "Non-retail" and y == 2026 and m in [1, 2]:
+                    print(
+                        "DEBUG SOURCE SHARE:",
+                        y,
+                        m,
+                        market,
+                        source,share)
+         
+
 
                 month = f"{y}-{m:02d}-01"
 
@@ -257,9 +284,29 @@ def save_configuration(payload: SaveConfigRequest):
 
                     if src not in source_data:
                         source_data[src] = {"months": [], "values": []}
+                        print("\n===== SOURCE DATA CHECK =====")
+
+                        for src, d in source_data.items():
+                            print(src)
+                            print("Last months:", d["months"][-3:])
+                            print("Last values:", d["values"][-3:])
+
+                    source_share = round(
+                        (float(share) * 100) /
+                        non_retail_totals[(y, m)],
+                        2
+                    )
 
                     source_data[src]["months"].append(month)
-                    source_data[src]["values"].append(float(share))
+                    source_data[src]["values"].append(source_share)
+                    
+                    if y == 2026 and m in [1, 2]:
+                        print(
+                            "NORMALIZED SOURCE:",
+                            src,
+                            source_share
+                        )
+
 
 
             #   Build clean market series (sorted by month)
@@ -323,7 +370,8 @@ def save_configuration(payload: SaveConfigRequest):
                 source_data[src]["months"] = [m for m, _ in pairs_sorted]
                 source_data[src]["values"] = [v for _, v in pairs_sorted]
                 source_fc[src] = process_growth_forecast_auto(
-                    d["months"], d["values"],
+                    source_data[src]["months"],
+                    source_data[src]["values"],
                     cfg.train_start_date,
                     cfg.train_end_date,
                     forecast_periods,
@@ -543,8 +591,8 @@ def get_model_input_filters(ta_name: str ):
         raise HTTPException(500, str(e))
     
 
-@router.post("/apply-scenario")
-def apply_scenario(payload: ApplyScenarioRequest):
+@router.post("/applyfilter")
+def apply_filter(payload: ApplyScenarioRequest):
 
     ta = payload.ta_name
 
