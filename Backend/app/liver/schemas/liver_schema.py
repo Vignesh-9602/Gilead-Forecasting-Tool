@@ -243,6 +243,10 @@ class LiverRecalculateRequest(BaseModel):
 # Save scenario
 # ---------------------------------------------------------------------------
 
+class LiverTableRow(BaseModel):
+    hierarchy: str
+    values: List[float]
+
 class LiverSaveScenarioRequest(BaseModel):
     scenario_name: str
     ta: str = "HCV"
@@ -264,10 +268,6 @@ class LiverSaveScenarioResponse(BaseModel):
 # Refresh table and make it editable
 # ---------------------------------------------------------------------------
 
-class LiverTableRow(BaseModel):
-    hierarchy: str
-    values: List[float]
-
 class LiverRefreshTableRequest(BaseModel):
     ta: str = "HCV"
     payer: List[str] = []
@@ -275,6 +275,6 @@ class LiverRefreshTableRequest(BaseModel):
     metric: str = "market_volume"
     from_date: str
     scenario: str = "Base"
-    tab_key: str                              # "total_market_volume" | "product_distribution" | "payer_distribution"
-    edited_hierarchy: Optional[str] = None   # which row the user last edited (used for redistribution)
+    tab_key: str                              
+    edited_hierarchy: Optional[str] = None   
     table: List[LiverTableRow]
