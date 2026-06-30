@@ -812,16 +812,45 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         train_end_dt = date_type(train_end_year, train_end_month, 1)
         end_date     = _add_months(train_end_dt, forecast_periods).isoformat()
 
-        empty_scenario = {
-            tab: {"market_volume": {}, "market_share": {}}
-            for tab in ("total_market_volume", "product_distribution",
-                        "market_distribution", "market_product", "product_market")
-        }
+        # ── Build TMV data for inactive scenarios ─────────────────────────────
+        cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+        all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+        if active_scenario != "Base":
+            base_factors = _estimate_default_factors(
+                cur, payload.ta, from_year, from_month,
+                train_end_year, train_end_month, granularity,
+            )
+            _, _, _base_ma, _ = _build_all_tabs_both_metrics(
+                cur, payload.ta, from_year, from_month,
+                train_end_year, train_end_month, forecast_periods, base_factors,
+                granularity, scenario_name="Base",
+            )
+            base_tmv = _base_ma.get("total_market_volume", {})
+        else:
+            base_tmv = market_analysis.get("total_market_volume", {})
+
+        def _tmv_table_only(tmv: dict) -> dict:
+            """Keep only the table rows from TMV, drop chart data."""
+            return {
+                metric: {"table": tmv[metric]["table"]}
+                for metric in ("market_volume", "market_share")
+                if metric in tmv and "table" in tmv[metric]
+            }
+
+        def _inactive_stub(sc_name):
+            if sc_name == "Base":
+                tmv = base_tmv
+            else:
+                cd = all_saved_cd.get(sc_name, {})
+                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+            return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
+
         scenarios = {
             sc: (
                 {"factors": response_factors, "market_analysis": market_analysis}
                 if sc == active_scenario
-                else {"market_analysis": empty_scenario}
+                else _inactive_stub(sc)
             )
             for sc in available_scenarios
         }
@@ -959,16 +988,44 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         train_end_dt = date_type(train_end_year, train_end_month, 1)
         end_date     = _add_months(train_end_dt, forecast_periods).isoformat()
 
-        empty_scenario = {
-            tab: {"market_volume": {}, "market_share": {}}
-            for tab in ("total_market_volume", "product_distribution",
-                        "market_distribution", "market_product", "product_market")
-        }
+        # ── Build TMV data for inactive scenarios ─────────────────────────────
+        cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+        all_saved_cd_rc = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+        if active_scenario != "Base":
+            _base_f = _estimate_default_factors(
+                cur, payload.ta_name, from_year, from_month,
+                train_end_year, train_end_month, granularity,
+            )
+            _, _, _base_ma_rc, _ = _build_all_tabs_both_metrics(
+                cur, payload.ta_name, from_year, from_month,
+                train_end_year, train_end_month, forecast_periods, _base_f,
+                granularity, scenario_name="Base",
+            )
+            base_tmv_rc = _base_ma_rc.get("total_market_volume", {})
+        else:
+            base_tmv_rc = market_analysis.get("total_market_volume", {})
+
+        def _tmv_table_only_rc(tmv: dict) -> dict:
+            return {
+                metric: {"table": tmv[metric]["table"]}
+                for metric in ("market_volume", "market_share")
+                if metric in tmv and "table" in tmv[metric]
+            }
+
+        def _inactive_stub_rc(sc_name):
+            if sc_name == "Base":
+                tmv = base_tmv_rc
+            else:
+                cd = all_saved_cd_rc.get(sc_name, {})
+                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+            return {"market_analysis": {"total_market_volume": _tmv_table_only_rc(tmv)}}
+
         scenarios = {
             sc: (
                 {"factors": response_factors, "market_analysis": market_analysis}
                 if sc == active_scenario
-                else {"market_analysis": empty_scenario}
+                else _inactive_stub_rc(sc)
             )
             for sc in available_scenarios
         }
