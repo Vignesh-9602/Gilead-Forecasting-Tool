@@ -321,11 +321,11 @@ def build_total_market_volume(total_vals, months, split_idx):
             "chart": {
                 "months": months,
                 "forecast_start_index": split_idx,
-                "series": [{"label": "BASE", "history": h, "forecast": f}]
+                "series": [{"label": "Base", "history": h, "forecast": f}]
             },
             "table": {
                 "type": "flat",
-                "rows": [{"label": "BASE", "values": int_vals}]
+                "rows": [{"label": "Base", "values": int_vals}]
             }
         },
         "market_share": {
