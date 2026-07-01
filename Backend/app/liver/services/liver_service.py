@@ -1362,6 +1362,7 @@ def _build_and_save_market_analysis(cur, conn, payload) -> dict:
     return {
         "ta_name":            payload.ta,
         "available_scenarios": available_scenarios,
+        "active_scenario":     active_scenario,
         "scenarios":           scenarios,
     }
 
