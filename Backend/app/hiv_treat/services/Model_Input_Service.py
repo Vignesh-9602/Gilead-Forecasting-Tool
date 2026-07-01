@@ -643,7 +643,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                 continue
             vol = mp_vol[mkt][prod]
             h_v, f_v = split_series(vol, split_idx)
-            vol_chart_series.append({"label": f"{mkt} - {prod}", "history": h_v, "forecast": f_v})
+            vol_chart_series.append({"label": f"{mkt} - {prod}", "market": mkt,"product": prod, "history": h_v, "forecast": f_v})
 
         prod_vols_in_mkt = []
         prod_labels_in_mkt = []
@@ -657,7 +657,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
 
         for c, prod in enumerate(prod_labels_in_mkt):
             sh, sf = split_series(norm_shares[c], split_idx)
-            share_chart_series.append({"label": f"{mkt} - {prod}", "history": sh, "forecast": sf})
+            share_chart_series.append({"label": f"{mkt} - {prod}", "market": mkt,"product": prod,"history": sh, "forecast": sf})
 
     # ================= TABLE (full hierarchy, all markets — unchanged) =================
     vol_table_rows = []
@@ -853,7 +853,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
             vol = pm_vol[prod][mkt]
             h_v, f_v = split_series(vol, split_idx)
             vol_chart_series.append({
-                "label": f"{prod} - {mkt}",
+                "label": f"{prod} - {mkt}","product": prod,"market": mkt,
                 "history": h_v,
                 "forecast": f_v
             })
@@ -866,7 +866,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         for i, mkt in enumerate(labels):
             sh, sf = split_series(norm_shares[i], split_idx)
             share_chart_series.append({
-                "label": f"{prod} - {mkt}",
+                "label": f"{prod} - {mkt}", "product": prod,"market": mkt,
                 "history": sh,
                 "forecast": sf
             })
