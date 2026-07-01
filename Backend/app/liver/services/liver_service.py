@@ -138,7 +138,7 @@ def get_liver_configuration(ta_name: str) -> dict:
             }
 
         entries = []
-        for payer, brand, config in db_rows:
+        for payer, brand, config, updated_at in db_rows:
             train_end    = date_type.fromisoformat(config["train_end_date"][:10])
             forecast_end = _add_months(train_end, int(config["forecast_periods"]))
             entries.append({
@@ -148,19 +148,23 @@ def get_liver_configuration(ta_name: str) -> dict:
                 "train_end_date":     config["train_end_date"][:10],
                 "model_granularity":  config.get("model_granularity", "monthly"),
                 "forecast_periods":   forecast_end.isoformat(),
+                "updated_at":         updated_at,
             })
 
-        # Collect all unique payers/brands; use first entry's dates for the `config` key
-        first = entries[0]
+        # Use updated_at to find rows from the most recent save.
+        # Those rows' payer/brand values represent the user's latest selection.
+        latest_ts = max(e["updated_at"] for e in entries)
+        latest_entries = [e for e in entries if e["updated_at"] == latest_ts]
+        first = latest_entries[0]
+
         return {
             "ta_name": ta_name,
             "exists": True,
             "entries": entries,
             "available_train_months": available_train_months,
-            # `config` key for frontend compatibility
             "config": {
-                "payer":             list({e["payer"] for e in entries}),
-                "brand":             list({e["brand"] for e in entries}),
+                "payer":             list(dict.fromkeys(e["payer"] for e in latest_entries)),
+                "brand":             list(dict.fromkeys(e["brand"] for e in latest_entries)),
                 "train_start_date":  first["train_start_date"],
                 "train_end_date":    first["train_end_date"],
                 "model_granularity": first["model_granularity"],
@@ -1303,8 +1307,63 @@ def _build_and_save_market_analysis(cur, conn, payload) -> dict:
     market_analysis = _recompute_all_market_shares(market_analysis)
     save_scenario(cur, payload, {"market_analysis": market_analysis})
     conn.commit()
-    return {"scenario_name": payload.scenario_name,
-            "message": f"Scenario '{payload.scenario_name}' saved successfully."}
+
+    # Build response identical to apply_liver_filters (minus selected_filter)
+    from_year, from_month = _parse_ym(payload.from_date)
+    cfg = _load_config(cur, payload.ta, _first(payload.payer), _first(payload.brand))
+    train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+    forecast_periods = cfg["forecast_periods"]
+    granularity = cfg.get("model_granularity", "monthly")
+
+    response_factors = _build_response_factors(factors)
+
+    all_scenario_names = get_scenarios(cur)
+    available_scenarios = ["Base"] + all_scenario_names
+    active_scenario = payload.scenario_name
+
+    cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+    all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+    base_factors = _estimate_default_factors(
+        cur, payload.ta, from_year, from_month,
+        train_end_year, train_end_month, granularity,
+    )
+    _, _, _base_ma, _ = _build_all_tabs_both_metrics(
+        cur, payload.ta, from_year, from_month,
+        train_end_year, train_end_month, forecast_periods, base_factors,
+        granularity, scenario_name="Base",
+    )
+    base_tmv = _base_ma.get("total_market_volume", {})
+
+    def _tmv_table_only(tmv: dict) -> dict:
+        return {
+            metric: {"table": tmv[metric]["table"]}
+            for metric in ("market_volume", "market_share")
+            if metric in tmv and "table" in tmv[metric]
+        }
+
+    def _inactive_stub(sc_name):
+        if sc_name == "Base":
+            tmv = base_tmv
+        else:
+            cd = all_saved_cd.get(sc_name, {})
+            tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+        return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
+
+    scenarios = {
+        sc: (
+            {"factors": response_factors, "market_analysis": market_analysis}
+            if sc == active_scenario
+            else _inactive_stub(sc)
+        )
+        for sc in available_scenarios
+    }
+
+    return {
+        "ta_name":            payload.ta,
+        "available_scenarios": available_scenarios,
+        "scenarios":           scenarios,
+    }
 
 
 def save_liver_scenario(payload: LiverSaveScenarioRequest) -> dict:
