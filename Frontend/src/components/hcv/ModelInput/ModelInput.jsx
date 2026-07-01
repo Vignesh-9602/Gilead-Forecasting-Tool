@@ -287,9 +287,10 @@ export default function PBCModelInput() {
   const [brand, setBrand] = useState("");
   const [totalMarketViewMode, setTotalMarketViewMode] = useState("monthly");
   const [showScenariosDropdown, setShowScenariosDropdown] = useState(false);
-  const [selectedCompareScenarios, setSelectedCompareScenarios] = useState(
-    COMPARE_OPTIONS.slice(0, 2),
-  );
+  // All scenario names from the API — shown in the Compare Scenarios dropdown
+  const [compareScenarioOptions, setCompareScenarioOptions] = useState([]);
+  // Subset the user has chosen to display; empty = show all
+  const [selectedCompareScenarios, setSelectedCompareScenarios] = useState([]);
   const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] =
     useState("");
   const [currentlyAppliedScenario, setCurrentlyAppliedScenario] = useState("");
@@ -521,6 +522,45 @@ export default function PBCModelInput() {
 
       tabs[tabKey] = { chart, table };
     });
+
+    // ── Multi-scenario table rows for Total Market Volume ──────────────────
+    // The active scenario's market_analysis only gives us one row ("Base").
+    // We need one row per scenario so the table can show/filter them all.
+    // For every scenario in the response, pull its total_market_volume
+    // market_volume table and add a row keyed by the scenario name.
+    if (data.scenarios && Object.keys(data.scenarios).length > 0) {
+      const tmvTab = tabs["total_market_volume"];
+      if (tmvTab) {
+        const scenarioRows = [];
+        Object.entries(data.scenarios).forEach(([scenarioName, scenarioData]) => {
+          const tmv = scenarioData?.market_analysis?.total_market_volume;
+          if (!tmv) return;
+          // pick market_volume first, fall back to market_share
+          const metricObj =
+            tmv.market_volume || tmv.market_share || Object.values(tmv)[0];
+          if (!metricObj) return;
+          const rawRows = metricObj?.table?.rows || [];
+          const firstRow = rawRows[0];
+          if (!firstRow) return;
+          scenarioRows.push({
+            hierarchy: scenarioName,
+            label: scenarioName,
+            total: undefined,
+            values: parseValues(firstRow.values, false),
+            children: [],
+          });
+        });
+        if (scenarioRows.length) {
+          tabs["total_market_volume"] = {
+            ...tmvTab,
+            table: {
+              ...tmvTab.table,
+              rows: scenarioRows,
+            },
+          };
+        }
+      }
+    }
 
     return { months, forecast_start_index: fsi, tabs };
   }
@@ -854,14 +894,22 @@ export default function PBCModelInput() {
       targetMetric = "market_volume";
     }
 
+    // Apply per-tab model defaults only when switching tabs (not on every
+    // render). We never override a model the user/backend explicitly set —
+    // we only set the default for a tab the first time it's visited.
+    //   total_market → default ets
+    //   all others   → default linear (ets is still selectable)
+    if (activeTab === "total_market") {
+      if (!modelSelection || modelSelection === "linear") setModelSelection("ets");
+    } else {
+      if (!modelSelection || modelSelection === "ets") setModelSelection("linear");
+    }
+
     if (metric !== targetMetric) {
       setMetric(targetMetric);
       if (targetMetric !== "market_share") setBrand("");
 
       if (isHCV && liverRawData) {
-        // Already have the full backend response cached from the last
-        // apply/filter call — just re-derive the view for the new metric
-        // locally instead of hitting the API again on every tab switch.
         setLiverTabsRaw(normalizeLiverResponse(liverRawData, targetMetric));
       } else {
         handleApplyFilterWithMetric(targetMetric);
@@ -869,13 +917,7 @@ export default function PBCModelInput() {
     }
   }, [activeTab, filtersLoaded]);
 
-  useEffect(() => {
-    if (activeTab === "total_market" && modelSelection !== "ets") {
-      setModelSelection("ets");
-    } else if (activeTab !== "total_market" && modelSelection === "ets") {
-      setModelSelection("linear");
-    }
-  }, [activeTab]);
+
 
   useEffect(() => {
     // For HCV, fetchMetricFilters already fully populates the initial view
@@ -925,11 +967,9 @@ export default function PBCModelInput() {
       if (!currentlyAppliedScenario) setCurrentlyAppliedScenario(names[0]);
       if (!tentativeRadioSelectedScenario)
         setTentativeRadioSelectedScenario(names[0]);
-      setSelectedCompareScenarios(
-        names
-          .filter((n) => n !== (currentlyAppliedScenario || names[0]))
-          .slice(0, 2),
-      );
+      // compareScenarioOptions / selectedCompareScenarios are managed by
+      // initializeCompareScenarios which is called with the raw API response —
+      // no override here.
     }
   }, [filterOptions.scenario_names]);
 
@@ -1066,6 +1106,7 @@ export default function PBCModelInput() {
               ...prev,
               scenario_names: availScenarios,
             }));
+            initializeCompareScenarios(data);
           }
           const activeScenarioKey =
             data?.active_scenario || availScenarios[0] || "Base";
@@ -1089,6 +1130,7 @@ export default function PBCModelInput() {
           const normalized = normalizeLiverResponse(data, metric);
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
+        initializeCompareScenarios(data);
           // The chart's month list doubles as the set of selectable dates
           // for the FROM/TO DATE dropdowns — no separate endpoint needed.
           if (normalized?.months?.length) setAvailableDates(normalized.months);
@@ -1245,15 +1287,20 @@ export default function PBCModelInput() {
     }
   };
 
-  // The Total Market Volume tab should always show ETS, and no other tab
-  // should ever show ETS (it's not offered there — see the BASE MODEL
-  // dropdown). Every place that sets modelSelection from a backend
-  // response's active_model needs to go through this so a stale/incorrect
-  // backend value (e.g. "linear" while on Total Market Volume) can't
-  // override the tab-driven default.
+  // Resolves the model to use from a backend active_model value.
+  // Rules:
+  //   - total_market tab default is "ets" if the backend sent nothing/null.
+  //   - All other tabs default to "linear" if the backend sent "ets" or nothing
+  //     (ETS is now allowed on any tab, but "ets" is only the default on
+  //     total_market).
+  //   - A concrete non-null value from the backend is always respected.
   const resolveModelForTab = (backendModel) => {
-    if (activeTab === "total_market") return "ets";
-    return backendModel && backendModel !== "ets" ? backendModel : "linear";
+    if (!backendModel) {
+      return activeTab === "total_market" ? "ets" : "linear";
+    }
+    // If we're NOT on total_market and the backend explicitly returned "ets",
+    // honour it — the user may have saved an ETS scenario on another tab.
+    return backendModel;
   };
 
   const handleApplyFilterWithMetric = async (newMetric) => {
@@ -1283,6 +1330,7 @@ export default function PBCModelInput() {
         }
         setLiverTabsRaw(normalizeLiverResponse(data, effectiveMetric));
         setLiverRawData(data);
+        initializeCompareScenarios(data);
         setAllMetricsData({
           [effectiveMetric]: {
             unit: effectiveMetric === "market_share" ? "%" : "",
@@ -1338,6 +1386,7 @@ export default function PBCModelInput() {
         }
         setLiverTabsRaw(normalizeLiverResponse(data, metric));
         setLiverRawData(data);
+        initializeCompareScenarios(data);
         setEditable(false);
         showSnackbar("Filters applied successfully", "success");
         return;
@@ -1383,6 +1432,7 @@ export default function PBCModelInput() {
         syncFactors(factors, am);
         setLiverTabsRaw(normalizeLiverResponse(data, metric));
         setLiverRawData(data);
+        initializeCompareScenarios(data);
         showSnackbar("Recalculated successfully", "success");
         return;
       }
@@ -1511,6 +1561,7 @@ export default function PBCModelInput() {
           if (normalized?.tabs && Object.keys(normalized.tabs).length) {
             setLiverTabsRaw(normalized);
             setLiverRawData(respData);
+            initializeCompareScenarios(respData);
             // mapLiverTabToView will re-run via the liverTabsRaw effect,
             // which updates chartData and tableData automatically.
           }
@@ -1676,10 +1727,29 @@ export default function PBCModelInput() {
     if (e?.stopPropagation) e.stopPropagation();
     setShowScenariosDropdown((s) => !s);
   };
-  const handleScenarioSelectionChange = (s) => {
+
+  // Seed Compare Scenarios dropdown from the API response's available_scenarios.
+  // Called after every apply-filters / save-scenario / initial load response.
+  const initializeCompareScenarios = (response) => {
+    const scenarios =
+      response?.available_scenarios ||
+      (response?.scenarios ? Object.keys(response.scenarios) : []);
+    if (!scenarios.length) return;
+    setCompareScenarioOptions(scenarios);
+    // On first init (empty selection) show all; preserve any prior selection.
     setSelectedCompareScenarios((prev) =>
-      prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s],
+      prev.length ? prev.filter((s) => scenarios.includes(s)) : scenarios,
     );
+  };
+
+  const handleScenarioSelectionChange = (s) => {
+    setSelectedCompareScenarios((prev) => {
+      const updated = prev.includes(s)
+        ? prev.filter((x) => x !== s)
+        : [...prev, s];
+      // If the user deselects everything, restore all options.
+      return updated.length ? updated : compareScenarioOptions;
+    });
   };
   const handleActiveScenarioRadioChange = (name) => {
     setTentativeRadioSelectedScenario(name);
@@ -2198,9 +2268,7 @@ export default function PBCModelInput() {
                   onChange={(e) => setModelSelection(e.target.value)}
                   disabled={!editable}
                 >
-                  {activeTab === "total_market" && (
-                    <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
-                  )}
+                  <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
                   <MenuItem value="linear">Linear</MenuItem>
                   <MenuItem value="exponential">Exponential</MenuItem>
                   <MenuItem value="logarithmic">Logarithmic</MenuItem>
@@ -2882,7 +2950,7 @@ export default function PBCModelInput() {
                           minWidth: 200,
                         }}
                       >
-                        {COMPARE_OPTIONS.map((s) => (
+                        {compareScenarioOptions.map((s) => (
                           <Box
                             key={s}
                             component="label"
@@ -3169,7 +3237,19 @@ export default function PBCModelInput() {
                     </>
                   ) : (
                     <>
-                    {groupedTableHierarchy.map((group) => {
+                    {groupedTableHierarchy
+                      .filter((group) => {
+                        // On total_market tab: only filter by selected
+                        // compare scenarios (always keep the applied one).
+                        // On other tabs: show all rows regardless.
+                        if (activeTab !== "total_market") return true;
+                        if (!selectedCompareScenarios.length) return true;
+                        return (
+                          group.brandName === currentlyAppliedScenario ||
+                          selectedCompareScenarios.includes(group.brandName)
+                        );
+                      })
+                      .map((group) => {
                       const isExpanded = !!expandedBrands[group.brandName];
                       const hasChildren = group.children.length > 0;
                       const showChildren = isExpanded;
