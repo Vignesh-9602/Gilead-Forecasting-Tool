@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from datetime import date
 
 
 class Configuration(BaseModel):
@@ -47,3 +48,70 @@ class SelectedFilter(BaseModel):
 class ApplyScenarioRequest(BaseModel):
     ta_name: str
     selected_filter: SelectedFilter
+
+
+class ETSFactors(BaseModel):
+    alpha: float
+    beta: float
+    gamma: float
+
+
+class GrowthFactors(BaseModel):
+    total_growth: float
+    duration: int
+    k_value: float
+    trajectory_start: str
+    
+
+class Factors(BaseModel):
+    multiplier: Optional[float] = 1.0
+    multiplier_horizon: Optional[str] = "Forecast"
+    ets: Optional[ETSFactors] = None
+    growth: Optional[GrowthFactors] = None
+
+
+class RecalculateRequest(BaseModel):
+    ta_name: str
+    selected_filter: SelectedFilter
+    scenario_name: Optional[str] = "Base"
+    model_type: str
+    factors: Optional[Factors] = None
+
+
+
+#response models
+
+
+class ChartSeries(BaseModel):
+    label: str
+    history: List[float]
+    forecast: List[float]
+
+
+class Chart(BaseModel):
+    months: List[str]
+    forecast_start_index: int
+    series: List[ChartSeries]
+
+
+class MarketVolume(BaseModel):
+    chart: Chart
+    market_volume: Dict[str, float]
+    market_share: Dict[str, float]
+
+
+class MarketAnalysis(BaseModel):
+    total_market_volume: MarketVolume
+
+
+class Scenario(BaseModel):
+    factors: Optional[Dict[str, Any]] = None
+    market_analysis: Dict[str, Any]
+
+
+class RecalculateResponse(BaseModel):
+    ta_name: str
+    selected_filter: Dict[str, Any]
+    available_scenarios: List[str]
+    active_scenario: str
+    scenarios: Dict[str, Scenario]
