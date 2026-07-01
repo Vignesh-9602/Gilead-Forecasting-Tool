@@ -6,9 +6,9 @@ import json
 # ---------------------------------------------------------------------------
 
 def get_liver_configs_for_ta(cur, ta_name: str) -> list:
-    """Returns all (payer, brand, config) rows for a TA, ordered payer→brand."""
+    """Returns all (payer, brand, config, updated_at) rows for a TA, ordered payer→brand."""
     cur.execute("""
-        SELECT payer, brand, config
+        SELECT payer, brand, config, updated_at
         FROM raw_liver.liver_configurations
         WHERE LOWER(TRIM(ta_name)) = LOWER(TRIM(%s))
         ORDER BY payer, brand
