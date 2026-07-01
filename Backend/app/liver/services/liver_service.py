@@ -539,8 +539,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
                                   granularity="monthly",
                                   sel_payer=None, sel_product=None,
-                                  scenario_name="Base",
-                                  force_tab1_ets=True):
+                                  force_tab1_ets=True,
+                                  scenario_name="Base"):
     """
     Build all 5 tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
@@ -581,18 +581,21 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     tab1_factors = factors.model_copy(update={"active_model": "ets", "ets": tab1_ets}) if force_tab1_ets else factors
     tmv_map      = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
     tab1_mv_data = _build_tab_data(tmv_map, month_range, month_labels, fsi, tab1_factors)
+    # chart label shows "Total Market Volume"; table hierarchy keeps scenario_name
+    for s in tab1_mv_data.chart.series:
+        s.label = "Total Market Volume"
 
     # TMV market_share is trivially 100% (it IS the total market)
     tab1_ms = {
         "chart": {
             "months": month_labels, "forecast_start_index": fsi,
-            "series": [{"label": scenario_name,
+            "series": [{"label": "Total Market Volume",
                         "history":  [100.0] * fsi,
                         "forecast": [100.0] * (n - fsi)}],
         },
         "table": {
             "type": "flat",
-            "rows": [{"label": scenario_name, "values": [100.0] * n}],
+            "rows": [{"label": "Total Market Volume", "values": [100.0] * n}],
         },
     }
 
@@ -807,8 +810,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             _, _, market_analysis, tab1_ets = _build_all_tabs_both_metrics(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, factors,
-                granularity,
-                scenario_name=active_scenario,
+                granularity, scenario_name=payload.scenario,
             )
 
         response_factors = _build_response_factors(factors)
@@ -974,8 +976,7 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             cur, payload.ta_name, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, factors,
             granularity,
-            scenario_name=active_scenario,
-            force_tab1_ets=False,
+            force_tab1_ets=False, scenario_name=payload.scenario_name,
         )
 
         response_factors = _build_response_factors(factors)
@@ -1478,10 +1479,13 @@ def refresh_liver_table(payload):
         month_labels = [_month_label(y, m, granularity) for y, m in month_range]
         forecast_start_index = len(actual_range)
 
-        # Separate Total row from data rows
+        # Filter to only the active scenario's row — frontend may send all scenarios
+        active_scenario = payload.scenario or "Base"
+        active_table = [r for r in payload.table if r.hierarchy == active_scenario] or payload.table
+
         is_dist_tab      = payload.tab_key in ("product_distribution", "market_distribution")
-        total_row_input  = next((r for r in payload.table if r.hierarchy.lower() == "total"), None)
-        non_total_rows   = [r for r in payload.table if r.hierarchy.lower() != "total"]
+        total_row_input  = next((r for r in active_table if r.hierarchy.lower() == "total"), None)
+        non_total_rows   = [r for r in active_table if r.hierarchy.lower() != "total"]
 
         # For distribution tabs: validate + proportionally redistribute when edited_hierarchy is set
         if is_dist_tab and payload.edited_hierarchy and total_row_input:
