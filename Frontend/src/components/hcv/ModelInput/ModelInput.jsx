@@ -82,6 +82,7 @@ const ForecastChart = ({
   payerFilter,
   appliedBrand,
   activeTab,
+  appliedScenario,
 }) => {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
@@ -405,7 +406,27 @@ export default function PBCModelInput() {
       (data.scenarios && Object.keys(data.scenarios || {})[0]);
     const sc = data.scenarios && data.scenarios[active];
     const ma = sc && sc.market_analysis;
-    if (!ma) return { months: [], forecast_start_index: 0, tabs: {} };
+
+    // The active scenario (e.g. a newly saved one) may only carry table data
+    // and no chart. Fall back to the first scenario that has chart data so
+    // the chart is never left empty after a save-scenario response.
+    const hasChart = (scenarioData) => {
+      const tmv = scenarioData?.market_analysis?.total_market_volume;
+      const mv = tmv?.market_volume || tmv?.market_share || Object.values(tmv || {})[0];
+      return !!(mv?.chart?.months?.length);
+    };
+    let chartMa = ma; // preferred: active scenario
+    if (!hasChart(sc) && data.scenarios) {
+      // Try Base first, then any other scenario that has chart data
+      const fallbackKey =
+        (data.scenarios["Base"] && hasChart(data.scenarios["Base"]) ? "Base" : null) ||
+        Object.keys(data.scenarios).find((k) => hasChart(data.scenarios[k]));
+      if (fallbackKey) {
+        chartMa = data.scenarios[fallbackKey]?.market_analysis;
+      }
+    }
+
+    if (!ma && !chartMa) return { months: [], forecast_start_index: 0, tabs: {} };
 
     const parseNumber = (x, asPercent = false) => {
       if (x == null || x === "") return null;
@@ -426,7 +447,12 @@ export default function PBCModelInput() {
       return [];
     };
 
-    const firstTab = ma.total_market_volume || ma[Object.keys(ma)[0]];
+    // Use chartMa (the scenario with actual chart data) to derive months and
+    // forecast_start_index. Use ma (active scenario) for table data when available.
+    const effectiveMa = ma || chartMa;
+    const firstTab = chartMa
+      ? (chartMa.total_market_volume || chartMa[Object.keys(chartMa)[0]])
+      : (effectiveMa.total_market_volume || effectiveMa[Object.keys(effectiveMa)[0]]);
     const firstMetric =
       firstTab &&
       (firstTab.market_volume ||
@@ -471,21 +497,30 @@ export default function PBCModelInput() {
       );
     };
 
+    // Build tabs using chart data from chartMa and table data from ma.
+    // The union of keys from both ensures we cover all tabs.
+    const allTabKeys = new Set([
+      ...Object.keys(chartMa || {}),
+      ...Object.keys(ma || {}),
+    ]);
     const tabs = {};
-    Object.keys(ma).forEach((tabKey) => {
-      const tabObj = ma[tabKey] || {};
-      const selectedMetric = selectMetricForTab(tabKey, tabObj);
-      const chartMetric = selectedMetric;
-      const tableMetric = selectedMetric;
-      const isTabPercent = selectedMetric === tabObj.market_share;
+    allTabKeys.forEach((tabKey) => {
+      // Chart source: prefer chartMa (scenario with full chart data)
+      const chartTabObj = (chartMa || {})[tabKey] || {};
+      const chartSelectedMetric = selectMetricForTab(tabKey, chartTabObj);
+      const isTabPercent = chartSelectedMetric === chartTabObj.market_share;
+
+      // Table source: prefer active scenario (ma), fall back to chartMa
+      const tableTabObj = (ma || {})[tabKey] || chartTabObj;
+      const tableSelectedMetric = selectMetricForTab(tabKey, tableTabObj);
 
       const chart =
-        chartMetric && chartMetric.chart
+        chartSelectedMetric && chartSelectedMetric.chart
           ? {
-              months: chartMetric.chart.months || months,
+              months: chartSelectedMetric.chart.months || months,
               forecast_start_index:
-                chartMetric.chart.forecast_start_index || fsi,
-              series: (chartMetric.chart.series || []).map((s) => ({
+                chartSelectedMetric.chart.forecast_start_index || fsi,
+              series: (chartSelectedMetric.chart.series || []).map((s) => ({
                 label: s.label || "",
                 train_values: parseValues(
                   s.history || s.train_values,
@@ -501,11 +536,11 @@ export default function PBCModelInput() {
           : { months, forecast_start_index: fsi, series: [] };
 
       const table =
-        tableMetric && tableMetric.table
+        tableSelectedMetric && tableSelectedMetric.table
           ? {
-              type: tableMetric.table.type,
-              headers: tableMetric.table.headers || chart.months,
-              rows: (tableMetric.table.rows || []).map((r) => ({
+              type: tableSelectedMetric.table.type,
+              headers: tableSelectedMetric.table.headers || chart.months,
+              rows: (tableSelectedMetric.table.rows || []).map((r) => ({
                 hierarchy: r.hierarchy || r.label || "",
                 label: r.label || r.hierarchy || "",
                 total: Array.isArray(r.total)
@@ -551,8 +586,43 @@ export default function PBCModelInput() {
           });
         });
         if (scenarioRows.length) {
+          const tmvChart = tmvTab.chart || { months, forecast_start_index: fsi, series: [] };
+          const chartFsi = tmvChart.forecast_start_index ?? fsi;
+
+          // Chart shows ONE scenario at a time:
+          //   - the currently applied scenario (passed in via currentMetric hack — we
+          //     use the component's currentlyAppliedScenario via closure if available,
+          //     otherwise fall back to the active_scenario from the response, then Base.
+          // Find the matching scenario row; fall back to the first row (Base).
+          const activeForChart =
+            data.active_scenario ||
+            (scenarioRows[0]?.hierarchy) ||
+            "Base";
+
+          const activeRow =
+            scenarioRows.find(
+              (r) => (r.hierarchy || "").toLowerCase() === activeForChart.toLowerCase()
+            ) || scenarioRows.find(
+              (r) => (r.hierarchy || "").toLowerCase() === "base"
+            ) || scenarioRows[0];
+
+          const singleChartSeries = activeRow
+            ? [
+                {
+                  label: activeRow.hierarchy || activeRow.label || "",
+                  lot: activeRow.hierarchy || activeRow.label || "",
+                  train_values: (activeRow.values || []).slice(0, chartFsi),
+                  forecast_values: (activeRow.values || []).slice(chartFsi),
+                },
+              ]
+            : tmvChart.series;
+
           tabs["total_market_volume"] = {
             ...tmvTab,
+            chart: {
+              ...tmvChart,
+              series: singleChartSeries,
+            },
             table: {
               ...tmvTab.table,
               rows: scenarioRows,
@@ -1756,9 +1826,20 @@ export default function PBCModelInput() {
   };
   const clickTableEdit = () => setEditable(true);
   const applySelectedScenario = () => {
-    setCurrentlyAppliedScenario(tentativeRadioSelectedScenario);
+    const chosenScenario = tentativeRadioSelectedScenario;
+    setCurrentlyAppliedScenario(chosenScenario);
+
+    // Re-derive the chart for the chosen scenario using the cached raw data.
+    // normalizeLiverResponse picks active_scenario from the response; we
+    // temporarily patch it so the chart series uses the right row.
+    if (liverRawData) {
+      const patched = { ...liverRawData, active_scenario: chosenScenario };
+      const normalized = normalizeLiverResponse(patched, metric);
+      setLiverTabsRaw(normalized);
+    }
+
     showSnackbar(
-      `Applied ${tentativeRadioSelectedScenario} successfully across all tabs!`,
+      `Applied ${chosenScenario} successfully across all tabs!`,
       "success",
     );
     setEditable(false);
@@ -2531,20 +2612,23 @@ export default function PBCModelInput() {
                     >
                       {(() => {
                         // Build option list from all months (not just forecast)
-                        // so the backend default (which may point to any month)
-                        // always has a matching MenuItem. If the current value
-                        // still isn't in the list (e.g. a month the chart
-                        // doesn't cover), append it so the Select can display
-                        // it rather than showing blank.
-                        const allMonths = chartData?.months || [];
-                        const opts =
-                          allMonths.length > 0
-                            ? allMonths
+                        // Trajectory start options = forecast months only
+                        // (from forecast_start_index onwards). This is the
+                        // right semantic — a trajectory starts somewhere in
+                        // the forecast period, not in history.
+                        // Always append the current value as a fallback so
+                        // the Select never renders blank even if the backend
+                        // default points to a month outside the visible range.
+                        const forecastMonths =
+                          chartData?.months && chartData?.forecast_start_index != null
+                            ? chartData.months.slice(chartData.forecast_start_index)
                             : trajectoryMonthOptions;
+
                         const withCurrent =
-                          trajectoryStart && !opts.includes(trajectoryStart)
-                            ? [...opts, trajectoryStart]
-                            : opts;
+                          trajectoryStart && !forecastMonths.includes(trajectoryStart)
+                            ? [...forecastMonths, trajectoryStart]
+                            : forecastMonths;
+
                         return withCurrent.map((m) => (
                           <MenuItem key={m} value={m}>
                             {new Date(m).toLocaleDateString("en-US", {
@@ -2692,6 +2776,7 @@ export default function PBCModelInput() {
               payerFilter={appliedPayerFilter}
               appliedBrand={appliedBrand}
               activeTab={activeTab}
+              appliedScenario={currentlyAppliedScenario}
             />
           </Paper>
 
