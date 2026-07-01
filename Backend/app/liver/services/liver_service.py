@@ -539,7 +539,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
                                   granularity="monthly",
                                   sel_payer=None, sel_product=None,
-                                  scenario_name="Base"):
+                                  scenario_name="Base",
+                                  force_tab1_ets=True):
     """
     Build all 5 tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
@@ -563,8 +564,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     n                    = len(month_labels)
     fsi                  = forecast_start_index
 
-    tab2_label = sel_product or ""
-    tab3_label = sel_payer  or ""
+    tab2_label = sel_product  # None → factors apply to all series
+    tab3_label = sel_payer
 
     # ── Tab 1: TMV (ETS) — metric-independent ──────────────────────────────
     if is_yearly:
@@ -577,7 +578,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     else:
         _t1a, _t1b, _t1g = 0.30, 0.20, 0.98
     tab1_ets     = EtsParams(alpha=round(_t1a, 4), beta=round(_t1b, 4), gamma=round(_t1g, 4))
-    tab1_factors = factors.model_copy(update={"active_model": "ets", "ets": tab1_ets})
+    tab1_factors = factors.model_copy(update={"active_model": "ets", "ets": tab1_ets}) if force_tab1_ets else factors
     tmv_map      = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
     tab1_mv_data = _build_tab_data(tmv_map, month_range, month_labels, fsi, tab1_factors)
 
@@ -973,6 +974,7 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             train_end_year, train_end_month, forecast_periods, factors,
             granularity,
             scenario_name=active_scenario,
+            force_tab1_ets=False,
         )
 
         response_factors = _build_response_factors(factors)
