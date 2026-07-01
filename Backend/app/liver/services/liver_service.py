@@ -812,6 +812,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             )
 
         response_factors = _build_response_factors(factors)
+        response_factors["active_model"] = "ets"
         response_factors["ets"] = {"alpha": tab1_ets.alpha, "beta": tab1_ets.beta, "gamma": tab1_ets.gamma}
 
         train_end_dt = date_type(train_end_year, train_end_month, 1)
