@@ -7,7 +7,6 @@ from app.liver.schemas.liver_schema import (
     LiverApplyFiltersResponse,
     LiverRecalculateRequest,
     LiverSaveScenarioRequest,
-    LiverSaveScenarioResponse,
     LiverRefreshTableRequest,
 )
 from app.liver.services.liver_service import (
@@ -98,7 +97,7 @@ def liver_recalculate(payload: LiverRecalculateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/save-scenario", response_model=LiverSaveScenarioResponse)
+@router.post("/save-scenario")
 def liver_save_scenario(payload: LiverSaveScenarioRequest):
     """
     Create a new scenario. Rejects if scenario_name already exists or equals 'Base'.
@@ -111,7 +110,7 @@ def liver_save_scenario(payload: LiverSaveScenarioRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/update-scenario", response_model=LiverSaveScenarioResponse)
+@router.put("/update-scenario")
 def liver_update_scenario(payload: LiverSaveScenarioRequest):
     """
     Overwrite an existing non-Base scenario. Rejects if scenario doesn't exist or equals 'Base'.
