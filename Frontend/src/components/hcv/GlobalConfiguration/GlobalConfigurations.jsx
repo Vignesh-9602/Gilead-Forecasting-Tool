@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext } from "react";
+import React, { useState, useEffect, useContext, useRef } from "react";
 import {
   Box,
   Paper,
@@ -43,20 +43,37 @@ export default function GlobalConfiguration() {
   const [errors, setErrors] = useState({});
   const [openModal, setOpenModal] = useState(false);
   const [availableTrainMonths, setAvailableTrainMonths] = useState([]);
+  // Local, page-scoped loading flags — intentionally NOT the global loading
+  // store for either load or save. The global flag drives a full-page
+  // spinner/overlay elsewhere in the app; toggling it here was unmounting +
+  // remounting this page (mid-save AND mid-load), which on load re-ran the
+  // therapyArea effect on the fresh mount and called the configuration API
+  // again, flipping the global flag again, unmounting again — an infinite
+  // fetch loop. Local flags keep the loading UI without touching that
+  // global overlay.
+  const [pageLoading, setPageLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const { showSnackbar } = useSnackbarStore();
-  const { setLoading, isLoading } = useLoadingStore();
   const { favState } = useContext(GlobalContext);
   const therapyArea = favState?.selectedTherapyArea;
 
+  // Guards against re-fetching the same therapy area more than once (e.g.
+  // a parent re-render passing an equal-but-new context object, or any
+  // effect re-trigger that doesn't represent an actual TA change).
+  const fetchedTaRef = useRef(null);
+
   // ── LOAD ON TA CHANGE ────────────────────────────────────────────────────
   useEffect(() => {
-    if (therapyArea) fetchConfigurationByTA(therapyArea);
+    if (!therapyArea) return;
+    if (fetchedTaRef.current === therapyArea) return;
+    fetchedTaRef.current = therapyArea;
+    fetchConfigurationByTA(therapyArea);
   }, [therapyArea]);
 
   const fetchConfigurationByTA = async (taName) => {
     try {
-      setLoading(true);
+      setPageLoading(true);
 
       // Use HCV-specific configuration API when TA is HCV
       const response =
@@ -90,7 +107,7 @@ export default function GlobalConfiguration() {
       console.error("Failed to load configuration:", error);
       resetFields();
     } finally {
-      setLoading(false);
+      setPageLoading(false);
     }
   };
 
@@ -138,7 +155,15 @@ export default function GlobalConfiguration() {
     };
 
     try {
-      setLoading(true);
+      // IMPORTANT: use the local `saving` flag here, not the global
+      // `setLoading` from useLoadingStore. The global flag is wired to a
+      // page-level overlay elsewhere in the app; flipping it during save
+      // was causing this component to unmount/remount, which reset every
+      // field to its default useState value and then re-ran
+      // fetchConfigurationByTA before the save had necessarily propagated
+      // — making the just-saved values appear to "reset". Keeping save
+      // local avoids that remount entirely.
+      setSaving(true);
       // Use HCV-specific configuration API when TA is HCV
       if (therapyArea === "HCV") {
         await saveConfigurationsHCV(payload);
@@ -148,13 +173,16 @@ export default function GlobalConfiguration() {
       showSnackbar("Configurations saved successfully", "success");
       // Signal ModelInput to auto-apply the saved config on next open
       try { localStorage.setItem("hcvConfigSaved", String(Date.now())); } catch (e) { /* ignore */ }
+      // No refetch here on purpose: the fields already reflect exactly
+      // what was just persisted, so re-querying the backend immediately
+      // only risks a stale/empty read overwriting good local state.
     } catch (error) {
       console.error("Save configuration failed:", error);
       const errorMessage =
         error?.response?.data?.detail || "Failed to save configuration";
       showSnackbar(errorMessage, "error");
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
@@ -558,7 +586,7 @@ export default function GlobalConfiguration() {
           <Button
             variant="contained"
             onClick={handleSave}
-            disabled={isLoading}
+            disabled={saving || pageLoading}
             sx={{
               backgroundColor: "#4F46E5",
               px: 2,
@@ -567,7 +595,7 @@ export default function GlobalConfiguration() {
               textTransform: "none",
             }}
           >
-            Save Configuration
+            {saving ? "Saving..." : "Save Configuration"}
           </Button>
         </Box>
       </Paper>

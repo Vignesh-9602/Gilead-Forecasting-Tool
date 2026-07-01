@@ -253,8 +253,8 @@ export const saveConfigurationsHCV = (payload) => {
 };
 
 // Liver filters
-export const getLiverFilters = () => {
-  return axios.get(`/api/liver/filters`);
+export const getLiverFilters = (params = {}) => {
+  return axios.get(`/api/liver/filters`, { params });
 };
 
 // POST — apply liver filters and return chart/table data
@@ -265,6 +265,11 @@ export const applyLiverFilters = (payload) => {
 // POST — recalculate liver with new ETS factors
 export const recalculateLiver = (payload) => {
   return axios.post(`/api/liver/recalculate`, payload);
+};
+
+// POST — refresh liver table after manual edits
+export const refreshLiverTable = (payload) => {
+  return axios.post(`/api/liver/refresh-table`, payload);
 };
 
 // POST — create/update liver configurations with required envelope { config: { ... } }

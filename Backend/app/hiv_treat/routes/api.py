@@ -623,12 +623,24 @@ def recalculate(payload: RecalculateRequest):
     Recalculate preview endpoint (does NOT persist):
     - Load BASE forecasts from `forecast_outputs` for TA
     - Re-run forecasting functions using `payload.model_type` + `payload.factors`
+      -- ONLY for the total market_volume series (market=ALL/source=ALL/product=ALL).
+      -- market_share rows are intentionally left untouched: they represent
+         distribution percentages across siblings (Retail/Non-retail, products,
+         sources) and must sum to 100. Independently re-growing each one with
+         the same growth trajectory breaks that reconciliation. Volumes for
+         every market/product are derived downstream in Model_Input_Service as
+         total_volume * base_share, so scaling only the total preserves
+         100%-reconciliation automatically without touching that file.
+    - Growth parameters (total_growth, duration, k_value, trajectory_start)
+      arrive as a FLAT `factors["growth"]` dict regardless of model_type
+      (this matches the frontend payload shape, NOT the stored scenario's
+      per-model nested shape like factors["linear"]/factors["scurve"]).
     - Temporarily override `fetch_forecast_scenario` so the existing
       `build_apply_scenario_response` will build the response using the
       recalculated in-memory forecasts.
     """
     ta = payload.ta_name
-    scenario = payload.scenario_name 
+    scenario = payload.scenario_name
 
     try:
         with get_connection() as conn, conn.cursor() as cur:
@@ -649,11 +661,14 @@ def recalculate(payload: RecalculateRequest):
                 FROM raw_hiv_treat.forecast_outputs
                 WHERE ta_name = %s
                   AND scenario_name = %s
-            """, (ta,scenario))
+            """, (ta, scenario))
 
             rows = cur.fetchall()
             if not rows:
-                raise HTTPException(404, "No BASE forecasts found")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No forecasts found for scenario '{scenario}'"
+                )
 
             base_map = {}
             for market, source, product, metric, forecast_data in rows:
@@ -670,85 +685,83 @@ def recalculate(payload: RecalculateRequest):
 
             model_type = (payload.model_type or "ets").lower()
             factors = payload.factors or {}
+            # Convert Pydantic model to dict
+            if hasattr(factors, "model_dump"):
+                factors = factors.model_dump()
+
             fp = config.get("forecast_periods")
             train_start = config.get("train_start_date")
             train_end = config.get("train_end_date")
 
+            print("FACTORS TYPE =", type(factors))
+            print("FACTORS =", factors)
+
             for key, data in base_map.items():
                 market, source, product, metric = key
+
+                # Only recalculate the TOTAL market_volume series. All
+                # market_share rows must stay as-is so siblings keep
+                # summing to 100 (see docstring above).
+                if metric != "market_volume":
+                    overrides[key] = data
+                    continue
+
                 months, values = series_inputs(data)
                 if not months or not values:
                     overrides[key] = data
                     continue
 
                 try:
-                    if metric == "market_volume":
-                        if model_type == "ets":
-                            ets = (factors.get("ets") if isinstance(factors, dict) else {})
-                            new_fc = process_forecast(
-                                months,
-                                values,
-                                train_start,
-                                train_end,
-                                fp,
-                                model_type="ETS",
-                                metric=metric,
-                                multiplier=factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
-                                multiplier_horizon=factors.get("multiplier_horizon", "Forecast") if isinstance(factors, dict) else getattr(factors, "multiplier_horizon", "Forecast"),
-                                alpha=ets.get("alpha"),
-                                beta=ets.get("beta"),
-                                gamma=ets.get("gamma")
-                            )
-                        else:
-                            growth = (factors.get("growth") if isinstance(factors, dict) else {})
-                            new_fc = process_growth_forecast(
-                                months,
-                                values,
-                                train_start,
-                                train_end,
-                                fp,
-                                model_type=model_type,
-                                metric=metric,
-                                total_growth_pct=growth.get("total_growth"),
-                                duration=growth.get("duration", fp),
-                                k=growth.get("k_value"),
-                                multiplier=factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
-                                multiplier_horizon=factors.get("multiplier_horizon", "Forecast") if isinstance(factors, dict) else getattr(factors, "multiplier_horizon", "Forecast"),
-                                trajectory_start=growth.get("trajectory_start")
-                            )
-                    else:
-                        # market share / product shares
-                        if model_type == "ets":
-                            ets = (factors.get("ets") if isinstance(factors, dict) else {})
-                            new_fc = process_forecast(
-                                months,
-                                values,
-                                train_start,
-                                train_end,
-                                fp,
-                                model_type="ETS",
-                                metric=metric,
-                                alpha=ets.get("alpha"),
-                                beta=ets.get("beta"),
-                                gamma=ets.get("gamma")
-                            )
-                        else:
-                            growth = (factors.get("growth") if isinstance(factors, dict) else {})
-                            new_fc = process_growth_forecast(
-                                months,
-                                values,
-                                train_start,
-                                train_end,
-                                fp,
-                                factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
-                                growth.get("total_growth", 0),
-                                growth.get("duration", fp),
-                                growth_type=model_type,
-                                metric=metric
-                            )
+                    ets = (factors.get("ets") if isinstance(factors, dict) else {}) or {}
+
+                    # Growth params are FLAT under "growth", not per-model-nested.
+                    growth = (
+                        factors.get("growth")
+                        if isinstance(factors, dict)
+                        else {}
+                    ) or {}
+
+                    new_fc = process_forecast(
+                        months,
+                        values,
+                        train_start,
+                        train_end,
+                        fp,
+
+                        model_type=model_type,
+                        metric=metric,
+
+                        alpha=ets.get("alpha"),
+                        beta=ets.get("beta"),
+                        gamma=ets.get("gamma"),
+
+                        total_growth_pct=growth.get("total_growth", 0),
+                        duration=growth.get("duration", fp),
+                        k=growth.get("k_value"),
+                        trajectory_start=growth.get("trajectory_start"),
+
+                        multiplier=(
+                            factors.get("multiplier", 1.0)
+                            if isinstance(factors, dict)
+                            else getattr(factors, "multiplier", 1.0)
+                        ),
+
+                        multiplier_horizon=(
+                            factors.get("multiplier_horizon", "Forecast")
+                            if isinstance(factors, dict)
+                            else getattr(factors, "multiplier_horizon", "Forecast")
+                        )
+                    )
 
                     overrides[key] = new_fc
-                except Exception:
+                except Exception as e:
+                    print(
+                        f"Forecast failed "
+                        f"key={key} "
+                        f"metric={metric} "
+                        f"model={model_type} "
+                        f"error={e}"
+                    )
                     overrides[key] = data
 
             # Monkeypatch fetch_forecast_scenario in Model_Input_Service
@@ -763,7 +776,143 @@ def recalculate(payload: RecalculateRequest):
             MIS.fetch_forecast_scenario = fetch_with_override
 
             try:
-                response = MIS.build_apply_scenario_response(cur, payload, config)
+                response = MIS.build_apply_scenario_response(
+                    cur,
+                    payload,
+                    config
+                )
+
+                if (
+                    "scenarios" in response
+                    and scenario in response["scenarios"]
+                ):
+
+                    scenario_factors = response["scenarios"][scenario]["factors"]
+
+                    growth = factors.get("growth", {}) if isinstance(factors, dict) else {}
+                    ets = factors.get("ets", {}) if isinstance(factors, dict) else {}
+
+                    # Common fields
+                    scenario_factors["active_model"] = model_type
+
+                    scenario_factors["multiplier"] = factors.get(
+                        "multiplier",
+                        scenario_factors.get("multiplier", 1)
+                    )
+
+                    scenario_factors["multiplier_horizon"] = factors.get(
+                        "multiplier_horizon",
+                        scenario_factors.get(
+                            "multiplier_horizon",
+                            "Forecast"
+                        )
+                    )
+
+                    # ETS
+                    if model_type == "ets":
+
+                        scenario_factors["ets"]["alpha"] = ets.get(
+                            "alpha",
+                            scenario_factors["ets"].get("alpha")
+                        )
+
+                        scenario_factors["ets"]["beta"] = ets.get(
+                            "beta",
+                            scenario_factors["ets"].get("beta")
+                        )
+
+                        scenario_factors["ets"]["gamma"] = ets.get(
+                            "gamma",
+                            scenario_factors["ets"].get("gamma")
+                        )
+
+                    # LINEAR
+                    elif model_type == "linear":
+
+                        scenario_factors["linear"]["duration"] = growth.get(
+                            "duration",
+                            scenario_factors["linear"].get("duration")
+                        )
+
+                        scenario_factors["linear"]["total_growth"] = growth.get(
+                            "total_growth",
+                            scenario_factors["linear"].get("total_growth")
+                        )
+
+                        scenario_factors["linear"]["trajectory_start"] = growth.get(
+                            "trajectory_start",
+                            scenario_factors["linear"].get("trajectory_start")
+                        )
+
+                    # EXPONENTIAL
+                    elif model_type == "exponential":
+
+                        scenario_factors["exponential"]["duration"] = growth.get(
+                            "duration",
+                            scenario_factors["exponential"].get("duration")
+                        )
+
+                        scenario_factors["exponential"]["total_growth"] = growth.get(
+                            "total_growth",
+                            scenario_factors["exponential"].get("total_growth")
+                        )
+
+                        scenario_factors["exponential"]["k_value"] = growth.get(
+                            "k_value",
+                            scenario_factors["exponential"].get("k_value")
+                        )
+
+                        scenario_factors["exponential"]["trajectory_start"] = growth.get(
+                            "trajectory_start",
+                            scenario_factors["exponential"].get("trajectory_start")
+                        )
+
+                    # LOGARITHMIC
+                    elif model_type == "logarithmic":
+
+                        scenario_factors["logarithmic"]["duration"] = growth.get(
+                            "duration",
+                            scenario_factors["logarithmic"].get("duration")
+                        )
+
+                        scenario_factors["logarithmic"]["total_growth"] = growth.get(
+                            "total_growth",
+                            scenario_factors["logarithmic"].get("total_growth")
+                        )
+
+                        scenario_factors["logarithmic"]["k_value"] = growth.get(
+                            "k_value",
+                            scenario_factors["logarithmic"].get("k_value")
+                        )
+
+                        scenario_factors["logarithmic"]["trajectory_start"] = growth.get(
+                            "trajectory_start",
+                            scenario_factors["logarithmic"].get("trajectory_start")
+                        )
+
+                    # S-CURVE
+                    elif model_type in ("scurve", "s-curve"):
+
+                        scenario_factors["scurve"]["duration"] = growth.get(
+                            "duration",
+                            scenario_factors["scurve"].get("duration")
+                        )
+
+                        scenario_factors["scurve"]["total_growth"] = growth.get(
+                            "total_growth",
+                            scenario_factors["scurve"].get("total_growth")
+                        )
+
+                        scenario_factors["scurve"]["k_value"] = growth.get(
+                            "k_value",
+                            scenario_factors["scurve"].get("k_value")
+                        )
+
+                        scenario_factors["scurve"]["trajectory_start"] = growth.get(
+                            "trajectory_start",
+                            scenario_factors["scurve"].get("trajectory_start")
+                        )
+
             finally:
                 MIS.fetch_forecast_scenario = orig_fetch
 
