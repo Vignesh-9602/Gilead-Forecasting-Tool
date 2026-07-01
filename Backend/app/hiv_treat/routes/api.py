@@ -1,10 +1,11 @@
 from datetime import date
-from fastapi import APIRouter, HTTPException
+from psycopg2.extras import RealDictCursor
+from fastapi import APIRouter, HTTPException , Depends
 from uuid import uuid4
 import json
 from app.db.connection import get_connection
 from typing import Dict, Any
-from app.hiv_treat.routes.schema import Configuration,ConfigurationResponse,SaveConfigRequest,ModelInputFilterResponse,ApplyScenarioRequest
+from app.hiv_treat.routes.schema import *
 from app.hiv_treat.utils.config import add_months
 from app.hiv_treat.services.HIV_helper_functions import (
     get_total_market_volume,
@@ -22,6 +23,8 @@ from app.hiv_treat.services.HIV_helper_functions import (
     process_growth_forecast_auto,
     normalize_shares
 )
+from app.services.growth_forecast_service import process_growth_forecast
+from app.hiv_treat.services import Model_Input_Service as MIS
 
 router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat"])
 
@@ -610,5 +613,163 @@ def apply_filter(payload: ApplyScenarioRequest):
 
             return build_apply_scenario_response(cur, payload, config)
 
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.post("/recalculate")
+def recalculate(payload: RecalculateRequest):
+    """
+    Recalculate preview endpoint (does NOT persist):
+    - Load BASE forecasts from `forecast_outputs` for TA
+    - Re-run forecasting functions using `payload.model_type` + `payload.factors`
+    - Temporarily override `fetch_forecast_scenario` so the existing
+      `build_apply_scenario_response` will build the response using the
+      recalculated in-memory forecasts.
+    """
+    ta = payload.ta_name
+    scenario = payload.scenario_name 
+
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+
+            # load config
+            cur.execute("""
+                SELECT config
+                FROM raw_hiv_treat.forecast_configurations
+                WHERE config->>'ta_name' = %s
+            """, (ta,))
+
+            row = cur.fetchone()
+            config = row[0] if row else {}
+
+            # load BASE forecasts
+            cur.execute("""
+                SELECT market, source_of_market, product, metric, forecast_data
+                FROM raw_hiv_treat.forecast_outputs
+                WHERE ta_name = %s
+                  AND scenario_name = %s
+            """, (ta,scenario))
+
+            rows = cur.fetchall()
+            if not rows:
+                raise HTTPException(404, "No BASE forecasts found")
+
+            base_map = {}
+            for market, source, product, metric, forecast_data in rows:
+                base_map[(market, source, product, metric)] = forecast_data
+
+            # prepare overrides by recalculating each stored series
+            overrides = {}
+
+            def series_inputs(data):
+                months = data.get("months", [])
+                tv = data.get("train_values") or []
+                fv = data.get("forecast_values") or []
+                return months, tv + fv
+
+            model_type = (payload.model_type or "ets").lower()
+            factors = payload.factors or {}
+            fp = config.get("forecast_periods")
+            train_start = config.get("train_start_date")
+            train_end = config.get("train_end_date")
+
+            for key, data in base_map.items():
+                market, source, product, metric = key
+                months, values = series_inputs(data)
+                if not months or not values:
+                    overrides[key] = data
+                    continue
+
+                try:
+                    if metric == "market_volume":
+                        if model_type == "ets":
+                            ets = (factors.get("ets") if isinstance(factors, dict) else {})
+                            new_fc = process_forecast(
+                                months,
+                                values,
+                                train_start,
+                                train_end,
+                                fp,
+                                model_type="ETS",
+                                metric=metric,
+                                multiplier=factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
+                                multiplier_horizon=factors.get("multiplier_horizon", "Forecast") if isinstance(factors, dict) else getattr(factors, "multiplier_horizon", "Forecast"),
+                                alpha=ets.get("alpha"),
+                                beta=ets.get("beta"),
+                                gamma=ets.get("gamma")
+                            )
+                        else:
+                            growth = (factors.get("growth") if isinstance(factors, dict) else {})
+                            new_fc = process_growth_forecast(
+                                months,
+                                values,
+                                train_start,
+                                train_end,
+                                fp,
+                                model_type=model_type,
+                                metric=metric,
+                                total_growth_pct=growth.get("total_growth"),
+                                duration=growth.get("duration", fp),
+                                k=growth.get("k_value"),
+                                multiplier=factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
+                                multiplier_horizon=factors.get("multiplier_horizon", "Forecast") if isinstance(factors, dict) else getattr(factors, "multiplier_horizon", "Forecast"),
+                                trajectory_start=growth.get("trajectory_start")
+                            )
+                    else:
+                        # market share / product shares
+                        if model_type == "ets":
+                            ets = (factors.get("ets") if isinstance(factors, dict) else {})
+                            new_fc = process_forecast(
+                                months,
+                                values,
+                                train_start,
+                                train_end,
+                                fp,
+                                model_type="ETS",
+                                metric=metric,
+                                alpha=ets.get("alpha"),
+                                beta=ets.get("beta"),
+                                gamma=ets.get("gamma")
+                            )
+                        else:
+                            growth = (factors.get("growth") if isinstance(factors, dict) else {})
+                            new_fc = process_growth_forecast(
+                                months,
+                                values,
+                                train_start,
+                                train_end,
+                                fp,
+                                factors.get("multiplier", 1.0) if isinstance(factors, dict) else getattr(factors, "multiplier", 1.0),
+                                growth.get("total_growth", 0),
+                                growth.get("duration", fp),
+                                growth_type=model_type,
+                                metric=metric
+                            )
+
+                    overrides[key] = new_fc
+                except Exception:
+                    overrides[key] = data
+
+            # Monkeypatch fetch_forecast_scenario in Model_Input_Service
+            orig_fetch = MIS.fetch_forecast_scenario
+
+            def fetch_with_override(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in):
+                k = (market_in, source_in, product_in, metric_in)
+                if k in overrides:
+                    return overrides[k]
+                return orig_fetch(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in)
+
+            MIS.fetch_forecast_scenario = fetch_with_override
+
+            try:
+                response = MIS.build_apply_scenario_response(cur, payload, config)
+            finally:
+                MIS.fetch_forecast_scenario = orig_fetch
+
+            return response
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
