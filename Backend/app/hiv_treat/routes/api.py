@@ -21,7 +21,8 @@ from app.services.forecast_service import process_forecast
 
 from app.hiv_treat.services.HIV_helper_functions import (
     process_growth_forecast_auto,
-    normalize_shares
+    normalize_shares,
+    process_moving_average_forecast
 )
 from app.services.growth_forecast_service import process_growth_forecast
 from app.hiv_treat.services import Model_Input_Service as MIS
@@ -215,13 +216,13 @@ def save_configuration(payload: SaveConfigRequest):
             values = [float(v) for _, _, v in rows]
 
             tv_fc = process_forecast(
-                months, values,
-                cfg.train_start_date,
-                cfg.train_end_date,
-                forecast_periods,
-                model_type="ETS",
-                metric="market_volume"
-            )
+            series_months=months,
+            series_values=values,
+            train_start_date=cfg.train_start_date,
+            train_end_date=cfg.train_end_date,
+            forecast_periods=forecast_periods,
+            metric="market_volume"
+        )
         
             fc_len = len(tv_fc["forecast_values"])
 
@@ -335,13 +336,15 @@ def save_configuration(payload: SaveConfigRequest):
             market_fc = {}
 
             for market, d in market_data.items():
-                market_fc[market] = process_growth_forecast_auto(
-                    d["months"], d["values"],
-                    cfg.train_start_date,
-                    cfg.train_end_date,
-                    forecast_periods,
-                    metric="market_share"
-                )
+                market_fc[market] = process_moving_average_forecast(
+                series_months=d["months"],
+                series_values=d["values"],
+                train_start_date=cfg.train_start_date,
+                train_end_date=cfg.train_end_date,
+                forecast_periods=forecast_periods,
+                window=cfg.window,
+                metric="market_share"
+            )
 
             #    Normalize markets
             for i in range(fc_len):
@@ -372,14 +375,15 @@ def save_configuration(payload: SaveConfigRequest):
 
                 source_data[src]["months"] = [m for m, _ in pairs_sorted]
                 source_data[src]["values"] = [v for _, v in pairs_sorted]
-                source_fc[src] = process_growth_forecast_auto(
-                    source_data[src]["months"],
-                    source_data[src]["values"],
-                    cfg.train_start_date,
-                    cfg.train_end_date,
-                    forecast_periods,
-                    metric="market_share"
-                )
+                source_fc[src] = process_moving_average_forecast(
+                series_months=source_data[src]["months"],
+                series_values=source_data[src]["values"],
+                train_start_date=cfg.train_start_date,
+                train_end_date=cfg.train_end_date,
+                forecast_periods=forecast_periods,
+                window=cfg.window,
+                metric="market_share"
+            )
 
             #    Normalize sources
             #   Build base weights (from historical data)
@@ -428,13 +432,15 @@ def save_configuration(payload: SaveConfigRequest):
             product_fc = {}
 
             for key, d in product_data.items():
-                product_fc[key] = process_growth_forecast_auto(
-                    d["months"], d["values"],
-                    cfg.train_start_date,
-                    cfg.train_end_date,
-                    forecast_periods,
-                    metric="market_share"
-                )
+                product_fc[key] = process_moving_average_forecast(
+                series_months=d["months"],
+                series_values=d["values"],
+                train_start_date=cfg.train_start_date,
+                train_end_date=cfg.train_end_date,
+                forecast_periods=forecast_periods,
+                window=cfg.window,
+                metric="market_share"
+            )
 
             #    Normalize per (market + source)
             groups = set((m, s) for m, s, _ in product_fc)

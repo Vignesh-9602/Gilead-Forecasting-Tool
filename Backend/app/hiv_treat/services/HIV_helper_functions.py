@@ -1,6 +1,9 @@
 from app.db.connection import get_connection
 from app.services.growth_forecast_service import process_growth_forecast
 from app.services.forecast_service import process_forecast
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
+from dateutil.parser import parse
 
 
 # -----------------------------------
@@ -24,6 +27,10 @@ def normalize_shares(values):
     if total == 0:
         return values
     return [(v * 100.0) / total for v in values]
+
+
+def parse_month(month):
+    return parse(month)
 
 
 # -----------------------------------
@@ -301,3 +308,132 @@ def process_growth_forecast_auto(
 
 
     return result
+
+
+
+
+def process_moving_average_forecast(
+    series_months,
+    series_values,
+    train_start_date,
+    train_end_date,
+    forecast_periods,
+    window,
+    metric="market_volume",
+    multiplier=1.0,
+    multiplier_horizon="Forecast"
+):
+    """
+    Moving Average Forecast
+
+    Parameters
+    ----------
+    forecast_periods : int
+        Number of months to forecast.
+
+    window : int
+        Number of previous months to average.
+    """
+
+    train_start = parse_month(train_start_date)
+    train_end = parse_month(train_end_date)
+
+    train_months = []
+    train_values = []
+
+    # ----------------------------------
+    # Extract training data
+    # ----------------------------------
+    for month, value in zip(series_months, series_values):
+
+        dt = parse_month(month)
+
+        if train_start <= dt <= train_end:
+            train_months.append(dt.strftime("%Y-%m-%d"))
+            train_values.append(float(value))
+
+    # ----------------------------------
+    # Validation
+    # ----------------------------------
+    forecast_periods = int(forecast_periods)
+    window = int(window)
+
+    if forecast_periods <= 0:
+        raise ValueError("forecast_periods must be greater than 0.")
+
+    if window <= 0:
+        raise ValueError("window must be greater than 0.")
+
+    if len(train_values) < window:
+        raise ValueError(
+            f"Need at least {window} historical observations. "
+            f"Only {len(train_values)} available."
+        )
+
+    # ----------------------------------
+    # Forecast months
+    # ----------------------------------
+    last_train = parse_month(train_months[-1])
+
+    forecast_months = [
+        (last_train + relativedelta(months=i)).strftime("%Y-%m-%d")
+        for i in range(1, forecast_periods + 1)
+    ]
+
+    history = train_values.copy()
+    forecast_values = []
+
+    # ----------------------------------
+    # Rolling Moving Average Forecast
+    # ----------------------------------
+    for _ in range(forecast_periods):
+
+        avg = sum(history[-window:]) / window
+
+        history.append(avg)
+        forecast_values.append(avg)
+
+    forecast_values = [round(v, 2) for v in forecast_values]
+
+    # ----------------------------------
+    # Apply multiplier
+    # ----------------------------------
+    mh = (multiplier_horizon or "Forecast").lower()
+
+    apply_to_history = mh in (
+        "history",
+        "both history & forecast"
+    )
+
+    apply_to_forecast = mh in (
+        "forecast",
+        "both history & forecast"
+    )
+
+    history_values = train_values.copy()
+
+    if apply_to_history:
+        history_values = [
+            round(v * multiplier, 2)
+            for v in history_values
+        ]
+
+    if apply_to_forecast:
+        forecast_values = [
+            round(v * multiplier, 2)
+            for v in forecast_values
+        ]
+
+    return {
+        "months": train_months + forecast_months,
+        "train_values": history_values,
+        "forecast_values": forecast_values,
+        "forecast_start_index": len(history_values),
+        "factors": {
+            "model_type": "moving_average",
+            "window": window,
+            "forecast_periods": forecast_periods,
+            "multiplier": multiplier,
+            "multiplier_horizon": multiplier_horizon
+        }
+    }

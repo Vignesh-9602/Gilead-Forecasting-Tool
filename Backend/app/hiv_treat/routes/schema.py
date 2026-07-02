@@ -9,6 +9,7 @@ class Configuration(BaseModel):
     train_end_date: str
     model_granularity: str
     forecast_periods: str
+    window: int = 6
 
 class ConfigurationResponse(BaseModel):
     ta_name: str
