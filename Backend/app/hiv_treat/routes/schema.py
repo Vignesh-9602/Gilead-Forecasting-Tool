@@ -58,10 +58,12 @@ class ETSFactors(BaseModel):
 
 
 class GrowthFactors(BaseModel):
-    total_growth: float
-    duration: int
-    k_value: float
-    trajectory_start: str
+    window: Optional[int] = None
+    forecast_periods: Optional[int] = None
+    total_growth: Optional[float] = None
+    duration: Optional[int] = None
+    k_value: Optional[float] = None
+    trajectory_start: Optional[str] = None
     
 
 class Factors(BaseModel):
