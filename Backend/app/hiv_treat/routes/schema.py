@@ -73,10 +73,12 @@ class Factors(BaseModel):
 
 class RecalculateRequest(BaseModel):
     ta_name: str
-    selected_filter: SelectedFilter
+    selected_filter: "SelectedFilter"
     scenario_name: Optional[str] = "Base"
+    selected_tab: Optional[str] = None
+    metric: Optional[str] = "market_share"   # "market_share" | "volume" -- interpretation of target growth
     model_type: str
-    factors: Optional[Factors] = None
+    factors: Optional["Factors"] = None
 
 
 
