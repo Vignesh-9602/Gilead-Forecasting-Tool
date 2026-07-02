@@ -442,6 +442,11 @@ def build_factors(cur, ta, scenario):
         return {}
 
     data      = row[0]
+    print("================================")
+    print("Forecast Factors:")
+    print(data.get("factors"))
+    print("================================")
+    factors = data.get("factors", {})
     months    = data.get("months", [])
     split_idx = data.get("forecast_start_index", 0)
     trajectory_start = months[split_idx] if split_idx < len(months) else None
@@ -452,6 +457,7 @@ def build_factors(cur, ta, scenario):
         "beta":  f.get("beta"),
         "gamma": f.get("gamma")
     }
+
 
     if is_base:
         cur.execute("""
@@ -464,7 +470,7 @@ def build_factors(cur, ta, scenario):
         """, (ta,))
     else:
         cur.execute("""
-            SELECT forecast_data->'factors'
+            SELECT forecast_data->'factors' as factors
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_share'
@@ -474,6 +480,11 @@ def build_factors(cur, ta, scenario):
 
     row  = cur.fetchone()
     traj = row[0].get("trajectory", {}) if row else {}
+    m_data = row[0] if row else {}
+
+    moving_average = {
+    "window": m_data.get("window")
+    }
 
     linear = {
         "duration":         traj.get("duration"),
@@ -491,6 +502,7 @@ def build_factors(cur, ta, scenario):
 
     return {
         "ets":                ets,
+        "moving_average":     moving_average,
         "linear":             linear,
         "scurve":             curve(),
         "multiplier":         1,
