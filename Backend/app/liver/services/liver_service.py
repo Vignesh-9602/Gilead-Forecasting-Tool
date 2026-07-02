@@ -539,6 +539,84 @@ def _fmt_hier(tab, month_labels, forecast_start_index, to_int=False, chart_paren
     }
 
 
+def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
+    """In-place: scale non-Total forecast values so they sum to tmv_fc per period."""
+    n_fc = len(tmv_fc)
+    if not n_fc:
+        return
+
+    # Chart series
+    active_s = [s for s in tab_data.chart.series if s.label.lower() != "total"]
+    s_sums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in active_s) for i in range(n_fc)]
+    for s in active_s:
+        s.forecast_values = [
+            s.forecast_values[i] * tmv_fc[i] / s_sums[i] if i < len(s.forecast_values) and s_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Table rows
+    non_tot = [r for r in tab_data.table.rows if r.hierarchy.lower() != "total"]
+    tot_row = next((r for r in tab_data.table.rows if r.hierarchy.lower() == "total"), None)
+    r_sums  = [sum(r.values[fsi+i] if fsi+i < len(r.values) else 0.0 for r in non_tot) for i in range(n_fc)]
+    for r in non_tot:
+        r.values = list(r.values[:fsi]) + [
+            r.values[fsi+i] * tmv_fc[i] / r_sums[i] if fsi+i < len(r.values) and r_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+    if tot_row:
+        n = fsi + n_fc
+        tot = [0.0] * n
+        for r in non_tot:
+            for i, v in enumerate(r.values[:n]):
+                tot[i] += v
+        tot_row.values = tot
+
+
+def _scale_hier_to_tmv(hier_data: HierarchicalTabData, tmv_fc: list, fsi: int) -> None:
+    """In-place: scale all children so the grand-total forecast matches tmv_fc per period."""
+    n_fc = len(tmv_fc)
+    if not n_fc:
+        return
+
+    # Table: scale all children proportionally
+    all_ch  = [c for r in hier_data.table.rows for c in r.children]
+    ch_sums = [sum(c.values[fsi+i] if fsi+i < len(c.values) else 0.0 for c in all_ch) for i in range(n_fc)]
+    for c in all_ch:
+        c.values = list(c.values[:fsi]) + [
+            c.values[fsi+i] * tmv_fc[i] / ch_sums[i] if fsi+i < len(c.values) and ch_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Recompute parent totals
+    n = fsi + n_fc
+    for r in hier_data.table.rows:
+        tot = [0.0] * n
+        for c in r.children:
+            for i, v in enumerate(c.values[:n]):
+                tot[i] += v
+        r.total = tot
+
+    # Chart: scale child series
+    plabels = {r.hierarchy for r in hier_data.table.rows}
+    ch_ser  = [s for s in hier_data.chart.series if s.label not in plabels]
+    csums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_ser) for i in range(n_fc)]
+    for s in ch_ser:
+        s.forecast_values = [
+            s.forecast_values[i] * tmv_fc[i] / csums[i] if i < len(s.forecast_values) and csums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Recompute parent chart series as sum of their children
+    for ps in hier_data.chart.series:
+        if ps.label not in plabels:
+            continue
+        ch_for_p = [s for s in hier_data.chart.series if s.label.startswith(f"{ps.label} - ")]
+        if ch_for_p:
+            n_tr = max(len(s.train_values) for s in ch_for_p)
+            ps.train_values    = [sum(s.train_values[i]    if i < len(s.train_values)    else 0.0 for s in ch_for_p) for i in range(n_tr)]
+            ps.forecast_values = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_for_p) for i in range(n_fc)]
+
+
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
                                   granularity="monthly",
@@ -623,20 +701,35 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         pwpy_mv = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_volume")
         pwpy_ms = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_share")
 
-    def bflat(rows, label, to_int=False):
+    # TMV forecast values — used to scale tabs 2-5 so their totals match Tab 1
+    _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
+
+    def bflat_mv(rows, label, to_int=False):
+        tab_data = _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
+                                   selected_label=label, auto_model="linear", add_total=True)
+        _scale_flat_to_tmv(tab_data, _tmv_fc, fsi)
+        return _fmt_flat(tab_data, month_labels, fsi, to_int=to_int)
+
+    def bflat_ms(rows, label):
         return _fmt_flat(
             _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
                             selected_label=label, auto_model="linear", add_total=True),
-            month_labels, fsi, to_int=to_int,
+            month_labels, fsi,
         )
 
-    def bhier(rows, parent_lbl, child_lbl, to_int=False):
+    def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
+        hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
+                                                 selected_parent=parent_lbl, selected_child=child_lbl,
+                                                 auto_model="linear")
+        _scale_hier_to_tmv(hier_data, _tmv_fc, fsi)
+        return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
+
+    def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
                                          selected_parent=parent_lbl, selected_child=child_lbl,
                                          auto_model="linear"),
-            month_labels, fsi, to_int=to_int,
-            chart_parent_filter=parent_lbl,
+            month_labels, fsi, chart_parent_filter=parent_lbl,
         )
 
     market_analysis = {
@@ -645,24 +738,98 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             "market_share":  tab1_ms,
         },
         "product_distribution": {
-            "market_volume": bflat(pd_mv,  tab2_label, to_int=True),
-            "market_share":  bflat(pd_ms,  tab2_label),
+            "market_volume": bflat_mv(pd_mv,  tab2_label, to_int=True),
+            "market_share":  bflat_ms(pd_ms,  tab2_label),
         },
         "market_distribution": {
-            "market_volume": bflat(pyd_mv, tab3_label, to_int=True),
-            "market_share":  bflat(pyd_ms, tab3_label),
+            "market_volume": bflat_mv(pyd_mv, tab3_label, to_int=True),
+            "market_share":  bflat_ms(pyd_ms, tab3_label),
         },
         "payer_product": {
-            "market_volume": bhier(pwp_mv,  tab3_label, tab2_label, to_int=True),
-            "market_share":  bhier(pwp_ms,  tab3_label, tab2_label),
+            "market_volume": bhier_mv(pwp_mv,  tab3_label, tab2_label, to_int=True),
+            "market_share":  bhier_ms(pwp_ms,  tab3_label, tab2_label),
         },
         "product_payer": {
-            "market_volume": bhier(pwpy_mv, tab2_label, tab3_label, to_int=True),
-            "market_share":  bhier(pwpy_ms, tab2_label, tab3_label),
+            "market_volume": bhier_mv(pwpy_mv, tab2_label, tab3_label, to_int=True),
+            "market_share":  bhier_ms(pwpy_ms, tab2_label, tab3_label),
         },
     }
 
+    # Recompute market_share from scaled market_volume so all tabs are consistent
+    market_analysis = _recompute_all_market_shares(market_analysis)
+
     return month_labels, forecast_start_index, market_analysis, tab1_ets
+
+
+def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
+    """
+    Derive yearly market_analysis from monthly by summing each month's values
+    into its calendar year. Guarantees yearly == sum(monthly) for every period.
+    market_share is recomputed from the aggregated yearly market_volume.
+    """
+    def _group_sum(month_labels, values):
+        year_sums = {}
+        for i, m in enumerate(month_labels):
+            y = m[:4]
+            year_sums[y] = year_sums.get(y, 0.0) + (float(values[i]) if i < len(values) else 0.0)
+        years = list(dict.fromkeys(m[:4] for m in month_labels))
+        return years, [year_sums.get(y, 0.0) for y in years]
+
+    ma_yearly = {}
+    for tab_key, metrics in ma_monthly.items():
+        ma_yearly[tab_key] = {}
+        for metric, data in metrics.items():
+            chart  = data.get("chart", {})
+            table  = data.get("table", {})
+            months = chart.get("months", [])
+            fsi    = chart.get("forecast_start_index", 0)
+
+            hist_months = months[:fsi]
+            fc_months   = months[fsi:]
+
+            hist_years, _ = _group_sum(hist_months, [])
+            fc_years,   _ = _group_sum(fc_months,   [])
+            yearly_months  = hist_years + fc_years
+            yearly_fsi     = len(hist_years)
+
+            # Chart series
+            new_series = []
+            for s in chart.get("series", []):
+                _, h = _group_sum(hist_months, s.get("history",  []))
+                _, f = _group_sum(fc_months,   s.get("forecast", []))
+                new_series.append({"label": s["label"], "history": h, "forecast": f})
+
+            # Table
+            table_type = table.get("type", "flat")
+            if table_type == "flat":
+                new_rows = []
+                for r in table.get("rows", []):
+                    vals = r.get("values", [])
+                    _, h = _group_sum(hist_months, vals[:fsi])
+                    _, f = _group_sum(fc_months,   vals[fsi:])
+                    new_rows.append({"label": r["label"], "values": h + f})
+                new_table = {"type": "flat", "rows": new_rows}
+            else:
+                new_rows = []
+                for r in table.get("rows", []):
+                    tot = r.get("values", [])
+                    _, th = _group_sum(hist_months, tot[:fsi])
+                    _, tf = _group_sum(fc_months,   tot[fsi:])
+                    new_children = []
+                    for c in r.get("children", []):
+                        cv = c.get("values", [])
+                        _, ch = _group_sum(hist_months, cv[:fsi])
+                        _, cf = _group_sum(fc_months,   cv[fsi:])
+                        new_children.append({"label": c["label"], "values": ch + cf})
+                    new_rows.append({"label": r["label"], "values": th + tf, "children": new_children})
+                new_table = {"type": "hierarchy", "rows": new_rows}
+
+            ma_yearly[tab_key][metric] = {
+                "chart": {"months": yearly_months, "forecast_start_index": yearly_fsi, "series": new_series},
+                "table": new_table,
+            }
+
+    return _recompute_all_market_shares(ma_yearly)
 
 
 def _build_market_analysis_both_granularities(
@@ -673,9 +840,8 @@ def _build_market_analysis_both_granularities(
 ):
     """
     Builds market_analysis for both monthly and yearly granularities.
-    Returns (merged_market_analysis, tab1_ets) where each metric is nested as
-    { monthly: {chart, table}, yearly: {chart, table} }.
-    forecast_periods_months must be in months (as stored in config).
+    Yearly is derived by aggregating monthly values per calendar year so that
+    sum(monthly forecast for a year) == yearly forecast value exactly.
     """
     _, _, ma_monthly, tab1_ets = _build_all_tabs_both_metrics(
         cur, ta, from_year, from_month,
@@ -684,14 +850,7 @@ def _build_market_analysis_both_granularities(
         sel_payer=sel_payer, sel_product=sel_product,
         force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
     )
-    forecast_periods_years = max(1, round(forecast_periods_months / 12))
-    _, _, ma_yearly, _ = _build_all_tabs_both_metrics(
-        cur, ta, from_year, 0,
-        train_end_year, 0, forecast_periods_years, factors,
-        granularity="yearly",
-        sel_payer=sel_payer, sel_product=sel_product,
-        force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
-    )
+    ma_yearly = _aggregate_monthly_to_yearly(ma_monthly)
 
     merged = {}
     for tab_key, metrics in ma_monthly.items():
