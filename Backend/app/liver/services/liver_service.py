@@ -764,8 +764,11 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
 def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
     """
     Derive yearly market_analysis from monthly by summing each month's values
-    into its calendar year. Guarantees yearly == sum(monthly) for every period.
-    market_share is recomputed from the aggregated yearly market_volume.
+    into its calendar year. Parent values are always recomputed from children
+    (not from stored parent values) to avoid int() truncation drift.
+    After aggregation, flat and hierarchical market_volume tabs are re-scaled
+    to match the yearly TMV so all tabs are consistent.
+    market_share is recomputed from the final scaled market_volume.
     """
     def _group_sum(month_labels, values):
         year_sums = {}
@@ -774,6 +777,9 @@ def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
             year_sums[y] = year_sums.get(y, 0.0) + (float(values[i]) if i < len(values) else 0.0)
         years = list(dict.fromkeys(m[:4] for m in month_labels))
         return years, [year_sums.get(y, 0.0) for y in years]
+
+    def _vsum(series_list, key, idx):
+        return sum(s.get(key, [])[idx] if idx < len(s.get(key, [])) else 0.0 for s in series_list)
 
     ma_yearly = {}
     for tab_key, metrics in ma_monthly.items():
@@ -791,43 +797,165 @@ def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
             fc_years,   _ = _group_sum(fc_months,   [])
             yearly_months  = hist_years + fc_years
             yearly_fsi     = len(hist_years)
+            n_yrs          = len(yearly_months)
 
-            # Chart series
-            new_series = []
-            for s in chart.get("series", []):
-                _, h = _group_sum(hist_months, s.get("history",  []))
-                _, f = _group_sum(fc_months,   s.get("forecast", []))
-                new_series.append({"label": s["label"], "history": h, "forecast": f})
-
-            # Table
             table_type = table.get("type", "flat")
+
             if table_type == "flat":
-                new_rows = []
+                # Aggregate non-Total rows; recompute Total from them
+                non_tot, tot_row_out = [], None
                 for r in table.get("rows", []):
                     vals = r.get("values", [])
                     _, h = _group_sum(hist_months, vals[:fsi])
                     _, f = _group_sum(fc_months,   vals[fsi:])
-                    new_rows.append({"label": r["label"], "values": h + f})
+                    nr = {"label": r["label"], "values": h + f}
+                    if r["label"].lower() == "total":
+                        tot_row_out = nr
+                    else:
+                        non_tot.append(nr)
+                if tot_row_out:
+                    tot_row_out["values"] = [
+                        sum(r["values"][i] for r in non_tot if i < len(r["values"]))
+                        for i in range(n_yrs)
+                    ]
+                new_rows  = ([tot_row_out] if tot_row_out else []) + non_tot
                 new_table = {"type": "flat", "rows": new_rows}
-            else:
-                new_rows = []
+
+                # Chart: aggregate each series; Total series recomputed from non-Total
+                non_tot_ser, tot_ser_out = [], None
+                for s in chart.get("series", []):
+                    _, h = _group_sum(hist_months, s.get("history",  []))
+                    _, f = _group_sum(fc_months,   s.get("forecast", []))
+                    ns = {"label": s["label"], "history": h, "forecast": f}
+                    if s["label"].lower() == "total":
+                        tot_ser_out = ns
+                    else:
+                        non_tot_ser.append(ns)
+                if tot_ser_out:
+                    tot_ser_out["history"]  = [_vsum(non_tot_ser, "history",  i) for i in range(yearly_fsi)]
+                    tot_ser_out["forecast"] = [_vsum(non_tot_ser, "forecast", i) for i in range(len(fc_years))]
+                new_series = ([tot_ser_out] if tot_ser_out else []) + non_tot_ser
+
+            else:  # hierarchy
+                new_rows   = []
+                new_series = []
+                plabels    = set()
+
                 for r in table.get("rows", []):
-                    tot = r.get("values", [])
-                    _, th = _group_sum(hist_months, tot[:fsi])
-                    _, tf = _group_sum(fc_months,   tot[fsi:])
+                    plabels.add(r["label"])
                     new_children = []
                     for c in r.get("children", []):
                         cv = c.get("values", [])
                         _, ch = _group_sum(hist_months, cv[:fsi])
                         _, cf = _group_sum(fc_months,   cv[fsi:])
                         new_children.append({"label": c["label"], "values": ch + cf})
-                    new_rows.append({"label": r["label"], "values": th + tf, "children": new_children})
+                    # Parent = sum of children (not stored parent — avoids int() drift)
+                    parent_vals = [
+                        sum(c["values"][i] for c in new_children if i < len(c["values"]))
+                        for i in range(n_yrs)
+                    ]
+                    new_rows.append({"label": r["label"], "values": parent_vals, "children": new_children})
                 new_table = {"type": "hierarchy", "rows": new_rows}
+
+                # Chart: aggregate child series; parent series = sum of their children
+                child_ser_map = {}  # parent_label → [child series]
+                for s in chart.get("series", []):
+                    if s["label"] in plabels:
+                        continue  # skip old parent series; we'll recompute
+                    _, h = _group_sum(hist_months, s.get("history",  []))
+                    _, f = _group_sum(fc_months,   s.get("forecast", []))
+                    ns = {"label": s["label"], "history": h, "forecast": f}
+                    # Determine parent by matching "Parent - Child" label format
+                    parent = next((pl for pl in plabels if s["label"].startswith(f"{pl} - ")), None)
+                    if parent:
+                        child_ser_map.setdefault(parent, []).append(ns)
+                    new_series.append(ns)
+
+                for pl in plabels:
+                    ch_ser = child_ser_map.get(pl, [])
+                    n_h = max((len(s.get("history",  [])) for s in ch_ser), default=0)
+                    n_f = max((len(s.get("forecast", [])) for s in ch_ser), default=0)
+                    new_series.insert(0, {
+                        "label":    pl,
+                        "history":  [_vsum(ch_ser, "history",  i) for i in range(n_h)],
+                        "forecast": [_vsum(ch_ser, "forecast", i) for i in range(n_f)],
+                    })
 
             ma_yearly[tab_key][metric] = {
                 "chart": {"months": yearly_months, "forecast_start_index": yearly_fsi, "series": new_series},
                 "table": new_table,
             }
+
+    # Re-scale flat and hierarchical market_volume tabs to match yearly TMV
+    # (removes residual int() truncation drift accumulated from 12-month summation)
+    tmv_chart = (ma_yearly.get("total_market_volume", {})
+                          .get("market_volume", {})
+                          .get("chart", {}))
+    yearly_fsi_tmv = tmv_chart.get("forecast_start_index", 0)
+    tmv_ser        = tmv_chart.get("series", [{}])[0] if tmv_chart.get("series") else {}
+    tmv_fc_yearly  = tmv_ser.get("forecast", [])
+
+    for tab_key in ("product_distribution", "market_distribution"):
+        mv = ma_yearly.get(tab_key, {}).get("market_volume", {})
+        if mv and tmv_fc_yearly:
+            chart  = mv["chart"]
+            table  = mv["table"]
+            non_s  = [s for s in chart.get("series", []) if s["label"].lower() != "total"]
+            s_sums = [sum(s.get("forecast", [])[i] if i < len(s.get("forecast", [])) else 0.0 for s in non_s) for i in range(len(tmv_fc_yearly))]
+            for s in non_s:
+                s["forecast"] = [s["forecast"][i] * tmv_fc_yearly[i] / s_sums[i] if i < len(s.get("forecast", [])) and s_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+            tot_s = next((s for s in chart.get("series", []) if s["label"].lower() == "total"), None)
+            if tot_s:
+                tot_s["forecast"] = tmv_fc_yearly[:]
+            non_r  = [r for r in table.get("rows", []) if r["label"].lower() != "total"]
+            r_sums = [sum(r["values"][yearly_fsi_tmv+i] if yearly_fsi_tmv+i < len(r["values"]) else 0.0 for r in non_r) for i in range(len(tmv_fc_yearly))]
+            for r in non_r:
+                fc = [r["values"][yearly_fsi_tmv+i] * tmv_fc_yearly[i] / r_sums[i] if yearly_fsi_tmv+i < len(r["values"]) and r_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+                r["values"] = list(r["values"][:yearly_fsi_tmv]) + fc
+            tot_r = next((r for r in table.get("rows", []) if r["label"].lower() == "total"), None)
+            if tot_r:
+                tot_r["values"] = list(tot_r["values"][:yearly_fsi_tmv]) + tmv_fc_yearly[:]
+
+    for tab_key in ("payer_product", "product_payer"):
+        mv = ma_yearly.get(tab_key, {}).get("market_volume", {})
+        if mv and tmv_fc_yearly:
+            chart   = mv["chart"]
+            table   = mv["table"]
+            plabels = {r["label"] for r in table.get("rows", [])}
+            ch_ser  = [s for s in chart.get("series", []) if s["label"] not in plabels]
+            cs_sums = [sum(s.get("forecast", [])[i] if i < len(s.get("forecast", [])) else 0.0 for s in ch_ser) for i in range(len(tmv_fc_yearly))]
+            for s in ch_ser:
+                s["forecast"] = [s["forecast"][i] * tmv_fc_yearly[i] / cs_sums[i] if i < len(s.get("forecast", [])) and cs_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+            # Recompute parent chart series from scaled children
+            for ps in chart.get("series", []):
+                if ps["label"] not in plabels:
+                    continue
+                ch = [s for s in ch_ser if s["label"].startswith(f"{ps['label']} - ")]
+                if ch:
+                    ps["forecast"] = [_vsum(ch, "forecast", i) for i in range(len(tmv_fc_yearly))]
+            # Scale table children
+            all_ch  = [c for r in table.get("rows", []) for c in r.get("children", [])]
+            ct_sums = [sum(c["values"][yearly_fsi_tmv+i] if yearly_fsi_tmv+i < len(c["values"]) else 0.0 for c in all_ch) for i in range(len(tmv_fc_yearly))]
+            for c in all_ch:
+                fc = [c["values"][yearly_fsi_tmv+i] * tmv_fc_yearly[i] / ct_sums[i] if yearly_fsi_tmv+i < len(c["values"]) and ct_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+                c["values"] = list(c["values"][:yearly_fsi_tmv]) + fc
+            # Recompute parent table values from scaled children
+            for r in table.get("rows", []):
+                n = yearly_fsi_tmv + len(tmv_fc_yearly)
+                r["values"] = [sum(c["values"][i] for c in r.get("children", []) if i < len(c["values"])) for i in range(n)]
+
+    # Round all market_volume forecast values to int after scaling
+    for tab_key, metrics in ma_yearly.items():
+        mv = metrics.get("market_volume", {})
+        if not mv:
+            continue
+        yr_fsi = mv.get("chart", {}).get("forecast_start_index", 0)
+        for s in mv.get("chart", {}).get("series", []):
+            s["forecast"] = [int(round(v)) for v in s.get("forecast", [])]
+        for r in mv.get("table", {}).get("rows", []):
+            r["values"] = list(r["values"][:yr_fsi]) + [int(round(v)) for v in r["values"][yr_fsi:]]
+            for c in r.get("children", []):
+                c["values"] = list(c["values"][:yr_fsi]) + [int(round(v)) for v in c["values"][yr_fsi:]]
 
     return _recompute_all_market_shares(ma_yearly)
 
