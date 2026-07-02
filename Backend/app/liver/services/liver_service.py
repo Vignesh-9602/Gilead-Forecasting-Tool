@@ -890,6 +890,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
                 scenario_name=payload.scenario,
             )
+            market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
         response_factors = _build_response_factors(factors, _traj_start)
@@ -1071,6 +1072,7 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             sel_payer=market, sel_product=product,
             force_tab1_ets=force_tab1, scenario_name=payload.scenario_name,
         )
+        market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         _traj_start_rc = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
         response_factors = _build_response_factors(factors, _traj_start_rc)
@@ -1209,18 +1211,29 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         ms_row_map = {r.get("label", ""): r for r in ms_data.get("table", {}).get("rows", [])}
         ms_ser_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
 
+        # Use column sum of non-Total rows as denominator so shares always sum to 100%
+        non_total_rows = [
+            r for r in mv_data.get("table", {}).get("rows", [])
+            if r.get("label", "").lower() != "total"
+        ]
+        tab_n = max((len(r.get("values", [])) for r in non_total_rows), default=0)
+        col_sums = [
+            sum(float(r["values"][i]) for r in non_total_rows if i < len(r.get("values", [])))
+            for i in range(tab_n)
+        ]
+
         for r in mv_data.get("table", {}).get("rows", []):
             lbl = r.get("label", "")
             if lbl.lower() == "total":
                 if lbl in ms_row_map:
-                    ms_row_map[lbl]["values"] = [100.0] * n
+                    ms_row_map[lbl]["values"] = [100.0] * tab_n
                 continue
             mv_vals = r.get("values", [])
             ms_vals = [
-                round(float(mv_vals[i]) / float(total_vals[i]) * 100, 4)
-                if i < len(mv_vals) and i < n and float(total_vals[i]) != 0
+                round(float(mv_vals[i]) / col_sums[i] * 100, 4)
+                if i < len(mv_vals) and i < tab_n and col_sums[i] != 0
                 else 0.0
-                for i in range(n)
+                for i in range(tab_n)
             ]
             if lbl in ms_row_map:
                 ms_row_map[lbl]["values"] = ms_vals
@@ -1228,7 +1241,7 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                 ms_ser_map[lbl]["history"]  = ms_vals[:fsi]
                 ms_ser_map[lbl]["forecast"] = ms_vals[fsi:]
 
-    # ── Hierarchical cross-tabs (4, 5): child / parent_total * 100 ────────
+    # ── Hierarchical cross-tabs (4, 5): child / sum(children) * 100 ─────────
     for tab in ("payer_product", "product_payer"):
         if tab not in market_analysis:
             continue
@@ -1241,20 +1254,32 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         ms_chart_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
 
         for mv_row in mv_data.get("table", {}).get("rows", []):
-            parent_lbl  = mv_row.get("label", "")
-            parent_vals = mv_row.get("values", [])
-            ms_parent   = ms_hier_map.get(parent_lbl, {})
-            if ms_parent:
-                ms_parent["values"] = [100.0] * n
+            parent_lbl = mv_row.get("label", "")
+            children   = mv_row.get("children", [])
+            ms_parent  = ms_hier_map.get(parent_lbl, {})
 
-            for child in mv_row.get("children", []):
+            if not children:
+                continue
+
+            # Derive length and per-period column sum directly from children
+            # to avoid rounding drift when parent_vals used to_int=True
+            hier_n = max((len(c.get("values", [])) for c in children), default=0)
+            child_col_sums = [
+                sum(float(c["values"][i]) for c in children if i < len(c.get("values", [])))
+                for i in range(hier_n)
+            ]
+
+            if ms_parent:
+                ms_parent["values"] = [100.0] * hier_n
+
+            for child in children:
                 child_lbl  = child.get("label", "")
                 child_vals = child.get("values", [])
                 child_ms   = [
-                    round(float(child_vals[i]) / float(parent_vals[i]) * 100, 4)
-                    if i < len(child_vals) and i < len(parent_vals) and float(parent_vals[i]) != 0
+                    round(float(child_vals[i]) / child_col_sums[i] * 100, 4)
+                    if i < len(child_vals) and i < hier_n and child_col_sums[i] != 0
                     else 0.0
-                    for i in range(n)
+                    for i in range(hier_n)
                 ]
                 if ms_parent:
                     for c in ms_parent.get("children", []):
