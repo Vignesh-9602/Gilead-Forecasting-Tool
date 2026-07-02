@@ -237,6 +237,7 @@ class LiverRecalculateRequest(BaseModel):
     scenario_name: str = "Base"
     model_type: str = "ets"             # "ets" | "linear" | "exponential" | "logarithmic" | "scurve"
     factors: LiverRecalculateFactors
+    selected_tab: str = "total_market_volume"  # "total_market_volume" → affects all tabs; others → tab1 stays ETS
 
 
 # ---------------------------------------------------------------------------
