@@ -165,6 +165,11 @@ def normalize_shares_to_100(children_values_list, n):
     Given a list of raw-float volume lists (one per child), compute each
     child's percentage share of the total at each time index.
     Guaranteed to sum to exactly 100 across siblings by construction.
+
+    When the parent total is 0 (or negative), all children get 0% rather
+    than an equal split -- a 0-volume parent has no meaningful
+    distribution to show, and splitting evenly would misleadingly imply
+    each child still holds a nonzero share.
     """
     num_children = len(children_values_list)
     if num_children == 0:
@@ -182,7 +187,7 @@ def normalize_shares_to_100(children_values_list, n):
             if total > 0:
                 normalized[c][t] = round((val / total) * 100, 2)
             else:
-                normalized[c][t] = round(100 / num_children, 2)
+                normalized[c][t] = 0.0
 
     return normalized
 
