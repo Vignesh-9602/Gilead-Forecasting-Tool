@@ -1113,6 +1113,19 @@ def recalculate(payload: RecalculateRequest):
                         scenario_factors["ets"]["alpha"] = ets.get("alpha", scenario_factors["ets"].get("alpha"))
                         scenario_factors["ets"]["beta"] = ets.get("beta", scenario_factors["ets"].get("beta"))
                         scenario_factors["ets"]["gamma"] = ets.get("gamma", scenario_factors["ets"].get("gamma"))
+
+                    elif model_type == "moving_average":
+                        ma = growth or {}
+
+                        scenario_factors["moving_average"]["window"] = ma.get(
+                            "window",
+                            scenario_factors["moving_average"].get("window")
+                        )
+
+                        scenario_factors["moving_average"]["forecast_periods"] = ma.get(
+                            "forecast_periods",
+                            scenario_factors["moving_average"].get("forecast_periods")
+                        )
  
                     elif model_type in ("linear", "exponential", "logarithmic", "scurve", "s-curve"):
                         norm_key = "scurve" if model_type == "s-curve" else model_type
