@@ -454,7 +454,8 @@ def scenario_exists(cur, scenario_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def save_scenario(cur, payload, chart_data: dict):
+def save_scenario(cur, scenario_name: str, ta: str, payer: str, product: str,
+                  from_date: str, to_date: str, chart_data: dict, factors: dict):
     cur.execute("""
         INSERT INTO raw_liver.liver_scenarios
             (scenario_name, ta, payer, product, metric, from_date, to_date, chart_data, factors)
@@ -470,13 +471,9 @@ def save_scenario(cur, payload, chart_data: dict):
             factors    = EXCLUDED.factors,
             created_at = CURRENT_TIMESTAMP
     """, (
-        payload.scenario_name,
-        payload.ta,
-        payload.payer[0] if payload.payer else None,
-        payload.brand[0] if payload.brand else None,
-        payload.metric,
-        payload.from_date,
-        getattr(payload, "to_date", None),
+        scenario_name, ta, payer, product,
+        "market_volume",
+        from_date, to_date,
         json.dumps(chart_data),
-        json.dumps(payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()),
+        json.dumps(factors),
     ))
