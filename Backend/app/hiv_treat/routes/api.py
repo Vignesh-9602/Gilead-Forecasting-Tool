@@ -11,7 +11,8 @@ from app.hiv_treat.services.HIV_helper_functions import (
     get_total_market_volume,
     get_market_distribution,
     get_product_distribution,
-    get_market_wise_product
+    get_market_wise_product,
+    parse_month
 )
 from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response
 # -----------------------------------
@@ -833,23 +834,43 @@ def _compute_target_new_share(
         for j, vol_j in enumerate(new_vol_fv):
             idx = start_idx + j
             if idx < len(parent_vol) and parent_vol[idx]:
-                new_share_fv.append(vol_j / parent_vol[idx] * 100)
+                new_share_fv.append(round(vol_j / parent_vol[idx] * 100, 2))
             else:
                 new_share_fv.append(0.0)
         return new_share_fv
  
     else:  # "market_share"
         try:
-            new_fc = process_forecast(
-                months, base_share_full, train_start, train_end, fp,
-                model_type=model_type, metric="market_share",
-                alpha=alpha, beta=beta, gamma=gamma,
-                total_growth_pct=growth.get("total_growth", 0),
-                duration=growth.get("duration", fp),
-                k=growth.get("k_value"),
-                trajectory_start=growth.get("trajectory_start"),
-                multiplier=multiplier, multiplier_horizon=multiplier_horizon
-            )
+            if model_type == "moving_average":
+
+                new_fc = process_moving_average_forecast(
+                    series_months=months,
+                    series_values=target_vol_full,
+                    train_start_date=train_start,
+                    train_end_date=train_end,
+                    forecast_periods=fp,
+                    window=growth.get("window", 3),
+                    metric="market_volume",
+                    multiplier=multiplier,
+                    multiplier_horizon=multiplier_horizon
+                )
+
+            else:
+
+                new_fc = process_forecast(
+                    months, target_vol_full, train_start, train_end, fp,
+                    model_type=model_type,
+                    metric="market_volume",
+                    alpha=alpha,
+                    beta=beta,
+                    gamma=gamma,
+                    total_growth_pct=growth.get("total_growth", 0),
+                    duration=growth.get("duration", fp),
+                    k=growth.get("k_value"),
+                    trajectory_start=growth.get("trajectory_start"),
+                    multiplier=multiplier,
+                    multiplier_horizon=multiplier_horizon
+                )
         except Exception as e:
             print(f"Forecast failed (share-mode) target={target_key} error={e}")
             return base_share_full[-len(fv):] if fv else []
@@ -973,9 +994,9 @@ def recalculate(payload: RecalculateRequest):
                 factors = factors.model_dump()
  
             fp = config.get("forecast_periods")
+            
             train_start = config.get("train_start_date")
             train_end = config.get("train_end_date")
- 
             ets = (factors.get("ets") if isinstance(factors, dict) else {}) or {}
             growth = (factors.get("growth") if isinstance(factors, dict) else {}) or {}
             multiplier = factors.get("multiplier", 1.0) if isinstance(factors, dict) else 1.0
@@ -1002,16 +1023,38 @@ def recalculate(payload: RecalculateRequest):
                     values = tv + fv
                     if months and values:
                         try:
-                            new_fc = process_forecast(
-                                months, values, train_start, train_end, fp,
-                                model_type=model_type, metric="market_volume",
-                                alpha=ets.get("alpha"), beta=ets.get("beta"), gamma=ets.get("gamma"),
-                                total_growth_pct=growth.get("total_growth", 0),
-                                duration=growth.get("duration", fp),
-                                k=growth.get("k_value"),
-                                trajectory_start=growth.get("trajectory_start"),
-                                multiplier=multiplier, multiplier_horizon=multiplier_horizon
-                            )
+                            forecast_train_start = train_start
+
+                            if model_type == "moving_average":
+
+                                new_fc = process_moving_average_forecast(
+                                    series_months=months,
+                                    series_values=values,
+                                    train_start_date=forecast_train_start,
+                                    train_end_date=train_end,
+                                    forecast_periods=fp,
+                                    window=growth.get("window", 3),
+                                    metric="market_volume",
+                                    multiplier=multiplier,
+                                    multiplier_horizon=multiplier_horizon
+                                )
+
+                            else:
+
+                                new_fc = process_forecast(
+                                    months, values, forecast_train_start, train_end, fp,
+                                    model_type=model_type,
+                                    metric="market_volume",
+                                    alpha=ets.get("alpha"),
+                                    beta=ets.get("beta"),
+                                    gamma=ets.get("gamma"),
+                                    total_growth_pct=growth.get("total_growth", 0),
+                                    duration=growth.get("duration", fp),
+                                    k=growth.get("k_value"),
+                                    trajectory_start=growth.get("trajectory_start"),
+                                    multiplier=multiplier,
+                                    multiplier_horizon=multiplier_horizon
+                                )
                             overrides[total_key] = new_fc
                         except Exception as e:
                             print(f"Forecast failed key={total_key} error={e}")
@@ -1051,13 +1094,19 @@ def recalculate(payload: RecalculateRequest):
                         else:
                             parent_vol = None
  
+                    forecast_train_start = train_start
+
+                    if model_type == "moving_average":
+                        forecast_train_start = payload.selected_filter.start_date
+
                     target_new_fv = _compute_target_new_share(
                         target_key, base_map, parent_vol, months, n,
                         effective_metric, model_type,
                         ets.get("alpha"), ets.get("beta"), ets.get("gamma"),
                         growth, multiplier, multiplier_horizon,
-                        train_start, train_end, fp
+                        forecast_train_start, train_end, fp
                     )
+                                        
  
                     target_clipped, new_sibling_fv = _renormalize_siblings(
                         target_new_fv, base_map, sibling_keys
@@ -1115,17 +1164,31 @@ def recalculate(payload: RecalculateRequest):
                         scenario_factors["ets"]["gamma"] = ets.get("gamma", scenario_factors["ets"].get("gamma"))
 
                     elif model_type == "moving_average":
-                        ma = growth or {}
 
-                        scenario_factors["moving_average"]["window"] = ma.get(
+                        selected_end = payload.selected_filter.end_date
+
+                        fp_to_use = fp
+
+                        if selected_end:
+                            train_end_dt = parse_month(train_end)
+                            selected_end_dt = parse_month(selected_end)
+
+                            fp_to_use = (
+                                (selected_end_dt.year - train_end_dt.year) * 12
+                                + (selected_end_dt.month - train_end_dt.month)
+                            )
+
+                            fp_to_use = max(1, fp_to_use)
+
+                        growth = growth or {}
+                        growth["forecast_periods"] = fp_to_use
+
+                        scenario_factors["moving_average"]["window"] = growth.get(
                             "window",
                             scenario_factors["moving_average"].get("window")
                         )
 
-                        scenario_factors["moving_average"]["forecast_periods"] = ma.get(
-                            "forecast_periods",
-                            scenario_factors["moving_average"].get("forecast_periods")
-                        )
+                        scenario_factors["moving_average"]["forecast_periods"] = fp_to_use
  
                     elif model_type in ("linear", "exponential", "logarithmic", "scurve", "s-curve"):
                         norm_key = "scurve" if model_type == "s-curve" else model_type
