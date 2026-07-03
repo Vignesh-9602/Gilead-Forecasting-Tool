@@ -27,6 +27,7 @@ from app.hiv_treat.services.HIV_helper_functions import (
 )
 from app.services.growth_forecast_service import process_growth_forecast
 from app.hiv_treat.services import Model_Input_Service as MIS
+from app.hiv_treat.services.HIV_Treat_Retaining_Filters import get_user_configuration, save_user_configuration
 
 router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat"])
 
@@ -582,12 +583,26 @@ def get_model_input_filters(ta_name: str ):
             end_date = months_sorted[-1]
 
             # DEFAULT SELECTION
-            selected_filter = {
+            user_id = "system"
+
+            saved_config = get_user_configuration(
+                cur,
+                user_id,
+                ta
+            )
+
+            default_filter = {
                 "market": markets[0] if markets else None,
                 "product": products[0] if products else None,
                 "start_date": start_date,
                 "end_date": end_date
             }
+
+            selected_filter = (
+                saved_config
+                if saved_config
+                else default_filter
+            )
 
             return {
                 "ta_name": ta,
@@ -617,7 +632,17 @@ def apply_filter(payload: ApplyScenarioRequest):
 
             row = cur.fetchone()
             config = row[0] if row else {}
+            save_user_configuration(
+                cur=cur,
+                user_id="system",
+                ta_name=payload.ta_name,
+                market=payload.selected_filter.market,
+                product=payload.selected_filter.product,
+                start_date=payload.selected_filter.start_date,
+                end_date=payload.selected_filter.end_date
+            )
 
+            conn.commit()
             return build_apply_scenario_response(cur, payload, config)
 
     except Exception as e:

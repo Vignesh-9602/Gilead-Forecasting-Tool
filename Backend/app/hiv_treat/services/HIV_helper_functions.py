@@ -351,13 +351,7 @@ def process_moving_average_forecast(
         if train_start <= dt <= train_end:
             train_months.append(dt.strftime("%Y-%m-%d"))
             train_values.append(float(value))
-    print("MA TRAIN START:", train_start_date)
-    print("MA TRAIN END:", train_end_date)
-    print("MA TRAIN MONTHS:", train_months)
-    print("MA TRAIN VALUES:", train_values)
-    print("MA TRAIN COUNT:", len(train_values))
-    print("WINDOW:", window)
-    print("=" * 50)
+   
     # ----------------------------------
     # Validation
     # ----------------------------------
