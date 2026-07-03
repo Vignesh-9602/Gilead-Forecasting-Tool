@@ -237,6 +237,7 @@ class LiverRecalculateRequest(BaseModel):
     scenario_name: str = "Base"
     model_type: str = "ets"             # "ets" | "linear" | "exponential" | "logarithmic" | "scurve"
     factors: LiverRecalculateFactors
+    selected_tab: str = "total_market_volume"  # "total_market_volume" → affects all tabs; others → tab1 stays ETS
 
 
 # ---------------------------------------------------------------------------
@@ -248,15 +249,12 @@ class LiverTableRow(BaseModel):
     values: List[float]
 
 class LiverSaveScenarioRequest(BaseModel):
+    ta_name: str = "HCV"
     scenario_name: str
-    ta: str = "HCV"
-    payer: List[str] = []
-    brand: List[str] = []
-    metric: str = "market_volume"
-    from_date: str
+    selected_filter: LiverSelectedFilter
+    source_scenario: str = "Base"
     factors: Dict[str, Any]
-    chart_data: Dict[str, Any]
-    editable_table : Optional[List[LiverTableRow]] = None
+    market_analysis: Dict[str, Any] = {}
 
 
 class LiverSaveScenarioResponse(BaseModel):
