@@ -315,6 +315,13 @@ export const recalculateHIVScenario = (payload) =>
     payload
   );
 
+export const editHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/refresh-edits",
+    payload
+  );
+
+
 
 
 // export const mainConversation = () => {

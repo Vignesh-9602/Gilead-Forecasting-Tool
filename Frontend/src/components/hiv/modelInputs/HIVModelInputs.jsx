@@ -25,7 +25,7 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario } from "../../../services/apiService";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario } from "../../../services/apiService";
 import { useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -81,6 +81,8 @@ export default function HIVModelInput() {
     const [duration, setDuration] =
         useState(0);
 
+    const [numberOfMonths, setNumberOfMonths] = useState(3);
+
     const [kValue, setKValue] =
         useState(0);
 
@@ -115,6 +117,8 @@ export default function HIVModelInput() {
 
     const [activeTab, setActiveTab] = useState("total_market_volume");
 
+    const [selectedMetric, setSelectedMetric] = useState("market_volume");
+
     // const [showAnalysis, setShowAnalysis] =
     //     useState(false);
 
@@ -146,6 +150,10 @@ export default function HIVModelInput() {
 
         setDuration(
             model.duration ?? 12
+        );
+
+        setNumberOfMonths(
+            model.window ?? 3
         );
 
         setTrajectoryStart(
@@ -265,9 +273,12 @@ export default function HIVModelInput() {
                     ?.chart;
 
             setTrajectoryMonthOptions(
-                chartData?.months?.slice(
-                    chartData?.forecast_start_index
-                ) || []
+                (chartData?.months?.slice(chartData?.forecast_start_index) || []).map(
+                    (month) => ({
+                        value: dayjs(month, "MMM-YY").format("YYYY-MM-DD"),
+                        label: month,
+                    })
+                )
             );
 
             // setShowAnalysis(true);
@@ -337,6 +348,10 @@ export default function HIVModelInput() {
 
                 scenario_name: activeScenario,
 
+                selected_tab: activeTab,
+
+                metric: selectedMetric,
+
                 model_type: modelSelection,
 
                 factors: {
@@ -352,19 +367,27 @@ export default function HIVModelInput() {
                                 gamma: Number(gamma),
                             },
                         }
-                        : {
-                            growth: {
-                                total_growth: Number(totalGrowth),
-                                duration: Number(duration),
-                                k_value:
-                                    modelSelection === "linear"
-                                        ? 0
-                                        : Number(kValue),
-                                trajectory_start: trajectoryStart,
-                            },
-                        }),
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
                 },
             };
+
+            console.log("paylod--->", payload)
 
             const response =
                 await recalculateHIVScenario(
@@ -406,6 +429,95 @@ export default function HIVModelInput() {
         }
     };
 
+    const handleEdit = async (updatedMarketAnalysis) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: activeScenario,
+
+                model_type: modelSelection,
+
+                factors: {
+                    multiplier: Number(multiplier),
+
+                    multiplier_horizon: multiplierHorizon,
+
+                    ...(modelSelection === "ets"
+                        ? {
+                            ets: {
+                                alpha: Number(alpha),
+                                beta: Number(beta),
+                                gamma: Number(gamma),
+                            },
+                        }
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
+                },
+
+                selected_tab: activeTab,
+
+                selected_metric: selectedMetric,
+
+                market_analysis: updatedMarketAnalysis,
+            };
+
+            console.log("Edit Payload", payload);
+
+            const response = await editHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(
+                scenario.factors || {}
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios || []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario || ""
+            );
+
+            setMarketAnalysis(
+                scenario.market_analysis || {}
+            );
+
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const inputStyle = {
         bgcolor: "#fcfcfd",
         borderRadius: "8px",
@@ -430,11 +542,34 @@ export default function HIVModelInput() {
         },
     };
 
+    // const handleTabChange = (tab) => {
+    //     setActiveTab(tab);
+
+    //     if (tab === "total_market_volume") {
+    //         setModelSelection("ets");
+    //     } else {
+    //         setModelSelection("linear");
+    //     }
+    // };
+
+    const DEFAULT_METRIC_BY_TAB = {
+        total_market_volume: "market_volume",
+        market_distribution: "market_share",
+        product_distribution: "market_share",
+        market_product: "market_volume",
+        product_market: "market_volume",
+    };
+
     const handleTabChange = (tab) => {
+        setActiveTab(tab);
+
+        const metric = DEFAULT_METRIC_BY_TAB[tab];
+        setSelectedMetric(metric);
+
         if (tab === "total_market_volume") {
             setModelSelection("ets");
         } else {
-            setModelSelection("linear");
+            setModelSelection("moving_average");
         }
     };
 
@@ -779,6 +914,7 @@ export default function HIVModelInput() {
                                     disabled={!editable}
                                 >
                                     <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
+                                    <MenuItem value="moving_average">Moving Average </MenuItem>
                                     <MenuItem value="linear">Linear</MenuItem>
                                     <MenuItem value="exponential">Exponential</MenuItem>
                                     <MenuItem value="logarithmic">Logarithmic</MenuItem>
@@ -906,6 +1042,52 @@ export default function HIVModelInput() {
                                     />
                                 </Box>
                             </>
+                        )}
+
+                        {modelSelection === "moving_average" && (
+                            <Box>
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 0.5,
+                                        mb: 1,
+                                    }}
+                                >
+                                    <Typography sx={{ fontSize: "14px" }}>
+                                        NUMBER OF MONTHS
+                                    </Typography>
+
+                                    <Tooltip
+                                        title="Please enter the number of months"
+                                        arrow
+                                        placement="top"
+                                    >
+                                        <InfoOutlinedIcon
+                                            sx={{
+                                                fontSize: 16,
+                                                color: "#64748b",
+                                                cursor: "pointer",
+                                            }}
+                                        />
+                                    </Tooltip>
+                                </Box>
+
+                                <TextField
+                                    type="number"
+                                    value={numberOfMonths}
+                                    disabled={!editable}
+                                    onChange={(e) =>
+                                        setNumberOfMonths(Number(e.target.value))
+                                    }
+                                    inputProps={{
+                                        min: 1,
+                                        max: 24,
+                                        step: 1,
+                                    }}
+                                    sx={recalculateInputStyle}
+                                />
+                            </Box>
                         )}
 
                         {["linear", "exponential", "logarithmic", "scurve"].includes(modelSelection) && (
@@ -1045,10 +1227,10 @@ export default function HIVModelInput() {
                                         >
                                             {trajectoryMonthOptions.map((month) => (
                                                 <MenuItem
-                                                    key={month}
-                                                    value={month}
+                                                    key={month.value}
+                                                    value={month.value}
                                                 >
-                                                    {month}
+                                                    {month.label}
                                                 </MenuItem>
                                             ))}
                                         </Select>
@@ -1134,18 +1316,25 @@ export default function HIVModelInput() {
                 selectedMarket={marketFilter}
                 selectedProduct={productFilter}
                 onTabChange={handleTabChange}
+                selectedMetric={selectedMetric}
+                setSelectedMetric={setSelectedMetric}
+                onEdit={handleEdit}
             />
             <Dialog
                 open={openSaveScenario}
                 onClose={() => setOpenSaveScenario(false)}
                 maxWidth="xs"
                 fullWidth
+                PaperProps={{ sx: { borderRadius: "12px" } }}
             >
-                <DialogTitle>
+                <DialogTitle sx={{ fontWeight: 700, fontSize: "16px", color: "#0f172a", pb: 1 }}>
                     Save Scenario
                 </DialogTitle>
 
                 <DialogContent>
+                    <Typography sx={{ fontSize: "13px", color: "#64748b", mb: 2 }}>
+                        Enter a name for this scenario.
+                    </Typography>
                     <TextField
                         autoFocus
                         fullWidth
@@ -1155,22 +1344,26 @@ export default function HIVModelInput() {
                         onChange={(e) =>
                             setScenarioName(e.target.value)
                         }
-                        sx={{ mt: 1 }}
+                        variant="outlined"
+                        sx={{ "& .MuiOutlinedInput-root": { borderRadius: "8px" } }}
                     />
                 </DialogContent>
 
-                <DialogActions>
+                <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
                     <Button
+                        variant="outlined"
                         onClick={() => {
                             setOpenSaveScenario(false);
                             setScenarioName("");
                         }}
+                        sx={{ textTransform: "none", borderRadius: "8px", color: "#64748b", borderColor: "#e2e8f0" }}
                     >
                         Cancel
                     </Button>
 
                     <Button
                         variant="contained"
+                        disabled={!scenarioName.trim()}
                         onClick={() => {
                             console.log({
                                 scenarioName,
@@ -1187,6 +1380,7 @@ export default function HIVModelInput() {
                             setOpenSaveScenario(false);
                             setScenarioName("");
                         }}
+                        sx={{ textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5" }}
                     >
                         Save
                     </Button>

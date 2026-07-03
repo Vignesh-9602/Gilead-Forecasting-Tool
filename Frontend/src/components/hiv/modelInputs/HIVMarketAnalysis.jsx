@@ -42,6 +42,9 @@ export default function HIVMarketAnalysis({
     selectedMarket,
     selectedProduct,
     onTabChange,
+    selectedMetric,
+    setSelectedMetric,
+    onEdit,
 }) {
 
     const DEFAULT_METRIC_BY_TAB = {
@@ -56,9 +59,9 @@ export default function HIVMarketAnalysis({
         "total_market_volume"
     );
 
-    const [selectedMetric, setSelectedMetric] = useState(
-        DEFAULT_METRIC_BY_TAB.total_market_volume
-    );
+    // const [selectedMetric, setSelectedMetric] = useState(
+    //     DEFAULT_METRIC_BY_TAB.total_market_volume
+    // );
 
     const [viewMode, setViewMode] = useState("monthly");
 
@@ -243,6 +246,8 @@ export default function HIVMarketAnalysis({
                             selectedProduct={selectedProduct}
                             viewMode={viewMode}
                             setViewMode={setViewMode}
+                            marketAnalysis={marketAnalysis}
+                            onEdit={onEdit}
                         />
                     </Box>
                 </>

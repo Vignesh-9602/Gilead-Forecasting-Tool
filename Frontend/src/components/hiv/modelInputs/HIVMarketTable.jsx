@@ -26,21 +26,6 @@ import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 
-// const months = [
-//     "Jan-24",
-//     "Feb-24",
-//     "Mar-24",
-//     "Apr-24",
-//     "May-24",
-//     "Jun-24",
-//     "Jul-24",
-//     "Aug-24",
-//     "Sep-24",
-//     "Oct-24",
-//     "Nov-24",
-//     "Dec-24",
-// ];
-
 export default function HIVMarketTable({
     activeTab,
     tableData,
@@ -54,6 +39,8 @@ export default function HIVMarketTable({
     selectedProduct,
     viewMode,
     setViewMode,
+    marketAnalysis,
+    onEdit,
 }) {
     if (!tableData?.rows?.length) {
         return null;
@@ -128,6 +115,24 @@ export default function HIVMarketTable({
 
     };
 
+    const handleRefresh = () => {
+
+        const updatedMarketAnalysis =
+            JSON.parse(JSON.stringify(marketAnalysis));
+
+        updatedMarketAnalysis[
+            activeTab
+        ][
+            selectedMetric
+        ][
+            viewMode
+        ].table.rows = tableRows;
+
+        onEdit(updatedMarketAnalysis);
+
+        setEditable(false);
+    };
+
     const handleCellChange = (
         rowIndex,
         childIndex,
@@ -191,6 +196,34 @@ export default function HIVMarketTable({
         }
     };
 
+    const canEditCell = (row, isChild = false) => {
+        if (!editable) return false;
+
+        switch (activeTab) {
+            case "total_market_volume":
+                return true;
+
+            case "market_distribution":
+                // Allow editing except the Overall row
+                return row.label !== "Overall";
+
+            case "product_distribution":
+                // Allow editing except the Overall row
+                return row.label !== "Overall";
+
+            case "market_product":
+                // Only child rows are editable
+                return isChild;
+
+            case "product_market":
+                // Only child rows are editable
+                return isChild;
+
+            default:
+                return false;
+        }
+    };
+
     const renderEditableCell = (
         value,
         rowIndex,
@@ -200,8 +233,7 @@ export default function HIVMarketTable({
 
         if (!editable) {
 
-            return Number(value).toLocaleString();
-
+            return formatCellValue(value);
         }
 
         return (
@@ -232,6 +264,22 @@ export default function HIVMarketTable({
 
         );
 
+    };
+
+    const formatCellValue = (value) => {
+        if (value === null || value === undefined || value === "") {
+            return "";
+        }
+
+        if (editable) {
+            return value;
+        }
+
+        if (selectedMetric === "market_share") {
+            return `${value}%`;
+        }
+
+        return Number(value).toLocaleString();
     };
 
     useEffect(() => {
@@ -405,7 +453,7 @@ export default function HIVMarketTable({
                     }}
                 >
 
-                    {/* <Box
+                    <Box
                         sx={{
                             display: "flex",
                             bgcolor: "#E2E8F0",
@@ -458,7 +506,7 @@ export default function HIVMarketTable({
                         >
                             Yearly
                         </Button>
-                    </Box> */}
+                    </Box>
 
                     {isTotalMarketVolume && (
 
@@ -546,15 +594,14 @@ export default function HIVMarketTable({
                         </Select>
                     </FormControl>
 
-                    {editable && (
-                        <Button
-                            variant="contained"
-                            sx={primaryButtonStyle}
-                        // onClick={handleApply}
-                        >
-                            Apply
-                        </Button>
-                    )}
+                    <Button
+                        variant="contained"
+                        sx={primaryButtonStyle}
+                        disabled={editable}
+                    // onClick={handleSave} // your save handler
+                    >
+                        Save
+                    </Button>
 
                     <Button
                         variant="outlined"
@@ -564,6 +611,18 @@ export default function HIVMarketTable({
                     >
                         {editable ? "Editing..." : "Edit Changes"}
                     </Button>
+
+                    {editable && (
+                        <>
+                            <Button
+                                variant="contained"
+                                sx={primaryButtonStyle}
+                                onClick={handleRefresh}
+                            >
+                                Refresh
+                            </Button>
+                        </>
+                    )}
 
                     <Button
                         variant="outlined"
@@ -706,12 +765,14 @@ export default function HIVMarketTable({
                                                             : "#334155",
                                                 }}
                                             >
-                                                {renderEditableCell(
-                                                    value,
-                                                    rowIndex,
-                                                    null,
-                                                    index
-                                                )}
+                                                {canEditCell(row)
+                                                    ? renderEditableCell(
+                                                        value,
+                                                        rowIndex,
+                                                        null,
+                                                        index
+                                                    )
+                                                    : formatCellValue(value)}
                                             </TableCell>
 
                                         ))}
@@ -814,7 +875,14 @@ export default function HIVMarketTable({
                                                     }}
                                                 >
                                                     {parent.values?.[index] !== undefined
-                                                        ? Number(parent.values[index]).toLocaleString()
+                                                        ? canEditCell(parent)
+                                                            ? renderEditableCell(
+                                                                parent.values[index],
+                                                                parentIndex,
+                                                                null,
+                                                                index
+                                                            )
+                                                            : formatCellValue(parent.values[index])
                                                         : ""}
                                                 </TableCell>
                                             ))}
@@ -888,12 +956,14 @@ export default function HIVMarketTable({
                                                                             : "#334155",
                                                                 }}
                                                             >
-                                                                {renderEditableCell(
-                                                                    value,
-                                                                    parentIndex,
-                                                                    childIndex,
-                                                                    index
-                                                                )}
+                                                                {canEditCell(child, true)
+                                                                    ? renderEditableCell(
+                                                                        value,
+                                                                        parentIndex,
+                                                                        childIndex,
+                                                                        index
+                                                                    )
+                                                                    : formatCellValue(value)}
                                                             </TableCell>
 
                                                         ))}
