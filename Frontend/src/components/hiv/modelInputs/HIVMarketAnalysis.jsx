@@ -9,7 +9,8 @@ import {
 import HIVMarketChart from "./HIVMarketChart";
 import HIVMarketTable from "./HIVMarketTable";
 
-import { mockData } from "./mockData";
+// import { mockData } from "./mockData";
+// import { mockData } from "./newMockData";
 
 const TABS = [
     {
@@ -17,7 +18,7 @@ const TABS = [
         value: "total_market_volume",
     },
     {
-        label: "Market Distribution",
+        label: "Market Distribution (%)",
         value: "market_distribution",
     },
     {
@@ -25,23 +26,58 @@ const TABS = [
         value: "product_distribution",
     },
     {
-        label: "Market Product",
+        label: "Market-Product",
         value: "market_product",
     },
     {
-        label: "Product Market",
+        label: "Product-Market",
         value: "product_market",
     },
 ];
 
-export default function HIVMarketAnalysis() {
+export default function HIVMarketAnalysis({
+    marketAnalysis,
+    availableScenarios,
+    activeScenario,
+    selectedMarket,
+    selectedProduct,
+    onTabChange,
+    selectedMetric,
+    setSelectedMetric,
+    onEdit,
+}) {
+
+    const DEFAULT_METRIC_BY_TAB = {
+        total_market_volume: "market_volume",
+        market_distribution: "market_share",
+        product_distribution: "market_share",
+        market_product: "market_volume",
+        product_market: "market_volume",
+    };
 
     const [activeTab, setActiveTab] = useState(
         "total_market_volume"
     );
 
+    // const [selectedMetric, setSelectedMetric] = useState(
+    //     DEFAULT_METRIC_BY_TAB.total_market_volume
+    // );
+
+    const [viewMode, setViewMode] = useState("monthly");
+
+    // const currentData =
+    //     mockData[activeTab]?.[selectedMetric];
+
     const currentData =
-        mockData[activeTab];
+        marketAnalysis?.[activeTab]?.[selectedMetric]?.[viewMode];
+
+    // if (!currentData) {
+    //     return null;
+    // }
+
+    const hasData =
+        !!currentData?.chart?.series?.length &&
+        !!currentData?.table?.rows?.length;
 
     return (
         <Paper
@@ -103,9 +139,11 @@ export default function HIVMarketAnalysis() {
                 {TABS.map((tab) => (
                     <Box
                         key={tab.value}
-                        onClick={() =>
-                            setActiveTab(tab.value)
-                        }
+                        onClick={() => {
+                            setActiveTab(tab.value);
+                            setSelectedMetric(DEFAULT_METRIC_BY_TAB[tab.value]);
+                            onTabChange?.(tab.value);
+                        }}
                         sx={{
                             px: 2,
                             py: 1,
@@ -163,31 +201,98 @@ export default function HIVMarketAnalysis() {
                 ))}
             </Box>
 
-            {/* ---------- Chart ---------- */}
+            {hasData ? (
+                <>
 
-            <Box
-                sx={{
-                    p: 3,
-                }}
-            >
-                <HIVMarketChart
-                    chartData={currentData.chart}
-                />
-            </Box>
+                    {/* ---------- Chart ---------- */}
 
-            {/* ---------- Table ---------- */}
+                    <Box
+                        sx={{
+                            p: 3,
+                        }}
+                    >
+                        <HIVMarketChart
+                            chartData={currentData?.chart}
+                            activeTab={activeTab}
+                            selectedMarket={selectedMarket}
+                            selectedProduct={selectedProduct}
+                        />
+                    </Box>
 
-            <Box
-                sx={{
-                    px: 3,
-                    pb: 3,
-                }}
-            >
-                <HIVMarketTable
-                    activeTab={activeTab}
-                    tableData={currentData.table}
-                />
-            </Box>
+                    {/* ---------- Table ---------- */}
+
+                    <Box
+                        sx={{
+                            px: 3,
+                            pb: 3,
+                        }}
+                    >
+                        <HIVMarketTable
+                            activeTab={activeTab}
+                            tableData={currentData?.table}
+                            selectedMetric={selectedMetric}
+                            months={
+                                currentData?.chart?.months ||
+                                currentData?.chart?.years ||
+                                []
+                            }
+                            setSelectedMetric={setSelectedMetric}
+                            forecastStartIndex={
+                                currentData?.chart?.forecast_start_index
+                            }
+                            availableScenarios={availableScenarios}
+                            activeScenario={activeScenario}
+                            selectedMarket={selectedMarket}
+                            selectedProduct={selectedProduct}
+                            viewMode={viewMode}
+                            setViewMode={setViewMode}
+                            marketAnalysis={marketAnalysis}
+                            onEdit={onEdit}
+                        />
+                    </Box>
+                </>
+            ) : (
+                <Paper
+                    sx={{
+                        m: 3,
+                        border: "1px dashed #CBD5E1",
+                        borderRadius: "12px",
+                        boxShadow: "none",
+                        minHeight: 300,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        backgroundColor: "#F8FAFC",
+                    }}
+                >
+                    <Box
+                        sx={{
+                            textAlign: "center",
+                        }}
+                    >
+                        <Typography
+                            sx={{
+                                fontSize: 18,
+                                fontWeight: 700,
+                                color: "#334155",
+                            }}
+                        >
+                            No Market Analysis Available
+                        </Typography>
+
+                        <Typography
+                            sx={{
+                                mt: 1,
+                                color: "#64748B",
+                                fontSize: 14,
+                            }}
+                        >
+                            Click <b>Apply Filter</b> to load the market analysis chart
+                            and table.
+                        </Typography>
+                    </Box>
+                </Paper>
+            )}
         </Paper>
     );
 }
