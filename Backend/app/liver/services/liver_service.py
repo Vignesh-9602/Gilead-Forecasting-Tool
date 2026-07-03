@@ -2026,7 +2026,9 @@ def refresh_liver(payload):
         from_year, from_month = _parse_ym(flt.start_date)
         cfg = _load_config(cur, payload.ta_name, flt.market or None, flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-        forecast_periods = _resolve_forecast_periods(cfg, flt.end_date)
+        forecast_periods = _resolve_forecast_periods(
+            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
         granularity = cfg.get("model_granularity", "monthly")
 
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
