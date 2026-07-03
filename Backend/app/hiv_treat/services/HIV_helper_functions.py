@@ -351,7 +351,7 @@ def process_moving_average_forecast(
         if train_start <= dt <= train_end:
             train_months.append(dt.strftime("%Y-%m-%d"))
             train_values.append(float(value))
-
+   
     # ----------------------------------
     # Validation
     # ----------------------------------

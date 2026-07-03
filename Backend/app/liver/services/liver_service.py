@@ -445,8 +445,18 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
 
 
 
-def _build_response_factors(factors: LiverFactors) -> dict:
+def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -> dict:
     """Return full oncology-format factors dict for the API response."""
+    def _growth(model_params):
+        d = {
+            "total_growth":     int(round(model_params.total_growth)),
+            "duration":         model_params.duration,
+            "trajectory_start": trajectory_start,
+        }
+        if hasattr(model_params, "k_value") and model_params.k_value is not None:
+            d["k_value"] = model_params.k_value
+        return d
+
     return {
         "active_model":       factors.active_model,
         "multiplier":         factors.multiplier,
@@ -456,29 +466,10 @@ def _build_response_factors(factors: LiverFactors) -> dict:
             "beta":  factors.ets.beta,
             "gamma": factors.ets.gamma,
         },
-        "linear": {
-            "total_growth":      factors.linear.total_growth,
-            "duration":          factors.linear.duration,
-            "trajectory_start":  factors.linear.trajectory_start,
-        },
-        "exponential": {
-            "total_growth":      factors.exponential.total_growth,
-            "duration":          factors.exponential.duration,
-            "trajectory_start":  factors.exponential.trajectory_start,
-            "k_value":           factors.exponential.k_value,
-        },
-        "logarithmic": {
-            "total_growth":      factors.logarithmic.total_growth,
-            "duration":          factors.logarithmic.duration,
-            "trajectory_start":  factors.logarithmic.trajectory_start,
-            "k_value":           factors.logarithmic.k_value,
-        },
-        "scurve": {
-            "total_growth":      factors.scurve.total_growth,
-            "duration":          factors.scurve.duration,
-            "trajectory_start":  factors.scurve.trajectory_start,
-            "k_value":           factors.scurve.k_value,
-        },
+        "linear":      _growth(factors.linear),
+        "exponential": _growth(factors.exponential),
+        "logarithmic": _growth(factors.logarithmic),
+        "scurve":      _growth(factors.scurve),
     }
 
 
@@ -492,33 +483,46 @@ def _rows_to_series(rows, label_col_index, value_col_index):
     return series
 
 
-def _fmt_flat(tab, month_labels, forecast_start_index):
-   
+def _fmt_flat(tab, month_labels, forecast_start_index, to_int=False):
+    def _v(vals):
+        return [int(v) for v in vals] if to_int else list(vals)
+
     return {
         "chart": {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
             "series": [
-                {"label": s.label, "history": s.train_values, "forecast": s.forecast_values}
+                {"label": s.label, "history": _v(s.train_values), "forecast": _v(s.forecast_values)}
                 for s in tab.chart.series
             ],
         },
         "table": {
             "type": "flat",
-            "rows": [{"label": r.hierarchy, "values": r.values} for r in tab.table.rows],
+            "rows": [{"label": r.hierarchy, "values": _v(r.values)} for r in tab.table.rows],
         },
     }
 
 
-def _fmt_hier(tab, month_labels, forecast_start_index):
-    
+def _fmt_hier(tab, month_labels, forecast_start_index, to_int=False, chart_parent_filter=None):
+    def _v(vals):
+        return [int(v) for v in vals] if to_int else list(vals)
+
+    if chart_parent_filter:
+        prefix = f"{chart_parent_filter} - "
+        chart_series = [
+            s for s in tab.chart.series
+            if s.label == chart_parent_filter or s.label.startswith(prefix)
+        ]
+    else:
+        chart_series = tab.chart.series
+
     return {
         "chart": {
             "months":               month_labels,
             "forecast_start_index": forecast_start_index,
             "series": [
-                {"label": s.label, "history": s.train_values, "forecast": s.forecast_values}
-                for s in tab.chart.series
+                {"label": s.label, "history": _v(s.train_values), "forecast": _v(s.forecast_values)}
+                for s in chart_series
             ],
         },
         "table": {
@@ -526,13 +530,91 @@ def _fmt_hier(tab, month_labels, forecast_start_index):
             "rows": [
                 {
                     "label":    r.hierarchy,
-                    "values":   r.total,
-                    "children": [{"label": c.label, "values": c.values} for c in r.children],
+                    "values":   _v(r.total),
+                    "children": [{"label": c.label, "values": _v(c.values)} for c in r.children],
                 }
                 for r in tab.table.rows
             ],
         },
     }
+
+
+def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
+    """In-place: scale non-Total forecast values so they sum to tmv_fc per period."""
+    n_fc = len(tmv_fc)
+    if not n_fc:
+        return
+
+    # Chart series
+    active_s = [s for s in tab_data.chart.series if s.label.lower() != "total"]
+    s_sums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in active_s) for i in range(n_fc)]
+    for s in active_s:
+        s.forecast_values = [
+            s.forecast_values[i] * tmv_fc[i] / s_sums[i] if i < len(s.forecast_values) and s_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Table rows
+    non_tot = [r for r in tab_data.table.rows if r.hierarchy.lower() != "total"]
+    tot_row = next((r for r in tab_data.table.rows if r.hierarchy.lower() == "total"), None)
+    r_sums  = [sum(r.values[fsi+i] if fsi+i < len(r.values) else 0.0 for r in non_tot) for i in range(n_fc)]
+    for r in non_tot:
+        r.values = list(r.values[:fsi]) + [
+            r.values[fsi+i] * tmv_fc[i] / r_sums[i] if fsi+i < len(r.values) and r_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+    if tot_row:
+        n = fsi + n_fc
+        tot = [0.0] * n
+        for r in non_tot:
+            for i, v in enumerate(r.values[:n]):
+                tot[i] += v
+        tot_row.values = tot
+
+
+def _scale_hier_to_tmv(hier_data: HierarchicalTabData, tmv_fc: list, fsi: int) -> None:
+    """In-place: scale all children so the grand-total forecast matches tmv_fc per period."""
+    n_fc = len(tmv_fc)
+    if not n_fc:
+        return
+
+    # Table: scale all children proportionally
+    all_ch  = [c for r in hier_data.table.rows for c in r.children]
+    ch_sums = [sum(c.values[fsi+i] if fsi+i < len(c.values) else 0.0 for c in all_ch) for i in range(n_fc)]
+    for c in all_ch:
+        c.values = list(c.values[:fsi]) + [
+            c.values[fsi+i] * tmv_fc[i] / ch_sums[i] if fsi+i < len(c.values) and ch_sums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Recompute parent totals
+    n = fsi + n_fc
+    for r in hier_data.table.rows:
+        tot = [0.0] * n
+        for c in r.children:
+            for i, v in enumerate(c.values[:n]):
+                tot[i] += v
+        r.total = tot
+
+    # Chart: scale child series
+    plabels = {r.hierarchy for r in hier_data.table.rows}
+    ch_ser  = [s for s in hier_data.chart.series if s.label not in plabels]
+    csums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_ser) for i in range(n_fc)]
+    for s in ch_ser:
+        s.forecast_values = [
+            s.forecast_values[i] * tmv_fc[i] / csums[i] if i < len(s.forecast_values) and csums[i] else 0.0
+            for i in range(n_fc)
+        ]
+
+    # Recompute parent chart series as sum of their children
+    for ps in hier_data.chart.series:
+        if ps.label not in plabels:
+            continue
+        ch_for_p = [s for s in hier_data.chart.series if s.label.startswith(f"{ps.label} - ")]
+        if ch_for_p:
+            n_tr = max(len(s.train_values) for s in ch_for_p)
+            ps.train_values    = [sum(s.train_values[i]    if i < len(s.train_values)    else 0.0 for s in ch_for_p) for i in range(n_tr)]
+            ps.forecast_values = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_for_p) for i in range(n_fc)]
 
 
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
@@ -545,7 +627,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     Build all 5 tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
     market_analysis_dict keys: total_market_volume, product_distribution,
-      market_distribution, market_product, product_market.
+      market_distribution, payer_product, product_payer.
     Each key maps to { market_volume: {chart, table}, market_share: {chart, table} }.
     """
     is_yearly = granularity == "yearly"
@@ -619,45 +701,327 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         pwpy_mv = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_volume")
         pwpy_ms = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_share")
 
-    def bflat(rows, label):
+    # TMV forecast values — used to scale tabs 2-5 so their totals match Tab 1
+    _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
+
+    def bflat_mv(rows, label, to_int=False):
+        tab_data = _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
+                                   selected_label=label, auto_model="linear", add_total=True)
+        _scale_flat_to_tmv(tab_data, _tmv_fc, fsi)
+        return _fmt_flat(tab_data, month_labels, fsi, to_int=to_int)
+
+    def bflat_ms(rows, label):
         return _fmt_flat(
             _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
                             selected_label=label, auto_model="linear", add_total=True),
             month_labels, fsi,
         )
 
-    def bhier(rows, parent_lbl, child_lbl):
+    def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
+        hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
+                                                 selected_parent=parent_lbl, selected_child=child_lbl,
+                                                 auto_model="linear")
+        _scale_hier_to_tmv(hier_data, _tmv_fc, fsi)
+        return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
+
+    def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
                                          selected_parent=parent_lbl, selected_child=child_lbl,
                                          auto_model="linear"),
-            month_labels, fsi,
+            month_labels, fsi, chart_parent_filter=parent_lbl,
         )
 
     market_analysis = {
         "total_market_volume": {
-            "market_volume": _fmt_flat(tab1_mv_data, month_labels, fsi),
+            "market_volume": _fmt_flat(tab1_mv_data, month_labels, fsi, to_int=True),
             "market_share":  tab1_ms,
         },
         "product_distribution": {
-            "market_volume": bflat(pd_mv,  tab2_label),
-            "market_share":  bflat(pd_ms,  tab2_label),
+            "market_volume": bflat_mv(pd_mv,  tab2_label, to_int=True),
+            "market_share":  bflat_ms(pd_ms,  tab2_label),
         },
         "market_distribution": {
-            "market_volume": bflat(pyd_mv, tab3_label),
-            "market_share":  bflat(pyd_ms, tab3_label),
+            "market_volume": bflat_mv(pyd_mv, tab3_label, to_int=True),
+            "market_share":  bflat_ms(pyd_ms, tab3_label),
         },
-        "market_product": {
-            "market_volume": bhier(pwp_mv,  tab3_label, tab2_label),
-            "market_share":  bhier(pwp_ms,  tab3_label, tab2_label),
+        "payer_product": {
+            "market_volume": bhier_mv(pwp_mv,  tab3_label, tab2_label, to_int=True),
+            "market_share":  bhier_ms(pwp_ms,  tab3_label, tab2_label),
         },
-        "product_market": {
-            "market_volume": bhier(pwpy_mv, tab2_label, tab3_label),
-            "market_share":  bhier(pwpy_ms, tab2_label, tab3_label),
+        "product_payer": {
+            "market_volume": bhier_mv(pwpy_mv, tab2_label, tab3_label, to_int=True),
+            "market_share":  bhier_ms(pwpy_ms, tab2_label, tab3_label),
         },
     }
 
+    # Recompute market_share from scaled market_volume so all tabs are consistent
+    market_analysis = _recompute_all_market_shares(market_analysis)
+
     return month_labels, forecast_start_index, market_analysis, tab1_ets
+
+
+def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
+    """
+    Derive yearly market_analysis from monthly by summing each month's values
+    into its calendar year. Parent values are always recomputed from children
+    (not from stored parent values) to avoid int() truncation drift.
+    After aggregation, flat and hierarchical market_volume tabs are re-scaled
+    to match the yearly TMV so all tabs are consistent.
+    market_share is recomputed from the final scaled market_volume.
+    """
+    def _group_sum(month_labels, values):
+        year_sums = {}
+        for i, m in enumerate(month_labels):
+            y = m[:4]
+            year_sums[y] = year_sums.get(y, 0.0) + (float(values[i]) if i < len(values) else 0.0)
+        years = list(dict.fromkeys(m[:4] for m in month_labels))
+        return years, [year_sums.get(y, 0.0) for y in years]
+
+    def _vsum(series_list, key, idx):
+        return sum(s.get(key, [])[idx] if idx < len(s.get(key, [])) else 0.0 for s in series_list)
+
+    ma_yearly = {}
+    for tab_key, metrics in ma_monthly.items():
+        ma_yearly[tab_key] = {}
+        for metric, data in metrics.items():
+            chart  = data.get("chart", {})
+            table  = data.get("table", {})
+            months = chart.get("months", [])
+            fsi    = chart.get("forecast_start_index", 0)
+
+            hist_months = months[:fsi]
+            fc_months   = months[fsi:]
+
+            hist_years, _ = _group_sum(hist_months, [])
+            fc_years,   _ = _group_sum(fc_months,   [])
+            yearly_months  = hist_years + fc_years
+            yearly_fsi     = len(hist_years)
+            n_yrs          = len(yearly_months)
+
+            table_type = table.get("type", "flat")
+
+            if table_type == "flat":
+                # Aggregate non-Total rows; recompute Total from them
+                non_tot, tot_row_out = [], None
+                for r in table.get("rows", []):
+                    vals = r.get("values", [])
+                    _, h = _group_sum(hist_months, vals[:fsi])
+                    _, f = _group_sum(fc_months,   vals[fsi:])
+                    nr = {"label": r["label"], "values": h + f}
+                    if r["label"].lower() == "total":
+                        tot_row_out = nr
+                    else:
+                        non_tot.append(nr)
+                if tot_row_out:
+                    tot_row_out["values"] = [
+                        sum(r["values"][i] for r in non_tot if i < len(r["values"]))
+                        for i in range(n_yrs)
+                    ]
+                new_rows  = ([tot_row_out] if tot_row_out else []) + non_tot
+                new_table = {"type": "flat", "rows": new_rows}
+
+                # Chart: aggregate each series; Total series recomputed from non-Total
+                non_tot_ser, tot_ser_out = [], None
+                for s in chart.get("series", []):
+                    _, h = _group_sum(hist_months, s.get("history",  []))
+                    _, f = _group_sum(fc_months,   s.get("forecast", []))
+                    ns = {"label": s["label"], "history": h, "forecast": f}
+                    if s["label"].lower() == "total":
+                        tot_ser_out = ns
+                    else:
+                        non_tot_ser.append(ns)
+                if tot_ser_out:
+                    tot_ser_out["history"]  = [_vsum(non_tot_ser, "history",  i) for i in range(yearly_fsi)]
+                    tot_ser_out["forecast"] = [_vsum(non_tot_ser, "forecast", i) for i in range(len(fc_years))]
+                new_series = ([tot_ser_out] if tot_ser_out else []) + non_tot_ser
+
+            else:  # hierarchy
+                new_rows   = []
+                new_series = []
+                plabels    = set()
+
+                for r in table.get("rows", []):
+                    plabels.add(r["label"])
+                    new_children = []
+                    for c in r.get("children", []):
+                        cv = c.get("values", [])
+                        _, ch = _group_sum(hist_months, cv[:fsi])
+                        _, cf = _group_sum(fc_months,   cv[fsi:])
+                        new_children.append({"label": c["label"], "values": ch + cf})
+                    # Parent = sum of children (not stored parent — avoids int() drift)
+                    parent_vals = [
+                        sum(c["values"][i] for c in new_children if i < len(c["values"]))
+                        for i in range(n_yrs)
+                    ]
+                    new_rows.append({"label": r["label"], "values": parent_vals, "children": new_children})
+                new_table = {"type": "hierarchy", "rows": new_rows}
+
+                # Chart: aggregate child series; parent series = sum of their children
+                child_ser_map = {}  # parent_label → [child series]
+                for s in chart.get("series", []):
+                    if s["label"] in plabels:
+                        continue  # skip old parent series; we'll recompute
+                    _, h = _group_sum(hist_months, s.get("history",  []))
+                    _, f = _group_sum(fc_months,   s.get("forecast", []))
+                    ns = {"label": s["label"], "history": h, "forecast": f}
+                    # Determine parent by matching "Parent - Child" label format
+                    parent = next((pl for pl in plabels if s["label"].startswith(f"{pl} - ")), None)
+                    if parent:
+                        child_ser_map.setdefault(parent, []).append(ns)
+                    new_series.append(ns)
+
+                for pl in plabels:
+                    ch_ser = child_ser_map.get(pl, [])
+                    n_h = max((len(s.get("history",  [])) for s in ch_ser), default=0)
+                    n_f = max((len(s.get("forecast", [])) for s in ch_ser), default=0)
+                    new_series.insert(0, {
+                        "label":    pl,
+                        "history":  [_vsum(ch_ser, "history",  i) for i in range(n_h)],
+                        "forecast": [_vsum(ch_ser, "forecast", i) for i in range(n_f)],
+                    })
+
+            ma_yearly[tab_key][metric] = {
+                "chart": {"months": yearly_months, "forecast_start_index": yearly_fsi, "series": new_series},
+                "table": new_table,
+            }
+
+    # Re-scale flat and hierarchical market_volume tabs to match yearly TMV
+    # (removes residual int() truncation drift accumulated from 12-month summation)
+    tmv_chart = (ma_yearly.get("total_market_volume", {})
+                          .get("market_volume", {})
+                          .get("chart", {}))
+    yearly_fsi_tmv = tmv_chart.get("forecast_start_index", 0)
+    tmv_ser        = tmv_chart.get("series", [{}])[0] if tmv_chart.get("series") else {}
+    tmv_fc_yearly  = tmv_ser.get("forecast", [])
+
+    for tab_key in ("product_distribution", "market_distribution"):
+        mv = ma_yearly.get(tab_key, {}).get("market_volume", {})
+        if mv and tmv_fc_yearly:
+            chart  = mv["chart"]
+            table  = mv["table"]
+            non_s  = [s for s in chart.get("series", []) if s["label"].lower() != "total"]
+            s_sums = [sum(s.get("forecast", [])[i] if i < len(s.get("forecast", [])) else 0.0 for s in non_s) for i in range(len(tmv_fc_yearly))]
+            for s in non_s:
+                s["forecast"] = [s["forecast"][i] * tmv_fc_yearly[i] / s_sums[i] if i < len(s.get("forecast", [])) and s_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+            tot_s = next((s for s in chart.get("series", []) if s["label"].lower() == "total"), None)
+            if tot_s:
+                tot_s["forecast"] = tmv_fc_yearly[:]
+            non_r  = [r for r in table.get("rows", []) if r["label"].lower() != "total"]
+            r_sums = [sum(r["values"][yearly_fsi_tmv+i] if yearly_fsi_tmv+i < len(r["values"]) else 0.0 for r in non_r) for i in range(len(tmv_fc_yearly))]
+            for r in non_r:
+                fc = [r["values"][yearly_fsi_tmv+i] * tmv_fc_yearly[i] / r_sums[i] if yearly_fsi_tmv+i < len(r["values"]) and r_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+                r["values"] = list(r["values"][:yearly_fsi_tmv]) + fc
+            tot_r = next((r for r in table.get("rows", []) if r["label"].lower() == "total"), None)
+            if tot_r:
+                tot_r["values"] = list(tot_r["values"][:yearly_fsi_tmv]) + tmv_fc_yearly[:]
+
+    for tab_key in ("payer_product", "product_payer"):
+        mv = ma_yearly.get(tab_key, {}).get("market_volume", {})
+        if mv and tmv_fc_yearly:
+            chart   = mv["chart"]
+            table   = mv["table"]
+            plabels = {r["label"] for r in table.get("rows", [])}
+            ch_ser  = [s for s in chart.get("series", []) if s["label"] not in plabels]
+            cs_sums = [sum(s.get("forecast", [])[i] if i < len(s.get("forecast", [])) else 0.0 for s in ch_ser) for i in range(len(tmv_fc_yearly))]
+            for s in ch_ser:
+                s["forecast"] = [s["forecast"][i] * tmv_fc_yearly[i] / cs_sums[i] if i < len(s.get("forecast", [])) and cs_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+            # Recompute parent chart series from scaled children
+            for ps in chart.get("series", []):
+                if ps["label"] not in plabels:
+                    continue
+                ch = [s for s in ch_ser if s["label"].startswith(f"{ps['label']} - ")]
+                if ch:
+                    ps["forecast"] = [_vsum(ch, "forecast", i) for i in range(len(tmv_fc_yearly))]
+            # Scale table children
+            all_ch  = [c for r in table.get("rows", []) for c in r.get("children", [])]
+            ct_sums = [sum(c["values"][yearly_fsi_tmv+i] if yearly_fsi_tmv+i < len(c["values"]) else 0.0 for c in all_ch) for i in range(len(tmv_fc_yearly))]
+            for c in all_ch:
+                fc = [c["values"][yearly_fsi_tmv+i] * tmv_fc_yearly[i] / ct_sums[i] if yearly_fsi_tmv+i < len(c["values"]) and ct_sums[i] else 0.0 for i in range(len(tmv_fc_yearly))]
+                c["values"] = list(c["values"][:yearly_fsi_tmv]) + fc
+            # Recompute parent table values from scaled children
+            for r in table.get("rows", []):
+                n = yearly_fsi_tmv + len(tmv_fc_yearly)
+                r["values"] = [sum(c["values"][i] for c in r.get("children", []) if i < len(c["values"])) for i in range(n)]
+
+    # Round all market_volume forecast values to int after scaling
+    for tab_key, metrics in ma_yearly.items():
+        mv = metrics.get("market_volume", {})
+        if not mv:
+            continue
+        yr_fsi = mv.get("chart", {}).get("forecast_start_index", 0)
+        for s in mv.get("chart", {}).get("series", []):
+            s["forecast"] = [int(round(v)) for v in s.get("forecast", [])]
+        for r in mv.get("table", {}).get("rows", []):
+            r["values"] = list(r["values"][:yr_fsi]) + [int(round(v)) for v in r["values"][yr_fsi:]]
+            for c in r.get("children", []):
+                c["values"] = list(c["values"][:yr_fsi]) + [int(round(v)) for v in c["values"][yr_fsi:]]
+
+    return _recompute_all_market_shares(ma_yearly)
+
+
+def _build_market_analysis_both_granularities(
+    cur, ta, from_year, from_month,
+    train_end_year, train_end_month, forecast_periods_months, factors,
+    sel_payer=None, sel_product=None,
+    force_tab1_ets=True, scenario_name="Base",
+):
+    """
+    Builds market_analysis for both monthly and yearly granularities.
+    Yearly is derived by aggregating monthly values per calendar year so that
+    sum(monthly forecast for a year) == yearly forecast value exactly.
+    """
+    _, _, ma_monthly, tab1_ets = _build_all_tabs_both_metrics(
+        cur, ta, from_year, from_month,
+        train_end_year, train_end_month, forecast_periods_months, factors,
+        granularity="monthly",
+        sel_payer=sel_payer, sel_product=sel_product,
+        force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
+    )
+    ma_yearly = _aggregate_monthly_to_yearly(ma_monthly)
+
+    merged = {}
+    for tab_key, metrics in ma_monthly.items():
+        merged[tab_key] = {}
+        for metric, monthly_data in metrics.items():
+            merged[tab_key][metric] = {
+                "monthly": monthly_data,
+                "yearly":  ma_yearly.get(tab_key, {}).get(metric, {}),
+            }
+
+    return merged, tab1_ets
+
+
+def _split_by_granularity(ma_nested: dict):
+    """Split {tab: {metric: {monthly: ..., yearly: ...}}} into two flat dicts."""
+    monthly, yearly = {}, {}
+    for tab, metrics in ma_nested.items():
+        monthly[tab], yearly[tab] = {}, {}
+        for metric, grans in metrics.items():
+            monthly[tab][metric] = grans.get("monthly", {})
+            yearly[tab][metric]  = grans.get("yearly", {})
+    return monthly, yearly
+
+
+def _merge_granularities(ma_monthly: dict, ma_yearly: dict) -> dict:
+    """Merge two flat dicts into {tab: {metric: {monthly: ..., yearly: ...}}}."""
+    merged = {}
+    for tab in ma_monthly:
+        merged[tab] = {}
+        for metric in ma_monthly[tab]:
+            merged[tab][metric] = {
+                "monthly": ma_monthly[tab][metric],
+                "yearly":  ma_yearly.get(tab, {}).get(metric, {}),
+            }
+    return merged
+
+
+def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
+    """Wrapper of _recompute_all_market_shares for the nested monthly/yearly format."""
+    ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
+    ma_monthly = _recompute_all_market_shares(ma_monthly)
+    ma_yearly  = _recompute_all_market_shares(ma_yearly)
+    return _merge_granularities(ma_monthly, ma_yearly)
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +1134,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         available_scenarios = ["Base"] + all_scenario_names
 
         saved_market_analysis = None
+        saved_factors_raw     = None
 
         # Load factors (and saved market_analysis) for the active scenario
         if active_scenario != "Base":
@@ -779,8 +1144,9 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             )
             row = cur.fetchone()
             if row:
+                saved_factors_raw = row[0] if isinstance(row[0], dict) else {}
                 try:
-                    factors = LiverFactors(**row[0])
+                    factors = LiverFactors(**saved_factors_raw)
                 except Exception:
                     factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
                 saved_cd = row[1] if row[1] else {}
@@ -794,7 +1160,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         if saved_market_analysis:
             # Use the exact data that was saved (includes any edited table values)
             # Recalculate market_share from market_volume to ensure consistency on load
-            market_analysis = _recompute_all_market_shares(saved_market_analysis)
+            market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
             # Still need tab1_ets for the factor sliders
             if granularity == "yearly":
                 _tmv_train = get_total_market_volume_yearly(cur, payload.ta, from_year, train_end_year, None)
@@ -807,50 +1173,66 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 _t1a, _t1b, _t1g = 0.30, 0.20, 0.98
             tab1_ets = EtsParams(alpha=round(_t1a, 4), beta=round(_t1b, 4), gamma=round(_t1g, 4))
         else:
-            _, _, market_analysis, tab1_ets = _build_all_tabs_both_metrics(
+            market_analysis, tab1_ets = _build_market_analysis_both_granularities(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, factors,
-                granularity, scenario_name=payload.scenario,
+                sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                scenario_name=payload.scenario,
             )
+            market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
-        response_factors = _build_response_factors(factors)
-        response_factors["active_model"] = "ets"
-        response_factors["ets"] = {"alpha": tab1_ets.alpha, "beta": tab1_ets.beta, "gamma": tab1_ets.gamma}
+        _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
+        if active_scenario != "Base" and saved_market_analysis and saved_factors_raw:
+            # Use the factors exactly as saved — preserves active_model, slider values, etc.
+            response_factors = dict(saved_factors_raw)
+        else:
+            # Base or no saved data: return computed ETS factors
+            response_factors = _build_response_factors(factors, _traj_start)
+            response_factors["active_model"] = "ets"
+            response_factors["ets"] = {"alpha": tab1_ets.alpha, "beta": tab1_ets.beta, "gamma": tab1_ets.gamma}
 
         train_end_dt = date_type(train_end_year, train_end_month, 1)
         end_date     = _add_months(train_end_dt, forecast_periods).isoformat()
 
-        # ── Build TMV data for inactive scenarios ─────────────────────────────
+        # ── Build TMV stubs for inactive scenarios ────────────────────────────
+        # Load stored chart_data for all saved scenarios — use that directly
+        # instead of rebuilding from scratch (rebuilding can silently fall back
+        # to ETS if the saved factors dict has unknown keys).
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
         all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-        if active_scenario != "Base":
+        if active_scenario == "Base":
+            base_tmv = market_analysis.get("total_market_volume", {})
+        else:
             base_factors = _estimate_default_factors(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, granularity,
             )
-            _, _, _base_ma, _ = _build_all_tabs_both_metrics(
+            _base_ma, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, base_factors,
-                granularity, scenario_name="Base",
+                scenario_name="Base",
             )
             base_tmv = _base_ma.get("total_market_volume", {})
-        else:
-            base_tmv = market_analysis.get("total_market_volume", {})
 
         def _tmv_table_only(tmv: dict) -> dict:
-            """Keep only the table rows from TMV, drop chart data."""
-            return {
-                metric: {"table": tmv[metric]["table"]}
-                for metric in ("market_volume", "market_share")
-                if metric in tmv and "table" in tmv[metric]
-            }
+            """Keep only the table rows from TMV (both granularities), drop chart data."""
+            result = {}
+            for metric in ("market_volume", "market_share"):
+                if metric not in tmv:
+                    continue
+                result[metric] = {}
+                for gran in ("monthly", "yearly"):
+                    if gran in tmv[metric] and "table" in tmv[metric][gran]:
+                        result[metric][gran] = {"table": tmv[metric][gran]["table"]}
+            return result
 
         def _inactive_stub(sc_name):
             if sc_name == "Base":
                 tmv = base_tmv
             else:
-                cd = all_saved_cd.get(sc_name, {})
+                # Load directly from stored chart_data — never rebuild from factors
+                cd  = all_saved_cd.get(sc_name, {})
                 tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
             return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
 
@@ -972,14 +1354,17 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         all_scenario_names = get_scenarios(cur)
         available_scenarios = ["Base"] + all_scenario_names
 
-        _, _, market_analysis, tab1_ets = _build_all_tabs_both_metrics(
+        force_tab1 = (payload.selected_tab != "total_market_volume")
+        market_analysis, tab1_ets = _build_market_analysis_both_granularities(
             cur, payload.ta_name, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, factors,
-            granularity,
-            force_tab1_ets=False, scenario_name=payload.scenario_name,
+            sel_payer=market, sel_product=product,
+            force_tab1_ets=force_tab1, scenario_name=payload.scenario_name,
         )
+        market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
-        response_factors = _build_response_factors(factors)
+        _traj_start_rc = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
+        response_factors = _build_response_factors(factors, _traj_start_rc)
         if model_type == "ets":
             response_factors["ets"] = {
                 "alpha": factors.ets.alpha,
@@ -996,36 +1381,43 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         train_end_dt = date_type(train_end_year, train_end_month, 1)
         end_date     = _add_months(train_end_dt, forecast_periods).isoformat()
 
-        # ── Build TMV data for inactive scenarios ─────────────────────────────
+        # ── Build TMV stubs for inactive scenarios ────────────────────────────
+        # Load stored chart_data from DB — never rebuild inactive scenarios from
+        # factors, which would silently produce Base values on any LiverFactors
+        # construction failure.
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
         all_saved_cd_rc = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-        if active_scenario != "Base":
+        if active_scenario == "Base":
+            base_tmv_rc = market_analysis.get("total_market_volume", {})
+        else:
             _base_f = _estimate_default_factors(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, granularity,
             )
-            _, _, _base_ma_rc, _ = _build_all_tabs_both_metrics(
+            _base_ma_rc, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, _base_f,
-                granularity, scenario_name="Base",
+                scenario_name="Base",
             )
             base_tmv_rc = _base_ma_rc.get("total_market_volume", {})
-        else:
-            base_tmv_rc = market_analysis.get("total_market_volume", {})
 
         def _tmv_table_only_rc(tmv: dict) -> dict:
-            return {
-                metric: {"table": tmv[metric]["table"]}
-                for metric in ("market_volume", "market_share")
-                if metric in tmv and "table" in tmv[metric]
-            }
+            result = {}
+            for metric in ("market_volume", "market_share"):
+                if metric not in tmv:
+                    continue
+                result[metric] = {}
+                for gran in ("monthly", "yearly"):
+                    if gran in tmv[metric] and "table" in tmv[metric][gran]:
+                        result[metric][gran] = {"table": tmv[metric][gran]["table"]}
+            return result
 
         def _inactive_stub_rc(sc_name):
             if sc_name == "Base":
                 tmv = base_tmv_rc
             else:
-                cd = all_saved_cd_rc.get(sc_name, {})
+                cd  = all_saved_cd_rc.get(sc_name, {})
                 tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
             return {"market_analysis": {"total_market_volume": _tmv_table_only_rc(tmv)}}
 
@@ -1064,7 +1456,7 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
     Recompute market_share for every tab from the current market_volume values.
     - total_market_volume  → always 100 %
     - product_distribution / market_distribution → each row / total_volume * 100
-    - market_product / product_market (hierarchical) → child / parent_total * 100
+    - payer_product / product_payer (hierarchical) → child / parent_total * 100
     """
     tmv_rows = (
         market_analysis.get("total_market_volume", {})
@@ -1103,18 +1495,29 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         ms_row_map = {r.get("label", ""): r for r in ms_data.get("table", {}).get("rows", [])}
         ms_ser_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
 
+        # Use column sum of non-Total rows as denominator so shares always sum to 100%
+        non_total_rows = [
+            r for r in mv_data.get("table", {}).get("rows", [])
+            if r.get("label", "").lower() != "total"
+        ]
+        tab_n = max((len(r.get("values", [])) for r in non_total_rows), default=0)
+        col_sums = [
+            sum(float(r["values"][i]) for r in non_total_rows if i < len(r.get("values", [])))
+            for i in range(tab_n)
+        ]
+
         for r in mv_data.get("table", {}).get("rows", []):
             lbl = r.get("label", "")
             if lbl.lower() == "total":
                 if lbl in ms_row_map:
-                    ms_row_map[lbl]["values"] = [100.0] * n
+                    ms_row_map[lbl]["values"] = [100.0] * tab_n
                 continue
             mv_vals = r.get("values", [])
             ms_vals = [
-                round(float(mv_vals[i]) / float(total_vals[i]) * 100, 4)
-                if i < len(mv_vals) and i < n and float(total_vals[i]) != 0
+                round(float(mv_vals[i]) / col_sums[i] * 100, 4)
+                if i < len(mv_vals) and i < tab_n and col_sums[i] != 0
                 else 0.0
-                for i in range(n)
+                for i in range(tab_n)
             ]
             if lbl in ms_row_map:
                 ms_row_map[lbl]["values"] = ms_vals
@@ -1122,8 +1525,8 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                 ms_ser_map[lbl]["history"]  = ms_vals[:fsi]
                 ms_ser_map[lbl]["forecast"] = ms_vals[fsi:]
 
-    # ── Hierarchical cross-tabs (4, 5): child / parent_total * 100 ────────
-    for tab in ("market_product", "product_market"):
+    # ── Hierarchical cross-tabs (4, 5): child / sum(children) * 100 ─────────
+    for tab in ("payer_product", "product_payer"):
         if tab not in market_analysis:
             continue
         mv_data = market_analysis[tab].get("market_volume", {})
@@ -1135,20 +1538,32 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         ms_chart_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
 
         for mv_row in mv_data.get("table", {}).get("rows", []):
-            parent_lbl  = mv_row.get("label", "")
-            parent_vals = mv_row.get("values", [])
-            ms_parent   = ms_hier_map.get(parent_lbl, {})
-            if ms_parent:
-                ms_parent["values"] = [100.0] * n
+            parent_lbl = mv_row.get("label", "")
+            children   = mv_row.get("children", [])
+            ms_parent  = ms_hier_map.get(parent_lbl, {})
 
-            for child in mv_row.get("children", []):
+            if not children:
+                continue
+
+            # Derive length and per-period column sum directly from children
+            # to avoid rounding drift when parent_vals used to_int=True
+            hier_n = max((len(c.get("values", [])) for c in children), default=0)
+            child_col_sums = [
+                sum(float(c["values"][i]) for c in children if i < len(c.get("values", [])))
+                for i in range(hier_n)
+            ]
+
+            if ms_parent:
+                ms_parent["values"] = [100.0] * hier_n
+
+            for child in children:
                 child_lbl  = child.get("label", "")
                 child_vals = child.get("values", [])
                 child_ms   = [
-                    round(float(child_vals[i]) / float(parent_vals[i]) * 100, 4)
-                    if i < len(child_vals) and i < len(parent_vals) and float(parent_vals[i]) != 0
+                    round(float(child_vals[i]) / child_col_sums[i] * 100, 4)
+                    if i < len(child_vals) and i < hier_n and child_col_sums[i] != 0
                     else 0.0
-                    for i in range(n)
+                    for i in range(hier_n)
                 ]
                 if ms_parent:
                     for c in ms_parent.get("children", []):
@@ -1163,250 +1578,128 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
     return market_analysis
 
 
-# ---------------------------------------------------------------------------
-# Save scenario
-# ---------------------------------------------------------------------------
 
-def _build_and_save_market_analysis(cur, conn, payload) -> dict:
+def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: bool) -> dict:
     """
-    Shared core used by both save_liver_scenario and update_liver_scenario.
-    Builds market_analysis, applies the edited tab, propagates, recalculates
-    market_share, then persists to DB.
+    Core for save/update: persists market_analysis + factors as-is, returns response.
+    No recomputation — whatever the frontend sends is what gets stored.
     """
-    from_year, from_month = _parse_ym(payload.from_date)
-    cfg = _load_config(cur, payload.ta, _first(payload.payer), _first(payload.brand))
-    train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-    forecast_periods = cfg["forecast_periods"]
-    granularity = cfg.get("model_granularity", "monthly")
+    name = payload.scenario_name.strip()
+    ta   = payload.ta_name
+    flt  = payload.selected_filter
 
-    fdict = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
+    conn = get_connection()
+    cur  = conn.cursor()
     try:
-        factors = LiverFactors(
-            ets=EtsParams(**fdict.get("ets", {})),
-            linear=LinearParams(**fdict.get("linear", {})),
-            scurve=SCurveParams(**fdict.get("scurve", {})),
-            exponential=ExponentialParams(**fdict.get("exponential", {})),
-            logarithmic=LogarithmicParams(**fdict.get("logarithmic", {})),
-            multiplier=fdict.get("multiplier", 1.0),
-            multiplier_horizon=fdict.get("multiplier_horizon", "Forecast"),
-            active_model=fdict.get("active_model", "ets"),
+        exists = scenario_exists(cur, name)
+        if not allow_overwrite and exists:
+            raise ValueError(
+                f"Scenario '{name}' already exists. "
+                "Use Update Scenario to overwrite it, or choose a different name."
+            )
+        if allow_overwrite and not exists:
+            raise ValueError(
+                f"Scenario '{name}' does not exist. "
+                "Use Save Scenario to create a new scenario first."
+            )
+
+        factors = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
+
+        save_scenario(
+            cur,
+            scenario_name=name,
+            ta=ta,
+            payer=flt.market or "",
+            product=flt.product or "",
+            from_date=flt.start_date,
+            to_date=flt.end_date,
+            chart_data={"market_analysis": payload.market_analysis},
+            factors=factors,
         )
-    except Exception:
-        factors = _estimate_default_factors(cur, payload.ta, from_year, from_month,
-                                            train_end_year, train_end_month, granularity)
+        conn.commit()
 
-    _, _, market_analysis, _ = _build_all_tabs_both_metrics(
-        cur, payload.ta, from_year, from_month,
-        train_end_year, train_end_month, forecast_periods, factors,
-        granularity, scenario_name=payload.scenario_name,
-    )
+        # Build response -------------------------------------------------
+        all_scenario_names = get_scenarios(cur)
+        if "Base" in all_scenario_names:
+            all_scenario_names.remove("Base")
+        available_scenarios = ["Base"] + all_scenario_names
 
-    raw_cd = payload.chart_data or {}
-    edited_chart = raw_cd.get("chart") or {}
-    edited_table = raw_cd.get("table") or []
+        # Load stored chart_data for inactive scenarios (TMV stub only)
+        cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+        saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-    if edited_chart or edited_table:
-        months = edited_chart.get("months") or []
-        fsi    = edited_chart.get("forecast_start_index") or 0
-        n      = len(months)
+        # Load config so we can compute Base TMV
+        cfg = _load_config(cur, ta, flt.market or None, flt.product or None)
+        train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+        from_year, from_month = _parse_ym(flt.start_date)
+        forecast_periods = _resolve_forecast_periods(
+            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
+        granularity = cfg.get("model_granularity", "monthly")
 
-        hier_labels = [r.get("hierarchy") or r.get("label") for r in edited_table]
-        has_total   = any(h and h.lower() == "total" for h in hier_labels)
+        base_factors = _estimate_default_factors(
+            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+        )
+        _base_ma, _ = _build_market_analysis_both_granularities(
+            cur, ta, from_year, from_month,
+            train_end_year, train_end_month, forecast_periods, base_factors,
+            scenario_name="Base",
+        )
+        base_tmv = _base_ma.get("total_market_volume", {})
 
-        if not has_total:
-            tab_key = "total_market_volume"
-        else:
-            non_total = [h for h in hier_labels if h and h.lower() != "total"]
-            products = get_products(cur)
-            payers   = get_payers(cur)
-            if non_total and non_total[0] in products:
-                tab_key = "product_distribution"
-            elif non_total and non_total[0] in payers:
-                tab_key = "market_distribution"
-            else:
-                tab_key = "product_distribution"
-
-        metric_key = payload.metric or "market_volume"
-
-        new_series = [
-            {
-                "label":    s.get("label", ""),
-                "history":  s.get("history") or s.get("train_values") or [],
-                "forecast": s.get("forecast") or s.get("forecast_values") or [],
+        def _tmv_stub(tmv: dict) -> dict:
+            return {
+                "market_analysis": {
+                    "total_market_volume": {
+                        "market_volume": {
+                            "monthly": tmv.get("market_volume", {}).get("monthly", {}),
+                            "yearly":  tmv.get("market_volume", {}).get("yearly",  {}),
+                        },
+                        "market_share": {
+                            "monthly": tmv.get("market_share", {}).get("monthly", {}),
+                            "yearly":  tmv.get("market_share", {}).get("yearly",  {}),
+                        },
+                    }
+                }
             }
-            for s in (edited_chart.get("series") or [])
-        ]
 
-        new_table_rows = []
-        for r in edited_table:
-            lbl     = r.get("hierarchy") or r.get("label") or ""
-            monthly = r.get("monthly_data") or {}
-            vals    = [monthly.get(m, 0) for m in months] if months else list(monthly.values())
-            new_table_rows.append({"label": lbl, "values": vals})
-
-        edited_tab_data = {
-            "chart": {"months": months, "forecast_start_index": fsi, "series": new_series},
-            "table": {"type": "flat", "rows": new_table_rows},
-        }
-
-        if metric_key == "market_volume":
-            dist_tabs = ["product_distribution", "market_distribution",
-                         "market_product", "product_market"]
-
-            if tab_key == "total_market_volume":
-                old_tmv_rows = (
-                    market_analysis.get("total_market_volume", {})
-                    .get("market_volume", {})
-                    .get("table", {}).get("rows", [])
-                )
-                old_total = list(old_tmv_rows[0].get("values", [])) if old_tmv_rows else []
-                new_total = list(new_table_rows[0].get("values", [])) if new_table_rows else []
-
-                market_analysis["total_market_volume"]["market_volume"] = edited_tab_data
-
-                scale = [
-                    float(new_total[i]) / float(old_total[i])
-                    if i < len(old_total) and float(old_total[i]) != 0 else 1.0
-                    for i in range(n)
-                ]
-                for dt in dist_tabs:
-                    if dt not in market_analysis:
-                        continue
-                    mv_data = market_analysis[dt].get("market_volume", {})
-                    for s in (mv_data.get("chart", {}).get("series") or []):
-                        h = s.get("history", [])
-                        f = s.get("forecast", [])
-                        s["history"]  = [round(float(h[i]) * scale[i], 4) if i < len(h) else 0.0 for i in range(fsi)]
-                        s["forecast"] = [round(float(f[i]) * scale[fsi + i], 4) if i < len(f) else 0.0 for i in range(n - fsi)]
-                    for r in (mv_data.get("table", {}).get("rows") or []):
-                        vals = r.get("values", [])
-                        r["values"] = [round(float(vals[i]) * scale[i], 4) if i < len(vals) else 0.0 for i in range(n)]
-                        for child in r.get("children", []):
-                            cvals = child.get("values", [])
-                            child["values"] = [round(float(cvals[i]) * scale[i], 4) if i < len(cvals) else 0.0 for i in range(n)]
-            else:
-                if tab_key in market_analysis:
-                    market_analysis[tab_key]["market_volume"] = edited_tab_data
-
-                non_total_rows = [r for r in new_table_rows if r.get("label", "").lower() != "total"]
-                if non_total_rows:
-                    new_total_vals = [0.0] * n
-                    for r in non_total_rows:
-                        for i, v in enumerate(r.get("values", [])):
-                            if i < n:
-                                new_total_vals[i] += float(v)
-
-                    tmv_mv = market_analysis.get("total_market_volume", {}).get("market_volume", {})
-                    tmv_rows = tmv_mv.get("table", {}).get("rows", [])
-                    if tmv_rows:
-                        tmv_rows[0]["values"] = [round(v, 4) for v in new_total_vals]
-                    tmv_series = tmv_mv.get("chart", {}).get("series", [])
-                    if tmv_series:
-                        tmv_series[0]["history"]  = [round(v, 4) for v in new_total_vals[:fsi]]
-                        tmv_series[0]["forecast"] = [round(v, 4) for v in new_total_vals[fsi:]]
-        else:
-            if tab_key in market_analysis and metric_key in market_analysis[tab_key]:
-                market_analysis[tab_key][metric_key] = edited_tab_data
-
-    market_analysis = _recompute_all_market_shares(market_analysis)
-    save_scenario(cur, payload, {"market_analysis": market_analysis})
-    conn.commit()
-
-    # Build response identical to apply_liver_filters (minus selected_filter)
-    from_year, from_month = _parse_ym(payload.from_date)
-    cfg = _load_config(cur, payload.ta, _first(payload.payer), _first(payload.brand))
-    train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-    forecast_periods = cfg["forecast_periods"]
-    granularity = cfg.get("model_granularity", "monthly")
-
-    response_factors = _build_response_factors(factors)
-
-    all_scenario_names = get_scenarios(cur)
-    available_scenarios = ["Base"] + all_scenario_names
-    active_scenario = payload.scenario_name
-
-    cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
-    all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
-
-    base_factors = _estimate_default_factors(
-        cur, payload.ta, from_year, from_month,
-        train_end_year, train_end_month, granularity,
-    )
-    _, _, _base_ma, _ = _build_all_tabs_both_metrics(
-        cur, payload.ta, from_year, from_month,
-        train_end_year, train_end_month, forecast_periods, base_factors,
-        granularity, scenario_name="Base",
-    )
-    base_tmv = _base_ma.get("total_market_volume", {})
-
-    def _tmv_table_only(tmv: dict) -> dict:
-        return {
-            metric: {"table": tmv[metric]["table"]}
-            for metric in ("market_volume", "market_share")
-            if metric in tmv and "table" in tmv[metric]
-        }
-
-    def _inactive_stub(sc_name):
-        if sc_name == "Base":
-            tmv = base_tmv
-        else:
-            cd = all_saved_cd.get(sc_name, {})
+        def _inactive_stub(sc_name):
+            if sc_name == "Base":
+                return _tmv_stub(base_tmv)
+            cd  = saved.get(sc_name, {})
             tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-        return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
+            return _tmv_stub(tmv)
 
-    scenarios = {
-        sc: (
-            {"factors": response_factors, "market_analysis": market_analysis}
-            if sc == active_scenario
-            else _inactive_stub(sc)
-        )
-        for sc in available_scenarios
-    }
+        scenarios = {}
+        for sc in available_scenarios:
+            if sc == name:
+                scenarios[sc] = {
+                    "factors":         factors,
+                    "market_analysis": payload.market_analysis,
+                }
+            else:
+                scenarios[sc] = _inactive_stub(sc)
 
-    return {
-        "ta_name":            payload.ta,
-        "available_scenarios": available_scenarios,
-        "active_scenario":     active_scenario,
-        "scenarios":           scenarios,
-    }
+        return {
+            "available_scenarios": available_scenarios,
+            "active_scenario":     name,
+            "scenarios":           scenarios,
+        }
+    finally:
+        cur.close()
+        conn.close()
 
 
 def save_liver_scenario(payload: LiverSaveScenarioRequest) -> dict:
     if payload.scenario_name.strip().lower() == "base":
-        raise ValueError(
-            "Cannot overwrite the Base scenario. Please provide a different scenario name."
-        )
-
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        if scenario_exists(cur, payload.scenario_name):
-            raise ValueError(
-                f"Scenario '{payload.scenario_name}' already exists. "
-                "Use Update Scenario to overwrite it, or choose a different name."
-            )
-        return _build_and_save_market_analysis(cur, conn, payload)
-    finally:
-        cur.close()
-        conn.close()
+        raise ValueError("Cannot overwrite the Base scenario. Please provide a different scenario name.")
+    return _persist_and_respond(payload, allow_overwrite=False)
 
 
 def update_liver_scenario(payload: LiverSaveScenarioRequest) -> dict:
     if payload.scenario_name.strip().lower() == "base":
         raise ValueError("The Base scenario cannot be updated.")
-
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        if not scenario_exists(cur, payload.scenario_name):
-            raise ValueError(
-                f"Scenario '{payload.scenario_name}' does not exist. "
-                "Use Save Scenario to create a new scenario first."
-            )
-        return _build_and_save_market_analysis(cur, conn, payload)
-    finally:
-        cur.close()
-        conn.close()
+    return _persist_and_respond(payload, allow_overwrite=True)
 
 
 
@@ -1551,16 +1844,82 @@ def refresh_liver_table(payload):
         for row in non_total_rows:
             table_rows.append({"label": row.hierarchy, "values": list(row.values)})
 
-        return {
+        # All-scenarios table: every row from payload.table
+        # active scenario rows get refreshed values, others keep original
+        refreshed_by_hierarchy = {row.hierarchy: list(row.values) for row in non_total_rows}
+        all_table_rows = []
+        if is_dist_tab:
+            all_table_rows.append({"label": "Total", "values": [round(v, 4) for v in total_vals]})
+        for row in payload.table:
+            if row.hierarchy.lower() == "total":
+                continue
+            vals = refreshed_by_hierarchy.get(row.hierarchy, list(row.values))
+            all_table_rows.append({"label": row.hierarchy, "values": vals})
+
+        refreshed_monthly_tab = {
             "chart": {
                 "months":               month_labels,
                 "forecast_start_index": forecast_start_index,
                 "series":               series,
             },
-            "table": {
-                "type": "flat",
-                "rows": table_rows,
-            },
+            "table": {"type": "flat", "rows": all_table_rows},
+        }
+
+        # ── Build full response matching apply_filters / save_scenario shape ──
+        cur.execute(
+            "SELECT scenario_name, chart_data, factors FROM raw_liver.liver_scenarios"
+        )
+        stored = {r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}} for r in cur.fetchall()}
+        saved_names = [n for n in stored.keys() if n != "Base"]
+        available_scenarios = ["Base"] + saved_names
+
+        base_factors_obj = _estimate_default_factors(
+            cur, payload.ta, from_year, from_month,
+            train_end_year, train_end_month, granularity,
+        )
+        _traj_start_ref = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
+        base_factors_raw = _build_response_factors(base_factors_obj, _traj_start_ref)
+
+        scenarios_out = {}
+        for sc_name in available_scenarios:
+            if sc_name == "Base":
+                sc_factors_raw = base_factors_raw
+                sc_factors_obj = base_factors_obj
+            else:
+                sc_factors_raw = stored[sc_name]["factors"]
+                try:
+                    sc_factors_obj = LiverFactors(**sc_factors_raw)
+                except Exception:
+                    sc_factors_obj = base_factors_obj
+
+            if sc_name == active_scenario:
+                # Rebuild ALL tabs (both granularities) so other tabs stay populated
+                full_ma, _ = _build_market_analysis_both_granularities(
+                    cur, payload.ta, from_year, from_month,
+                    train_end_year, train_end_month, forecast_periods, sc_factors_obj,
+                    sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                    scenario_name=sc_name,
+                )
+                # Override refreshed tab's monthly data with the edited values
+                tab_entry = dict(full_ma.get(payload.tab_key, {}))
+                metric_entry = dict(tab_entry.get(payload.metric, {}))
+                metric_entry["monthly"] = refreshed_monthly_tab
+                tab_entry[payload.metric] = metric_entry
+                full_ma[payload.tab_key] = tab_entry
+                sc_chart_data = full_ma
+            else:
+                sc_chart_data = stored.get(sc_name, {}).get("chart_data", {})
+
+            scenarios_out[sc_name] = {
+                "factors":         sc_factors_raw,
+                "market_analysis": sc_chart_data,
+            }
+
+        return {
+            "ta_name":             payload.ta,
+            "available_scenarios": available_scenarios,
+            "active_scenario":     active_scenario,
+            "scenarios":           scenarios_out,
         }
     finally:
         cur.close()
