@@ -286,6 +286,11 @@ export default function PBCModelInput() {
   const [compareScenarioOptions, setCompareScenarioOptions] = useState([]);
   // Subset the user has chosen to display; empty = show all
   const [selectedCompareScenarios, setSelectedCompareScenarios] = useState([]);
+  // True only after the user has manually toggled a checkbox in the Compare
+  // Scenarios dropdown. Until then, ALL rows in tableData are shown regardless
+  // of selectedCompareScenarios so that initial load / apply-filter always
+  // shows every scenario without waiting for state to settle.
+  const [userHasCustomizedCompare, setUserHasCustomizedCompare] = useState(false);
   const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] =
     useState("");
   const [currentlyAppliedScenario, setCurrentlyAppliedScenario] = useState("");
@@ -596,11 +601,30 @@ export default function PBCModelInput() {
           const tmvChart = tmvTab.chart || { months, forecast_start_index: fsi, series: [] };
           const chartFsi = tmvChart.forecast_start_index ?? fsi;
 
-          // Chart shows ONE scenario at a time:
-          //   - the currently applied scenario (passed in via currentMetric hack — we
-          //     use the component's currentlyAppliedScenario via closure if available,
-          //     otherwise fall back to the active_scenario from the response, then Base.
-          // Find the matching scenario row; fall back to the first row (Base).
+          // Build yearly scenario rows in the same way — one row per scenario
+          // using each scenario's yearly.table.rows[0].values.
+          const yearlyScenarioRows = [];
+          Object.entries(data.scenarios).forEach(([scenarioName, scenarioData]) => {
+            const tmv = scenarioData?.market_analysis?.total_market_volume;
+            if (!tmv) return;
+            const metricObj = tmv.market_volume || tmv.market_share || Object.values(tmv)[0];
+            if (!metricObj) return;
+            const yearlyRows = metricObj?.yearly?.table?.rows || [];
+            const firstYearlyRow = yearlyRows[0];
+            if (!firstYearlyRow) return;
+            yearlyScenarioRows.push({
+              hierarchy: scenarioName,
+              label: scenarioName,
+              total: undefined,
+              values: parseValues(firstYearlyRow.values, false),
+              children: [],
+            });
+          });
+
+          // Yearly chart months (for building yearly table headers)
+          const yearlyChartMonths = tmvTab.yearlyChart?.months || [];
+
+          // Chart shows ONE scenario at a time — active_scenario or Base.
           const activeForChart =
             data.active_scenario ||
             (scenarioRows[0]?.hierarchy) ||
@@ -634,6 +658,14 @@ export default function PBCModelInput() {
               ...tmvTab.table,
               rows: scenarioRows,
             },
+            // Replace yearlyTable rows with all-scenario yearly rows so the
+            // yearly view also shows every scenario, not just the active one.
+            yearlyTable: yearlyScenarioRows.length
+              ? {
+                  ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                  rows: yearlyScenarioRows,
+                }
+              : tmvTab.yearlyTable,
           };
         }
       }
@@ -975,15 +1007,18 @@ export default function PBCModelInput() {
       targetMetric = "market_volume";
     }
 
-    // Apply per-tab model defaults only when switching tabs (not on every
-    // render). We never override a model the user/backend explicitly set —
-    // we only set the default for a tab the first time it's visited.
-    //   total_market → default ets
-    //   all others   → default linear (ets is still selectable)
-    if (activeTab === "total_market") {
-      if (!modelSelection || modelSelection === "linear") setModelSelection("ets");
-    } else {
-      if (!modelSelection || modelSelection === "ets") setModelSelection("linear");
+    // Set per-tab model default only when the model is at the other tab's
+    // default (i.e. the user hasn't explicitly chosen a non-default model).
+    // We do NOT call setModelSelection on initial load when syncFactors has
+    // already set the correct model from the backend — only change it when
+    // the user switches tabs and the current model is clearly a "wrong default".
+    const isDefaultForOtherTab =
+      activeTab === "total_market"
+        ? modelSelection === "linear"     // switching TO total_market, was linear
+        : modelSelection === "ets";       // switching AWAY from total_market, was ets
+    if (isDefaultForOtherTab && modelSelection) {
+      const newDefault = activeTab === "total_market" ? "ets" : "linear";
+      setModelSelection(newDefault);
     }
 
     if (metric !== targetMetric) {
@@ -1187,7 +1222,6 @@ export default function PBCModelInput() {
               ...prev,
               scenario_names: availScenarios,
             }));
-            initializeCompareScenarios(data);
           }
           const activeScenarioKey =
             data?.active_scenario || availScenarios[0] || "Base";
@@ -1211,7 +1245,7 @@ export default function PBCModelInput() {
           const normalized = normalizeLiverResponse(data, metric);
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
-        initializeCompareScenarios(data);
+          initializeCompareScenarios(data);
           // The chart's month list doubles as the set of selectable dates
           // for the FROM/TO DATE dropdowns — no separate endpoint needed.
           if (normalized?.months?.length) setAvailableDates(normalized.months);
@@ -1594,23 +1628,44 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        const resp = await saveLiverScenario({
+        // Resolve source scenario robustly
+        const sourceScenario =
+          currentlyAppliedScenario ||
+          scenarioSelector ||
+          liverRawData?.active_scenario ||
+          (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
+          "Base";
+
+        // Resolve market_analysis — try exact key match first, then case-insensitive,
+        // then fall back to the first available scenario's market_analysis.
+        let marketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis;
+        if (!marketAnalysis && liverRawData?.scenarios) {
+          const matchedKey = Object.keys(liverRawData.scenarios).find(
+            (k) => k.toLowerCase() === sourceScenario.toLowerCase()
+          );
+          marketAnalysis = matchedKey
+            ? liverRawData.scenarios[matchedKey]?.market_analysis
+            : Object.values(liverRawData.scenarios)[0]?.market_analysis;
+        }
+        marketAnalysis = marketAnalysis || {};
+
+        const payload = {
+          ta_name: therapyArea || "HCV",
           scenario_name: scenarioNameFromDialog,
-          ta: therapyArea || "HCV",
-          payer: payerFilter ? [payerFilter] : [],
-          brand: productFilter ? [productFilter] : [],
-          metric: metric || "market_volume",
-          from_date: resolveFromDate(),
+          selected_filter: {
+            market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+            start_date: resolveFromDate(),
+            end_date: toDate || "",
+          },
+          source_scenario: sourceScenario,
           factors: buildFullFactors(),
-          chart_data: { chart: chartData, table: tableData },
-          editable_table: tableData.map((row) => ({
-            hierarchy: row.hierarchy,
-            values: (chartData?.months || []).map((m) => {
-              const v = row.monthly_data?.[m];
-              return v == null ? 0 : Number(v);
-            }),
-          })),
-        });
+          market_analysis: marketAnalysis,
+        };
+
+        console.log("[SaveScenario] payload:", JSON.stringify(payload, null, 2));
+
+        const resp = await saveLiverScenario(payload);
 
         showSnackbar("Scenario saved successfully", "success");
 
@@ -1650,15 +1705,15 @@ export default function PBCModelInput() {
 
         setTentativeRadioSelectedScenario(scenarioNameFromDialog);
         setCurrentlyAppliedScenario(scenarioNameFromDialog);
-        // Remove from savedScenarioRows if it got real data (the actual
-        // row will now appear in groupedTableHierarchy from the response).
+
+        // Add to savedScenarioRows so it appears in the table immediately.
+        // Only skip adding it if the API response already includes it as a
+        // scenario with its own table data in groupedTableHierarchy.
         setSavedScenarioRows((prev) => {
-          const hasRealData =
-            resp?.data &&
-            Object.keys(resp.data).length &&
-            normalizeLiverResponse(resp.data, metric)?.tabs &&
-            Object.keys(normalizeLiverResponse(resp.data, metric).tabs).length;
-          if (hasRealData) return prev.filter((n) => n !== scenarioNameFromDialog);
+          const scenarioInResponse =
+            respData?.scenarios?.[scenarioNameFromDialog] ||
+            respData?.available_scenarios?.includes(scenarioNameFromDialog);
+          if (scenarioInResponse) return prev.filter((n) => n !== scenarioNameFromDialog);
           return prev.includes(scenarioNameFromDialog)
             ? prev
             : [...prev, scenarioNameFromDialog];
@@ -1688,6 +1743,7 @@ export default function PBCModelInput() {
       });
       setScenarioSelector(scenarioNameFromDialog);
     } catch (err) {
+      console.error("[SaveScenario] error:", err?.response?.data || err);
       showSnackbar("Failed to save scenario", "error");
     } finally {
       setLoading(false);
@@ -1815,25 +1871,25 @@ export default function PBCModelInput() {
     const scenarios =
       response?.available_scenarios ||
       (response?.scenarios ? Object.keys(response.scenarios) : []);
-    if (!scenarios.length) return;
-    setCompareScenarioOptions(scenarios);
-    // On first init (empty selection) show all.
-    // On subsequent calls, preserve the user's prior selection but:
-    //   1. Remove any scenarios no longer returned by the API.
-    //   2. Always include the currently applied scenario so it stays checked.
-    const applied = appliedScenario || currentlyAppliedScenario || "";
-    setSelectedCompareScenarios((prev) => {
-      if (!prev.length) return scenarios;
-      const kept = prev.filter((s) => scenarios.includes(s));
-      // Ensure the applied scenario is always checked
-      if (applied && scenarios.includes(applied) && !kept.includes(applied)) {
-        return [...kept, applied];
-      }
-      return kept.length ? kept : scenarios;
-    });
+
+    // Always include the newly saved/applied scenario even if the API
+    // response doesn't list it in available_scenarios / scenarios keys.
+    const toAdd = appliedScenario || currentlyAppliedScenario || "";
+    const merged = toAdd && !scenarios.includes(toAdd)
+      ? [...scenarios, toAdd]
+      : scenarios;
+
+    if (!merged.length) return;
+    setCompareScenarioOptions(merged);
+    // Reset to "show all" whenever the available scenario list changes
+    // (new apply-filter, save-scenario, initial load). The user can then
+    // narrow the view by unchecking items in the Compare dropdown.
+    setSelectedCompareScenarios(merged);
+    setUserHasCustomizedCompare(false);
   };
 
   const handleScenarioSelectionChange = (s) => {
+    setUserHasCustomizedCompare(true);
     setSelectedCompareScenarios((prev) => {
       const updated = prev.includes(s)
         ? prev.filter((x) => x !== s)
@@ -3379,10 +3435,13 @@ export default function PBCModelInput() {
                     <>
                     {groupedTableHierarchy
                       .filter((group) => {
-                        // On total_market tab: only filter by selected
-                        // compare scenarios (always keep the applied one).
-                        // On other tabs: show all rows regardless.
+                        // On non-total_market tabs: always show all rows.
                         if (activeTab !== "total_market") return true;
+                        // On total_market: only filter when the user has
+                        // explicitly toggled the Compare Scenarios checkboxes.
+                        // Before that, show every row so all scenarios are
+                        // visible on initial load and after apply-filter.
+                        if (!userHasCustomizedCompare) return true;
                         if (!selectedCompareScenarios.length) return true;
                         return (
                           group.brandName === currentlyAppliedScenario ||
