@@ -7,7 +7,7 @@ from app.liver.schemas.liver_schema import (
     LiverApplyFiltersResponse,
     LiverRecalculateRequest,
     LiverSaveScenarioRequest,
-    LiverRefreshTableRequest,
+    LiverRefreshRequest,
 )
 from app.liver.services.liver_service import (
     get_liver_configuration,
@@ -17,7 +17,7 @@ from app.liver.services.liver_service import (
     recalculate_liver,
     save_liver_scenario,
     update_liver_scenario,
-    refresh_liver_table,
+    refresh_liver,
 )
 
 router = APIRouter(prefix="/api/liver", tags=["Liver"])
@@ -121,11 +121,18 @@ def liver_update_scenario(payload: LiverSaveScenarioRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-@router.post("/refresh-table")
-def liver_refresh_table(payload: LiverRefreshTableRequest):
+
+
+@router.post("/refresh")
+def liver_refresh(payload: LiverRefreshRequest):
+    """
+    Propagate a user's table edit across related tabs and metrics.
+    - TMV edit: keep distribution shares, recompute volumes.
+    - Dist tab volume edit: redistribute others to maintain sum = TMV, recompute shares.
+    - Dist tab share edit: redistribute others to maintain sum = 100%, recompute volumes.
+    """
     try:
-        return refresh_liver_table(payload)
+        return refresh_liver(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

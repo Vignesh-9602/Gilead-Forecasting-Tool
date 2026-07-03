@@ -1751,175 +1751,331 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
         active_model="linear",
     )
 
+
 # ---------------------------------------------------------------------------
-# Refresh Liver Table and chart
+# Refresh / edit table
 # ---------------------------------------------------------------------------
 
-def refresh_liver_table(payload):
-    from_year, from_month = _parse_ym(payload.from_date)
-    conn = get_connection()
-    cur = conn.cursor()
+def refresh_liver(payload):
+    import copy
+
+    ma  = copy.deepcopy(payload.market_analysis)
+    tab = payload.selected_tab
+    metric = payload.selected_metric
+    eh  = payload.edited_hierarchy  # label of the row the user changed
+
+    DIST_TABS = ["market_distribution", "product_distribution", "market_product", "product_market"]
+    HIER_TABS = {"market_product", "product_market"}
+
+    # ── Low-level helpers ────────────────────────────────────────────────────
+
+    def _rows(t, m, g):
+        return ma.get(t, {}).get(m, {}).get(g, {}).get("table", {}).get("rows", [])
+
+    def _set_gran(t, m, g, gran_dict):
+        ma.setdefault(t, {}).setdefault(m, {})[g] = gran_dict
+
+    def _total_vals(rows):
+        """Return values of the Total row; if absent, sum all rows."""
+        for r in rows:
+            if r.get("label", "").lower() == "total":
+                return [float(v) for v in r["values"]]
+        if not rows:
+            return []
+        n = max((len(r.get("values", [])) for r in rows), default=0)
+        totals = [0.0] * n
+        for r in rows:
+            for i, v in enumerate(r.get("values", [])):
+                if i < n:
+                    totals[i] += float(v)
+        return totals
+
+    def _sync_flat_chart(gran_dict):
+        rows = gran_dict.get("table", {}).get("rows", [])
+        fsi  = gran_dict.get("forecast_start_index", 0)
+        series = []
+        for r in rows:
+            if r.get("label", "").lower() == "total":
+                continue
+            vals = [float(v) for v in r.get("values", [])]
+            series.append({"label": r["label"], "history": vals[:fsi], "forecast": vals[fsi:]})
+        gran_dict.setdefault("chart", {})["series"] = series
+
+    def _sync_hier_chart(gran_dict):
+        rows = gran_dict.get("table", {}).get("rows", [])
+        fsi  = gran_dict.get("forecast_start_index", 0)
+        series = []
+        for parent in rows:
+            plbl  = parent.get("label", "")
+            pvals = [float(v) for v in parent.get("values", [])]
+            series.append({"label": plbl, "history": pvals[:fsi], "forecast": pvals[fsi:]})
+            for child in parent.get("children", []):
+                clbl  = child.get("label", "")
+                cvals = [float(v) for v in child.get("values", [])]
+                series.append({"label": f"{plbl} - {clbl}", "history": cvals[:fsi], "forecast": cvals[fsi:]})
+        gran_dict.setdefault("chart", {})["series"] = series
+
+    def _put_flat(t, m, g, rows):
+        gran_dict = dict(ma.get(t, {}).get(m, {}).get(g, {}))
+        gran_dict.setdefault("table", {})["rows"] = rows
+        _sync_flat_chart(gran_dict)
+        _set_gran(t, m, g, gran_dict)
+
+    def _put_hier(t, m, g, rows):
+        gran_dict = dict(ma.get(t, {}).get(m, {}).get(g, {}))
+        gran_dict.setdefault("table", {})["rows"] = rows
+        _sync_hier_chart(gran_dict)
+        _set_gran(t, m, g, gran_dict)
+
+    # ── Flat conversion helpers ──────────────────────────────────────────────
+
+    def _share_from_vol(vol_rows, tmv):
+        out = []
+        for r in vol_rows:
+            lbl = r.get("label", "")
+            if lbl.lower() == "total":
+                out.append({"label": lbl, "values": [100.0] * len(tmv)})
+            else:
+                vals = [round(float(v) / float(t) * 100, 4) if t else 0.0
+                        for v, t in zip(r.get("values", []), tmv)]
+                out.append({"label": lbl, "values": vals})
+        return out
+
+    def _vol_from_share(share_rows, tmv):
+        out = []
+        for r in share_rows:
+            lbl = r.get("label", "")
+            if lbl.lower() == "total":
+                out.append({"label": lbl, "values": [round(v, 4) for v in tmv]})
+            else:
+                vals = [round(float(s) / 100.0 * float(t), 4)
+                        for s, t in zip(r.get("values", []), tmv)]
+                out.append({"label": lbl, "values": vals})
+        return out
+
+    def _redistribute(rows, edited_lbl, target_vals):
+        """
+        Keep the edited row as-is; scale the other non-total rows proportionally
+        so that non-total values sum to target_vals per column.
+        Returns a new rows list (total row recomputed).
+        """
+        non_tot = [r for r in rows if r.get("label", "").lower() != "total"]
+        edited  = next((r for r in non_tot if r["label"] == edited_lbl), None)
+        others  = [r for r in non_tot if r["label"] != edited_lbl]
+        if not edited:
+            return rows  # nothing to redistribute
+
+        n = len(target_vals)
+        new_others = []
+        for other in others:
+            new_vals = []
+            for i in range(n):
+                tgt   = float(target_vals[i]) if i < len(target_vals) else 0.0
+                ed_v  = float(edited["values"][i]) if i < len(edited.get("values", [])) else 0.0
+                remaining = max(0.0, tgt - ed_v)
+                old_other_sum = sum(
+                    float(o["values"][i]) if i < len(o.get("values", [])) else 0.0
+                    for o in others
+                )
+                old_v = float(other["values"][i]) if i < len(other.get("values", [])) else 0.0
+                if old_other_sum > 0:
+                    new_vals.append(round(old_v / old_other_sum * remaining, 4))
+                else:
+                    new_vals.append(round(remaining / max(1, len(others)), 4))
+            new_others.append({"label": other["label"], "values": new_vals})
+
+        new_non_tot = [edited] + new_others
+        # Recompute total
+        tot_vals = [0.0] * n
+        for r in new_non_tot:
+            for i, v in enumerate(r.get("values", [])):
+                if i < n:
+                    tot_vals[i] += float(v)
+        return [{"label": "Total", "values": [round(v, 4) for v in tot_vals]}] + new_non_tot
+
+    # ── Hierarchical conversion helpers ──────────────────────────────────────
+
+    def _hier_vol_from_share(hier_rows, tmv):
+        """Children: vol = share/100 * tmv.  Parent totals = tmv."""
+        out = []
+        for parent in hier_rows:
+            new_children = []
+            for child in parent.get("children", []):
+                cvals = [round(float(s) / 100.0 * float(t), 4)
+                         for s, t in zip(child.get("values", []), tmv)]
+                new_children.append({"label": child["label"], "values": cvals})
+            out.append({"label": parent["label"],
+                        "values": [round(v, 4) for v in tmv],
+                        "children": new_children})
+        return out
+
+    def _hier_share_from_vol(hier_rows, tmv):
+        """Children: share = vol/tmv*100.  Parent totals = 100%."""
+        out = []
+        for parent in hier_rows:
+            new_children = []
+            for child in parent.get("children", []):
+                cvals = [round(float(v) / float(t) * 100, 4) if t else 0.0
+                         for v, t in zip(child.get("values", []), tmv)]
+                new_children.append({"label": child["label"], "values": cvals})
+            out.append({"label": parent["label"],
+                        "values": [100.0] * len(tmv),
+                        "children": new_children})
+        return out
+
+    def _hier_redistribute_share(hier_rows, edited_lbl, tmv):
+        """
+        edited_lbl = "ParentLabel::ChildLabel".
+        Within that parent, keep edited child's share; redistribute siblings so
+        children sum to 100%. Then recompute volumes.
+        """
+        if not edited_lbl or "::" not in edited_lbl:
+            return hier_rows
+        parent_lbl, child_lbl = edited_lbl.split("::", 1)
+        out = []
+        for parent in hier_rows:
+            if parent.get("label") != parent_lbl:
+                out.append(parent)
+                continue
+            children    = parent.get("children", [])
+            edited_child = next((c for c in children if c["label"] == child_lbl), None)
+            sibling_cs   = [c for c in children if c["label"] != child_lbl]
+            if not edited_child:
+                out.append(parent)
+                continue
+            n = len(tmv)
+            new_siblings = []
+            for sib in sibling_cs:
+                new_vals = []
+                for i in range(n):
+                    ed_share  = float(edited_child["values"][i]) if i < len(edited_child.get("values", [])) else 0.0
+                    remaining = max(0.0, 100.0 - ed_share)
+                    old_sib_sum = sum(
+                        float(s["values"][i]) if i < len(s.get("values", [])) else 0.0
+                        for s in sibling_cs
+                    )
+                    old_v = float(sib["values"][i]) if i < len(sib.get("values", [])) else 0.0
+                    if old_sib_sum > 0:
+                        new_vals.append(round(old_v / old_sib_sum * remaining, 4))
+                    else:
+                        new_vals.append(round(remaining / max(1, len(sibling_cs)), 4))
+                new_siblings.append({"label": sib["label"], "values": new_vals})
+            out.append({"label": parent_lbl,
+                        "values": [100.0] * n,
+                        "children": [edited_child] + new_siblings})
+        return out
+
+    # ── Core propagation ─────────────────────────────────────────────────────
+
+    for gran in ("monthly", "yearly"):
+        tmv_rows = _rows("total_market_volume", "market_volume", gran)
+        tmv_vals = _total_vals(tmv_rows)
+        if not tmv_vals:
+            continue
+
+        if tab == "total_market_volume":
+            # Sync TMV chart from (user-edited) table
+            tmv_gran = dict(ma.get("total_market_volume", {}).get("market_volume", {}).get(gran, {}))
+            _sync_flat_chart(tmv_gran)
+            _set_gran("total_market_volume", "market_volume", gran, tmv_gran)
+
+            # Propagate new TMV to all distribution tabs: keep shares, recompute volumes
+            for dtab in DIST_TABS:
+                share_rows = _rows(dtab, "market_share", gran)
+                if not share_rows:
+                    continue
+                if dtab in HIER_TABS:
+                    _put_hier(dtab, "market_volume", gran, _hier_vol_from_share(share_rows, tmv_vals))
+                else:
+                    _put_flat(dtab, "market_volume", gran, _vol_from_share(share_rows, tmv_vals))
+
+        elif tab in DIST_TABS:
+            if tab in HIER_TABS:
+                if metric == "market_volume":
+                    vol_rows = _rows(tab, "market_volume", gran)
+                    _put_hier(tab, "market_share", gran, _hier_share_from_vol(vol_rows, tmv_vals))
+                else:
+                    share_rows = _rows(tab, "market_share", gran)
+                    if eh:
+                        share_rows = _hier_redistribute_share(share_rows, eh, tmv_vals)
+                        _put_hier(tab, "market_share", gran, share_rows)
+                    _put_hier(tab, "market_volume", gran,
+                              _hier_vol_from_share(_rows(tab, "market_share", gran), tmv_vals))
+            else:
+                if metric == "market_volume":
+                    vol_rows = _rows(tab, "market_volume", gran)
+                    if eh:
+                        vol_rows = _redistribute(vol_rows, eh, tmv_vals)
+                        _put_flat(tab, "market_volume", gran, vol_rows)
+                    _put_flat(tab, "market_share", gran,
+                              _share_from_vol(_rows(tab, "market_volume", gran), tmv_vals))
+                else:
+                    share_rows = _rows(tab, "market_share", gran)
+                    if eh:
+                        share_rows = _redistribute(share_rows, eh, [100.0] * len(tmv_vals))
+                        _put_flat(tab, "market_share", gran, share_rows)
+                    _put_flat(tab, "market_volume", gran,
+                              _vol_from_share(_rows(tab, "market_share", gran), tmv_vals))
+
+    # ── Build response ────────────────────────────────────────────────────────
+    active = payload.scenario_name
+    flt    = payload.selected_filter
+    conn   = get_connection()
+    cur    = conn.cursor()
     try:
-        cfg = _load_config(cur, payload.ta, _first(payload.payer), _first(payload.brand))
+        from_year, from_month = _parse_ym(flt.start_date)
+        cfg = _load_config(cur, payload.ta_name, flt.market or None, flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-        forecast_periods = cfg["forecast_periods"]
+        forecast_periods = _resolve_forecast_periods(cfg, flt.end_date)
         granularity = cfg.get("model_granularity", "monthly")
 
-        # Rebuild the full month range (same logic as _build_all_tabs)
-        forecast_end_dt = datetime(train_end_year, train_end_month, 1) + relativedelta(months=forecast_periods)
-        month_range = _generate_months(from_year, from_month, forecast_end_dt.year, forecast_end_dt.month)
-        actual_range = _generate_months(from_year, from_month, train_end_year, train_end_month)
-        month_labels = [_month_label(y, m, granularity) for y, m in month_range]
-        forecast_start_index = len(actual_range)
+        cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+        all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+        available_scenarios = ["Base"] + list(all_saved_cd.keys())
 
-        # Filter to only the active scenario's row — frontend may send all scenarios
-        active_scenario = payload.scenario or "Base"
-        active_table = [r for r in payload.table if r.hierarchy == active_scenario] or payload.table
+        def _tmv_table_only(tmv_dict):
+            result = {}
+            for mk in ("market_volume", "market_share"):
+                if mk not in tmv_dict:
+                    continue
+                result[mk] = {}
+                for g in ("monthly", "yearly"):
+                    if g in tmv_dict[mk] and "table" in tmv_dict[mk][g]:
+                        result[mk][g] = {"table": tmv_dict[mk][g]["table"]}
+            return result
 
-        is_dist_tab      = payload.tab_key in ("product_distribution", "market_distribution")
-        total_row_input  = next((r for r in active_table if r.hierarchy.lower() == "total"), None)
-        non_total_rows   = [r for r in active_table if r.hierarchy.lower() != "total"]
-
-        # For distribution tabs: validate + proportionally redistribute when edited_hierarchy is set
-        if is_dist_tab and payload.edited_hierarchy and total_row_input:
-            edited_row  = next((r for r in non_total_rows if r.hierarchy == payload.edited_hierarchy), None)
-            other_rows  = [r for r in non_total_rows if r.hierarchy != payload.edited_hierarchy]
-
-            if edited_row:
-                n_vals = len(total_row_input.values)
-
-                # Validate: no edited value may exceed the Total for that month
-                for i, edited_val in enumerate(edited_row.values):
-                    total_val = float(total_row_input.values[i]) if i < n_vals else 0.0
-                    if float(edited_val) > total_val:
-                        raise ValueError(
-                            f"'{payload.edited_hierarchy}' value ({edited_val}) exceeds "
-                            f"Total ({total_val}) at month index {i + 1}"
-                        )
-
-                # Redistribute remaining proportionally among the other rows
-                redistributed_others = []
-                for other_row in other_rows:
-                    new_vals = []
-                    for i in range(len(other_row.values)):
-                        total_val   = float(total_row_input.values[i]) if i < n_vals else 0.0
-                        edited_val  = float(edited_row.values[i]) if i < len(edited_row.values) else 0.0
-                        remaining   = max(0.0, total_val - edited_val)
-                        other_total = sum(
-                            float(r.values[i]) if i < len(r.values) else 0.0
-                            for r in other_rows
-                        )
-                        old_val = float(other_row.values[i]) if i < len(other_row.values) else 0.0
-                        if other_total > 0:
-                            new_vals.append(round((old_val / other_total) * remaining, 4))
-                        else:
-                            new_vals.append(0.0)
-                    redistributed_others.append(
-                        TableRow(hierarchy=other_row.hierarchy, values=new_vals)
-                    )
-                non_total_rows = [edited_row] + redistributed_others
-
-        # Build chart series from (redistributed) non_total_rows
-        series = []
-        for row in non_total_rows:
-            vals = row.values
-            series.append({
-                "label":   row.hierarchy,
-                "history":  list(vals[:forecast_start_index]),
-                "forecast": list(vals[forecast_start_index:]),
-            })
-
-        # Recompute Total row as sum of non_total_rows
-        n = len(month_labels)
-        total_vals = [0.0] * n
-        for row in non_total_rows:
-            for i, v in enumerate(row.values):
-                if i < n:
-                    total_vals[i] += round(v, 4)
-
-        # Distribution tabs get a recomputed Total row prepended; Tab 1 has no Total row
-        table_rows = []
-        if is_dist_tab:
-            table_rows.append({"label": "Total", "values": [round(v, 4) for v in total_vals]})
-        for row in non_total_rows:
-            table_rows.append({"label": row.hierarchy, "values": list(row.values)})
-
-        # All-scenarios table: every row from payload.table
-        # active scenario rows get refreshed values, others keep original
-        refreshed_by_hierarchy = {row.hierarchy: list(row.values) for row in non_total_rows}
-        all_table_rows = []
-        if is_dist_tab:
-            all_table_rows.append({"label": "Total", "values": [round(v, 4) for v in total_vals]})
-        for row in payload.table:
-            if row.hierarchy.lower() == "total":
-                continue
-            vals = refreshed_by_hierarchy.get(row.hierarchy, list(row.values))
-            all_table_rows.append({"label": row.hierarchy, "values": vals})
-
-        refreshed_monthly_tab = {
-            "chart": {
-                "months":               month_labels,
-                "forecast_start_index": forecast_start_index,
-                "series":               series,
-            },
-            "table": {"type": "flat", "rows": all_table_rows},
-        }
-
-        # ── Build full response matching apply_filters / save_scenario shape ──
-        cur.execute(
-            "SELECT scenario_name, chart_data, factors FROM raw_liver.liver_scenarios"
-        )
-        stored = {r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}} for r in cur.fetchall()}
-        saved_names = [n for n in stored.keys() if n != "Base"]
-        available_scenarios = ["Base"] + saved_names
-
-        base_factors_obj = _estimate_default_factors(
-            cur, payload.ta, from_year, from_month,
-            train_end_year, train_end_month, granularity,
-        )
-        _traj_start_ref = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
-        base_factors_raw = _build_response_factors(base_factors_obj, _traj_start_ref)
-
-        scenarios_out = {}
-        for sc_name in available_scenarios:
+        def _inactive_stub(sc_name):
             if sc_name == "Base":
-                sc_factors_raw = base_factors_raw
-                sc_factors_obj = base_factors_obj
-            else:
-                sc_factors_raw = stored[sc_name]["factors"]
-                try:
-                    sc_factors_obj = LiverFactors(**sc_factors_raw)
-                except Exception:
-                    sc_factors_obj = base_factors_obj
-
-            if sc_name == active_scenario:
-                # Rebuild ALL tabs (both granularities) so other tabs stay populated
-                full_ma, _ = _build_market_analysis_both_granularities(
-                    cur, payload.ta, from_year, from_month,
-                    train_end_year, train_end_month, forecast_periods, sc_factors_obj,
-                    sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
-                    scenario_name=sc_name,
+                base_f = _estimate_default_factors(
+                    cur, payload.ta_name, from_year, from_month,
+                    train_end_year, train_end_month, granularity,
                 )
-                # Override refreshed tab's monthly data with the edited values
-                tab_entry = dict(full_ma.get(payload.tab_key, {}))
-                metric_entry = dict(tab_entry.get(payload.metric, {}))
-                metric_entry["monthly"] = refreshed_monthly_tab
-                tab_entry[payload.metric] = metric_entry
-                full_ma[payload.tab_key] = tab_entry
-                sc_chart_data = full_ma
+                base_ma, _ = _build_market_analysis_both_granularities(
+                    cur, payload.ta_name, from_year, from_month,
+                    train_end_year, train_end_month, forecast_periods, base_f,
+                    sel_payer=flt.market or None, sel_product=flt.product or None,
+                    scenario_name="Base",
+                )
+                tmv = base_ma.get("total_market_volume", {})
             else:
-                sc_chart_data = stored.get(sc_name, {}).get("chart_data", {})
+                cd  = all_saved_cd.get(sc_name, {})
+                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+            return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
 
-            scenarios_out[sc_name] = {
-                "factors":         sc_factors_raw,
-                "market_analysis": sc_chart_data,
-            }
+        scenarios = {}
+        for sc in available_scenarios:
+            if sc == active:
+                scenarios[sc] = {
+                    "factors":         payload.factors or {},
+                    "market_analysis": ma,
+                }
+            else:
+                scenarios[sc] = _inactive_stub(sc)
 
         return {
-            "ta_name":             payload.ta,
             "available_scenarios": available_scenarios,
-            "active_scenario":     active_scenario,
-            "scenarios":           scenarios_out,
+            "active_scenario":     active,
+            "scenarios":           scenarios,
         }
     finally:
         cur.close()
