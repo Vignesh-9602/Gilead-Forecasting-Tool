@@ -14,7 +14,7 @@ const tabs = [
 
 export default function HCVLayout() {
     const [activeTab, setActiveTab] = useState(
-        localStorage.getItem("pbcActiveTab") || "Configurations"
+        localStorage.getItem("hcvActiveTab") || "Configurations"
     );
 
     useEffect(() => {
