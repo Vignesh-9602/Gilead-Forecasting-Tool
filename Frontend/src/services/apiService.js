@@ -268,9 +268,7 @@ export const recalculateLiver = (payload) => {
 };
 
 // POST — refresh liver table after manual edits
-export const refreshLiverTable = (payload) => {
-  return axios.post(`/api/liver/refresh-table`, payload);
-};
+export const refreshLiverTable = (payload) => axios.post('/api/liver/refresh', payload);
 
 // POST — create/update liver configurations with required envelope { config: { ... } }
 export const postLiverConfigurations = (config) => {
