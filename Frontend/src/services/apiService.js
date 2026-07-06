@@ -244,12 +244,12 @@ export const loginApi = (payload) =>
 
 // GET — loads existing config + available date options
 export const getConfigurationByTherapyAreaHCV = (taName) => {
-    return axios.get(`/api/liver/configurations/${taName}`);
+  return axios.get(`/api/liver/configurations/${taName}`);
 };
 
 // POST — saves / updates config
 export const saveConfigurationsHCV = (payload) => {
-    return axios.post(`/api/liver/configurations`, payload);
+  return axios.post(`/api/liver/configurations`, payload);
 };
 
 // Liver filters
@@ -279,6 +279,45 @@ export const postLiverConfigurations = (config) => {
 export const saveLiverScenario = (payload) => {
   return axios.post(`/api/liver/save-scenario`, payload);
 };
+
+
+
+//HIC API's
+export const getHIVConfigurationByTherapyArea = (taName) => {
+  return httpClient.get(`/api/hiv_treat/configurations/${taName}`);
+};
+
+export const saveHIVConfigurations = (payload) => {
+  return httpClient.post(`/api/hiv_treat/save-configurations`, payload);
+};
+
+
+export const getHIVModelInputFilters = (taName) => {
+  return httpClient.get("/api/hiv_treat/model-input-filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+};
+
+export const applyHIVScenario = (payload) => {
+  return httpClient.post(
+    "/api/hiv_treat/applyfilter",
+    payload
+  );
+};
+
+export const recalculateHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/recalculate",
+    payload
+  );
+
+export const editHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/refresh-edits",
+    payload
+  );
 
 
 
