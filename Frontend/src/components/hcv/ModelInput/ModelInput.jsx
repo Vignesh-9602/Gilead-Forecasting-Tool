@@ -300,6 +300,8 @@ export default function PBCModelInput() {
   const [tableSnapshot, setTableSnapshot] = useState([]);
   const [editedHierarchies, setEditedHierarchies] = useState({});
   const [savingTable, setSavingTable] = useState(false);
+  // true only after Refresh succeeds — gates the Save button
+  const [isRefreshed, setIsRefreshed] = useState(false);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const metricUnit = useMemo(() => {
@@ -1002,38 +1004,101 @@ export default function PBCModelInput() {
     }
     fullMarketAnalysis = fullMarketAnalysis || {};
 
-    // Send only the active tab's market_analysis slice to keep payload small
-    // and avoid backend validation errors on unrelated tab data.
+    // The backend expects ALL tabs in market_analysis.
+    // We spread fullMarketAnalysis (all tabs) and patch only the active tab's rows.
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
-    const tabMarketAnalysis = fullMarketAnalysis[backendTabKey]
-      ? { [backendTabKey]: fullMarketAnalysis[backendTabKey] }
-      : fullMarketAnalysis;
 
     // Build the current table values to send as the edited market_analysis.
-    // The backend uses these to compute the refreshed forecast for the
-    // edited hierarchy.
+    // The backend expects the SAME hierarchical structure as the original
+    // market_analysis, with edited values patched in.
+    //
+    // For hierarchical tabs (payer_product, product_payer): rows have children[].
+    //   tableData stores these as flat rows: "Payer - Product" hierarchy strings.
+    //   We rebuild the hierarchy by looking up the original raw table structure
+    //   and patching each row's values from tableData's monthly_data.
+    //
+    // For flat tabs (total_market_volume, product_distribution, market_distribution):
+    //   rows are flat — we emit them as-is from tableData.
     const months = chartData?.months || [];
-    const tableRows = tableData.map((row) => ({
-      label: row.hierarchy,
-      values: months.map((m) => {
-        const v = row.monthly_data?.[m];
-        return v == null ? 0 : Number(v);
-      }),
-    }));
-
-    // Merge edited table rows into the market_analysis for the active tab
-    // so the backend knows what the user changed.
     const activeMetric = metric || "market_volume";
+
+    // Helper: extract values array from a row's monthly_data in month order
+    const rowToValues = (row) =>
+      months.map((m) => {
+        const v = row?.monthly_data?.[m];
+        return v == null ? 0 : Number(v);
+      });
+
+    // Build a lookup map from hierarchy key -> tableData row (for fast access)
+    const tableDataMap = {};
+    tableData.forEach((row) => {
+      tableDataMap[row.hierarchy] = row;
+    });
+
+    // Determine if the active tab uses a hierarchical table structure.
+    const isHierarchicalTab =
+      backendTabKey === "payer_product" || backendTabKey === "product_payer";
+
+    let tableRows;
+    if (isHierarchicalTab) {
+      // Rebuild hierarchical rows from the original raw table structure,
+      // patching in edited values from tableData.
+      // The original rows are in liverRawData -> scenarios -> activeScenario
+      // -> market_analysis -> [tab] -> [metric] -> monthly -> table -> rows
+      const origRows =
+        fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.monthly?.table?.rows ||
+        fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.table?.rows ||
+        [];
+
+      tableRows = origRows.map((origRow) => {
+        const parentLabel = origRow.label || origRow.hierarchy || "";
+        // Parent row: look up edited values from tableData (keyed by parentLabel)
+        const parentTableRow = tableDataMap[parentLabel];
+        const parentValues = parentTableRow
+          ? rowToValues(parentTableRow)
+          : (origRow.values || origRow.total || []);
+
+        // Child rows: look up edited values using "Parent - Child" key
+        const children = (origRow.children || []).map((origChild) => {
+          const childKey = `${parentLabel} - ${origChild.label}`;
+          const childTableRow = tableDataMap[childKey];
+          return {
+            label: origChild.label,
+            values: childTableRow
+              ? rowToValues(childTableRow)
+              : (origChild.values || []),
+          };
+        });
+
+        const rebuilt = {
+          label: parentLabel,
+          values: parentValues,
+        };
+        if (children.length) rebuilt.children = children;
+        return rebuilt;
+      });
+    } else {
+      // Flat tabs: emit rows directly from tableData
+      tableRows = tableData.map((row) => ({
+        label: row.hierarchy,
+        values: rowToValues(row),
+      }));
+    }
+
+    const tableType = isHierarchicalTab ? "hierarchical" : "flat";
+
+    // Merged market_analysis: ALL tabs from fullMarketAnalysis,
+    // with the active tab's monthly table rows patched with edited values.
     const mergedMarketAnalysis = {
-      ...tabMarketAnalysis,
+      ...fullMarketAnalysis,
       [backendTabKey]: {
-        ...(tabMarketAnalysis[backendTabKey] || {}),
+        ...(fullMarketAnalysis[backendTabKey] || {}),
         [activeMetric]: {
-          ...(tabMarketAnalysis[backendTabKey]?.[activeMetric] || {}),
+          ...(fullMarketAnalysis[backendTabKey]?.[activeMetric] || {}),
           monthly: {
-            ...(tabMarketAnalysis[backendTabKey]?.[activeMetric]?.monthly || {}),
+            ...(fullMarketAnalysis[backendTabKey]?.[activeMetric]?.monthly || {}),
             table: {
-              type: "flat",
+              type: tableType,
               rows: tableRows,
             },
           },
@@ -1204,6 +1269,7 @@ export default function PBCModelInput() {
     if (tableEditing) {
       setTableData(tableSnapshot);
       setEditedHierarchies({});
+      setIsRefreshed(false);
       setTableEditing(false);
       setEditable(false);
     }
@@ -1869,6 +1935,7 @@ export default function PBCModelInput() {
   const handleEnterTableEdit = () => {
     setTableSnapshot(tableData.map((r) => ({ ...r, monthly_data: { ...r.monthly_data } })));
     setEditedHierarchies({});
+    setIsRefreshed(false);
     setTableEditing(true);
     setEditable(true);
   };
@@ -1876,8 +1943,18 @@ export default function PBCModelInput() {
   const handleCancelTableEdit = () => {
     setTableData(tableSnapshot);
     setEditedHierarchies({});
+    setIsRefreshed(false);
     setTableEditing(false);
     setEditable(false);
+  };
+
+  // Called by the Save button after Refresh has already synced data with the backend.
+  // Just closes edit mode — no additional API call needed.
+  const handleConfirmSave = () => {
+    setIsRefreshed(false);
+    setTableEditing(false);
+    setEditable(false);
+    showSnackbar("Changes saved successfully", "success");
   };
 
   const handleSaveTableChanges = async () => {
@@ -1941,9 +2018,8 @@ export default function PBCModelInput() {
         }
       }
       setEditedHierarchies({});
-      setTableEditing(false);
-      setEditable(false);
-      showSnackbar("Table updated successfully", "success");
+      setIsRefreshed(true);
+      showSnackbar("Table refreshed successfully. You can now Save.", "success");
     } catch (error) {
       const msg = error?.response?.data || error?.message || "Unknown error";
       showSnackbar(
@@ -2062,8 +2138,12 @@ export default function PBCModelInput() {
   const formatCellValue = (val) => {
     if (val == null) return "—";
     const num = Number(val);
-    if (metricUnit === "%") return `${num.toFixed(1)}%`;
-    return num.toLocaleString(undefined, { maximumFractionDigits: 1 });
+    if (metricUnit === "%") {
+      // Whole numbers: no decimals (100%); fractional: up to 2dp (64.79%)
+      const formatted = Number.isInteger(num) ? num : parseFloat(num.toFixed(2));
+      return `${formatted}%`;
+    }
+    return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
   };
 
   const toggleBrandExpand = (name) => {
@@ -2073,7 +2153,8 @@ export default function PBCModelInput() {
   const handleCellChange = (hierarchyKey, colName, value) => {
     const numericValue = value === "" ? null : Number(value);
     if (numericValue !== null && Number.isNaN(numericValue)) return;
-
+    // Any new edit invalidates the previous refresh — user must Refresh again
+    setIsRefreshed(false);
     setTableData((prevTable) =>
       prevTable.map((row) => {
         if (row.hierarchy === hierarchyKey) {
@@ -3073,6 +3154,14 @@ export default function PBCModelInput() {
                       value={metric}
                       onChange={async (e) => {
                         const nm = e.target.value;
+                        // Exit edit mode before switching metric so tableSnapshot
+                        // is never stale and cancel always restores correct data.
+                        if (tableEditing) {
+                          setTableData(tableSnapshot);
+                          setEditedHierarchies({});
+                          setTableEditing(false);
+                          setEditable(false);
+                        }
                         setMetric(nm);
                         if (nm !== "market_share") setBrand("");
                         if (isHCV && liverRawData) {
@@ -3167,7 +3256,7 @@ export default function PBCModelInput() {
                   <Button
                     size="small"
                     variant="contained"
-                    disabled={savingTable}
+                    disabled={savingTable || Object.keys(editedHierarchies).length === 0}
                     onClick={handleSaveTableChanges}
                     // startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
                     sx={{
@@ -3231,8 +3320,8 @@ export default function PBCModelInput() {
                   <Button
                     size="small"
                     variant="contained"
-                    disabled={savingTable}
-                    onClick={handleSaveTableChanges}
+                    disabled={!isRefreshed}
+                    onClick={handleConfirmSave}
                     sx={{
                       textTransform: "none",
                       fontSize: "12px",
@@ -3243,7 +3332,7 @@ export default function PBCModelInput() {
                       "&:hover": { backgroundColor: "#059669" },
                     }}
                   >
-                    {savingTable ? "Saving..." : "Save"}
+                    Save
                   </Button>
                 )}
 
@@ -3667,14 +3756,15 @@ export default function PBCModelInput() {
                         isAppliedParent = targetParentLabel === currentBrand;
                       }
 
-                      // ── Edit eligibility ─────────────────────────────────────────────
-                      // total_market: only the radio-selected scenario row is editable.
-                      // Other tabs: parent rows (hasChildren=true) are aggregated "Total"
-                      //   rows — never editable. Only leaf rows can be edited.
-                      // Also block rows whose label starts with "Total" as a safety net.
+                      // Rows whose label starts with "Total" are always
+                      // aggregates and must never be editable, even if they
+                      // have no children in the grouped structure.
                       const isTotalRow =
-                        (group.brandName || "").toLowerCase().startsWith("total");
+                        (group.brandName || "").trim().toLowerCase().startsWith("total");
 
+                      // total_market tab: only the radio-selected scenario row
+                      // is editable. Other tabs: only leaf rows (no children,
+                      // not a Total row) are editable.
                       const isEditEligible = (() => {
                         if (!tableEditing) return false;
                         if (totalMarketViewMode !== "monthly") return false;
@@ -3827,7 +3917,9 @@ export default function PBCModelInput() {
                                 >
                                   {isEditableCell ? (
                                     <input
-                                      value={val ?? ''}
+                                      value={val == null ? '' : metricUnit === '%'
+                                        ? (Number.isInteger(Number(val)) ? String(Number(val)) : parseFloat(Number(val).toFixed(2)).toString())
+                                        : String(Math.round(Number(val)))}
                                       onChange={(e) => {
                                         if (/^-?\d*\.?\d*$/.test(e.target.value)) {
                                           handleCellChange(group.brandName, col, e.target.value);
@@ -3920,7 +4012,9 @@ export default function PBCModelInput() {
                                       >
                                         {isEditableChild ? (
                                           <input
-                                            value={childVal ?? ''}
+                                            value={childVal == null ? '' : metricUnit === '%'
+                                            ? (Number.isInteger(Number(childVal)) ? String(Number(childVal)) : parseFloat(Number(childVal).toFixed(2)).toString())
+                                            : String(Math.round(Number(childVal)))}
                                             onChange={(e) => {
                                               if (/^-?\d*\.?\d*$/.test(e.target.value)) {
                                                 handleCellChange(childRow.hierarchy, col, e.target.value);
