@@ -1,4 +1,4 @@
-import React, { useState, useContext } from "react";
+import React, { useState, useContext, useEffect } from "react";
 
 import {
     Box,
@@ -9,6 +9,10 @@ import {
     MenuItem,
     TextField,
     Button,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogActions,
 } from "@mui/material";
 
 import Tooltip from "@mui/material/Tooltip";
@@ -21,38 +25,13 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario } from "../../../services/apiService";
+import { useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
     fieldYearPlaceholder: () => "YYYY",
 };
-
-const availableMonths = [
-    "2024-01-01",
-    "2024-02-01",
-    "2024-03-01",
-    "2024-04-01",
-    "2024-05-01",
-    "2024-06-01",
-    "2024-07-01",
-    "2024-08-01",
-    "2024-09-01",
-    "2024-10-01",
-    "2024-11-01",
-    "2024-12-01",
-    "2025-01-01",
-    "2025-02-01",
-    "2025-03-01",
-    "2025-04-01",
-    "2025-05-01",
-    "2025-06-01",
-    "2025-07-01",
-    "2025-08-01",
-    "2025-09-01",
-    "2025-10-01",
-    "2025-11-01",
-    "2025-12-01",
-];
 
 export default function HIVModelInput() {
     const { favState } = useContext(GlobalContext);
@@ -64,8 +43,14 @@ export default function HIVModelInput() {
     const [fromDate, setFromDate] = useState("2024-01-01");
     const [toDate, setToDate] = useState("2025-12-01");
 
-    const [metricFilter, setMetricFilter] =
-        useState("market_volume");
+    const { setLoading } = useLoadingStore();
+
+    const [availableMonths, setAvailableMonths] = useState([]);
+    const [markets, setMarkets] = useState([]);
+    const [products, setProducts] = useState([]);
+
+    // const [metricFilter, setMetricFilter] =
+    //     useState("market_volume");
 
     const [marketFilter, setMarketFilter] =
         useState("retail");
@@ -82,45 +67,455 @@ export default function HIVModelInput() {
         useState("ets");
 
     const [alpha, setAlpha] =
-        useState(0.35);
+        useState(0);
 
     const [beta, setBeta] =
-        useState(0.25);
+        useState(0);
 
     const [gamma, setGamma] =
-        useState(0.65);
+        useState(0);
 
     const [totalGrowth, setTotalGrowth] =
-        useState(15);
+        useState(0);
 
     const [duration, setDuration] =
-        useState(12);
+        useState(0);
+
+    const [numberOfMonths, setNumberOfMonths] = useState(3);
 
     const [kValue, setKValue] =
-        useState(1);
+        useState(0);
 
     const [trajectoryStart, setTrajectoryStart] =
-        useState("2025-01-01");
+        useState("");
 
     const [multiplier, setMultiplier] =
-        useState(1);
+        useState(0);
 
     const [multiplierHorizon, setMultiplierHorizon] =
         useState("Forecast");
 
-    const handleApplyFilter = () => {
-        console.log({
-            therapyArea,
-            fromDate,
-            toDate,
-            metricFilter,
-            marketFilter,
-            productFilter,
-        });
+    const [openSaveScenario, setOpenSaveScenario] =
+        useState(false);
+
+    const [scenarioName, setScenarioName] =
+        useState("");
+
+    const [projectionFactors, setProjectionFactors] =
+        useState(null);
+
+    const [marketAnalysis, setMarketAnalysis] =
+        useState(null);
+
+    const [availableScenarios, setAvailableScenarios] = useState([]);
+
+    const [activeScenario, setActiveScenario] =
+        useState("");
+
+    const [trajectoryMonthOptions, setTrajectoryMonthOptions] =
+        useState([]);
+
+    const [activeTab, setActiveTab] = useState("total_market_volume");
+
+    const [selectedMetric, setSelectedMetric] = useState("market_volume");
+
+    // const [showAnalysis, setShowAnalysis] =
+    //     useState(false);
+
+    useEffect(() => {
+        if (therapyArea) {
+            fetchModelInputFilters();
+        }
+    }, [therapyArea]);
+
+    useEffect(() => {
+        if (!projectionFactors) return;
+
+        // ETS
+
+        const ets = projectionFactors.ets || {};
+
+        setAlpha(ets.alpha ?? 0);
+        setBeta(ets.beta ?? 0);
+        setGamma(ets.gamma ?? 0);
+
+        // Selected model
+
+        const model =
+            projectionFactors[modelSelection] || {};
+
+        setTotalGrowth(
+            model.total_growth ?? 0
+        );
+
+        setDuration(
+            model.duration ?? 12
+        );
+
+        setNumberOfMonths(
+            model.window ?? 3
+        );
+
+        setTrajectoryStart(
+            model.trajectory_start || ""
+        );
+
+        setKValue(
+            model.k_value ?? 1
+        );
+
+        // Common
+
+        setMultiplier(
+            projectionFactors.multiplier ?? 1
+        );
+
+        setMultiplierHorizon(
+            projectionFactors.multiplier_horizon ??
+            "Forecast"
+        );
+
+    }, [modelSelection, projectionFactors]);
+
+    const fetchModelInputFilters = async () => {
+        try {
+            setLoading(true);
+
+            const response = await getHIVModelInputFilters(therapyArea);
+            const resData = response?.data;
+
+            setAvailableMonths(resData?.available_months || []);
+            setMarkets(resData?.markets || []);
+            setProducts(resData?.products || []);
+
+            // Default filter: first time default filter, last applied filters afterwards
+            const defaultFilter = resData?.selected_filter;
+
+            if (defaultFilter) {
+                setFromDate(defaultFilter.start_date || "");
+                setToDate(defaultFilter.end_date || "");
+                setMarketFilter(defaultFilter.market || "");
+                setProductFilter(defaultFilter.product || "");
+            } else {
+                setFromDate("");
+                setToDate("");
+                setMarketFilter("");
+                setProductFilter("");
+            }
+        } catch (error) {
+            console.error("Failed to fetch model input filters", error);
+
+            setAvailableMonths([]);
+            setMarkets([]);
+            setProducts([]);
+
+            setFromDate("");
+            setToDate("");
+            setMarketFilter("");
+            setProductFilter("");
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const handleRecalculate = () => {
-        console.log("Dummy Recalculate");
+    const handleApplyFilter = async () => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+            };
+
+            const response =
+                await applyHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            const factors =
+                scenario?.factors || {};
+
+            setProjectionFactors(factors);
+
+            setModelSelection(
+                factors.active_model || "ets"
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios || []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario || ""
+            );
+
+            setMarketAnalysis(
+                scenario?.market_analysis || {}
+            );
+
+            console.log(
+                scenario.market_analysis
+            );
+
+            const chartData =
+                scenario?.market_analysis
+                    ?.total_market_volume
+                    ?.market_volume
+                    ?.monthly
+                    ?.chart;
+
+            setTrajectoryMonthOptions(
+                (chartData?.months?.slice(chartData?.forecast_start_index) || []).map(
+                    (month) => ({
+                        value: dayjs(month, "MMM-YY").format("YYYY-MM-DD"),
+                        label: month,
+                    })
+                )
+            );
+
+            // setShowAnalysis(true);
+
+            // Projection Engine
+
+            // setModelSelection(
+            //     factors.active_model || "ets"
+            // );
+
+            // setMultiplier(
+            //     factors.multiplier ?? 1
+            // );
+
+            // setMultiplierHorizon(
+            //     factors.multiplier_horizon ??
+            //     "Forecast"
+            // );
+
+            // const ets =
+            //     factors.ets || {};
+
+            // setAlpha(ets.alpha ?? 0);
+            // setBeta(ets.beta ?? 0);
+            // setGamma(ets.gamma ?? 0);
+
+            // const growth =
+            //     factors[
+            //     factors.active_model
+            //     ] || {};
+
+            // setTotalGrowth(
+            //     growth.total_growth ?? 0
+            // );
+
+            // setDuration(
+            //     growth.duration ?? 12
+            // );
+
+            // setTrajectoryStart(
+            //     growth.trajectory_start || ""
+            // );
+
+            // setKValue(
+            //     growth.k_value ?? 1
+            // );
+        } catch (err) {
+            console.log(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleRecalculate = async () => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: activeScenario,
+
+                selected_tab: activeTab,
+
+                metric: selectedMetric,
+
+                model_type: modelSelection,
+
+                factors: {
+                    multiplier: Number(multiplier),
+
+                    multiplier_horizon: multiplierHorizon,
+
+                    ...(modelSelection === "ets"
+                        ? {
+                            ets: {
+                                alpha: Number(alpha),
+                                beta: Number(beta),
+                                gamma: Number(gamma),
+                            },
+                        }
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
+                },
+            };
+
+            console.log("paylod--->", payload)
+
+            const response =
+                await recalculateHIVScenario(
+                    payload
+                );
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            const factors =
+                scenario?.factors || {};
+
+            setProjectionFactors(factors);
+
+            setModelSelection(
+                factors.active_model ||
+                modelSelection
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios ||
+                []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario ||
+                ""
+            );
+
+            setMarketAnalysis(
+                scenario.market_analysis || {}
+            );
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleEdit = async (updatedMarketAnalysis) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: activeScenario,
+
+                model_type: modelSelection,
+
+                factors: {
+                    multiplier: Number(multiplier),
+
+                    multiplier_horizon: multiplierHorizon,
+
+                    ...(modelSelection === "ets"
+                        ? {
+                            ets: {
+                                alpha: Number(alpha),
+                                beta: Number(beta),
+                                gamma: Number(gamma),
+                            },
+                        }
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
+                },
+
+                selected_tab: activeTab,
+
+                selected_metric: selectedMetric,
+
+                market_analysis: updatedMarketAnalysis,
+            };
+
+            console.log("Edit Payload", payload);
+
+            const response = await editHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(
+                scenario.factors || {}
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios || []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario || ""
+            );
+
+            setMarketAnalysis(
+                scenario.market_analysis || {}
+            );
+
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const inputStyle = {
@@ -145,6 +540,37 @@ export default function HIVModelInput() {
             height: "35px",
             backgroundColor: "#fcfcfd",
         },
+    };
+
+    // const handleTabChange = (tab) => {
+    //     setActiveTab(tab);
+
+    //     if (tab === "total_market_volume") {
+    //         setModelSelection("ets");
+    //     } else {
+    //         setModelSelection("linear");
+    //     }
+    // };
+
+    const DEFAULT_METRIC_BY_TAB = {
+        total_market_volume: "market_volume",
+        market_distribution: "market_share",
+        product_distribution: "market_share",
+        market_product: "market_volume",
+        product_market: "market_volume",
+    };
+
+    const handleTabChange = (tab) => {
+        setActiveTab(tab);
+
+        const metric = DEFAULT_METRIC_BY_TAB[tab];
+        setSelectedMetric(metric);
+
+        if (tab === "total_market_volume") {
+            setModelSelection("ets");
+        } else {
+            setModelSelection("moving_average");
+        }
     };
 
     return (
@@ -241,6 +667,19 @@ export default function HIVModelInput() {
                                         renderValue={(selected) =>
                                             dayjs(selected).format("MMM YY")
                                         }
+                                        MenuProps={{
+                                            PaperProps: {
+                                                sx: {
+                                                    maxHeight: 300,
+                                                    width: 130,
+                                                    "& .MuiMenuItem-root": {
+                                                        minHeight: 32,
+                                                        fontSize: "15px",
+                                                        py: 0.5,
+                                                    },
+                                                },
+                                            },
+                                        }}
                                     >
                                         {availableMonths.map((month) => (
                                             <MenuItem
@@ -280,6 +719,19 @@ export default function HIVModelInput() {
                                         renderValue={(selected) =>
                                             dayjs(selected).format("MMM YY")
                                         }
+                                        MenuProps={{
+                                            PaperProps: {
+                                                sx: {
+                                                    maxHeight: 300,
+                                                    width: 130,
+                                                    "& .MuiMenuItem-root": {
+                                                        minHeight: 32,
+                                                        fontSize: "15px",
+                                                        py: 0.5,
+                                                    },
+                                                },
+                                            },
+                                        }}
                                     >
                                         {availableMonths
                                             .filter((m) =>
@@ -300,7 +752,7 @@ export default function HIVModelInput() {
 
                         {/* METRIC FILTER */}
 
-                        <Box>
+                        {/* <Box>
                             <Typography
                                 sx={{
                                     mb: 1,
@@ -328,7 +780,7 @@ export default function HIVModelInput() {
                                     </MenuItem>
                                 </Select>
                             </FormControl>
-                        </Box>
+                        </Box> */}
 
                         {/* MARKET FILTER */}
 
@@ -351,13 +803,14 @@ export default function HIVModelInput() {
                                         setMarketFilter(e.target.value)
                                     }
                                 >
-                                    <MenuItem value="retail">
-                                        Retail
-                                    </MenuItem>
-
-                                    <MenuItem value="non-retail">
-                                        Non-Retail
-                                    </MenuItem>
+                                    {markets.map((market) => (
+                                        <MenuItem
+                                            key={market}
+                                            value={market}
+                                        >
+                                            {market}
+                                        </MenuItem>
+                                    ))}
                                 </Select>
                             </FormControl>
                         </Box>
@@ -383,36 +836,53 @@ export default function HIVModelInput() {
                                         setProductFilter(e.target.value)
                                     }
                                 >
-                                    <MenuItem value="Truvada">
-                                        Truvada
-                                    </MenuItem>
-
-                                    <MenuItem value="Descovy">
-                                        Descovy
-                                    </MenuItem>
-
-                                    <MenuItem value="Biktarvy">
-                                        Biktarvy
-                                    </MenuItem>
+                                    {products.map((product) => (
+                                        <MenuItem
+                                            key={product}
+                                            value={product}
+                                        >
+                                            {product}
+                                        </MenuItem>
+                                    ))}
                                 </Select>
                             </FormControl>
                         </Box>
 
-                        <Button
-                            variant="contained"
-                            onClick={handleApplyFilter}
+                        <Box
                             sx={{
-                                textTransform: "none",
-                                borderRadius: "8px",
-                                backgroundColor: "#4F46E5",
+                                display: "flex",
+                                gap: 1.5,
+                                alignItems: "center",
                             }}
                         >
-                            Apply Filter
-                        </Button>
+                            <Button
+                                variant="contained"
+                                onClick={handleApplyFilter}
+                                sx={{
+                                    textTransform: "none",
+                                    borderRadius: "8px",
+                                    backgroundColor: "#4F46E5",
+                                }}
+                            >
+                                Apply Filter
+                            </Button>
+
+                            <Button
+                                variant="outlined"
+                                onClick={() => setOpenSaveScenario(true)}
+                                sx={{
+                                    textTransform: "none",
+                                    borderRadius: "8px",
+                                }}
+                            >
+                                Save Scenario
+                            </Button>
+                        </Box>
                     </Box>
                 </Box>
 
                 {/* ===================== STATISTICAL ENGINE ===================== */}
+                {/* {showAnalysis && ( */}
 
                 <Paper
                     sx={{ mt: 3, p: 3, borderRadius: "16px", border: "1px solid #D8DEE8", boxShadow: "none", backgroundColor: editable ? "#fff" : "#eff6ff", }} >
@@ -444,6 +914,7 @@ export default function HIVModelInput() {
                                     disabled={!editable}
                                 >
                                     <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
+                                    <MenuItem value="moving_average">Moving Average </MenuItem>
                                     <MenuItem value="linear">Linear</MenuItem>
                                     <MenuItem value="exponential">Exponential</MenuItem>
                                     <MenuItem value="logarithmic">Logarithmic</MenuItem>
@@ -573,6 +1044,52 @@ export default function HIVModelInput() {
                             </>
                         )}
 
+                        {modelSelection === "moving_average" && (
+                            <Box>
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 0.5,
+                                        mb: 1,
+                                    }}
+                                >
+                                    <Typography sx={{ fontSize: "14px" }}>
+                                        NUMBER OF MONTHS
+                                    </Typography>
+
+                                    <Tooltip
+                                        title="Please enter the number of months"
+                                        arrow
+                                        placement="top"
+                                    >
+                                        <InfoOutlinedIcon
+                                            sx={{
+                                                fontSize: 16,
+                                                color: "#64748b",
+                                                cursor: "pointer",
+                                            }}
+                                        />
+                                    </Tooltip>
+                                </Box>
+
+                                <TextField
+                                    type="number"
+                                    value={numberOfMonths}
+                                    disabled={!editable}
+                                    onChange={(e) =>
+                                        setNumberOfMonths(Number(e.target.value))
+                                    }
+                                    inputProps={{
+                                        min: 1,
+                                        max: 24,
+                                        step: 1,
+                                    }}
+                                    sx={recalculateInputStyle}
+                                />
+                            </Box>
+                        )}
+
                         {["linear", "exponential", "logarithmic", "scurve"].includes(modelSelection) && (
                             <>
                                 <Box>
@@ -693,20 +1210,27 @@ export default function HIVModelInput() {
                                         <Select
                                             value={trajectoryStart}
                                             onChange={(e) => setTrajectoryStart(e.target.value)}
+                                            MenuProps={{
+                                                PaperProps: {
+                                                    sx: {
+                                                        maxHeight: 300,
+                                                        width: 130,
+                                                        "& .MuiMenuItem-root": {
+                                                            minHeight: 32,
+                                                            fontSize: "15px",
+                                                            py: 0.5,
+                                                        },
+                                                    },
+                                                },
+                                            }}
                                             disabled={!editable}
                                         >
-                                            {availableMonths.map((month) => (
+                                            {trajectoryMonthOptions.map((month) => (
                                                 <MenuItem
-                                                    key={month}
-                                                    value={month}
+                                                    key={month.value}
+                                                    value={month.value}
                                                 >
-                                                    {new Date(month).toLocaleDateString(
-                                                        "en-US",
-                                                        {
-                                                            month: "short",
-                                                            year: "2-digit",
-                                                        }
-                                                    )}
+                                                    {month.label}
                                                 </MenuItem>
                                             ))}
                                         </Select>
@@ -782,8 +1306,86 @@ export default function HIVModelInput() {
                     </Box>
                 </Paper>
 
+                {/* )} */}
+
             </Paper>
-            <HIVMarketAnalysis />
+            <HIVMarketAnalysis
+                marketAnalysis={marketAnalysis}
+                availableScenarios={availableScenarios}
+                activeScenario={activeScenario}
+                selectedMarket={marketFilter}
+                selectedProduct={productFilter}
+                onTabChange={handleTabChange}
+                selectedMetric={selectedMetric}
+                setSelectedMetric={setSelectedMetric}
+                onEdit={handleEdit}
+            />
+            <Dialog
+                open={openSaveScenario}
+                onClose={() => setOpenSaveScenario(false)}
+                maxWidth="xs"
+                fullWidth
+                PaperProps={{ sx: { borderRadius: "12px" } }}
+            >
+                <DialogTitle sx={{ fontWeight: 700, fontSize: "16px", color: "#0f172a", pb: 1 }}>
+                    Save Scenario
+                </DialogTitle>
+
+                <DialogContent>
+                    <Typography sx={{ fontSize: "13px", color: "#64748b", mb: 2 }}>
+                        Enter a name for this scenario.
+                    </Typography>
+                    <TextField
+                        autoFocus
+                        fullWidth
+                        label="Scenario Name"
+                        placeholder="Enter scenario name"
+                        value={scenarioName}
+                        onChange={(e) =>
+                            setScenarioName(e.target.value)
+                        }
+                        variant="outlined"
+                        sx={{ "& .MuiOutlinedInput-root": { borderRadius: "8px" } }}
+                    />
+                </DialogContent>
+
+                <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
+                    <Button
+                        variant="outlined"
+                        onClick={() => {
+                            setOpenSaveScenario(false);
+                            setScenarioName("");
+                        }}
+                        sx={{ textTransform: "none", borderRadius: "8px", color: "#64748b", borderColor: "#e2e8f0" }}
+                    >
+                        Cancel
+                    </Button>
+
+                    <Button
+                        variant="contained"
+                        disabled={!scenarioName.trim()}
+                        onClick={() => {
+                            console.log({
+                                scenarioName,
+                                therapyArea,
+                                fromDate,
+                                toDate,
+                                marketFilter,
+                                productFilter,
+                            });
+
+                            // TODO:
+                            // call save scenario API
+
+                            setOpenSaveScenario(false);
+                            setScenarioName("");
+                        }}
+                        sx={{ textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5" }}
+                    >
+                        Save
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Box >
     );
 }

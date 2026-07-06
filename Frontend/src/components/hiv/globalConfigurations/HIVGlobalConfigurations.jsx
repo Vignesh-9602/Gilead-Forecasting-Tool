@@ -18,31 +18,11 @@ import { DatePicker } from "@mui/x-date-pickers/DatePicker";
 import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import { useLoadingStore } from "../../../stores";
+import { getHIVConfigurationByTherapyArea, saveHIVConfigurations } from "../../../services/apiService";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
     fieldYearPlaceholder: () => "YYYY",
-};
-
-const dummyResponse = {
-    ta_name: "HIV",
-    exists: true,
-    config: {
-        ta_name: "HIV",
-        train_start_date: "2024-01-01",
-        train_end_date: "2026-02-01",
-        model_granularity: "monthly",
-        forecast_periods: "2027-02-01",
-    },
-    available_train_months: [
-        "2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01",
-        "2024-05-01", "2024-06-01", "2024-07-01", "2024-08-01",
-        "2024-09-01", "2024-10-01", "2024-11-01", "2024-12-01",
-        "2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01",
-        "2025-05-01", "2025-06-01", "2025-07-01", "2025-08-01",
-        "2025-09-01", "2025-10-01", "2025-11-01", "2025-12-01",
-        "2026-01-01", "2026-02-01",
-    ],
 };
 
 export default function HIVGlobalConfigurations() {
@@ -71,16 +51,42 @@ export default function HIVGlobalConfigurations() {
         try {
             setLoading(true);
 
-            const response = { data: dummyResponse };
+            const response = await getHIVConfigurationByTherapyArea(therapyArea);
 
-            const config = response.data.config;
+            const config = response?.data?.config;
 
-            setAvailableTrainMonths(response.data.available_train_months || []);
+            setAvailableTrainMonths(
+                response?.data?.available_train_months || []
+            );
 
-            setTrainStartDate(config.train_start_date || "");
-            setTrainEndDate(config.train_end_date || "");
-            setModelGranularity(config.model_granularity?.toLowerCase() || "");
-            setForecastPeriods(config.forecast_periods || "");
+            if (config) {
+                setTrainStartDate(config.train_start_date || "");
+                setTrainEndDate(config.train_end_date || "");
+                setModelGranularity(
+                    config.model_granularity?.toLowerCase() || ""
+                );
+                setForecastPeriods(config.forecast_periods || "");
+            } else {
+                // No configuration exists yet
+                setTrainStartDate("");
+                setTrainEndDate("");
+                setModelGranularity("");
+                setForecastPeriods("");
+            }
+        } catch (error) {
+            console.error("Failed to fetch configuration", error);
+
+            showSnackbar(
+                error?.response?.data?.detail ||
+                "Failed to load configuration",
+                "error"
+            );
+
+            setTrainStartDate("");
+            setTrainEndDate("");
+            setModelGranularity("");
+            setForecastPeriods("");
+            setAvailableTrainMonths([]);
         } finally {
             setLoading(false);
         }
@@ -124,20 +130,29 @@ export default function HIVGlobalConfigurations() {
                 forecast_periods: forecastPeriods,
             },
         };
+        console.log(payload)
 
         try {
             setLoading(true);
 
-            console.log("Mock Save Payload:", payload);
+            const response = await saveHIVConfigurations(payload);
 
-            const response = {
-                ta_name: "HIV",
-                status: "config_saved_and_base_rebuilt",
-            };
-
-            console.log("Mock Response:", response);
+            // console.log("Payload sent:", payload);
+            // console.log("Response:", response.data);
 
             showSnackbar("Configurations saved successfully", "success");
+
+            // Optional: Refresh configuration after save
+            // await fetchConfigurationByTA();
+
+        } catch (error) {
+            console.error("Save configuration failed:", error);     
+
+            const errorMessage =
+                error?.response?.data?.detail ||
+                "Failed to save configuration";
+
+            showSnackbar(errorMessage, "error");
         } finally {
             setLoading(false);
         }
