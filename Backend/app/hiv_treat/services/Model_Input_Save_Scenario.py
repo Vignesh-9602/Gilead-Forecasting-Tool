@@ -122,7 +122,7 @@ def _build_total_only_block(cur, ta, scenario, start, end):
     return {
         "market_analysis": {
             "total_market_volume": build_total_market_volume(
-                total["values"], total["months"], total["split_idx"]
+                total["values"], total["months"], total["split_idx"],scenario
             )
         }
     }
@@ -766,7 +766,7 @@ def build_factors(cur, ta, scenario):
 # ================= MARKET ANALYSIS BUILDERS ===============
 # =========================================================
 
-def build_total_market_volume(total_vals, months, split_idx):
+def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base"):
     """
     Total market volume — share is always 100%.
 
@@ -784,9 +784,9 @@ def build_total_market_volume(total_vals, months, split_idx):
 
     # Monthly
     mv_chart = {"months": months, "forecast_start_index": split_idx,
-                "series": [{"label": "Base", "history": h, "forecast": f}]}
+                "series": [{"label": scenario_label, "history": h, "forecast": f}]}
     mv_table = {"type": "flat",
-                "rows": [{"label": "Base", "values": int_vals}]}
+                "rows": [{"label": scenario_label, "values": int_vals}]}
 
     ms_chart = {"months": months, "forecast_start_index": split_idx,
                 "series": [{"label": "Market Share", "history": sh, "forecast": sf}]}
@@ -794,8 +794,8 @@ def build_total_market_volume(total_vals, months, split_idx):
                 "rows": [{"label": "Market Share", "values": share_vals}]}
 
     # Yearly descriptors — use raw total_vals (floats) for volume aggregation
-    mv_series_data = [{"label": "Base", "monthly_values": total_vals}]
-    mv_table_rows  = [{"label": "Base", "monthly_values": total_vals}]
+    mv_series_data = [{"label": scenario_label, "monthly_values": total_vals}]
+    mv_table_rows  = [{"label": scenario_label, "monthly_values": total_vals}]
 
     ms_series_data = [{"label": "Market Share",
                        "child_vols": total_vals, "parent_vols": total_vals}]
@@ -1480,7 +1480,7 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 
     return {
         "total_market_volume": build_total_market_volume(
-            total_vals, months, split_idx),
+            total_vals, months, split_idx,scenario),
         "market_distribution": build_market_distribution(
             cur, ta, scenario, total_vals, months, split_idx, start, end),
         "product_distribution": build_product_distribution(
