@@ -1400,25 +1400,65 @@ def get_saved_scenarios(ta_name: str):
     }
 
 
+def scenario_exists(cur, ta, scenario_name):
+    cur.execute("""
+        SELECT 1
+        FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND scenario_name = %s
+        LIMIT 1
+    """, (ta, scenario_name))
+
+    return cur.fetchone() is not None
+
 @router.post("/save-scenarios")
 def save_scenario(payload: SaveScenarioRequest):
-    """
-    Saves the scenario to the DB, then immediately builds and returns the
-    full response -- one round trip, no separate read call needed.
-    """
+
     ta = payload.ta_name
     scenario = payload.scenario_name
- 
+
     try:
         with get_connection() as conn, conn.cursor() as cur:
-            _save_market_analysis(cur, ta, scenario, payload.user_id, payload.market_analysis, payload.factors)
+
+            if scenario.upper() != "BASE" and scenario_exists(
+                cur,
+                ta,
+                scenario
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Scenario '{scenario}' already exists"
+                )
+
+            user_id = getattr(
+                payload,
+                "user_id",
+                None
+            ) or "default_user"
+
+            _save_market_analysis(
+                cur,
+                ta,
+                scenario,
+                user_id,
+                payload.market_analysis,
+                payload.factors
+            )
+
             conn.commit()
- 
-            response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+
+            response = build_save_scenario_response(
+                cur,
+                ta,
+                scenario,
+                payload.selected_filter
+            )
+
             return response
- 
+
     except HTTPException:
         raise
+
     except Exception as e:
         raise HTTPException(500, str(e))
     

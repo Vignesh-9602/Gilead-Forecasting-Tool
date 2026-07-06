@@ -58,6 +58,8 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                                         across sources (source=None placeholder)
     Everything else (other market_volume blocks) is intentionally not saved.
     """
+    if hasattr(factors, "model_dump"):
+        factors = factors.model_dump()
     tmv = ma.get("total_market_volume", {}).get("market_volume", {}).get("monthly", {})
     if tmv:
         chart = tmv["chart"]
@@ -597,7 +599,10 @@ def build_factors(cur, ta, scenario):
     else:
         db_factors = row[0] or {}
         data = row[1] or {}
-
+    print("ROW:", row)
+    print("DB_FACTORS TYPE:", type(db_factors))
+    print("DB_FACTORS:", db_factors)
+    print("DATA TYPE:", type(data))
     months = data.get("months", [])
     split_idx = data.get("forecast_start_index", 0)
 
@@ -655,7 +660,7 @@ def build_factors(cur, ta, scenario):
         len(months) - split_idx
     )
 
-    linear_cfg = factors_data.get("linear", {})
+    linear_cfg = factors_data.get("linear") or {}
 
     scurve_cfg = (
         factors_data.get("s_curve")
@@ -663,9 +668,9 @@ def build_factors(cur, ta, scenario):
         or {}
     )
 
-    exp_cfg = factors_data.get("exponential", {})
+    exp_cfg = factors_data.get("exponential") or {}
 
-    log_cfg = factors_data.get("logarithmic", {})
+    log_cfg = factors_data.get("logarithmic") or {}
 
     linear = {
         "duration": linear_cfg.get(
