@@ -569,49 +569,6 @@ def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
         tot_row.values = tot
 
 
-def _scale_hier_to_tmv(hier_data: HierarchicalTabData, tmv_fc: list, fsi: int) -> None:
-    """In-place: scale all children so the grand-total forecast matches tmv_fc per period."""
-    n_fc = len(tmv_fc)
-    if not n_fc:
-        return
-
-    # Table: scale all children proportionally
-    all_ch  = [c for r in hier_data.table.rows for c in r.children]
-    ch_sums = [sum(c.values[fsi+i] if fsi+i < len(c.values) else 0.0 for c in all_ch) for i in range(n_fc)]
-    for c in all_ch:
-        c.values = list(c.values[:fsi]) + [
-            c.values[fsi+i] * tmv_fc[i] / ch_sums[i] if fsi+i < len(c.values) and ch_sums[i] else 0.0
-            for i in range(n_fc)
-        ]
-
-    # Recompute parent totals
-    n = fsi + n_fc
-    for r in hier_data.table.rows:
-        tot = [0.0] * n
-        for c in r.children:
-            for i, v in enumerate(c.values[:n]):
-                tot[i] += v
-        r.total = tot
-
-    # Chart: scale child series
-    plabels = {r.hierarchy for r in hier_data.table.rows}
-    ch_ser  = [s for s in hier_data.chart.series if s.label not in plabels]
-    csums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_ser) for i in range(n_fc)]
-    for s in ch_ser:
-        s.forecast_values = [
-            s.forecast_values[i] * tmv_fc[i] / csums[i] if i < len(s.forecast_values) and csums[i] else 0.0
-            for i in range(n_fc)
-        ]
-
-    # Recompute parent chart series as sum of their children
-    for ps in hier_data.chart.series:
-        if ps.label not in plabels:
-            continue
-        ch_for_p = [s for s in hier_data.chart.series if s.label.startswith(f"{ps.label} - ")]
-        if ch_for_p:
-            n_tr = max(len(s.train_values) for s in ch_for_p)
-            ps.train_values    = [sum(s.train_values[i]    if i < len(s.train_values)    else 0.0 for s in ch_for_p) for i in range(n_tr)]
-            ps.forecast_values = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_for_p) for i in range(n_fc)]
 
 
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
@@ -715,16 +672,17 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         )
 
     def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
+        # selected_parent="" forces all series to use auto_model="linear".
+        # No _scale_hier_to_tmv: scaling by an ETS-shaped TMV would curve the linear forecasts.
         hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                                 selected_parent=parent_lbl, selected_child=child_lbl,
+                                                 selected_parent="", selected_child="",
                                                  auto_model="linear")
-        _scale_hier_to_tmv(hier_data, _tmv_fc, fsi)
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
 
     def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                         selected_parent=parent_lbl, selected_child=child_lbl,
+                                         selected_parent="", selected_child="",
                                          auto_model="linear"),
             month_labels, fsi, chart_parent_filter=parent_lbl,
         )
@@ -1018,6 +976,7 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
     ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     ma_monthly = _recompute_all_market_shares(ma_monthly)
     ma_yearly  = _recompute_all_market_shares(ma_yearly)
+    ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     return _merge_granularities(ma_monthly, ma_yearly)
 
 
@@ -1962,12 +1921,20 @@ def refresh_liver(payload):
             return rows  # nothing to redistribute
 
         n = len(target_vals)
+        # Cap edited value per period so it never exceeds the target (TMV / 100% for share)
+        capped_edited_vals = [
+            min(float(edited["values"][i]) if i < len(edited.get("values", [])) else 0.0,
+                float(target_vals[i]) if i < len(target_vals) else 0.0)
+            for i in range(n)
+        ]
+        capped_edited = {**edited, "values": capped_edited_vals}
+
         new_others = []
         for other in others:
             new_vals = []
             for i in range(n):
                 tgt   = float(target_vals[i]) if i < len(target_vals) else 0.0
-                ed_v  = float(edited["values"][i]) if i < len(edited.get("values", [])) else 0.0
+                ed_v  = capped_edited_vals[i]
                 remaining = max(0.0, tgt - ed_v)
                 old_other_sum = sum(
                     float(o["values"][i]) if i < len(o.get("values", [])) else 0.0
@@ -1980,7 +1947,7 @@ def refresh_liver(payload):
                     new_vals.append(round(remaining / max(1, len(others)), 4))
             new_others.append({"label": other["label"], "values": new_vals})
 
-        new_non_tot = [edited] + new_others
+        new_non_tot = [capped_edited] + new_others
         # Recompute total
         tot_vals = [0.0] * n
         for r in new_non_tot:
@@ -2035,6 +2002,74 @@ def refresh_liver(payload):
             out.append({"label": parent["label"],
                         "values": list(parent_vals),
                         "children": new_children})
+        return out
+
+    def _transpose_hier(src_rows, dst_rows):
+        """
+        Mirror a hier tab into its counterpart by transposing parent↔child.
+        payer_product[Medicaid][GILD] == product_payer[GILD][Medicaid].
+        src_rows: updated rows of the edited tab.
+        dst_rows: current rows of the counterpart tab (provides parent/child structure).
+        """
+        # Build lookup: {dst_parent (=src_child): {dst_child (=src_parent): [values]}}
+        lookup = {}
+        for sp in src_rows:
+            sp_lbl = sp.get("label", "")
+            for sc in sp.get("children", []):
+                sc_lbl = sc.get("label", "")
+                lookup.setdefault(sc_lbl, {})[sp_lbl] = [float(v) for v in sc.get("values", [])]
+
+        new_rows = []
+        for dp in dst_rows:
+            dp_lbl   = dp.get("label", "")
+            children = dp.get("children", [])
+            new_children = []
+            for dc in children:
+                dc_lbl = dc.get("label", "")
+                vals   = lookup.get(dp_lbl, {}).get(dc_lbl,
+                         [float(v) for v in dc.get("values", [])])
+                new_children.append({"label": dc_lbl, "values": [int(round(v)) for v in vals]})
+            n_c = max((len(c["values"]) for c in new_children), default=0)
+            parent_total = [
+                sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_children)
+                for i in range(n_c)
+            ]
+            new_rows.append({"label": dp_lbl, "values": parent_total, "children": new_children})
+        return new_rows
+
+    def _scale_hier_by_flat_vol(old_hier_rows, flat_vol_map):
+        """
+        Scale each parent row so its total matches the corresponding flat_vol_map entry.
+        Children within a parent are scaled proportionally (old_child * new_parent / old_parent).
+        flat_vol_map: {parent_label: [new_vol_per_period]}
+        """
+        out = []
+        for parent in old_hier_rows:
+            plbl = parent.get("label", "")
+            old_pvals = [float(v) for v in parent.get("values", [])]
+            new_pvals = flat_vol_map.get(plbl, old_pvals)
+            n = len(new_pvals)
+            children = parent.get("children", [])
+            new_children = []
+            for child in children:
+                old_cvals = [float(v) for v in child.get("values", [])]
+                new_cvals = []
+                for i in range(n):
+                    op = old_pvals[i] if i < len(old_pvals) else 0.0
+                    np_ = new_pvals[i]
+                    oc = old_cvals[i] if i < len(old_cvals) else 0.0
+                    if op:
+                        new_cvals.append(int(round(oc * np_ / op)))
+                    elif children:
+                        new_cvals.append(int(round(np_ / len(children))))
+                    else:
+                        new_cvals.append(0)
+                new_children.append({"label": child.get("label", ""), "values": new_cvals})
+            new_parent_total = [
+                sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_children)
+                for i in range(n)
+            ]
+            out.append({"label": plbl, "values": new_parent_total, "children": new_children})
         return out
 
     def _hier_redistribute_share(hier_rows, edited_lbl, n_cols):
@@ -2160,6 +2195,29 @@ def refresh_liver(payload):
                 _put_flat(tab, "market_volume", gran,
                           _vol_from_share(_rows(tab, "market_share", gran), tmv_vals), to_int=True)
 
+            # Propagate flat tab edit to the counterpart hierarchical tab:
+            #   product_distribution → product_payer  (product is the parent dimension)
+            #   market_distribution  → payer_product  (payer/market is the parent dimension)
+            flat_vol_map = {
+                r["label"]: [float(v) for v in r["values"]]
+                for r in _rows(tab, "market_volume", gran)
+                if r.get("label", "").lower() != "total"
+            }
+            hier_tab       = "product_payer" if tab == "product_distribution" else "payer_product"
+            other_hier_tab = "payer_product" if hier_tab == "product_payer" else "product_payer"
+            old_hier = _old_rows(hier_tab, "market_volume", gran)
+            if old_hier and flat_vol_map:
+                _put_hier(hier_tab, "market_volume", gran,
+                          _scale_hier_by_flat_vol(old_hier, flat_vol_map), to_int=True)
+                # Transpose the updated tab so the other hier tab reflects the same values.
+                # e.g. market_distribution Cash=75k → payer_product Cash parent=75k,
+                # other parents=0 → product_payer each product's Cash child=max, others=0.
+                updated_hier     = _rows(hier_tab, "market_volume", gran)
+                old_other_hier   = _old_rows(other_hier_tab, "market_volume", gran)
+                if updated_hier and old_other_hier:
+                    _put_hier(other_hier_tab, "market_volume", gran,
+                              _transpose_hier(updated_hier, old_other_hier), to_int=True)
+
         elif tab in HIER_TABS:
             share_rows = _rows(tab, "market_share", gran)
             if metric == "market_share":
@@ -2169,8 +2227,51 @@ def refresh_liver(payload):
                 _put_hier(tab, "market_volume", gran,
                           _hier_vol_from_parent_share(_rows(tab, "market_share", gran), tmv_vals), to_int=True)
             else:
-                # Volume edited in hier tab — recompute shares via _recompute_all_market_shares_nested later
-                pass
+                # Volume edited in hier tab: cap each child at its parent total,
+                # then redistribute remaining among siblings proportionally.
+                hier_rows     = _rows(tab, "market_volume", gran)
+                old_hier_rows = _old_rows(tab, "market_volume", gran)
+                old_parent_map = {
+                    r.get("label", ""): [float(v) for v in r.get("values", [])]
+                    for r in old_hier_rows
+                }
+                new_hier_rows = []
+                for parent in hier_rows:
+                    plbl     = parent.get("label", "")
+                    old_pt   = old_parent_map.get(plbl, [float(v) for v in parent.get("values", [])])
+                    children = parent.get("children", [])
+                    n_p      = len(old_pt)
+                    # Cap every child at its parent total, then scale siblings so sum = parent total
+                    new_children = []
+                    for child in children:
+                        capped = [
+                            min(float(child["values"][i]) if i < len(child.get("values", [])) else 0.0,
+                                old_pt[i] if i < len(old_pt) else 0.0)
+                            for i in range(n_p)
+                        ]
+                        new_children.append({"label": child.get("label", ""), "values": capped})
+                    # Redistribute: keep child sums == parent total
+                    for i in range(n_p):
+                        child_sum = sum(float(c["values"][i]) for c in new_children)
+                        if child_sum > old_pt[i] and child_sum > 0:
+                            scale = old_pt[i] / child_sum
+                            for c in new_children:
+                                c["values"][i] = round(float(c["values"][i]) * scale, 4)
+                    new_hier_rows.append({
+                        "label":    plbl,
+                        "values":   [int(round(v)) for v in old_pt],
+                        "children": new_children,
+                    })
+                _put_hier(tab, "market_volume", gran, new_hier_rows, to_int=True)
+
+            # payer_product and product_payer are mirror views of the same payer×product matrix.
+            # After updating the edited tab's volumes, transpose to keep the counterpart in sync.
+            counterpart_tab = "product_payer" if tab == "payer_product" else "payer_product"
+            updated_vol     = _rows(tab, "market_volume", gran)
+            counterpart_old = _old_rows(counterpart_tab, "market_volume", gran)
+            if updated_vol and counterpart_old:
+                _put_hier(counterpart_tab, "market_volume", gran,
+                          _transpose_hier(updated_vol, counterpart_old), to_int=True)
 
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).
