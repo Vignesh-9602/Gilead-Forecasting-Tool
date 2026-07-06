@@ -569,6 +569,96 @@ def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
         tot_row.values = tot
 
 
+def _ipf_hier_rows(hier_rows, row_targets, col_targets, max_iter=8):
+    """Iterative Proportional Fitting on hierarchical rows.
+
+    Scales cell values so that:
+      - each parent's sum of children == row_targets[parent_label]  (row constraint)
+      - each child's sum across parents == col_targets[child_label]  (col constraint)
+
+    Returns a new list of hier_rows with integer-rounded values.
+    """
+    parents = [r.get("label", "") for r in hier_rows]
+    child_set = list({c.get("label", "") for r in hier_rows for c in r.get("children", [])})
+    n = max((len(r.get("values", [])) for r in hier_rows), default=0)
+    if not n or not parents or not child_set:
+        return hier_rows
+
+    mat = {}
+    for r in hier_rows:
+        p = r.get("label", "")
+        ch_by_label = {ch.get("label", ""): ch for ch in r.get("children", [])}
+        mat[p] = {}
+        for c in child_set:
+            vals = ch_by_label[c].get("values", []) if c in ch_by_label else []
+            mat[p][c] = [float(v) for v in vals] + [0.0] * (n - len(vals))
+
+    for _ in range(max_iter):
+        for p in parents:
+            row_sum = [sum(mat[p][c][i] for c in child_set) for i in range(n)]
+            tgt = row_targets.get(p, row_sum)
+            for c in child_set:
+                mat[p][c] = [mat[p][c][i] * tgt[i] / row_sum[i] if row_sum[i] else 0.0 for i in range(n)]
+        for c in child_set:
+            col_sum = [sum(mat[p][c][i] for p in parents) for i in range(n)]
+            tgt = col_targets.get(c, col_sum)
+            for p in parents:
+                mat[p][c] = [mat[p][c][i] * tgt[i] / col_sum[i] if col_sum[i] else 0.0 for i in range(n)]
+
+    new_rows = []
+    for r in hier_rows:
+        p = r.get("label", "")
+        new_ch = [
+            {"label": ch.get("label", ""), "values": [int(round(mat[p][ch.get("label","")][i])) for i in range(n)]}
+            for ch in r.get("children", [])
+        ]
+        ptotal = [sum(ch["values"][i] for ch in new_ch) for i in range(n)]
+        new_rows.append({"label": p, "values": ptotal, "children": new_ch})
+    return new_rows
+
+
+def _transpose_hier_rows(src_rows, dst_rows):
+    """Build dst (product×payer) by transposing src (payer×product).
+
+    dst_rows provides the parent/child structure; values come from src transposed.
+    """
+    lookup = {}
+    for sp in src_rows:
+        plbl = sp.get("label", "")
+        for sc in sp.get("children", []):
+            lookup.setdefault(sc.get("label", ""), {})[plbl] = [int(round(float(v))) for v in sc.get("values", [])]
+
+    new_rows = []
+    for dp in dst_rows:
+        dp_lbl = dp.get("label", "")
+        new_ch = []
+        for dc in dp.get("children", []):
+            dc_lbl = dc.get("label", "")
+            fallback = [int(round(float(v))) for v in dc.get("values", [])]
+            new_ch.append({"label": dc_lbl, "values": lookup.get(dp_lbl, {}).get(dc_lbl, fallback)})
+        n_c = max((len(c["values"]) for c in new_ch), default=0)
+        new_rows.append({
+            "label": dp_lbl,
+            "values": [sum(c["values"][i] for c in new_ch) for i in range(n_c)],
+            "children": new_ch,
+        })
+    return new_rows
+
+
+def _sync_hier_mv_chart(tab_mv, fsi, chart_parent_filter=None):
+    """Rebuild market_volume chart series from table rows after an IPF update."""
+    rows = tab_mv.get("table", {}).get("rows", [])
+    series = []
+    for parent in rows:
+        plbl = parent.get("label", "")
+        if chart_parent_filter and plbl != chart_parent_filter:
+            continue
+        for child in parent.get("children", []):
+            clbl = child.get("label", "")
+            cvals = [int(round(float(v))) for v in child.get("values", [])]
+            series.append({"label": f"{plbl} - {clbl}", "history": cvals[:fsi], "forecast": cvals[fsi:]})
+    tab_mv.setdefault("chart", {})["series"] = series
+
 
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
@@ -708,6 +798,30 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             "market_share":  bhier_ms(pwpy_ms, tab2_label, tab3_label),
         },
     }
+
+    # Align Tab4 (payer_product) and Tab5 (product_payer) so their parent totals match
+    # Tab2 (product_distribution) and Tab3 (market_distribution) respectively.
+    # bflat_mv scales Tab2/Tab3 forecasts via _scale_flat_to_tmv; bhier_mv has no
+    # such scaling, so IPF bridges the gap and ensures all tabs are self-consistent.
+    _tab2_mv_rows = market_analysis["product_distribution"]["market_volume"]["table"]["rows"]
+    _tab3_mv_rows = market_analysis["market_distribution"]["market_volume"]["table"]["rows"]
+    _tab4_mv = market_analysis["payer_product"]["market_volume"]
+    _tab5_mv = market_analysis["product_payer"]["market_volume"]
+    _col_tgts = {
+        r["label"]: [float(v) for v in r["values"]]
+        for r in _tab2_mv_rows if r.get("label", "").lower() != "total"
+    }
+    _row_tgts = {
+        r["label"]: [float(v) for v in r["values"]]
+        for r in _tab3_mv_rows if r.get("label", "").lower() != "total"
+    }
+    if _tab4_mv.get("table", {}).get("rows") and _col_tgts and _row_tgts:
+        _new4 = _ipf_hier_rows(_tab4_mv["table"]["rows"], _row_tgts, _col_tgts)
+        _tab4_mv["table"]["rows"] = _new4
+        _sync_hier_mv_chart(_tab4_mv, fsi, chart_parent_filter=tab3_label)
+        if _tab5_mv.get("table", {}).get("rows"):
+            _tab5_mv["table"]["rows"] = _transpose_hier_rows(_new4, _tab5_mv["table"]["rows"])
+            _sync_hier_mv_chart(_tab5_mv, fsi, chart_parent_filter=tab2_label)
 
     # Recompute market_share from scaled market_volume so all tabs are consistent
     market_analysis = _recompute_all_market_shares(market_analysis)
@@ -2043,15 +2157,98 @@ def refresh_liver(payload):
                         "children": new_children})
         return out
 
+    def _transpose_hier(src_rows, dst_rows):
+        """
+        Mirror a hier tab into its counterpart by transposing parent↔child.
+        payer_product[Medicaid][GILD] == product_payer[GILD][Medicaid].
+        src_rows: updated rows of the edited tab.
+        dst_rows: current rows of the counterpart tab (provides parent/child structure).
+        """
+        # Build lookup: {dst_parent (=src_child): {dst_child (=src_parent): [values]}}
+        lookup = {}
+        for sp in src_rows:
+            sp_lbl = sp.get("label", "")
+            for sc in sp.get("children", []):
+                sc_lbl = sc.get("label", "")
+                lookup.setdefault(sc_lbl, {})[sp_lbl] = [float(v) for v in sc.get("values", [])]
+
+        new_rows = []
+        for dp in dst_rows:
+            dp_lbl   = dp.get("label", "")
+            children = dp.get("children", [])
+            new_children = []
+            for dc in children:
+                dc_lbl = dc.get("label", "")
+                vals   = lookup.get(dp_lbl, {}).get(dc_lbl,
+                         [float(v) for v in dc.get("values", [])])
+                new_children.append({"label": dc_lbl, "values": [int(round(v)) for v in vals]})
+            n_c = max((len(c["values"]) for c in new_children), default=0)
+            parent_total = [
+                sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_children)
+                for i in range(n_c)
+            ]
+            new_rows.append({"label": dp_lbl, "values": parent_total, "children": new_children})
+        return new_rows
+
+    def _ipf_fit(hier_rows, row_targets, col_targets, n, max_iter=8):
+        """
+        Iterative Proportional Fitting:
+        Fit a payer×product hier-row matrix to row marginals (row_targets = {payer: [vals]})
+        and column marginals (col_targets = {product: [vals]}).
+        Returns new hier rows with integer-rounded values.
+        """
+        parents = [r.get("label", "") for r in hier_rows]
+        child_labels = list({c.get("label", "")
+                             for r in hier_rows for c in r.get("children", [])})
+        # Build float matrix
+        matrix = {p: {c: [0.0] * n for c in child_labels} for p in parents}
+        for r in hier_rows:
+            plbl = r.get("label", "")
+            for ch in r.get("children", []):
+                clbl = ch.get("label", "")
+                matrix[plbl][clbl] = [float(v) for v in ch.get("values", [])]
+        for _ in range(max_iter):
+            # Scale rows to row_targets
+            for p in parents:
+                row_sum = [sum(matrix[p][c][i] for c in child_labels) for i in range(n)]
+                tgt = row_targets.get(p, [0.0] * n)
+                for c in child_labels:
+                    matrix[p][c] = [
+                        matrix[p][c][i] * tgt[i] / row_sum[i] if row_sum[i] else 0.0
+                        for i in range(n)
+                    ]
+            # Scale columns to col_targets
+            for c in child_labels:
+                col_sum = [sum(matrix[p][c][i] for p in parents) for i in range(n)]
+                tgt = col_targets.get(c, [0.0] * n)
+                for p in parents:
+                    matrix[p][c] = [
+                        matrix[p][c][i] * tgt[i] / col_sum[i] if col_sum[i] else 0.0
+                        for i in range(n)
+                    ]
+        # Rebuild hier rows
+        new_rows = []
+        for r in hier_rows:
+            plbl = r.get("label", "")
+            new_ch = []
+            for ch in r.get("children", []):
+                clbl = ch.get("label", "")
+                vals = [int(round(matrix[plbl][clbl][i])) for i in range(n)]
+                new_ch.append({"label": clbl, "values": vals})
+            total = [sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_ch)
+                     for i in range(n)]
+            new_rows.append({"label": plbl, "values": total, "children": new_ch})
+        return new_rows
+
     def _hier_redistribute_share(hier_rows, edited_lbl, n_cols):
         """
-        edited_lbl = "ParentLabel::ChildLabel".
+        edited_lbl = "ParentLabel - ChildLabel".
         Within that parent, keep edited child's share; redistribute siblings so
         children shares sum to 100%.
         """
-        if not edited_lbl or "::" not in edited_lbl:
+        if not edited_lbl or " - " not in edited_lbl:
             return hier_rows
-        parent_lbl, child_lbl = edited_lbl.split("::", 1)
+        parent_lbl, child_lbl = edited_lbl.split(" - ", 1)
         out = []
         for parent in hier_rows:
             if parent.get("label") != parent_lbl:
@@ -2166,34 +2363,58 @@ def refresh_liver(payload):
                 _put_flat(tab, "market_volume", gran,
                           _vol_from_share(_rows(tab, "market_share", gran), tmv_vals), to_int=True)
 
-            # Propagate flat tab edit to the counterpart hierarchical tab:
-            #   product_distribution → product_payer  (product is the parent dimension)
-            #   market_distribution  → payer_product  (payer/market is the parent dimension)
-            flat_vol_map = {
+            # Top-to-bottom rule: Tab2 (product_distribution) rescales Tab3 downward,
+            # but Tab3 edits do NOT touch Tab2.
+            if tab == "product_distribution":
+                other_flat_shares = _rows("market_distribution", "market_share", gran)
+                if other_flat_shares:
+                    _put_flat("market_distribution", "market_volume", gran,
+                              _vol_from_share(other_flat_shares, tmv_vals), to_int=True)
+
+            # Derive Tab4 (payer_product) and Tab5 (product_payer) using IPF.
+            # Row targets = Tab3 (payer) volumes — always read after redistribution above.
+            # Col targets:
+            #   Tab2 edit → use Tab2 directly (just redistributed, authoritative).
+            #   Tab3 edit → derive from Tab4's current column sums, which carry forward
+            #               the product state from the previous Tab2 refresh.  The payload
+            #               may not re-send Tab2 data, so Tab4 col sums are the best proxy.
+            tab4_seed = _rows("payer_product", "market_volume", gran)
+            row_targets = {
                 r["label"]: [float(v) for v in r["values"]]
-                for r in _rows(tab, "market_volume", gran)
+                for r in _rows("market_distribution", "market_volume", gran)
                 if r.get("label", "").lower() != "total"
             }
-            # Also rescale the OTHER flat tab: its shares stay the same but volumes
-            # must reflect the new effective TMV (e.g. after a prior TMV edit).
-            other_flat_tab = "market_distribution" if tab == "product_distribution" else "product_distribution"
-            other_flat_shares = _rows(other_flat_tab, "market_share", gran)
-            if other_flat_shares:
-                _put_flat(other_flat_tab, "market_volume", gran,
-                          _vol_from_share(other_flat_shares, tmv_vals), to_int=True)
-
-            hier_tab       = "product_payer" if tab == "product_distribution" else "payer_product"
-            other_hier_tab = "payer_product" if hier_tab == "product_payer" else "product_payer"
-            old_hier = _old_rows(hier_tab, "market_volume", gran)
-            if old_hier and flat_vol_map:
-                _put_hier(hier_tab, "market_volume", gran,
-                          _scale_hier_by_flat_vol(old_hier, flat_vol_map), to_int=True)
-                # Transpose the updated tab so the other hier tab reflects the same values.
-                updated_hier     = _rows(hier_tab, "market_volume", gran)
-                old_other_hier   = _old_rows(other_hier_tab, "market_volume", gran)
-                if updated_hier and old_other_hier:
-                    _put_hier(other_hier_tab, "market_volume", gran,
-                              _transpose_hier(updated_hier, old_other_hier), to_int=True)
+            if tab == "product_distribution":
+                col_targets = {
+                    r["label"]: [float(v) for v in r["values"]]
+                    for r in _rows("product_distribution", "market_volume", gran)
+                    if r.get("label", "").lower() != "total"
+                }
+            elif tab4_seed:
+                child_labels = list({c.get("label", "")
+                                     for r in tab4_seed for c in r.get("children", [])})
+                _n = len(tmv_vals)
+                col_targets = {
+                    lbl: [sum(float(c["values"][i]) if i < len(c.get("values", [])) else 0.0
+                              for r in tab4_seed
+                              for c in r.get("children", [])
+                              if c.get("label", "") == lbl)
+                          for i in range(_n)]
+                    for lbl in child_labels
+                }
+            else:
+                col_targets = {
+                    r["label"]: [float(v) for v in r["values"]]
+                    for r in _rows("product_distribution", "market_volume", gran)
+                    if r.get("label", "").lower() != "total"
+                }
+            if tab4_seed and row_targets and col_targets:
+                new_tab4 = _ipf_fit(tab4_seed, row_targets, col_targets, len(tmv_vals))
+                _put_hier("payer_product", "market_volume", gran, new_tab4, to_int=True)
+                tab5_seed = _rows("product_payer", "market_volume", gran)
+                if tab5_seed:
+                    _put_hier("product_payer", "market_volume", gran,
+                              _transpose_hier(new_tab4, tab5_seed), to_int=True)
 
         elif tab in HIER_TABS:
             share_rows = _rows(tab, "market_share", gran)
@@ -2213,6 +2434,78 @@ def refresh_liver(payload):
                 if flat_shares:
                     _put_flat(flat_t, "market_volume", gran,
                               _vol_from_share(flat_shares, tmv_vals), to_int=True)
+                # Volume edited in hier tab.
+                # eh = "ParentLabel - ChildLabel" identifies the specific cell the user changed.
+                # Cap that child at its parent total (from payload, not DB), then redistribute
+                # the remaining budget proportionally among siblings (up AND down).
+                hier_rows = _rows(tab, "market_volume", gran)
+
+                edited_parent_lbl = None
+                edited_child_lbl  = None
+                if eh and " - " in eh:
+                    edited_parent_lbl, edited_child_lbl = eh.split(" - ", 1)
+
+                new_hier_rows = []
+                for parent in hier_rows:
+                    plbl     = parent.get("label", "")
+                    cur_pt   = [float(v) for v in parent.get("values", [])]  # payload parent total
+                    children = parent.get("children", [])
+                    n_p      = len(cur_pt)
+
+                    if edited_parent_lbl and plbl == edited_parent_lbl and edited_child_lbl:
+                        edited_ch = next((c for c in children if c.get("label") == edited_child_lbl), None)
+                        siblings  = [c for c in children if c.get("label") != edited_child_lbl]
+                        if edited_ch:
+                            # Cap edited child at the CURRENT parent total (from payload)
+                            ec_vals = [
+                                min(float(edited_ch["values"][i]) if i < len(edited_ch.get("values", [])) else 0.0,
+                                    cur_pt[i] if i < len(cur_pt) else 0.0)
+                                for i in range(n_p)
+                            ]
+                            # Redistribute remaining budget among siblings proportionally
+                            new_siblings = []
+                            for sib in siblings:
+                                sib_vals = []
+                                for i in range(n_p):
+                                    remaining = max(0.0, cur_pt[i] - ec_vals[i])
+                                    old_sib_sum = sum(
+                                        float(s["values"][i]) if i < len(s.get("values", [])) else 0.0
+                                        for s in siblings
+                                    )
+                                    old_sv = float(sib["values"][i]) if i < len(sib.get("values", [])) else 0.0
+                                    if old_sib_sum > 0:
+                                        sib_vals.append(round(old_sv / old_sib_sum * remaining, 4))
+                                    elif siblings:
+                                        sib_vals.append(round(remaining / len(siblings), 4))
+                                    else:
+                                        sib_vals.append(0.0)
+                                new_siblings.append({"label": sib.get("label", ""), "values": sib_vals})
+                            new_children = [{"label": edited_child_lbl, "values": ec_vals}] + new_siblings
+                        else:
+                            new_children = children
+                    else:
+                        # Unedited parent — keep children unchanged
+                        new_children = [
+                            {"label": c.get("label", ""),
+                             "values": [float(v) for v in c.get("values", [])]}
+                            for c in children
+                        ]
+                    new_hier_rows.append({
+                        "label":    plbl,
+                        "values":   [int(round(v)) for v in cur_pt],  # preserve payload parent total
+                        "children": new_children,
+                    })
+                _put_hier(tab, "market_volume", gran, new_hier_rows, to_int=True)
+
+            # Top-to-bottom rule:
+            # Tab4 (payer_product) edit → propagates down to Tab5 (transpose)
+            # Tab5 (product_payer) edit → affects only Tab5, no propagation up or sideways
+            if tab == "payer_product":
+                updated_vol = _rows("payer_product", "market_volume", gran)
+                tab5_seed   = _rows("product_payer", "market_volume", gran)
+                if updated_vol and tab5_seed:
+                    _put_hier("product_payer", "market_volume", gran,
+                              _transpose_hier(updated_vol, tab5_seed), to_int=True)
 
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).
