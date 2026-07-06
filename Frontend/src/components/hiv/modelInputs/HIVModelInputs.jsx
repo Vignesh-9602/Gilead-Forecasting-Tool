@@ -25,7 +25,7 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario } from "../../../services/apiService";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario } from "../../../services/apiService";
 import { useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -95,11 +95,11 @@ export default function HIVModelInput() {
     const [multiplierHorizon, setMultiplierHorizon] =
         useState("Forecast");
 
-    const [openSaveScenario, setOpenSaveScenario] =
-        useState(false);
+    // const [openSaveScenario, setOpenSaveScenario] =
+    //     useState(false);
 
-    const [scenarioName, setScenarioName] =
-        useState("");
+    // const [scenarioName, setScenarioName] =
+    //     useState("");
 
     const [projectionFactors, setProjectionFactors] =
         useState(null);
@@ -188,7 +188,6 @@ export default function HIVModelInput() {
             setMarkets(resData?.markets || []);
             setProducts(resData?.products || []);
 
-            // Default filter: first time default filter, last applied filters afterwards
             const defaultFilter = resData?.selected_filter;
 
             if (defaultFilter) {
@@ -196,6 +195,60 @@ export default function HIVModelInput() {
                 setToDate(defaultFilter.end_date || "");
                 setMarketFilter(defaultFilter.market || "");
                 setProductFilter(defaultFilter.product || "");
+
+                // Auto load saved scenario
+                const payload = {
+                    ta_name: therapyArea,
+                    selected_filter: {
+                        start_date: defaultFilter.start_date,
+                        end_date: defaultFilter.end_date,
+                        market: defaultFilter.market,
+                        product: defaultFilter.product,
+                    },
+                };
+
+                const applyResponse = await applyHIVScenario(payload);
+
+                const scenario =
+                    applyResponse.data.scenarios[
+                    applyResponse.data.active_scenario
+                    ];
+
+                const factors = scenario?.factors || {};
+
+                setProjectionFactors(factors);
+
+                setModelSelection(
+                    factors.active_model || "ets"
+                );
+
+                setAvailableScenarios(
+                    applyResponse.data.available_scenarios || []
+                );
+
+                setActiveScenario(
+                    applyResponse.data.active_scenario || ""
+                );
+
+                setMarketAnalysis(
+                    scenario?.market_analysis || {}
+                );
+
+                const chartData =
+                    scenario?.market_analysis
+                        ?.total_market_volume
+                        ?.market_volume
+                        ?.monthly
+                        ?.chart;
+
+                setTrajectoryMonthOptions(
+                    (chartData?.months?.slice(chartData?.forecast_start_index) || []).map(
+                        (month) => ({
+                            value: dayjs(month, "MMM-YY").format("YYYY-MM-DD"),
+                            label: month,
+                        })
+                    )
+                );
             } else {
                 setFromDate("");
                 setToDate("");
@@ -429,7 +482,7 @@ export default function HIVModelInput() {
         }
     };
 
-    const handleEdit = async (updatedMarketAnalysis) => {
+    const handleEdit = async (updatedMarketAnalysis, editedRows) => {
         try {
             setLoading(true);
 
@@ -483,6 +536,8 @@ export default function HIVModelInput() {
 
                 selected_metric: selectedMetric,
 
+                edited_rows: editedRows,
+
                 market_analysis: updatedMarketAnalysis,
             };
 
@@ -513,10 +568,163 @@ export default function HIVModelInput() {
 
         } catch (err) {
             console.error(err);
+            throw err; // let handleRefresh know it failed
+
         } finally {
             setLoading(false);
         }
     };
+
+    const handleSaveScenario = async (scenarioName) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: scenarioName,
+
+                model_type: modelSelection,
+
+                factors: {
+                    multiplier: Number(multiplier),
+
+                    multiplier_horizon: multiplierHorizon,
+
+                    ...(modelSelection === "ets"
+                        ? {
+                            ets: {
+                                alpha: Number(alpha),
+                                beta: Number(beta),
+                                gamma: Number(gamma),
+                            },
+                        }
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
+                },
+
+                market_analysis: JSON.parse(
+                    JSON.stringify(marketAnalysis)
+                ),
+            };
+
+            console.log("Save Scenario Payload", payload);
+
+            const response =
+                await saveHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(
+                scenario.factors || {}
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios || []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario || ""
+            );
+
+            setMarketAnalysis(
+                scenario.market_analysis || {}
+            );
+
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleApplySelectedScenario = async (scenarioName) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: scenarioName,
+            };
+
+            console.log(
+                "Apply Selected Scenario Payload",
+                payload
+            );
+
+            const response =
+                await applySelectedHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            const factors =
+                scenario?.factors || {};
+
+            setProjectionFactors(factors);
+
+            setModelSelection(
+                factors.active_model || "ets"
+            );
+
+            setAvailableScenarios(
+                response.data.available_scenarios || []
+            );
+
+            setActiveScenario(
+                response.data.active_scenario || ""
+            );
+
+            setMarketAnalysis(
+                scenario.market_analysis || {}
+            );
+
+        } catch (err) {
+
+            console.error(err);
+
+        } finally {
+
+            setLoading(false);
+
+        }
+    };
+
 
     const inputStyle = {
         bgcolor: "#fcfcfd",
@@ -867,7 +1075,7 @@ export default function HIVModelInput() {
                                 Apply Filter
                             </Button>
 
-                            <Button
+                            {/* <Button
                                 variant="outlined"
                                 onClick={() => setOpenSaveScenario(true)}
                                 sx={{
@@ -876,7 +1084,7 @@ export default function HIVModelInput() {
                                 }}
                             >
                                 Save Scenario
-                            </Button>
+                            </Button> */}
                         </Box>
                     </Box>
                 </Box>
@@ -1319,8 +1527,10 @@ export default function HIVModelInput() {
                 selectedMetric={selectedMetric}
                 setSelectedMetric={setSelectedMetric}
                 onEdit={handleEdit}
+                onSaveScenario={handleSaveScenario}
+                onApplyScenario={handleApplySelectedScenario}
             />
-            <Dialog
+            {/* <Dialog
                 open={openSaveScenario}
                 onClose={() => setOpenSaveScenario(false)}
                 maxWidth="xs"
@@ -1385,7 +1595,7 @@ export default function HIVModelInput() {
                         Save
                     </Button>
                 </DialogActions>
-            </Dialog>
+            </Dialog> */}
         </Box >
     );
 }

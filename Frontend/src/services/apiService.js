@@ -321,6 +321,18 @@ export const editHIVScenario = (payload) =>
     payload
   );
 
+export const saveHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/save-scenarios",
+    payload
+  );
+
+export const applySelectedHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/apply-selected-scenario",
+    payload
+  );
+
 
 
 

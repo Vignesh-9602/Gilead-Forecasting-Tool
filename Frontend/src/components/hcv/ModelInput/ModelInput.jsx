@@ -103,9 +103,9 @@ const ForecastChart = ({
     return parsed.isValid()
       ? parsed.format("MMM-YY")
       : new Date(m).toLocaleDateString("en-US", {
-          month: "short",
-          year: "2-digit",
-        });
+        month: "short",
+        year: "2-digit",
+      });
   });
 
   const filteredSeries = useMemo(() => {
@@ -170,9 +170,9 @@ const ForecastChart = ({
     const forecastY =
       fsi > 0
         ? [
-            lastTrain ?? null,
-            ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
-          ]
+          lastTrain ?? null,
+          ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
+        ]
         : Array.isArray(s.forecast_values)
           ? s.forecast_values
           : [];
@@ -517,42 +517,42 @@ export default function PBCModelInput() {
       const chart =
         chartSelectedMetric && chartSelectedMetric.chart
           ? {
-              months: chartSelectedMetric.chart.months || months,
-              forecast_start_index:
-                chartSelectedMetric.chart.forecast_start_index || fsi,
-              series: (chartSelectedMetric.chart.series || []).map((s) => ({
-                label: s.label || "",
-                train_values: parseValues(
-                  s.history || s.train_values,
-                  isTabPercent,
-                ),
-                forecast_values: parseValues(
-                  s.forecast || s.forecast_values,
-                  isTabPercent,
-                ),
-                lot: s.lot || s.label || "",
-              })),
-            }
+            months: chartSelectedMetric.chart.months || months,
+            forecast_start_index:
+              chartSelectedMetric.chart.forecast_start_index || fsi,
+            series: (chartSelectedMetric.chart.series || []).map((s) => ({
+              label: s.label || "",
+              train_values: parseValues(
+                s.history || s.train_values,
+                isTabPercent,
+              ),
+              forecast_values: parseValues(
+                s.forecast || s.forecast_values,
+                isTabPercent,
+              ),
+              lot: s.lot || s.label || "",
+            })),
+          }
           : { months, forecast_start_index: fsi, series: [] };
 
       const table =
         tableSelectedMetric && tableSelectedMetric.table
           ? {
-              type: tableSelectedMetric.table.type,
-              headers: tableSelectedMetric.table.headers || chart.months,
-              rows: (tableSelectedMetric.table.rows || []).map((r) => ({
-                hierarchy: r.hierarchy || r.label || "",
-                label: r.label || r.hierarchy || "",
-                total: Array.isArray(r.total)
-                  ? parseValues(r.total, isTabPercent)
-                  : undefined,
-                values: parseValues(r.values, isTabPercent),
-                children: (r.children || []).map((c) => ({
-                  label: c.label,
-                  values: parseValues(c.values, isTabPercent),
-                })),
+            type: tableSelectedMetric.table.type,
+            headers: tableSelectedMetric.table.headers || chart.months,
+            rows: (tableSelectedMetric.table.rows || []).map((r) => ({
+              hierarchy: r.hierarchy || r.label || "",
+              label: r.label || r.hierarchy || "",
+              total: Array.isArray(r.total)
+                ? parseValues(r.total, isTabPercent)
+                : undefined,
+              values: parseValues(r.values, isTabPercent),
+              children: (r.children || []).map((c) => ({
+                label: c.label,
+                values: parseValues(c.values, isTabPercent),
               })),
-            }
+            })),
+          }
           : { type: "flat", headers: chart.months, rows: [] };
 
       tabs[tabKey] = { chart, table };
@@ -608,13 +608,13 @@ export default function PBCModelInput() {
 
           const singleChartSeries = activeRow
             ? [
-                {
-                  label: activeRow.hierarchy || activeRow.label || "",
-                  lot: activeRow.hierarchy || activeRow.label || "",
-                  train_values: (activeRow.values || []).slice(0, chartFsi),
-                  forecast_values: (activeRow.values || []).slice(chartFsi),
-                },
-              ]
+              {
+                label: activeRow.hierarchy || activeRow.label || "",
+                lot: activeRow.hierarchy || activeRow.label || "",
+                train_values: (activeRow.values || []).slice(0, chartFsi),
+                forecast_values: (activeRow.values || []).slice(chartFsi),
+              },
+            ]
             : tmvChart.series;
 
           tabs["total_market_volume"] = {
@@ -1200,7 +1200,7 @@ export default function PBCModelInput() {
           const normalized = normalizeLiverResponse(data, metric);
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
-        initializeCompareScenarios(data);
+          initializeCompareScenarios(data);
           // The chart's month list doubles as the set of selectable dates
           // for the FROM/TO DATE dropdowns — no separate endpoint needed.
           if (normalized?.months?.length) setAvailableDates(normalized.months);
@@ -1510,13 +1510,13 @@ export default function PBCModelInput() {
         modelSelection === "ets"
           ? { ets: { alpha, beta, gamma } }
           : {
-              growth: {
-                total_growth: totalGrowth,
-                duration,
-                trajectory_start: trajectoryStart,
-                ...(modelSelection !== "linear" && { k_value: Number(kValue) }),
-              },
-            };
+            growth: {
+              total_growth: totalGrowth,
+              duration,
+              trajectory_start: trajectoryStart,
+              ...(modelSelection !== "linear" && { k_value: Number(kValue) }),
+            },
+          };
       const response = await recalculateMetrics({
         ...buildBasePayload(),
         model_type: modelSelection,
@@ -2479,78 +2479,7 @@ export default function PBCModelInput() {
             {["linear", "exponential", "logarithmic", "scurve"].includes(
               modelSelection,
             ) && (
-              <>
-                <Box>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 0.5,
-                      mb: 1,
-                    }}
-                  >
-                    <Typography sx={{ fontSize: "14px" }}>GROWTH %</Typography>
-                    <Tooltip
-                      title="Please enter the total growth%"
-                      arrow
-                      placement="top"
-                    >
-                      <InfoOutlinedIcon
-                        sx={{
-                          fontSize: 16,
-                          color: "#64748b",
-                          cursor: "pointer",
-                        }}
-                      />
-                    </Tooltip>
-                  </Box>
-                  <TextField
-                    type="number"
-                    value={totalGrowth}
-                    disabled={!editable}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "" || (Number(v) >= -100 && Number(v) <= 100))
-                        setTotalGrowth(v);
-                    }}
-                    inputProps={{ min: 0, max: 100, step: 0.1 }}
-                    sx={recalculateInputStyle}
-                  />
-                </Box>
-                <Box>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 0.5,
-                      mb: 1,
-                    }}
-                  >
-                    <Typography sx={{ fontSize: "14px" }}>DURATION</Typography>
-                    <Tooltip
-                      title="Please enter the months"
-                      arrow
-                      placement="top"
-                    >
-                      <InfoOutlinedIcon
-                        sx={{
-                          fontSize: 16,
-                          color: "#64748b",
-                          cursor: "pointer",
-                        }}
-                      />
-                    </Tooltip>
-                  </Box>
-                  <TextField
-                    type="number"
-                    value={duration}
-                    disabled={!editable}
-                    onChange={(e) => setDuration(Number(e.target.value))}
-                    inputProps={{ min: 0, max: 100, step: 1 }}
-                    sx={recalculateInputStyle}
-                  />
-                </Box>
-                {modelSelection !== "linear" && (
+                <>
                   <Box>
                     <Box
                       sx={{
@@ -2560,9 +2489,9 @@ export default function PBCModelInput() {
                         mb: 1,
                       }}
                     >
-                      <Typography sx={{ fontSize: "14px" }}>K VALUE</Typography>
+                      <Typography sx={{ fontSize: "14px" }}>GROWTH %</Typography>
                       <Tooltip
-                        title="Please enter value from 0 to 3"
+                        title="Please enter the total growth%"
                         arrow
                         placement="top"
                       >
@@ -2577,72 +2506,143 @@ export default function PBCModelInput() {
                     </Box>
                     <TextField
                       type="number"
-                      value={kValue}
+                      value={totalGrowth}
                       disabled={!editable}
                       onChange={(e) => {
                         const v = e.target.value;
-                        if (v === "" || (Number(v) >= 0 && Number(v) <= 3))
-                          setKValue(v);
+                        if (v === "" || (Number(v) >= -100 && Number(v) <= 100))
+                          setTotalGrowth(v);
                       }}
-                      inputProps={{ min: 0, max: 3, step: 0.01 }}
+                      inputProps={{ min: 0, max: 100, step: 0.1 }}
                       sx={recalculateInputStyle}
                     />
                   </Box>
-                )}
-                <Box>
-                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
-                    TRAJECTORY START
-                  </Typography>
-                  <FormControl sx={recalculateInputStyle}>
-                    <Select
-                      value={trajectoryStart}
-                      onChange={(e) => setTrajectoryStart(e.target.value)}
+                  <Box>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 0.5,
+                        mb: 1,
+                      }}
+                    >
+                      <Typography sx={{ fontSize: "14px" }}>DURATION</Typography>
+                      <Tooltip
+                        title="Please enter the months"
+                        arrow
+                        placement="top"
+                      >
+                        <InfoOutlinedIcon
+                          sx={{
+                            fontSize: 16,
+                            color: "#64748b",
+                            cursor: "pointer",
+                          }}
+                        />
+                      </Tooltip>
+                    </Box>
+                    <TextField
+                      type="number"
+                      value={duration}
                       disabled={!editable}
-                      displayEmpty
-                      renderValue={(sel) => {
-                        if (!sel) return "Select";
-                        const d = new Date(sel);
-                        return isNaN(d)
-                          ? sel
-                          : d.toLocaleDateString("en-US", {
+                      onChange={(e) => setDuration(Number(e.target.value))}
+                      inputProps={{ min: 0, max: 100, step: 1 }}
+                      sx={recalculateInputStyle}
+                    />
+                  </Box>
+                  {modelSelection !== "linear" && (
+                    <Box>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 0.5,
+                          mb: 1,
+                        }}
+                      >
+                        <Typography sx={{ fontSize: "14px" }}>K VALUE</Typography>
+                        <Tooltip
+                          title="Please enter value from 0 to 3"
+                          arrow
+                          placement="top"
+                        >
+                          <InfoOutlinedIcon
+                            sx={{
+                              fontSize: 16,
+                              color: "#64748b",
+                              cursor: "pointer",
+                            }}
+                          />
+                        </Tooltip>
+                      </Box>
+                      <TextField
+                        type="number"
+                        value={kValue}
+                        disabled={!editable}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "" || (Number(v) >= 0 && Number(v) <= 3))
+                            setKValue(v);
+                        }}
+                        inputProps={{ min: 0, max: 3, step: 0.01 }}
+                        sx={recalculateInputStyle}
+                      />
+                    </Box>
+                  )}
+                  <Box>
+                    <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                      TRAJECTORY START
+                    </Typography>
+                    <FormControl sx={recalculateInputStyle}>
+                      <Select
+                        value={trajectoryStart}
+                        onChange={(e) => setTrajectoryStart(e.target.value)}
+                        disabled={!editable}
+                        displayEmpty
+                        renderValue={(sel) => {
+                          if (!sel) return "Select";
+                          const d = new Date(sel);
+                          return isNaN(d)
+                            ? sel
+                            : d.toLocaleDateString("en-US", {
                               month: "short",
                               year: "2-digit",
                             });
-                      }}
-                    >
-                      {(() => {
-                        // Build option list from all months (not just forecast)
-                        // Trajectory start options = forecast months only
-                        // (from forecast_start_index onwards). This is the
-                        // right semantic — a trajectory starts somewhere in
-                        // the forecast period, not in history.
-                        // Always append the current value as a fallback so
-                        // the Select never renders blank even if the backend
-                        // default points to a month outside the visible range.
-                        const forecastMonths =
-                          chartData?.months && chartData?.forecast_start_index != null
-                            ? chartData.months.slice(chartData.forecast_start_index)
-                            : trajectoryMonthOptions;
+                        }}
+                      >
+                        {(() => {
+                          // Build option list from all months (not just forecast)
+                          // Trajectory start options = forecast months only
+                          // (from forecast_start_index onwards). This is the
+                          // right semantic — a trajectory starts somewhere in
+                          // the forecast period, not in history.
+                          // Always append the current value as a fallback so
+                          // the Select never renders blank even if the backend
+                          // default points to a month outside the visible range.
+                          const forecastMonths =
+                            chartData?.months && chartData?.forecast_start_index != null
+                              ? chartData.months.slice(chartData.forecast_start_index)
+                              : trajectoryMonthOptions;
 
-                        const withCurrent =
-                          trajectoryStart && !forecastMonths.includes(trajectoryStart)
-                            ? [...forecastMonths, trajectoryStart]
-                            : forecastMonths;
+                          const withCurrent =
+                            trajectoryStart && !forecastMonths.includes(trajectoryStart)
+                              ? [...forecastMonths, trajectoryStart]
+                              : forecastMonths;
 
-                        return withCurrent.map((m) => (
-                          <MenuItem key={m} value={m}>
-                            {new Date(m).toLocaleDateString("en-US", {
-                              month: "short",
-                              year: "2-digit",
-                            })}
-                          </MenuItem>
-                        ));
-                      })()}
-                    </Select>
-                  </FormControl>
-                </Box>
-              </>
-            )}
+                          return withCurrent.map((m) => (
+                            <MenuItem key={m} value={m}>
+                              {new Date(m).toLocaleDateString("en-US", {
+                                month: "short",
+                                year: "2-digit",
+                              })}
+                            </MenuItem>
+                          ));
+                        })()}
+                      </Select>
+                    </FormControl>
+                  </Box>
+                </>
+              )}
 
             <Box>
               <Box
@@ -3322,296 +3322,183 @@ export default function PBCModelInput() {
                     </>
                   ) : (
                     <>
-                    {groupedTableHierarchy
-                      .filter((group) => {
-                        // On total_market tab: only filter by selected
-                        // compare scenarios (always keep the applied one).
-                        // On other tabs: show all rows regardless.
-                        if (activeTab !== "total_market") return true;
-                        if (!selectedCompareScenarios.length) return true;
-                        return (
-                          group.brandName === currentlyAppliedScenario ||
-                          selectedCompareScenarios.includes(group.brandName)
-                        );
-                      })
-                      .map((group) => {
-                      const isExpanded = !!expandedBrands[group.brandName];
-                      const hasChildren = group.children.length > 0;
-                      const showChildren = isExpanded;
+                      {groupedTableHierarchy
+                        .filter((group) => {
+                          // On total_market tab: only filter by selected
+                          // compare scenarios (always keep the applied one).
+                          // On other tabs: show all rows regardless.
+                          if (activeTab !== "total_market") return true;
+                          if (!selectedCompareScenarios.length) return true;
+                          return (
+                            group.brandName === currentlyAppliedScenario ||
+                            selectedCompareScenarios.includes(group.brandName)
+                          );
+                        })
+                        .map((group) => {
+                          const isExpanded = !!expandedBrands[group.brandName];
+                          const hasChildren = group.children.length > 0;
+                          const showChildren = isExpanded;
 
-                      const mainRowApplied = group.mainRow?.is_applied;
-                      const isSelected =
-                        tentativeRadioSelectedScenario === group.brandName;
+                          const mainRowApplied = group.mainRow?.is_applied;
+                          const isSelected =
+                            tentativeRadioSelectedScenario === group.brandName;
 
-                      const currentBrand = (
-                        appliedProductFilter ||
-                        appliedBrand ||
-                        ""
-                      ).toLowerCase();
+                          const currentBrand = (
+                            appliedProductFilter ||
+                            appliedBrand ||
+                            ""
+                          ).toLowerCase();
 
-                      const currentPayer = (appliedPayerFilter || "").toLowerCase();
+                          const currentPayer = (appliedPayerFilter || "").toLowerCase();
 
-                      const targetParentLabel = (
-                        group.brandName || ""
-                      ).toLowerCase();
+                          const targetParentLabel = (
+                            group.brandName || ""
+                          ).toLowerCase();
 
-                      let isAppliedParent = false;
+                          let isAppliedParent = false;
 
-                      if (activeTab === "prod_dist") {
-                        isAppliedParent = targetParentLabel === currentBrand;
-                      } else if (activeTab === "payer_dist") {
-                        isAppliedParent = targetParentLabel === currentPayer;
-                      } else if (activeTab === "payer_prod") {
-                        isAppliedParent = targetParentLabel === currentPayer;
-                      } else if (activeTab === "prod_payer") {
-                        isAppliedParent = targetParentLabel === currentBrand;
-                      }
+                          if (activeTab === "prod_dist") {
+                            isAppliedParent = targetParentLabel === currentBrand;
+                          } else if (activeTab === "payer_dist") {
+                            isAppliedParent = targetParentLabel === currentPayer;
+                          } else if (activeTab === "payer_prod") {
+                            isAppliedParent = targetParentLabel === currentPayer;
+                          } else if (activeTab === "prod_payer") {
+                            isAppliedParent = targetParentLabel === currentBrand;
+                          }
 
-                      return (
-                        <React.Fragment key={group.brandName}>
-                          {/* Parent */}
-                          <Box
-                            component="tr"
-                            onClick={() => {
-                              if (hasChildren) {
-                                toggleBrandExpand(group.brandName);
-                              }
-                            }}
-                            sx={{
-                              cursor: hasChildren ? "pointer" : "default",
-
-                              position: "relative",
-                              isolation: "isolate",
-
-                              backgroundColor: hasChildren ? "#f8fafc" : "white",
-
-                              "&:hover": {
-                                backgroundColor: hasChildren ? "#f1f5f9" : "#f8fafc",
-                              },
-                            }}
-                          >
-                            <Box
-                              component="td"
-                              sx={{
-                                position: "sticky",
-                                left: 0,
-                                zIndex: 1,
-
-                                backgroundColor: isAppliedParent
-                                  ? "#fffbeb"
-                                  : hasChildren
-                                    ? "#f8fafc"
-                                    : "white",
-
-                                borderRight: "1px solid #e2e8f0",
-
-                                borderBottom: hasChildren
-                                    ? "1px solid #cbd5e1"
-                                    : "1px solid #f1f5f9",
-
-                                p: "10px 16px",
-                              }}
-                            >
+                          return (
+                            <React.Fragment key={group.brandName}>
+                              {/* Parent */}
                               <Box
+                                component="tr"
+                                onClick={() => {
+                                  if (hasChildren) {
+                                    toggleBrandExpand(group.brandName);
+                                  }
+                                }}
                                 sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1,
+                                  cursor: hasChildren ? "pointer" : "default",
+
+                                  position: "relative",
+                                  isolation: "isolate",
+
+                                  backgroundColor: hasChildren ? "#f8fafc" : "white",
+
+                                  "&:hover": {
+                                    backgroundColor: hasChildren ? "#f1f5f9" : "#f8fafc",
+                                  },
                                 }}
                               >
-                                {activeTab === "total_market" && (
-                                  <input
-                                    type="radio"
-                                    checked={isSelected}
-                                    value={group.brandName}
-                                    onChange={(e) => {
-                                      e.stopPropagation();
-                                      handleActiveScenarioRadioChange(
-                                        group.brandName,
-                                      );
-                                    }}
-                                  />
-                                )}
-
-                                {hasChildren && (
-                                  <Typography
-                                    component="span"
-                                    sx={{
-                                      fontSize: "10px",
-                                      width: "12px",
-                                    }}
-                                  >
-                                    {isExpanded ? "▼" : "▶"}
-                                  </Typography>
-                                )}
-
-                                <Typography
-                                  sx={{
-                                    fontSize: "13px",
-
-                                    fontWeight: hasChildren ? 700 : 400,
-
-                                    color: isAppliedParent
-                                      ? "#f59e0b"
-                                      : "#0f172a",
-                                  }}
-                                >
-                                  {group.brandName}
-                                </Typography>
-
-                                {(mainRowApplied ||
-                                  currentlyAppliedScenario ===
-                                    group.brandName) && (
-                                  <Typography
-                                    sx={{
-                                      fontSize: "11px",
-                                      fontWeight: 600,
-                                      color: "#10b981",
-                                    }}
-                                  >
-                                    (Applied)
-                                  </Typography>
-                                )}
-                              </Box>
-                            </Box>
-
-                            {displayColumns.map((col) => {
-                              const val = getColumnValue(group.mainRow, col);
-
-                              const isF = isForecastColumn(col);
-
-                              return tableEditing &&
-                                !hasChildren &&
-                                totalMarketViewMode === "monthly" ? (
-                                <Box
-                                  component="td"
-                                  key={col}
-                                  sx={{
-                                    p: "6px 6px",
-                                    textAlign: "center",
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <TextField
-                                    size="small"
-                                    type="number"
-                                    value={val ?? ""}
-                                    onChange={(e) =>
-                                      handleCellChange(
-                                        group.brandName,
-                                        col,
-                                        e.target.value,
-                                      )
-                                    }
-                                    sx={{
-                                      width: 85,
-                                      "& .MuiOutlinedInput-root": {
-                                        height: 30,
-                                        fontSize: "12px",
-                                      },
-                                    }}
-                                  />
-                                </Box>
-                              ) : (
-                                <Box
-                                  component="td"
-                                  key={col}
-                                  sx={{
-                                    p: "10px 8px",
-                                    textAlign: "center",
-
-                                    fontSize: "13px",
-
-                                    fontWeight: hasChildren ? 700 : 400,
-
-                                    backgroundColor:
-                                      (isAppliedParent || activeTab === "total_market") && isF
-                                        ? "#fffbeb"
-                                        : isF
-                                          ? "#ffffff"
-                                          : "#eef2f7",
-
-                                    color:
-                                      (isAppliedParent || activeTab === "total_market") && isF
-                                        ? "#f59e0b"
-                                        : "#1e3a5f",
-                                  }}
-                                >
-                                  {formatCellValue(val)}
-                                </Box>
-                              );
-                            })}
-                          </Box>
-
-                          {showChildren &&
-                            group.children.map((childRow, idx) => {
-                              const childLabel = (
-                                childRow.cleanLabel || ""
-                              ).toLowerCase();
-
-                              // For payer_prod / prod_payer tabs, highlight only
-                              // the specific child whose label matches the
-                              // complementary filter (product under the
-                              // matching payer parent, or vice versa).
-                              let isAppliedChild = false;
-                              if (activeTab === "payer_prod") {
-                                isAppliedChild =
-                                  targetParentLabel === currentPayer &&
-                                  childLabel === currentBrand;
-                              } else if (activeTab === "prod_payer") {
-                                isAppliedChild =
-                                  targetParentLabel === currentBrand &&
-                                  childLabel === currentPayer;
-                              }
-
-                              const isHighlightedChild = isAppliedChild;
-
-                              return (
-                              <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
                                 <Box
                                   component="td"
                                   sx={{
                                     position: "sticky",
                                     left: 0,
                                     zIndex: 1,
-                                    backgroundColor: isHighlightedChild
+
+                                    backgroundColor: isAppliedParent
                                       ? "#fffbeb"
-                                      : "white",
+                                      : hasChildren
+                                        ? "#f8fafc"
+                                        : "white",
+
                                     borderRight: "1px solid #e2e8f0",
-                                    pl: "40px",
+
+                                    borderBottom: hasChildren
+                                      ? "1px solid #cbd5e1"
+                                      : "1px solid #f1f5f9",
+
                                     p: "10px 16px",
                                   }}
                                 >
-                                  <Typography
+                                  <Box
                                     sx={{
-                                      fontSize: "13px",
-
-                                      fontWeight: 500,
-
-                                      color: isHighlightedChild
-                                        ? "#f59e0b"
-                                        : "#0f172a",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 1,
                                     }}
                                   >
-                                    {childRow.cleanLabel}
-                                  </Typography>
+                                    {activeTab === "total_market" && (
+                                      <input
+                                        type="radio"
+                                        checked={isSelected}
+                                        value={group.brandName}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          handleActiveScenarioRadioChange(
+                                            group.brandName,
+                                          );
+                                        }}
+                                      />
+                                    )}
+
+                                    {hasChildren && (
+                                      <Typography
+                                        component="span"
+                                        sx={{
+                                          fontSize: "10px",
+                                          width: "12px",
+                                        }}
+                                      >
+                                        {isExpanded ? "▼" : "▶"}
+                                      </Typography>
+                                    )}
+
+                                    <Typography
+                                      sx={{
+                                        fontSize: "13px",
+
+                                        fontWeight: hasChildren ? 700 : 400,
+
+                                        color: isAppliedParent
+                                          ? "#f59e0b"
+                                          : "#0f172a",
+                                      }}
+                                    >
+                                      {group.brandName}
+                                    </Typography>
+
+                                    {(mainRowApplied ||
+                                      currentlyAppliedScenario ===
+                                      group.brandName) && (
+                                        <Typography
+                                          sx={{
+                                            fontSize: "11px",
+                                            fontWeight: 600,
+                                            color: "#10b981",
+                                          }}
+                                        >
+                                          (Applied)
+                                        </Typography>
+                                      )}
+                                  </Box>
                                 </Box>
 
                                 {displayColumns.map((col) => {
-                                  const isFChild = isForecastColumn(col);
-                                  return tableEditing && totalMarketViewMode === "monthly" ? (
+                                  const val = getColumnValue(group.mainRow, col);
+
+                                  const isF = isForecastColumn(col);
+
+                                  return tableEditing &&
+                                    !hasChildren &&
+                                    totalMarketViewMode === "monthly" ? (
                                     <Box
                                       component="td"
                                       key={col}
-                                      sx={{ p: "6px 6px", textAlign: "center" }}
+                                      sx={{
+                                        p: "6px 6px",
+                                        textAlign: "center",
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
                                     >
                                       <TextField
                                         size="small"
                                         type="number"
-                                        value={childRow?.monthly_data?.[col] ?? ""}
+                                        value={val ?? ""}
                                         onChange={(e) =>
                                           handleCellChange(
-                                            childRow.hierarchy,
+                                            group.brandName,
                                             col,
                                             e.target.value,
                                           )
@@ -3633,132 +3520,245 @@ export default function PBCModelInput() {
                                         p: "10px 8px",
                                         textAlign: "center",
 
+                                        fontSize: "13px",
+
+                                        fontWeight: hasChildren ? 700 : 400,
+
                                         backgroundColor:
-                                          isHighlightedChild && isFChild
+                                          (isAppliedParent || activeTab === "total_market") && isF
                                             ? "#fffbeb"
-                                            : isFChild
+                                            : isF
                                               ? "#ffffff"
                                               : "#eef2f7",
 
                                         color:
-                                          isHighlightedChild && isFChild
+                                          (isAppliedParent || activeTab === "total_market") && isF
                                             ? "#f59e0b"
                                             : "#1e3a5f",
                                       }}
                                     >
-                                      {formatCellValue(
-                                        getColumnValue(childRow, col),
-                                      )}
+                                      {formatCellValue(val)}
                                     </Box>
                                   );
                                 })}
                               </Box>
-                              );
-                            })}
-                        </React.Fragment>
-                      );
-                    })}
 
-                    {/* Saved-scenario rows — appear immediately after Save
+                              {showChildren &&
+                                group.children.map((childRow, idx) => {
+                                  const childLabel = (
+                                    childRow.cleanLabel || ""
+                                  ).toLowerCase();
+
+                                  // For payer_prod / prod_payer tabs, highlight only
+                                  // the specific child whose label matches the
+                                  // complementary filter (product under the
+                                  // matching payer parent, or vice versa).
+                                  let isAppliedChild = false;
+                                  if (activeTab === "payer_prod") {
+                                    isAppliedChild =
+                                      targetParentLabel === currentPayer &&
+                                      childLabel === currentBrand;
+                                  } else if (activeTab === "prod_payer") {
+                                    isAppliedChild =
+                                      targetParentLabel === currentBrand &&
+                                      childLabel === currentPayer;
+                                  }
+
+                                  const isHighlightedChild = isAppliedChild;
+
+                                  return (
+                                    <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
+                                      <Box
+                                        component="td"
+                                        sx={{
+                                          position: "sticky",
+                                          left: 0,
+                                          zIndex: 1,
+                                          backgroundColor: isHighlightedChild
+                                            ? "#fffbeb"
+                                            : "white",
+                                          borderRight: "1px solid #e2e8f0",
+                                          pl: "40px",
+                                          p: "10px 16px",
+                                        }}
+                                      >
+                                        <Typography
+                                          sx={{
+                                            fontSize: "13px",
+
+                                            fontWeight: 500,
+
+                                            color: isHighlightedChild
+                                              ? "#f59e0b"
+                                              : "#0f172a",
+                                          }}
+                                        >
+                                          {childRow.cleanLabel}
+                                        </Typography>
+                                      </Box>
+
+                                      {displayColumns.map((col) => {
+                                        const isFChild = isForecastColumn(col);
+                                        return tableEditing && totalMarketViewMode === "monthly" ? (
+                                          <Box
+                                            component="td"
+                                            key={col}
+                                            sx={{ p: "6px 6px", textAlign: "center" }}
+                                          >
+                                            <TextField
+                                              size="small"
+                                              type="number"
+                                              value={childRow?.monthly_data?.[col] ?? ""}
+                                              onChange={(e) =>
+                                                handleCellChange(
+                                                  childRow.hierarchy,
+                                                  col,
+                                                  e.target.value,
+                                                )
+                                              }
+                                              sx={{
+                                                width: 85,
+                                                "& .MuiOutlinedInput-root": {
+                                                  height: 30,
+                                                  fontSize: "12px",
+                                                },
+                                              }}
+                                            />
+                                          </Box>
+                                        ) : (
+                                          <Box
+                                            component="td"
+                                            key={col}
+                                            sx={{
+                                              p: "10px 8px",
+                                              textAlign: "center",
+
+                                              backgroundColor:
+                                                isHighlightedChild && isFChild
+                                                  ? "#fffbeb"
+                                                  : isFChild
+                                                    ? "#ffffff"
+                                                    : "#eef2f7",
+
+                                              color:
+                                                isHighlightedChild && isFChild
+                                                  ? "#f59e0b"
+                                                  : "#1e3a5f",
+                                            }}
+                                          >
+                                            {formatCellValue(
+                                              getColumnValue(childRow, col),
+                                            )}
+                                          </Box>
+                                        );
+                                      })}
+                                    </Box>
+                                  );
+                                })}
+                            </React.Fragment>
+                          );
+                        })}
+
+                      {/* Saved-scenario rows — appear immediately after Save
                         Scenario without reloading chart/table data. Radio is
                         active so the user can click Apply Selected Scenario. */}
-                    {activeTab === "total_market" && savedScenarioRows
-                      .filter(
-                        (name) =>
-                          !groupedTableHierarchy.some(
-                            (g) => g.brandName === name,
-                          ),
-                      )
-                      .map((name) => {
-                        const isSelected =
-                          tentativeRadioSelectedScenario === name;
-                        return (
-                          <Box
-                            component="tr"
-                            key={`saved-${name}`}
-                            sx={{
-                              position: "relative",
-                              isolation: "isolate",
-                              "&:hover": { backgroundColor: "#f8fafc" },
-                            }}
-                          >
+                      {activeTab === "total_market" && savedScenarioRows
+                        .filter(
+                          (name) =>
+                            !groupedTableHierarchy.some(
+                              (g) => g.brandName === name,
+                            ),
+                        )
+                        .map((name) => {
+                          const isSelected =
+                            tentativeRadioSelectedScenario === name;
+                          return (
                             <Box
-                              component="td"
+                              component="tr"
+                              key={`saved-${name}`}
                               sx={{
-                                position: "sticky",
-                                left: 0,
-                                zIndex: 1,
-                                backgroundColor: "white",
-                                borderRight: "1px solid #e2e8f0",
-                                borderBottom: "1px solid #f1f5f9",
-                                p: "10px 16px",
+                                position: "relative",
+                                isolation: "isolate",
+                                "&:hover": { backgroundColor: "#f8fafc" },
                               }}
                             >
                               <Box
+                                component="td"
                                 sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1.5,
+                                  position: "sticky",
+                                  left: 0,
+                                  zIndex: 1,
+                                  backgroundColor: "white",
+                                  borderRight: "1px solid #e2e8f0",
+                                  borderBottom: "1px solid #f1f5f9",
+                                  p: "10px 16px",
                                 }}
                               >
-                                <input
-                                  type="radio"
-                                  name="activeScenarioRadio"
-                                  value={name}
-                                  checked={isSelected}
-                                  onChange={() =>
-                                    handleActiveScenarioRadioChange(name)
-                                  }
-                                  style={{
-                                    accentColor: "#4F46E5",
-                                    width: 14,
-                                    height: 14,
-                                    margin: 0,
-                                  }}
-                                />
-                                <Typography
-                                  sx={{
-                                    fontSize: "13px",
-                                    fontWeight: 600,
-                                    color: "#0f172a",
-                                  }}
-                                >
-                                  {name}
-                                </Typography>
-                                <Typography
-                                  component="span"
-                                  sx={{
-                                    fontSize: "11px",
-                                    fontWeight: 600,
-                                    color: "#10b981",
-                                  }}
-                                >
-                                  {currentlyAppliedScenario === name ? "(Applied)" : "(Saved)"}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            {displayColumns.map((col, i) => {
-                              const isF = isForecastColumn(col);
-                              return (
                                 <Box
-                                  component="td"
-                                  key={i}
                                   sx={{
-                                    p: "10px 8px",
-                                    textAlign: "center",
-                                    fontSize: "13px",
-                                    backgroundColor: isF ? "#ffffff" : "#f8fafc",
-                                    color: "#94a3b8",
-                                    borderBottom: "1px solid #f1f5f9",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 1.5,
                                   }}
                                 >
-                                  —
+                                  <input
+                                    type="radio"
+                                    name="activeScenarioRadio"
+                                    value={name}
+                                    checked={isSelected}
+                                    onChange={() =>
+                                      handleActiveScenarioRadioChange(name)
+                                    }
+                                    style={{
+                                      accentColor: "#4F46E5",
+                                      width: 14,
+                                      height: 14,
+                                      margin: 0,
+                                    }}
+                                  />
+                                  <Typography
+                                    sx={{
+                                      fontSize: "13px",
+                                      fontWeight: 600,
+                                      color: "#0f172a",
+                                    }}
+                                  >
+                                    {name}
+                                  </Typography>
+                                  <Typography
+                                    component="span"
+                                    sx={{
+                                      fontSize: "11px",
+                                      fontWeight: 600,
+                                      color: "#10b981",
+                                    }}
+                                  >
+                                    {currentlyAppliedScenario === name ? "(Applied)" : "(Saved)"}
+                                  </Typography>
                                 </Box>
-                              );
-                            })}
-                          </Box>
-                        );
-                      })}
+                              </Box>
+                              {displayColumns.map((col, i) => {
+                                const isF = isForecastColumn(col);
+                                return (
+                                  <Box
+                                    component="td"
+                                    key={i}
+                                    sx={{
+                                      p: "10px 8px",
+                                      textAlign: "center",
+                                      fontSize: "13px",
+                                      backgroundColor: isF ? "#ffffff" : "#f8fafc",
+                                      color: "#94a3b8",
+                                      borderBottom: "1px solid #f1f5f9",
+                                    }}
+                                  >
+                                    —
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                          );
+                        })}
                     </>
                   )}
                 </Box>

@@ -18,6 +18,11 @@ import {
     TableHead,
     TableRow,
     Typography,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogActions,
+    TextField,
 } from "@mui/material";
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
@@ -41,6 +46,8 @@ export default function HIVMarketTable({
     setViewMode,
     marketAnalysis,
     onEdit,
+    onSaveScenario,
+    onApplyScenario
 }) {
     if (!tableData?.rows?.length) {
         return null;
@@ -68,7 +75,6 @@ export default function HIVMarketTable({
     const [compareScenario, setCompareScenario] =
         useState([]);
 
-
     useEffect(() => {
         setCompareScenario(availableScenarios);
     }, [availableScenarios]);
@@ -92,6 +98,12 @@ export default function HIVMarketTable({
 
     const [originalRows, setOriginalRows] = useState([]);
 
+    const [openSaveScenario, setOpenSaveScenario] = useState(false);
+
+    const [scenarioName, setScenarioName] = useState("");
+
+    const [editedRows, setEditedRows] = useState([]);
+
     useEffect(() => {
         if (!tableData?.rows?.length) return;
 
@@ -103,6 +115,9 @@ export default function HIVMarketTable({
         setOriginalRows(
             JSON.parse(JSON.stringify(cloned))
         );
+
+        setEditedRows([]);
+
     }, [tableData]);
 
     const handleCancel = () => {
@@ -115,22 +130,16 @@ export default function HIVMarketTable({
 
     };
 
-    const handleRefresh = () => {
+    const handleRefresh = async () => {
+        const updatedMarketAnalysis = JSON.parse(JSON.stringify(marketAnalysis));
+        updatedMarketAnalysis[activeTab][selectedMetric][viewMode].table.rows = tableRows;
 
-        const updatedMarketAnalysis =
-            JSON.parse(JSON.stringify(marketAnalysis));
-
-        updatedMarketAnalysis[
-            activeTab
-        ][
-            selectedMetric
-        ][
-            viewMode
-        ].table.rows = tableRows;
-
-        onEdit(updatedMarketAnalysis);
-
-        setEditable(false);
+        try {
+            await onEdit(updatedMarketAnalysis, editedRows);
+            setEditable(false); // only exit edit mode on success
+        } catch (err) {
+            console.error("Edit failed, staying in edit mode", err);
+        }
     };
 
     const handleCellChange = (
@@ -158,6 +167,17 @@ export default function HIVMarketTable({
         }
 
         setTableRows(updated);
+
+        const editedLabel =
+            childIndex === null
+                ? updated[rowIndex].label
+                : updated[rowIndex].children[childIndex].label;
+
+        setEditedRows((prev) =>
+            prev.includes(editedLabel)
+                ? prev
+                : [...prev, editedLabel]
+        );
 
     };
 
@@ -407,7 +427,7 @@ export default function HIVMarketTable({
                     sx={{
                         display: "flex",
                         alignItems: "center",
-                        gap: 1,
+                        gap: 2,
                     }}
                 >
 
@@ -419,6 +439,14 @@ export default function HIVMarketTable({
                     >
                         Market Metrics Table
                     </Typography>
+
+                    <Button
+                        variant="contained"
+                        sx={primaryButtonStyle}
+                        onClick={() => setOpenSaveScenario(true)}
+                    >
+                        Save Scenario
+                    </Button>
 
                     {rows.some(row => row.children?.length) && (
                         <>
@@ -461,62 +489,54 @@ export default function HIVMarketTable({
                             p: "2px",
                         }}
                     >
+
                         <Button
                             onClick={() => setViewMode("monthly")}
                             sx={{
-                                minWidth: 90,
+                                minWidth: 80,
+                                height: 30,
+                                px: 1.5,
+                                py: 0.25,
                                 textTransform: "none",
                                 borderRadius: "8px",
-                                bgcolor:
-                                    viewMode === "monthly"
-                                        ? "#fff"
-                                        : "transparent",
-                                color:
-                                    viewMode === "monthly"
-                                        ? "#4F46E5"
-                                        : "#64748B",
-                                boxShadow:
-                                    viewMode === "monthly"
-                                        ? 1
-                                        : "none",
+                                bgcolor: viewMode === "monthly" ? "#fff" : "transparent",
+                                color: viewMode === "monthly" ? "#4F46E5" : "#64748B",
+                                boxShadow: viewMode === "monthly" ? 1 : "none",
                             }}
                         >
+
                             Monthly
                         </Button>
+
 
                         <Button
                             onClick={() => setViewMode("yearly")}
                             sx={{
-                                minWidth: 90,
+                                minWidth: 80,
+                                height: 30,
+                                px: 1.5,
+                                py: 0.25,
                                 textTransform: "none",
                                 borderRadius: "8px",
-                                bgcolor:
-                                    viewMode === "yearly"
-                                        ? "#fff"
-                                        : "transparent",
-                                color:
-                                    viewMode === "yearly"
-                                        ? "#4F46E5"
-                                        : "#64748B",
-                                boxShadow:
-                                    viewMode === "yearly"
-                                        ? 1
-                                        : "none",
+                                bgcolor: viewMode === "yearly" ? "#fff" : "transparent",
+                                color: viewMode === "yearly" ? "#4F46E5" : "#64748B",
+                                boxShadow: viewMode === "yearly" ? 1 : "none",
                             }}
                         >
+
                             Yearly
                         </Button>
                     </Box>
 
                     {isTotalMarketVolume && (
-
                         <>
-
-
                             <Button
                                 variant="contained"
                                 sx={primaryButtonStyle}
                                 disabled={!selectedRow}
+                                onClick={async () => {
+                                    await onApplyScenario(selectedRow);
+                                }}
                             >
                                 Apply Selected Scenario
                             </Button>
@@ -983,6 +1003,62 @@ export default function HIVMarketTable({
                     </TableBody>
                 </Table>
             </TableContainer>
+            <Dialog
+                open={openSaveScenario}
+                onClose={() => setOpenSaveScenario(false)}
+                maxWidth="xs"
+                fullWidth
+                PaperProps={{ sx: { borderRadius: "12px" } }}
+            >
+                <DialogTitle sx={{ fontWeight: 700, fontSize: "16px", color: "#0f172a", pb: 1 }}>
+                    Save Scenario
+                </DialogTitle>
+
+                <DialogContent>
+                    <Typography sx={{ fontSize: "13px", color: "#64748b", mb: 2 }}>
+                        Enter a name for this scenario.
+                    </Typography>
+                    <TextField
+                        autoFocus
+                        fullWidth
+                        label="Scenario Name"
+                        placeholder="Enter scenario name"
+                        value={scenarioName}
+                        onChange={(e) =>
+                            setScenarioName(e.target.value)
+                        }
+                        variant="outlined"
+                        sx={{ "& .MuiOutlinedInput-root": { borderRadius: "8px" } }}
+                    />
+                </DialogContent>
+
+                <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
+                    <Button
+                        variant="outlined"
+                        onClick={() => {
+                            setOpenSaveScenario(false);
+                            setScenarioName("");
+                        }}
+                        sx={{ textTransform: "none", borderRadius: "8px", color: "#64748b", borderColor: "#e2e8f0" }}
+                    >
+                        Cancel
+                    </Button>
+
+                    <Button
+                        variant="contained"
+                        disabled={!scenarioName.trim()}
+                        onClick={async () => {
+                            await onSaveScenario(scenarioName);
+
+                            setOpenSaveScenario(false);
+                            setScenarioName("");
+                        }}
+                        sx={{ textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5" }}
+                    >
+                        Save
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Paper>
     );
 }

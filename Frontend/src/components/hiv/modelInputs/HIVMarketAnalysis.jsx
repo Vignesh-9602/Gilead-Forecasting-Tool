@@ -45,6 +45,8 @@ export default function HIVMarketAnalysis({
     selectedMetric,
     setSelectedMetric,
     onEdit,
+    onSaveScenario,
+    onApplyScenario
 }) {
 
     const DEFAULT_METRIC_BY_TAB = {
@@ -248,6 +250,8 @@ export default function HIVMarketAnalysis({
                             setViewMode={setViewMode}
                             marketAnalysis={marketAnalysis}
                             onEdit={onEdit}
+                            onSaveScenario={onSaveScenario}
+                            onApplyScenario={onApplyScenario}
                         />
                     </Box>
                 </>
