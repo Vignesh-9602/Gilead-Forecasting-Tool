@@ -569,50 +569,6 @@ def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
         tot_row.values = tot
 
 
-def _scale_hier_to_tmv(hier_data: HierarchicalTabData, tmv_fc: list, fsi: int) -> None:
-    """In-place: scale all children so the grand-total forecast matches tmv_fc per period."""
-    n_fc = len(tmv_fc)
-    if not n_fc:
-        return
-
-    # Table: scale all children proportionally
-    all_ch  = [c for r in hier_data.table.rows for c in r.children]
-    ch_sums = [sum(c.values[fsi+i] if fsi+i < len(c.values) else 0.0 for c in all_ch) for i in range(n_fc)]
-    for c in all_ch:
-        c.values = list(c.values[:fsi]) + [
-            c.values[fsi+i] * tmv_fc[i] / ch_sums[i] if fsi+i < len(c.values) and ch_sums[i] else 0.0
-            for i in range(n_fc)
-        ]
-
-    # Recompute parent totals
-    n = fsi + n_fc
-    for r in hier_data.table.rows:
-        tot = [0.0] * n
-        for c in r.children:
-            for i, v in enumerate(c.values[:n]):
-                tot[i] += v
-        r.total = tot
-
-    # Chart: scale child series
-    plabels = {r.hierarchy for r in hier_data.table.rows}
-    ch_ser  = [s for s in hier_data.chart.series if s.label not in plabels]
-    csums   = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_ser) for i in range(n_fc)]
-    for s in ch_ser:
-        s.forecast_values = [
-            s.forecast_values[i] * tmv_fc[i] / csums[i] if i < len(s.forecast_values) and csums[i] else 0.0
-            for i in range(n_fc)
-        ]
-
-    # Recompute parent chart series as sum of their children
-    for ps in hier_data.chart.series:
-        if ps.label not in plabels:
-            continue
-        ch_for_p = [s for s in hier_data.chart.series if s.label.startswith(f"{ps.label} - ")]
-        if ch_for_p:
-            n_tr = max(len(s.train_values) for s in ch_for_p)
-            ps.train_values    = [sum(s.train_values[i]    if i < len(s.train_values)    else 0.0 for s in ch_for_p) for i in range(n_tr)]
-            ps.forecast_values = [sum(s.forecast_values[i] if i < len(s.forecast_values) else 0.0 for s in ch_for_p) for i in range(n_fc)]
-
 
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
@@ -715,16 +671,17 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         )
 
     def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
+        # selected_parent="" forces all series to use auto_model="linear" (no ETS for hier tabs).
+        # No _scale_hier_to_tmv: scaling by an ETS-shaped TMV would curve the linear forecasts.
         hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                                 selected_parent=parent_lbl, selected_child=child_lbl,
+                                                 selected_parent="", selected_child="",
                                                  auto_model="linear")
-        _scale_hier_to_tmv(hier_data, _tmv_fc, fsi)
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
 
     def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                         selected_parent=parent_lbl, selected_child=child_lbl,
+                                         selected_parent="", selected_child="",
                                          auto_model="linear"),
             month_labels, fsi, chart_parent_filter=parent_lbl,
         )
@@ -2003,12 +1960,20 @@ def refresh_liver(payload):
             return rows  # nothing to redistribute
 
         n = len(target_vals)
+        # Cap edited value per period so it never exceeds the target (TMV / 100% for share)
+        capped_edited_vals = [
+            min(float(edited["values"][i]) if i < len(edited.get("values", [])) else 0.0,
+                float(target_vals[i]) if i < len(target_vals) else 0.0)
+            for i in range(n)
+        ]
+        capped_edited = {**edited, "values": capped_edited_vals}
+
         new_others = []
         for other in others:
             new_vals = []
             for i in range(n):
                 tgt   = float(target_vals[i]) if i < len(target_vals) else 0.0
-                ed_v  = float(edited["values"][i]) if i < len(edited.get("values", [])) else 0.0
+                ed_v  = capped_edited_vals[i]
                 remaining = max(0.0, tgt - ed_v)
                 old_other_sum = sum(
                     float(o["values"][i]) if i < len(o.get("values", [])) else 0.0
@@ -2021,7 +1986,7 @@ def refresh_liver(payload):
                     new_vals.append(round(remaining / max(1, len(others)), 4))
             new_others.append({"label": other["label"], "values": new_vals})
 
-        new_non_tot = [edited] + new_others
+        new_non_tot = [capped_edited] + new_others
         # Recompute total
         tot_vals = [0.0] * n
         for r in new_non_tot:
@@ -2201,8 +2166,6 @@ def refresh_liver(payload):
                 _put_flat(tab, "market_volume", gran,
                           _vol_from_share(_rows(tab, "market_share", gran), tmv_vals), to_int=True)
 
-<<<<<<< Updated upstream
-=======
             # Propagate flat tab edit to the counterpart hierarchical tab:
             #   product_distribution → product_payer  (product is the parent dimension)
             #   market_distribution  → payer_product  (payer/market is the parent dimension)
@@ -2232,7 +2195,6 @@ def refresh_liver(payload):
                     _put_hier(other_hier_tab, "market_volume", gran,
                               _transpose_hier(updated_hier, old_other_hier), to_int=True)
 
->>>>>>> Stashed changes
         elif tab in HIER_TABS:
             share_rows = _rows(tab, "market_share", gran)
             if metric == "market_share":
