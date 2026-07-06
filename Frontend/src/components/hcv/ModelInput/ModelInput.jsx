@@ -1198,11 +1198,17 @@ export default function PBCModelInput() {
     }
   }, [filterOptions.scenario_names]);
 
+  // Exit table edit mode whenever the user switches tabs so edits
+  // from one tab never bleed into another tab's view.
   useEffect(() => {
-    const fn = () => setShowScenariosDropdown(false);
-    window.addEventListener("click", fn);
-    return () => window.removeEventListener("click", fn);
-  }, []);
+    if (tableEditing) {
+      setTableData(tableSnapshot);
+      setEditedHierarchies({});
+      setTableEditing(false);
+      setEditable(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // ── API ───────────────────────────────────────────────────────────────────
   const fetchMetricFilters = async () => {
@@ -3163,7 +3169,7 @@ export default function PBCModelInput() {
                     variant="contained"
                     disabled={savingTable}
                     onClick={handleSaveTableChanges}
-                    startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
+                    // startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
                     sx={{
                       textTransform: "none",
                       fontSize: "12px",
@@ -3661,6 +3667,24 @@ export default function PBCModelInput() {
                         isAppliedParent = targetParentLabel === currentBrand;
                       }
 
+                      // ── Edit eligibility ─────────────────────────────────────────────
+                      // total_market: only the radio-selected scenario row is editable.
+                      // Other tabs: parent rows (hasChildren=true) are aggregated "Total"
+                      //   rows — never editable. Only leaf rows can be edited.
+                      // Also block rows whose label starts with "Total" as a safety net.
+                      const isTotalRow =
+                        (group.brandName || "").toLowerCase().startsWith("total");
+
+                      const isEditEligible = (() => {
+                        if (!tableEditing) return false;
+                        if (totalMarketViewMode !== "monthly") return false;
+                        if (isTotalRow) return false;
+                        if (activeTab === "total_market") {
+                          return isSelected && !hasChildren;
+                        }
+                        return !hasChildren;
+                      })();
+
                       return (
                         <React.Fragment key={group.brandName}>
                           {/* Parent */}
@@ -3778,7 +3802,7 @@ export default function PBCModelInput() {
                               const val = getColumnValue(group.mainRow, col);
                               const isF = isForecastColumn(col);
                               const isLastCol = col === displayColumns[displayColumns.length - 1];
-                              const isEditableCell = tableEditing && !hasChildren && totalMarketViewMode === 'monthly';
+                              const isEditableCell = isEditEligible;
 
                               return (
                                 <Box
@@ -3873,7 +3897,11 @@ export default function PBCModelInput() {
                                     const isFChild = isForecastColumn(col);
                                     const childVal = childRow?.monthly_data?.[col];
                                     const isLastCol = col === displayColumns[displayColumns.length - 1];
-                                    const isEditableChild = tableEditing && totalMarketViewMode === 'monthly';
+                                    const isEditableChild =
+                                      tableEditing &&
+                                      totalMarketViewMode === "monthly" &&
+                                      activeTab !== "total_market" &&
+                                      !isTotalRow;
 
                                     return (
                                       <Box
