@@ -1463,7 +1463,7 @@ def save_scenario(payload: SaveScenarioRequest):
         raise HTTPException(500, str(e))
     
 @router.post("/apply_selected_scenario")
-def apply_scenario(payload: ApplyScenarioRequest):
+def apply_scenario(payload: ApplySelectedScenarioRequest):
     """
     User clicks a scenario in the table -> return the same shape as
     save_scenario's response, but read-only: no DB write, just builds
