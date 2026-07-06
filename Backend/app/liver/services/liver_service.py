@@ -569,7 +569,10 @@ def _scale_flat_to_tmv(tab_data: TabData, tmv_fc: list, fsi: int) -> None:
         tot_row.values = tot
 
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 2833fd3a2243c21178594ac1801f19e84a954b43
 
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
@@ -672,7 +675,11 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         )
 
     def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
+<<<<<<< HEAD
         # selected_parent="" forces all series to use auto_model="linear".
+=======
+        # selected_parent="" forces all series to use auto_model="linear" (no ETS for hier tabs).
+>>>>>>> 2833fd3a2243c21178594ac1801f19e84a954b43
         # No _scale_hier_to_tmv: scaling by an ETS-shaped TMV would curve the linear forecasts.
         hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
                                                  selected_parent="", selected_child="",
@@ -1795,6 +1802,47 @@ def refresh_liver(payload):
         cur.close()
         conn.close()
 
+    # ── Infer effective TMV from the edited tab when it isn't in the payload ────
+    # If the user previously edited TMV (first refresh) and now edits a distribution
+    # tab (second refresh), the payload won't re-send TMV data, so `ma` would have
+    # the stale DB TMV.  We recover the correct TMV from:
+    #   flat tabs  → the "Total" row already equals the current effective TMV
+    #   hier tabs  → sum of all parent-total rows equals the current effective TMV
+    if tab != "total_market_volume":
+        payload_tab_rows = (
+            (payload_ma.get(tab) or {})
+            .get("market_volume", {})
+            .get("monthly", {})
+            .get("table", {})
+            .get("rows", [])
+        )
+        eff_tmv = None
+        if tab in FLAT_DIST_TABS and payload_tab_rows:
+            tot = next((r for r in payload_tab_rows if r.get("label", "").lower() == "total"), None)
+            if tot and tot.get("values"):
+                eff_tmv = [float(v) for v in tot["values"]]
+        elif tab in HIER_TABS and payload_tab_rows:
+            n = max((len(r.get("values", [])) for r in payload_tab_rows), default=0)
+            eff_tmv = [
+                sum(float(r["values"][i]) if i < len(r.get("values", [])) else 0.0
+                    for r in payload_tab_rows)
+                for i in range(n)
+            ]
+        if eff_tmv:
+            tmv_mv_monthly = (ma.get("total_market_volume", {})
+                               .get("market_volume", {})
+                               .get("monthly", {}))
+            tmv_rows = tmv_mv_monthly.get("table", {}).get("rows", [])
+            # TMV table has one row per scenario — update the active scenario's row
+            updated = False
+            for r in tmv_rows:
+                if r.get("label") == active:
+                    r["values"] = eff_tmv
+                    updated = True
+                    break
+            if not updated and len(tmv_rows) == 1:
+                tmv_rows[0]["values"] = eff_tmv
+
     # Re-derive yearly from the updated monthly data so the propagation loop
     # for "yearly" uses values that reflect the user's edits (frontend sends monthly only).
     ma_monthly_flat, _ = _split_by_granularity(ma)
@@ -2203,6 +2251,17 @@ def refresh_liver(payload):
                 for r in _rows(tab, "market_volume", gran)
                 if r.get("label", "").lower() != "total"
             }
+<<<<<<< HEAD
+=======
+            # Also rescale the OTHER flat tab: its shares stay the same but volumes
+            # must reflect the new effective TMV (e.g. after a prior TMV edit).
+            other_flat_tab = "market_distribution" if tab == "product_distribution" else "product_distribution"
+            other_flat_shares = _rows(other_flat_tab, "market_share", gran)
+            if other_flat_shares:
+                _put_flat(other_flat_tab, "market_volume", gran,
+                          _vol_from_share(other_flat_shares, tmv_vals), to_int=True)
+
+>>>>>>> 2833fd3a2243c21178594ac1801f19e84a954b43
             hier_tab       = "product_payer" if tab == "product_distribution" else "payer_product"
             other_hier_tab = "payer_product" if hier_tab == "product_payer" else "product_payer"
             old_hier = _old_rows(hier_tab, "market_volume", gran)
@@ -2210,8 +2269,11 @@ def refresh_liver(payload):
                 _put_hier(hier_tab, "market_volume", gran,
                           _scale_hier_by_flat_vol(old_hier, flat_vol_map), to_int=True)
                 # Transpose the updated tab so the other hier tab reflects the same values.
+<<<<<<< HEAD
                 # e.g. market_distribution Cash=75k → payer_product Cash parent=75k,
                 # other parents=0 → product_payer each product's Cash child=max, others=0.
+=======
+>>>>>>> 2833fd3a2243c21178594ac1801f19e84a954b43
                 updated_hier     = _rows(hier_tab, "market_volume", gran)
                 old_other_hier   = _old_rows(other_hier_tab, "market_volume", gran)
                 if updated_hier and old_other_hier:
@@ -2272,6 +2334,13 @@ def refresh_liver(payload):
             if updated_vol and counterpart_old:
                 _put_hier(counterpart_tab, "market_volume", gran,
                           _transpose_hier(updated_vol, counterpart_old), to_int=True)
+
+            # Rescale both flat tabs to the effective TMV so they stay in sync.
+            for flat_t in FLAT_DIST_TABS:
+                flat_shares = _rows(flat_t, "market_share", gran)
+                if flat_shares:
+                    _put_flat(flat_t, "market_volume", gran,
+                              _vol_from_share(flat_shares, tmv_vals), to_int=True)
 
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).
