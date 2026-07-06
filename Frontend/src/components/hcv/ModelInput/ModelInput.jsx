@@ -52,8 +52,8 @@ const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
   payer_dist: "market_distribution",
-  payer_prod: "market_product",
-  prod_payer: "product_market",
+  payer_prod: "payer_product",
+  prod_payer: "product_payer",
 };
 
 const COMPARE_OPTIONS = ["ETS 13M", "ETS 26M", "Exponential"];
@@ -108,22 +108,9 @@ const ForecastChart = ({
         });
   });
 
-  const filteredSeries = useMemo(() => {
-    const brandLower = (productFilter || appliedBrand || "").toLowerCase();
-    const payerLower = (payerFilter || "").toLowerCase();
-
-    if (
-      (activeTab === "payer_prod" || activeTab === "prod_payer") &&
-      brandLower &&
-      payerLower
-    ) {
-      return series.filter((s) => {
-        const lbl = (s.label || "").toLowerCase();
-        return lbl.includes(brandLower) && lbl.includes(payerLower);
-      });
-    }
-    return series;
-  }, [series, activeTab, productFilter, payerFilter, appliedBrand]);
+  // All series from the API are always rendered.
+  // isSelectedTrace below colours the matching one orange; everything else is grey.
+  const filteredSeries = series;
 
   const traces = filteredSeries.flatMap((s, idx) => {
     const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
@@ -151,9 +138,8 @@ const ForecastChart = ({
         (currentPayer && seriesLabel.includes(currentPayer));
     }
 
-    const color = isSelectedTrace
-      ? CHART_COLORS[idx % CHART_COLORS.length]
-      : "#e2e8f0";
+    // Selected series → amber orange across all tabs; non-selected → dimmed grey.
+    const color = isSelectedTrace ? "#f59e0b" : "#e2e8f0";
     const width = isSelectedTrace ? 3.5 : 1.5;
 
     const trainX = allMonths.slice(0, fsi);
@@ -201,14 +187,22 @@ const ForecastChart = ({
   });
 
   return (
-    <Box sx={{ width: "100%", height: 300 }}>
+    <Box sx={{ width: "100%", height: 380 }}>
       <PlotComponent
         data={traces}
         layout={{
           autosize: true,
-          height: 300,
-          margin: { l: 50, r: 30, t: 8, b: 60 },
-          legend: { orientation: "h", x: 0.35, y: -0.2 },
+          height: 380,
+          margin: { l: 50, r: 30, t: 8, b: 120 },
+          legend: {
+            orientation: "h",
+            x: 0.5,
+            xanchor: "center",
+            y: -0.45,
+            yanchor: "top",
+            traceorder: "normal",
+            itemwidth: 10,
+          },
           showlegend: true,
           xaxis: { tickangle: -45, showgrid: true },
           yaxis: { showgrid: false },
@@ -292,6 +286,11 @@ export default function PBCModelInput() {
   const [compareScenarioOptions, setCompareScenarioOptions] = useState([]);
   // Subset the user has chosen to display; empty = show all
   const [selectedCompareScenarios, setSelectedCompareScenarios] = useState([]);
+  // True only after the user has manually toggled a checkbox in the Compare
+  // Scenarios dropdown. Until then, ALL rows in tableData are shown regardless
+  // of selectedCompareScenarios so that initial load / apply-filter always
+  // shows every scenario without waiting for state to settle.
+  const [userHasCustomizedCompare, setUserHasCustomizedCompare] = useState(false);
   const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] =
     useState("");
   const [currentlyAppliedScenario, setCurrentlyAppliedScenario] = useState("");
@@ -301,6 +300,8 @@ export default function PBCModelInput() {
   const [tableSnapshot, setTableSnapshot] = useState([]);
   const [editedHierarchies, setEditedHierarchies] = useState({});
   const [savingTable, setSavingTable] = useState(false);
+  // true only after Refresh succeeds — gates the Save button
+  const [isRefreshed, setIsRefreshed] = useState(false);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const metricUnit = useMemo(() => {
@@ -413,7 +414,8 @@ export default function PBCModelInput() {
     const hasChart = (scenarioData) => {
       const tmv = scenarioData?.market_analysis?.total_market_volume;
       const mv = tmv?.market_volume || tmv?.market_share || Object.values(tmv || {})[0];
-      return !!(mv?.chart?.months?.length);
+      // Support both old shape (mv.chart) and new shape (mv.monthly.chart)
+      return !!(mv?.monthly?.chart?.months?.length || mv?.chart?.months?.length);
     };
     let chartMa = ma; // preferred: active scenario
     if (!hasChart(sc) && data.scenarios) {
@@ -449,6 +451,7 @@ export default function PBCModelInput() {
 
     // Use chartMa (the scenario with actual chart data) to derive months and
     // forecast_start_index. Use ma (active scenario) for table data when available.
+    // New API structure: metric.monthly.chart / metric.monthly.table / metric.yearly.*
     const effectiveMa = ma || chartMa;
     const firstTab = chartMa
       ? (chartMa.total_market_volume || chartMa[Object.keys(chartMa)[0]])
@@ -458,13 +461,17 @@ export default function PBCModelInput() {
       (firstTab.market_volume ||
         firstTab.market_share ||
         Object.values(firstTab)[0]);
+
+    // Support both old shape (metric.chart) and new shape (metric.monthly.chart)
+    const getMonthlyChart = (metric) => metric?.monthly?.chart || metric?.chart || null;
+    const getMonthlyTable = (metric) => metric?.monthly?.table || metric?.table || null;
+    const getYearlyChart  = (metric) => metric?.yearly?.chart  || null;
+    const getYearlyTable  = (metric) => metric?.yearly?.table  || null;
+
     const months =
-      (firstMetric && firstMetric.chart && firstMetric.chart.months) || [];
+      (firstMetric && getMonthlyChart(firstMetric)?.months) || [];
     const fsi =
-      (firstMetric &&
-        firstMetric.chart &&
-        firstMetric.chart.forecast_start_index) ||
-      0;
+      (firstMetric && getMonthlyChart(firstMetric)?.forecast_start_index) || 0;
 
     const selectMetricForTab = (tabKey, tabObj) => {
       // Force "market_volume" if the context tab is total_market_volume
@@ -476,7 +483,7 @@ export default function PBCModelInput() {
         return tabObj[currentMetric];
       }
       const isVolumeTab =
-        tabKey === "market_product" || tabKey === "product_market";
+        tabKey === "payer_product" || tabKey === "product_payer";
       const isDefaultShareTab =
         tabKey === "product_distribution" || tabKey === "market_distribution";
 
@@ -497,6 +504,40 @@ export default function PBCModelInput() {
       );
     };
 
+    // Helper to parse a chart object (monthly or yearly) into our internal format
+    const parseChartObj = (rawChart, fallbackMonths, fallbackFsi, asPercent) => {
+      if (!rawChart) return { months: fallbackMonths, forecast_start_index: fallbackFsi, series: [] };
+      return {
+        months: rawChart.months || fallbackMonths,
+        forecast_start_index: rawChart.forecast_start_index ?? fallbackFsi,
+        series: (rawChart.series || []).map((s) => ({
+          label: s.label || "",
+          train_values: parseValues(s.history || s.train_values, asPercent),
+          forecast_values: parseValues(s.forecast || s.forecast_values, asPercent),
+          lot: s.lot || s.label || "",
+        })),
+      };
+    };
+
+    // Helper to parse a table object into our internal format
+    const parseTableObj = (rawTable, fallbackMonths, asPercent) => {
+      if (!rawTable) return { type: "flat", headers: fallbackMonths, rows: [] };
+      return {
+        type: rawTable.type,
+        headers: rawTable.headers || fallbackMonths,
+        rows: (rawTable.rows || []).map((r) => ({
+          hierarchy: r.hierarchy || r.label || "",
+          label: r.label || r.hierarchy || "",
+          total: Array.isArray(r.total) ? parseValues(r.total, asPercent) : undefined,
+          values: parseValues(r.values, asPercent),
+          children: (r.children || []).map((c) => ({
+            label: c.label,
+            values: parseValues(c.values, asPercent),
+          })),
+        })),
+      };
+    };
+
     // Build tabs using chart data from chartMa and table data from ma.
     // The union of keys from both ensures we cover all tabs.
     const allTabKeys = new Set([
@@ -514,86 +555,90 @@ export default function PBCModelInput() {
       const tableTabObj = (ma || {})[tabKey] || chartTabObj;
       const tableSelectedMetric = selectMetricForTab(tabKey, tableTabObj);
 
-      const chart =
-        chartSelectedMetric && chartSelectedMetric.chart
-          ? {
-              months: chartSelectedMetric.chart.months || months,
-              forecast_start_index:
-                chartSelectedMetric.chart.forecast_start_index || fsi,
-              series: (chartSelectedMetric.chart.series || []).map((s) => ({
-                label: s.label || "",
-                train_values: parseValues(
-                  s.history || s.train_values,
-                  isTabPercent,
-                ),
-                forecast_values: parseValues(
-                  s.forecast || s.forecast_values,
-                  isTabPercent,
-                ),
-                lot: s.lot || s.label || "",
-              })),
-            }
-          : { months, forecast_start_index: fsi, series: [] };
+      // Monthly data (used for chart and monthly table)
+      const rawMonthlyChart = getMonthlyChart(chartSelectedMetric);
+      const rawMonthlyTable = getMonthlyTable(tableSelectedMetric);
 
-      const table =
-        tableSelectedMetric && tableSelectedMetric.table
-          ? {
-              type: tableSelectedMetric.table.type,
-              headers: tableSelectedMetric.table.headers || chart.months,
-              rows: (tableSelectedMetric.table.rows || []).map((r) => ({
-                hierarchy: r.hierarchy || r.label || "",
-                label: r.label || r.hierarchy || "",
-                total: Array.isArray(r.total)
-                  ? parseValues(r.total, isTabPercent)
-                  : undefined,
-                values: parseValues(r.values, isTabPercent),
-                children: (r.children || []).map((c) => ({
-                  label: c.label,
-                  values: parseValues(c.values, isTabPercent),
-                })),
-              })),
-            }
-          : { type: "flat", headers: chart.months, rows: [] };
+      // Yearly data (pre-computed by backend, used for yearly table/chart)
+      const rawYearlyChart = getYearlyChart(chartSelectedMetric);
+      const rawYearlyTable = getYearlyTable(tableSelectedMetric);
 
-      tabs[tabKey] = { chart, table };
+      const chart       = parseChartObj(rawMonthlyChart, months, fsi, isTabPercent);
+      const table       = parseTableObj(rawMonthlyTable, chart.months, isTabPercent);
+      const yearlyChart = rawYearlyChart ? parseChartObj(rawYearlyChart, [], 0, isTabPercent) : null;
+      const yearlyTable = rawYearlyTable ? parseTableObj(rawYearlyTable, yearlyChart?.months || [], isTabPercent) : null;
+
+      tabs[tabKey] = { chart, table, yearlyChart, yearlyTable };
     });
 
     // ── Multi-scenario table rows for Total Market Volume ──────────────────
-    // The active scenario's market_analysis only gives us one row ("Base").
-    // We need one row per scenario so the table can show/filter them all.
-    // For every scenario in the response, pull its total_market_volume
-    // market_volume table and add a row keyed by the scenario name.
+    // Only include scenarios that have real table values. Scenarios like s03/s02
+    // that return empty market_analysis are skipped — they have no data to show.
+    // The hierarchy key is always the scenario name (not the row label inside
+    // the response, which may say "Base" for all of them).
     if (data.scenarios && Object.keys(data.scenarios).length > 0) {
       const tmvTab = tabs["total_market_volume"];
       if (tmvTab) {
+        // Use available_scenarios ordering when present, fall back to object keys
+        const allScenarioNames =
+          Array.isArray(data.available_scenarios) && data.available_scenarios.length
+            ? data.available_scenarios
+            : Object.keys(data.scenarios);
+
         const scenarioRows = [];
-        Object.entries(data.scenarios).forEach(([scenarioName, scenarioData]) => {
+        allScenarioNames.forEach((scenarioName) => {
+          const scenarioData = data.scenarios[scenarioName];
           const tmv = scenarioData?.market_analysis?.total_market_volume;
-          if (!tmv) return;
-          // pick market_volume first, fall back to market_share
-          const metricObj =
-            tmv.market_volume || tmv.market_share || Object.values(tmv)[0];
-          if (!metricObj) return;
-          const rawRows = metricObj?.table?.rows || [];
+          const metricObj = tmv
+            ? (tmv.market_volume || tmv.market_share || Object.values(tmv)[0])
+            : null;
+          if (!metricObj) return; // no data at all — skip this scenario
+          // Support both old shape (metricObj.table) and new shape (metricObj.monthly.table)
+          const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
           const firstRow = rawRows[0];
-          if (!firstRow) return;
+          if (!firstRow) return; // empty table — skip this scenario
+          const vals = parseValues(firstRow.values, false);
+          if (!vals.length) return; // no actual values — skip
           scenarioRows.push({
             hierarchy: scenarioName,
             label: scenarioName,
             total: undefined,
-            values: parseValues(firstRow.values, false),
+            values: vals,
             children: [],
           });
         });
+
         if (scenarioRows.length) {
           const tmvChart = tmvTab.chart || { months, forecast_start_index: fsi, series: [] };
           const chartFsi = tmvChart.forecast_start_index ?? fsi;
 
-          // Chart shows ONE scenario at a time:
-          //   - the currently applied scenario (passed in via currentMetric hack — we
-          //     use the component's currentlyAppliedScenario via closure if available,
-          //     otherwise fall back to the active_scenario from the response, then Base.
-          // Find the matching scenario row; fall back to the first row (Base).
+          // Build yearly scenario rows — only for scenarios that have yearly data.
+          const yearlyScenarioRows = [];
+          allScenarioNames.forEach((scenarioName) => {
+            const scenarioData = data.scenarios[scenarioName];
+            const tmv = scenarioData?.market_analysis?.total_market_volume;
+            const metricObj = tmv
+              ? (tmv.market_volume || tmv.market_share || Object.values(tmv)[0])
+              : null;
+            if (!metricObj) return;
+            const yearlyRows = metricObj?.yearly?.table?.rows || [];
+            const firstYearlyRow = yearlyRows[0];
+            if (!firstYearlyRow) return;
+            const yearlyVals = parseValues(firstYearlyRow.values, false);
+            if (!yearlyVals.length) return;
+            yearlyScenarioRows.push({
+              hierarchy: scenarioName,
+              label: scenarioName,
+              total: undefined,
+              values: yearlyVals,
+              children: [],
+            });
+          });
+
+          // Yearly chart months (for building yearly table headers)
+          const yearlyChartMonths = tmvTab.yearlyChart?.months || [];
+
+          // Chart shows ONE scenario at a time — active_scenario or Base.
           const activeForChart =
             data.active_scenario ||
             (scenarioRows[0]?.hierarchy) ||
@@ -627,6 +672,14 @@ export default function PBCModelInput() {
               ...tmvTab.table,
               rows: scenarioRows,
             },
+            // Replace yearlyTable rows with all-scenario yearly rows so the
+            // yearly view also shows every scenario, not just the active one.
+            yearlyTable: yearlyScenarioRows.length
+              ? {
+                  ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                  rows: yearlyScenarioRows,
+                }
+              : tmvTab.yearlyTable,
           };
         }
       }
@@ -635,13 +688,22 @@ export default function PBCModelInput() {
     return { months, forecast_start_index: fsi, tabs };
   }
 
-  // Maps the response of refresh-table (POST /api/liver/refresh-table) into
-  // { chart, table } for the currently active tab. This response shape is
-  // flat: { chart: { months, forecast_start_index, series: [{label, history, forecast}] },
-  //         table: { type: "flat", rows: [{label, values}] } }
-  // where `values` is history concatenated with forecast (one entry per month).
+  // Maps the response of POST /api/liver/refresh into chart + table for the
+  // currently active tab. The refresh API returns the same full scenarios
+  // payload as apply-filters, so we reuse normalizeLiverResponse + mapLiverTabToView.
+  // Falls back to a flat-shape parser if the response doesn't include scenarios.
   const mapRefreshTableResponse = (data) => {
     if (!data) return { chart: null, table: [] };
+
+    // Full scenarios payload (same shape as apply-filters response)
+    if (data.scenarios || data.active_scenario) {
+      const normalized = normalizeLiverResponse(data, metric);
+      // Update liverRawData so subsequent tab switches use the refreshed data
+      setLiverRawData(data);
+      return mapLiverTabToView(normalized, activeTab, totalMarketViewMode);
+    }
+
+    // Fallback: flat shape { chart, table } — handle gracefully
     const months = data?.chart?.months || chartData?.months || [];
     const fsi =
       data?.chart?.forecast_start_index ??
@@ -674,7 +736,7 @@ export default function PBCModelInput() {
     };
   };
 
-  const mapLiverTabToView = (tabsPayload, uiTabKey) => {
+  const mapLiverTabToView = (tabsPayload, uiTabKey, viewMode = "monthly") => {
     if (!tabsPayload) return { chart: null, table: [] };
     const {
       months = [],
@@ -688,6 +750,10 @@ export default function PBCModelInput() {
         chart: { months, forecast_start_index: fsi, series: [] },
         table: [],
       };
+
+    // Chart always uses monthly data (time-series visualization).
+    // Table uses yearly backend data when in yearly mode (pre-computed by API).
+    const activeTableData = (viewMode === "yearly" && tab.yearlyTable) ? tab.yearlyTable : tab.table;
 
     const series = (tab.chart?.series || [])
       .filter((s) => {
@@ -776,7 +842,7 @@ export default function PBCModelInput() {
       }
     }
 
-    const headers = tab.table?.headers || months;
+    const headers = activeTableData?.headers || months;
     const mkMonthly = (vals, hdrs) => {
       const obj = {};
       hdrs.forEach((m, i) => {
@@ -787,7 +853,7 @@ export default function PBCModelInput() {
     };
 
     const table = [];
-    (tab.table?.rows || []).forEach((r) => {
+    (activeTableData?.rows || []).forEach((r) => {
       if (r && Array.isArray(r.total)) {
         table.push({
           hierarchy: r.hierarchy,
@@ -911,32 +977,183 @@ export default function PBCModelInput() {
     scenario: scenarioSelector || "Base",
   });
 
-  // Build payload for the refresh-table API based on current (edited) table state
-  const buildRefreshTablePayload = (hierarchyKey) => ({
-    ta: therapyArea || "HCV",
-    payer: payerFilter
-      ? [payerFilter]
-      : payerOptions?.length
-        ? [getFirstOption(payerOptions)]
-        : [],
-    brand: productFilter
-      ? [productFilter]
-      : productOptions?.length
-        ? [getFirstOption(productOptions)]
-        : [],
-    metric: metric || "market_volume",
-    from_date: resolveFromDate(),
-    scenario: scenarioSelector || "Base",
-    tab_key: TAB_KEY_MAP[activeTab] || activeTab,
-    edited_hierarchy: hierarchyKey || "",
-    table: tableData.map((row) => ({
-      hierarchy: row.hierarchy,
-      values: (chartData?.months || []).map((m) => {
-        const v = row.monthly_data?.[m];
+  // Build payload for the refresh-table API based on current (edited) table state.
+  // Expected shape:
+  // {
+  //   ta_name, selected_filter: { market, product, start_date, end_date },
+  //   scenario_name, selected_tab, selected_metric, edited_hierarchy,
+  //   factors, market_analysis
+  // }
+  const buildRefreshTablePayload = (hierarchyKey) => {
+    const sourceScenario =
+      currentlyAppliedScenario ||
+      scenarioSelector ||
+      liverRawData?.active_scenario ||
+      (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
+      "Base";
+
+    // Resolve full market_analysis for the active scenario
+    let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis;
+    if (!fullMarketAnalysis && liverRawData?.scenarios) {
+      const matchedKey = Object.keys(liverRawData.scenarios).find(
+        (k) => k.toLowerCase() === sourceScenario.toLowerCase()
+      );
+      fullMarketAnalysis = matchedKey
+        ? liverRawData.scenarios[matchedKey]?.market_analysis
+        : Object.values(liverRawData.scenarios)[0]?.market_analysis;
+    }
+    fullMarketAnalysis = fullMarketAnalysis || {};
+
+    // The backend expects ALL tabs in market_analysis.
+    // We spread fullMarketAnalysis (all tabs) and patch only the active tab's rows.
+    const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
+
+    // Build the current table values to send as the edited market_analysis.
+    // The backend expects the SAME hierarchical structure as the original
+    // market_analysis, with edited values patched in.
+    //
+    // For hierarchical tabs (payer_product, product_payer): rows have children[].
+    //   tableData stores these as flat rows: "Payer - Product" hierarchy strings.
+    //   We rebuild the hierarchy by looking up the original raw table structure
+    //   and patching each row's values from tableData's monthly_data.
+    //
+    // For flat tabs (total_market_volume, product_distribution, market_distribution):
+    //   rows are flat — we emit them as-is from tableData.
+    const months = chartData?.months || [];
+    const activeMetric = metric || "market_volume";
+
+    // Helper: extract values array from a row's monthly_data in month order
+    const rowToValues = (row) =>
+      months.map((m) => {
+        const v = row?.monthly_data?.[m];
         return v == null ? 0 : Number(v);
-      }),
-    })),
-  });
+      });
+
+    // Build a lookup map from hierarchy key -> tableData row (for fast access)
+    const tableDataMap = {};
+    tableData.forEach((row) => {
+      tableDataMap[row.hierarchy] = row;
+    });
+
+    // Determine if the active tab uses a hierarchical table structure.
+    const isHierarchicalTab =
+      backendTabKey === "payer_product" || backendTabKey === "product_payer";
+
+    let tableRows;
+    if (isHierarchicalTab) {
+      // Rebuild hierarchical rows from the original raw table structure,
+      // patching in edited values from tableData.
+      // The original rows are in liverRawData -> scenarios -> activeScenario
+      // -> market_analysis -> [tab] -> [metric] -> monthly -> table -> rows
+      const origRows =
+        fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.monthly?.table?.rows ||
+        fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.table?.rows ||
+        [];
+
+      tableRows = origRows.map((origRow) => {
+        const parentLabel = origRow.label || origRow.hierarchy || "";
+        // Parent row: look up edited values from tableData (keyed by parentLabel)
+        const parentTableRow = tableDataMap[parentLabel];
+        const parentValues = parentTableRow
+          ? rowToValues(parentTableRow)
+          : (origRow.values || origRow.total || []);
+
+        // Child rows: look up edited values using "Parent - Child" key
+        const children = (origRow.children || []).map((origChild) => {
+          const childKey = `${parentLabel} - ${origChild.label}`;
+          const childTableRow = tableDataMap[childKey];
+          return {
+            label: origChild.label,
+            values: childTableRow
+              ? rowToValues(childTableRow)
+              : (origChild.values || []),
+          };
+        });
+
+        const rebuilt = {
+          label: parentLabel,
+          values: parentValues,
+        };
+        if (children.length) rebuilt.children = children;
+        return rebuilt;
+      });
+    } else {
+      // Flat tabs: emit rows directly from tableData
+      tableRows = tableData.map((row) => ({
+        label: row.hierarchy,
+        values: rowToValues(row),
+      }));
+    }
+
+    const tableType = isHierarchicalTab ? "hierarchical" : "flat";
+
+    // Merged market_analysis: ALL tabs from fullMarketAnalysis,
+    // with the active tab's monthly table rows patched with edited values.
+    const mergedMarketAnalysis = {
+      ...fullMarketAnalysis,
+      [backendTabKey]: {
+        ...(fullMarketAnalysis[backendTabKey] || {}),
+        [activeMetric]: {
+          ...(fullMarketAnalysis[backendTabKey]?.[activeMetric] || {}),
+          monthly: {
+            ...(fullMarketAnalysis[backendTabKey]?.[activeMetric]?.monthly || {}),
+            table: {
+              type: tableType,
+              rows: tableRows,
+            },
+          },
+        },
+      },
+    };
+
+    // Send only the active model's factors to keep the payload lean
+    const activeFactors = {
+      multiplier,
+      multiplier_horizon: multiplierHorizon,
+      active_model: modelSelection,
+      ...(modelSelection === "ets"
+        ? { ets: { alpha, beta, gamma } }
+        : {
+            [modelSelection]: {
+              total_growth: totalGrowth,
+              duration,
+              trajectory_start: trajectoryStart,
+              k_value: Number(kValue),
+            },
+          }),
+    };
+
+    // Use the backend's own resolved selected_filter when available —
+    // it has the correct train_start_date and end_date that _resolve_forecast_periods needs.
+    const backendSf = liverRawData?.selected_filter || {};
+
+    const endDate = backendSf.end_date || toDate || "";
+    const startDate = backendSf.start_date || resolveFromDate();
+    const forecastPeriods = chartData?.months?.length
+      ? chartData.months.length - (chartData.forecast_start_index ?? 0)
+      : 0;
+
+    return {
+      ta_name: therapyArea || "HCV",
+      selected_filter: {
+        market: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+        start_date: startDate,
+        end_date: endDate,
+      },
+      // Provide the exact positional arg names that _resolve_forecast_periods() expects
+      train_end_month: endDate,
+      cfg_periods: forecastPeriods,
+      // Also keep forecast_periods for backward compat
+      forecast_periods: forecastPeriods,
+      scenario_name: sourceScenario,
+      selected_tab: backendTabKey,
+      selected_metric: activeMetric,
+      edited_hierarchy: hierarchyKey || "",
+      factors: activeFactors,
+      market_analysis: mergedMarketAnalysis,
+    };
+  };
 
   // ── Effects ───────────────────────────────────────────────────────────────
   // Guards against firing fetchMetricFilters more than once for the same
@@ -964,15 +1181,18 @@ export default function PBCModelInput() {
       targetMetric = "market_volume";
     }
 
-    // Apply per-tab model defaults only when switching tabs (not on every
-    // render). We never override a model the user/backend explicitly set —
-    // we only set the default for a tab the first time it's visited.
-    //   total_market → default ets
-    //   all others   → default linear (ets is still selectable)
-    if (activeTab === "total_market") {
-      if (!modelSelection || modelSelection === "linear") setModelSelection("ets");
-    } else {
-      if (!modelSelection || modelSelection === "ets") setModelSelection("linear");
+    // Set per-tab model default only when the model is at the other tab's
+    // default (i.e. the user hasn't explicitly chosen a non-default model).
+    // We do NOT call setModelSelection on initial load when syncFactors has
+    // already set the correct model from the backend — only change it when
+    // the user switches tabs and the current model is clearly a "wrong default".
+    const isDefaultForOtherTab =
+      activeTab === "total_market"
+        ? modelSelection === "linear"     // switching TO total_market, was linear
+        : modelSelection === "ets";       // switching AWAY from total_market, was ets
+    if (isDefaultForOtherTab && modelSelection) {
+      const newDefault = activeTab === "total_market" ? "ets" : "linear";
+      setModelSelection(newDefault);
     }
 
     if (metric !== targetMetric) {
@@ -1025,11 +1245,11 @@ export default function PBCModelInput() {
 
   useEffect(() => {
     if (!liverTabsRaw) return;
-    const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab);
+    const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode);
     setChartData(chart);
     setTableData(table);
     setExpandedBrands({});
-  }, [activeTab, liverTabsRaw]);
+  }, [activeTab, liverTabsRaw, totalMarketViewMode]);
 
   useEffect(() => {
     if (filterOptions?.scenario_names?.length) {
@@ -1043,11 +1263,18 @@ export default function PBCModelInput() {
     }
   }, [filterOptions.scenario_names]);
 
+  // Exit table edit mode whenever the user switches tabs so edits
+  // from one tab never bleed into another tab's view.
   useEffect(() => {
-    const fn = () => setShowScenariosDropdown(false);
-    window.addEventListener("click", fn);
-    return () => window.removeEventListener("click", fn);
-  }, []);
+    if (tableEditing) {
+      setTableData(tableSnapshot);
+      setEditedHierarchies({});
+      setIsRefreshed(false);
+      setTableEditing(false);
+      setEditable(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // ── API ───────────────────────────────────────────────────────────────────
   const fetchMetricFilters = async () => {
@@ -1176,7 +1403,6 @@ export default function PBCModelInput() {
               ...prev,
               scenario_names: availScenarios,
             }));
-            initializeCompareScenarios(data);
           }
           const activeScenarioKey =
             data?.active_scenario || availScenarios[0] || "Base";
@@ -1200,7 +1426,7 @@ export default function PBCModelInput() {
           const normalized = normalizeLiverResponse(data, metric);
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
-        initializeCompareScenarios(data);
+          initializeCompareScenarios(data);
           // The chart's month list doubles as the set of selectable dates
           // for the FROM/TO DATE dropdowns — no separate endpoint needed.
           if (normalized?.months?.length) setAvailableDates(normalized.months);
@@ -1583,23 +1809,44 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        const resp = await saveLiverScenario({
+        // Resolve source scenario robustly
+        const sourceScenario =
+          currentlyAppliedScenario ||
+          scenarioSelector ||
+          liverRawData?.active_scenario ||
+          (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
+          "Base";
+
+        // Resolve market_analysis — try exact key match first, then case-insensitive,
+        // then fall back to the first available scenario's market_analysis.
+        let marketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis;
+        if (!marketAnalysis && liverRawData?.scenarios) {
+          const matchedKey = Object.keys(liverRawData.scenarios).find(
+            (k) => k.toLowerCase() === sourceScenario.toLowerCase()
+          );
+          marketAnalysis = matchedKey
+            ? liverRawData.scenarios[matchedKey]?.market_analysis
+            : Object.values(liverRawData.scenarios)[0]?.market_analysis;
+        }
+        marketAnalysis = marketAnalysis || {};
+
+        const payload = {
+          ta_name: therapyArea || "HCV",
           scenario_name: scenarioNameFromDialog,
-          ta: therapyArea || "HCV",
-          payer: payerFilter ? [payerFilter] : [],
-          brand: productFilter ? [productFilter] : [],
-          metric: metric || "market_volume",
-          from_date: resolveFromDate(),
+          selected_filter: {
+            market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+            start_date: resolveFromDate(),
+            end_date: toDate || "",
+          },
+          source_scenario: sourceScenario,
           factors: buildFullFactors(),
-          chart_data: { chart: chartData, table: tableData },
-          editable_table: tableData.map((row) => ({
-            hierarchy: row.hierarchy,
-            values: (chartData?.months || []).map((m) => {
-              const v = row.monthly_data?.[m];
-              return v == null ? 0 : Number(v);
-            }),
-          })),
-        });
+          market_analysis: marketAnalysis,
+        };
+
+        console.log("[SaveScenario] payload:", JSON.stringify(payload, null, 2));
+
+        const resp = await saveLiverScenario(payload);
 
         showSnackbar("Scenario saved successfully", "success");
 
@@ -1631,7 +1878,7 @@ export default function PBCModelInput() {
           if (normalized?.tabs && Object.keys(normalized.tabs).length) {
             setLiverTabsRaw(normalized);
             setLiverRawData(respData);
-            initializeCompareScenarios(respData);
+            initializeCompareScenarios(respData, scenarioNameFromDialog);
             // mapLiverTabToView will re-run via the liverTabsRaw effect,
             // which updates chartData and tableData automatically.
           }
@@ -1639,15 +1886,15 @@ export default function PBCModelInput() {
 
         setTentativeRadioSelectedScenario(scenarioNameFromDialog);
         setCurrentlyAppliedScenario(scenarioNameFromDialog);
-        // Remove from savedScenarioRows if it got real data (the actual
-        // row will now appear in groupedTableHierarchy from the response).
+
+        // Add to savedScenarioRows so it appears in the table immediately.
+        // Only skip adding it if the API response already includes it as a
+        // scenario with its own table data in groupedTableHierarchy.
         setSavedScenarioRows((prev) => {
-          const hasRealData =
-            resp?.data &&
-            Object.keys(resp.data).length &&
-            normalizeLiverResponse(resp.data, metric)?.tabs &&
-            Object.keys(normalizeLiverResponse(resp.data, metric).tabs).length;
-          if (hasRealData) return prev.filter((n) => n !== scenarioNameFromDialog);
+          const scenarioInResponse =
+            respData?.scenarios?.[scenarioNameFromDialog] ||
+            respData?.available_scenarios?.includes(scenarioNameFromDialog);
+          if (scenarioInResponse) return prev.filter((n) => n !== scenarioNameFromDialog);
           return prev.includes(scenarioNameFromDialog)
             ? prev
             : [...prev, scenarioNameFromDialog];
@@ -1677,6 +1924,7 @@ export default function PBCModelInput() {
       });
       setScenarioSelector(scenarioNameFromDialog);
     } catch (err) {
+      console.error("[SaveScenario] error:", err?.response?.data || err);
       showSnackbar("Failed to save scenario", "error");
     } finally {
       setLoading(false);
@@ -1687,6 +1935,7 @@ export default function PBCModelInput() {
   const handleEnterTableEdit = () => {
     setTableSnapshot(tableData.map((r) => ({ ...r, monthly_data: { ...r.monthly_data } })));
     setEditedHierarchies({});
+    setIsRefreshed(false);
     setTableEditing(true);
     setEditable(true);
   };
@@ -1694,8 +1943,18 @@ export default function PBCModelInput() {
   const handleCancelTableEdit = () => {
     setTableData(tableSnapshot);
     setEditedHierarchies({});
+    setIsRefreshed(false);
     setTableEditing(false);
     setEditable(false);
+  };
+
+  // Called by the Save button after Refresh has already synced data with the backend.
+  // Just closes edit mode — no additional API call needed.
+  const handleConfirmSave = () => {
+    setIsRefreshed(false);
+    setTableEditing(false);
+    setEditable(false);
+    showSnackbar("Changes saved successfully", "success");
   };
 
   const handleSaveTableChanges = async () => {
@@ -1709,49 +1968,58 @@ export default function PBCModelInput() {
     try {
       setSavingTable(true);
       setLoading(true);
-      let lastData = null;
+      let lastRawData = null;
       for (const hierarchyKey of editedKeys) {
-        const response = await refreshLiverTable(
-          buildRefreshTablePayload(hierarchyKey),
-        );
-        lastData = response?.data || {};
+        const payload = buildRefreshTablePayload(hierarchyKey);
+        console.log("[RefreshTable] calling refreshLiverTable with payload:", JSON.stringify(payload, null, 2));
+        const response = await refreshLiverTable(payload);
+        lastRawData = response?.data || {};
       }
-      if (lastData) {
-        const { chart, table } = mapRefreshTableResponse(lastData);
+      if (lastRawData) {
+        // mapRefreshTableResponse handles both the new full-scenarios shape
+        // and the legacy flat shape. For the full-scenarios shape it also
+        // calls setLiverRawData internally so all tabs stay in sync.
+        const { chart, table } = mapRefreshTableResponse(lastRawData);
         setChartData(chart);
         setTableData(table);
 
-        // Keep liverTabsRaw in sync so switching tabs and back still shows
-        // the saved values for this tab.
-        const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
-        setLiverTabsRaw((prev) => {
-          const base = prev || { months: chart?.months || [], forecast_start_index: chart?.forecast_start_index || 0, tabs: {} };
-          return {
-            ...base,
-            tabs: {
-              ...base.tabs,
-              [backendKey]: {
-                chart,
-                table: {
-                  type: "flat",
-                  headers: chart?.months || [],
-                  rows: table.map((r) => ({
-                    hierarchy: r.hierarchy,
-                    label: r.hierarchy,
-                    values: (chart?.months || []).map(
-                      (m) => r.monthly_data?.[m] ?? null,
-                    ),
-                  })),
+        // If the response was a full scenarios payload, normalizeLiverResponse
+        // already ran inside mapRefreshTableResponse; update liverTabsRaw so
+        // that switching tabs re-derives the correct view from fresh data.
+        if (lastRawData.scenarios || lastRawData.active_scenario) {
+          const normalized = normalizeLiverResponse(lastRawData, metric);
+          setLiverTabsRaw(normalized);
+        } else {
+          // Legacy flat response: patch only the current tab in liverTabsRaw.
+          const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
+          setLiverTabsRaw((prev) => {
+            const base = prev || { months: chart?.months || [], forecast_start_index: chart?.forecast_start_index || 0, tabs: {} };
+            return {
+              ...base,
+              tabs: {
+                ...base.tabs,
+                [backendKey]: {
+                  chart,
+                  table: {
+                    type: "flat",
+                    headers: chart?.months || [],
+                    rows: table.map((r) => ({
+                      hierarchy: r.hierarchy,
+                      label: r.hierarchy,
+                      values: (chart?.months || []).map(
+                        (m) => r.monthly_data?.[m] ?? null,
+                      ),
+                    })),
+                  },
                 },
               },
-            },
-          };
-        });
+            };
+          });
+        }
       }
       setEditedHierarchies({});
-      setTableEditing(false);
-      setEditable(false);
-      showSnackbar("Table updated successfully", "success");
+      setIsRefreshed(true);
+      showSnackbar("Table refreshed successfully. You can now Save.", "success");
     } catch (error) {
       const msg = error?.response?.data || error?.message || "Unknown error";
       showSnackbar(
@@ -1800,19 +2068,29 @@ export default function PBCModelInput() {
 
   // Seed Compare Scenarios dropdown from the API response's available_scenarios.
   // Called after every apply-filters / save-scenario / initial load response.
-  const initializeCompareScenarios = (response) => {
+  const initializeCompareScenarios = (response, appliedScenario) => {
     const scenarios =
       response?.available_scenarios ||
       (response?.scenarios ? Object.keys(response.scenarios) : []);
-    if (!scenarios.length) return;
-    setCompareScenarioOptions(scenarios);
-    // On first init (empty selection) show all; preserve any prior selection.
-    setSelectedCompareScenarios((prev) =>
-      prev.length ? prev.filter((s) => scenarios.includes(s)) : scenarios,
-    );
+
+    // Always include the newly saved/applied scenario even if the API
+    // response doesn't list it in available_scenarios / scenarios keys.
+    const toAdd = appliedScenario || currentlyAppliedScenario || "";
+    const merged = toAdd && !scenarios.includes(toAdd)
+      ? [...scenarios, toAdd]
+      : scenarios;
+
+    if (!merged.length) return;
+    setCompareScenarioOptions(merged);
+    // Reset to "show all" whenever the available scenario list changes
+    // (new apply-filter, save-scenario, initial load). The user can then
+    // narrow the view by unchecking items in the Compare dropdown.
+    setSelectedCompareScenarios(merged);
+    setUserHasCustomizedCompare(false);
   };
 
   const handleScenarioSelectionChange = (s) => {
+    setUserHasCustomizedCompare(true);
     setSelectedCompareScenarios((prev) => {
       const updated = prev.includes(s)
         ? prev.filter((x) => x !== s)
@@ -1829,9 +2107,13 @@ export default function PBCModelInput() {
     const chosenScenario = tentativeRadioSelectedScenario;
     setCurrentlyAppliedScenario(chosenScenario);
 
+    // Always keep the newly applied scenario checked in the Compare dropdown.
+    setSelectedCompareScenarios((prev) => {
+      if (prev.includes(chosenScenario)) return prev;
+      return [...prev, chosenScenario];
+    });
+
     // Re-derive the chart for the chosen scenario using the cached raw data.
-    // normalizeLiverResponse picks active_scenario from the response; we
-    // temporarily patch it so the chart series uses the right row.
     if (liverRawData) {
       const patched = { ...liverRawData, active_scenario: chosenScenario };
       const normalized = normalizeLiverResponse(patched, metric);
@@ -1856,8 +2138,12 @@ export default function PBCModelInput() {
   const formatCellValue = (val) => {
     if (val == null) return "—";
     const num = Number(val);
-    if (metricUnit === "%") return `${num.toFixed(1)}%`;
-    return num.toLocaleString(undefined, { maximumFractionDigits: 1 });
+    if (metricUnit === "%") {
+      // Whole numbers: no decimals (100%); fractional: up to 2dp (64.79%)
+      const formatted = Number.isInteger(num) ? num : parseFloat(num.toFixed(2));
+      return `${formatted}%`;
+    }
+    return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
   };
 
   const toggleBrandExpand = (name) => {
@@ -1867,7 +2153,8 @@ export default function PBCModelInput() {
   const handleCellChange = (hierarchyKey, colName, value) => {
     const numericValue = value === "" ? null : Number(value);
     if (numericValue !== null && Number.isNaN(numericValue)) return;
-
+    // Any new edit invalidates the previous refresh — user must Refresh again
+    setIsRefreshed(false);
     setTableData((prevTable) =>
       prevTable.map((row) => {
         if (row.hierarchy === hierarchyKey) {
@@ -1937,20 +2224,25 @@ export default function PBCModelInput() {
   }, [tableData, chartData]);
 
   // ── Monthly / Yearly toggle helpers ──────────────────────────────────────
-  // displayColumns are the column keys actually rendered in the table header
-  // and used to look up cell values. In monthly mode these are just the raw
-  // month strings from chartData.months; in yearly mode they're the unique
-  // years derived from those months, in chronological order.
+  // displayColumns are the column keys actually rendered in the table header.
+  // In monthly mode: raw month strings from chartData.months.
+  // In yearly mode: use the yearly months from the backend (pre-computed),
+  //                  falling back to extracting unique years from monthly months.
   const displayColumns = useMemo(() => {
     const months = chartData?.months || [];
     if (totalMarketViewMode !== "yearly") return months;
+    // Try backend yearly chart months from liverTabsRaw
+    const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
+    const yearlyMonths = liverTabsRaw?.tabs?.[backendKey]?.yearlyChart?.months;
+    if (yearlyMonths?.length) return yearlyMonths;
+    // Fallback: extract unique years from monthly months
     const years = [];
     months.forEach((m) => {
       const y = String(m).slice(0, 4);
       if (y && !years.includes(y)) years.push(y);
     });
     return years;
-  }, [chartData, totalMarketViewMode]);
+  }, [chartData, totalMarketViewMode, liverTabsRaw, activeTab]);
 
   // Map of year -> array of underlying month keys, used for aggregation and
   // for forecast-period detection in yearly mode.
@@ -1970,32 +2262,41 @@ export default function PBCModelInput() {
     return formatDateLabel(col);
   };
 
-  // Looks up a row's value for a given display column. In monthly mode this
-  // is a direct lookup; in yearly mode it aggregates the months belonging to
-  // that year — summed for volume metrics, averaged for percentage metrics
-  // (market share), skipping any null/missing months.
+  // Looks up a row's value for a given display column.
+  // In monthly mode: direct lookup by month key.
+  // In yearly mode: backend provides yearly table data so monthly_data is keyed
+  //                 by year strings like "2020". Direct lookup works.
+  //                 Fallback: aggregate monthly values (for tabs without yearly data).
   const getColumnValue = (row, col) => {
     if (totalMarketViewMode !== "yearly") {
       return row?.monthly_data?.[col];
     }
+    // Yearly mode — try direct lookup first (backend yearly table)
+    const direct = row?.monthly_data?.[col];
+    if (direct != null) return direct;
+    // Fallback: sum monthly values that belong to this year
     const monthsInYear = yearToMonthsMap[col] || [];
-    let sum = 0;
-    let count = 0;
+    let sum = 0, count = 0;
     monthsInYear.forEach((m) => {
       const v = row?.monthly_data?.[m];
-      if (v != null && !Number.isNaN(Number(v))) {
-        sum += Number(v);
-        count += 1;
-      }
+      if (v != null && !Number.isNaN(Number(v))) { sum += Number(v); count += 1; }
     });
     if (count === 0) return null;
     return metricUnit === "%" ? sum / count : sum;
   };
 
-  // A column counts as "forecast" if any of its underlying months are in the
-  // forecast period (monthly mode checks the single month directly).
+  // A column is "forecast" if it falls in the forecast period.
+  // Monthly mode: check against chartData.forecast_start_index directly.
+  // Yearly mode: check against the yearly chart's forecast_start_index from backend.
   const isForecastColumn = (col) => {
     if (totalMarketViewMode !== "yearly") return isForecastMonth(col);
+    const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
+    const yearlyChart = liverTabsRaw?.tabs?.[backendKey]?.yearlyChart;
+    if (yearlyChart?.months?.length && yearlyChart?.forecast_start_index != null) {
+      const fcastYears = yearlyChart.months.slice(yearlyChart.forecast_start_index);
+      return fcastYears.includes(col);
+    }
+    // Fallback: any month in the year is forecast
     const monthsInYear = yearToMonthsMap[col] || [];
     return monthsInYear.some((m) => isForecastMonth(m));
   };
@@ -2083,6 +2384,19 @@ export default function PBCModelInput() {
                     setFromDate(e.target.value);
                     setToDate("");
                   }}
+                   MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
                   displayEmpty
                 >
                   <MenuItem value="" disabled>
@@ -2114,6 +2428,19 @@ export default function PBCModelInput() {
                   onChange={(e) => setToDate(e.target.value)}
                   displayEmpty
                   disabled={!fromDate}
+                  MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
                 >
                   <MenuItem value="" disabled>
                     Select
@@ -2597,44 +2924,52 @@ export default function PBCModelInput() {
                     <Select
                       value={trajectoryStart}
                       onChange={(e) => setTrajectoryStart(e.target.value)}
+                       MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
                       disabled={!editable}
                       displayEmpty
                       renderValue={(sel) => {
+                        // Use dayjs to avoid the UTC-midnight timezone shift
+                        // that makes new Date("YYYY-MM-DD") display one day off.
                         if (!sel) return "Select";
-                        const d = new Date(sel);
-                        return isNaN(d)
-                          ? sel
-                          : d.toLocaleDateString("en-US", {
-                              month: "short",
-                              year: "2-digit",
-                            });
+                        const p = parseDateString(sel);
+                        return p.isValid() ? p.format("MMM-YY") : sel;
                       }}
                     >
                       {(() => {
-                        // Build option list from all months (not just forecast)
-                        // Trajectory start options = forecast months only
-                        // (from forecast_start_index onwards). This is the
-                        // right semantic — a trajectory starts somewhere in
-                        // the forecast period, not in history.
-                        // Always append the current value as a fallback so
-                        // the Select never renders blank even if the backend
-                        // default points to a month outside the visible range.
                         const forecastMonths =
                           chartData?.months && chartData?.forecast_start_index != null
                             ? chartData.months.slice(chartData.forecast_start_index)
                             : trajectoryMonthOptions;
 
-                        const withCurrent =
-                          trajectoryStart && !forecastMonths.includes(trajectoryStart)
-                            ? [...forecastMonths, trajectoryStart]
-                            : forecastMonths;
+                        // Dropdown shows only months STRICTLY AFTER the
+                        // current trajectoryStart — the default value itself
+                        // is displayed via renderValue above and acts as the
+                        // "current" selection; the list lets the user pick a
+                        // later start date.
+                        const dropdownOptions = trajectoryStart
+                          ? forecastMonths.filter((m) => m > trajectoryStart)
+                          : forecastMonths;
 
-                        return withCurrent.map((m) => (
+                        // Fallback: if nothing passes the filter, show all.
+                        const opts = dropdownOptions.length ? dropdownOptions : forecastMonths;
+
+                        return opts.map((m) => (
                           <MenuItem key={m} value={m}>
-                            {new Date(m).toLocaleDateString("en-US", {
-                              month: "short",
-                              year: "2-digit",
-                            })}
+                            {parseDateString(m).isValid()
+                              ? parseDateString(m).format("MMM-YY")
+                              : m}
                           </MenuItem>
                         ));
                       })()}
@@ -2819,6 +3154,14 @@ export default function PBCModelInput() {
                       value={metric}
                       onChange={async (e) => {
                         const nm = e.target.value;
+                        // Exit edit mode before switching metric so tableSnapshot
+                        // is never stale and cancel always restores correct data.
+                        if (tableEditing) {
+                          setTableData(tableSnapshot);
+                          setEditedHierarchies({});
+                          setTableEditing(false);
+                          setEditable(false);
+                        }
                         setMetric(nm);
                         if (nm !== "market_share") setBrand("");
                         if (isHCV && liverRawData) {
@@ -2853,42 +3196,43 @@ export default function PBCModelInput() {
                   </FormControl>
                 )}
 
-                {/* Monthly / Yearly toggle */}
-                <ToggleButtonGroup
-                  value={totalMarketViewMode}
-                  exclusive
-                  size="small"
-                  onChange={(e, val) => {
-                    if (!val) return;
-                    setTotalMarketViewMode(val);
-                    if (val === "yearly" && tableEditing) {
-                      handleCancelTableEdit();
-                    }
-                  }}
+                {/* Monthly / Yearly switch */}
+                <Box
                   sx={{
-                    border: "1px solid #e2e8f0",
+                    display: "flex",
+                    alignItems: "center",
+                    backgroundColor: "#f1f5f9",
                     borderRadius: "6px",
-                    overflow: "hidden",
-                    "& .MuiToggleButton-root": {
-                      border: "none",
-                      borderRadius: 0,
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                      px: 2,
-                      py: 0.5,
-                      color: "#64748b",
-                      "&.Mui-selected": {
-                        backgroundColor: "#4F46E5",
-                        color: "white",
-                        "&:hover": { backgroundColor: "#4338ca" },
-                      },
-                    },
+                    p: "3px",
+                    gap: "2px",
                   }}
                 >
-                  <ToggleButton value="monthly">Monthly</ToggleButton>
-                  <ToggleButton value="yearly">Yearly</ToggleButton>
-                </ToggleButtonGroup>
+                  {["monthly", "yearly"].map((mode) => (
+                    <Box
+                      key={mode}
+                      onClick={() => {
+                        if (mode === totalMarketViewMode) return;
+                        setTotalMarketViewMode(mode);
+                        if (mode === "yearly" && tableEditing) handleCancelTableEdit();
+                      }}
+                      sx={{
+                        px: 1.5,
+                        py: 0.4,
+                        borderRadius: "4px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        userSelect: "none",
+                        transition: "all 0.2s",
+                        backgroundColor: totalMarketViewMode === mode ? "white" : "transparent",
+                        color: totalMarketViewMode === mode ? "#4F46E5" : "#94a3b8",
+                        boxShadow: totalMarketViewMode === mode ? "0 1px 4px rgba(0,0,0,0.12)" : "none",
+                      }}
+                    >
+                      {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </Box>
+                  ))}
+                </Box>
 
                 {/* Download / Save / Edit Changes / Cancel — table edit toolbar */}
                 <Tooltip title="Download table as CSV">
@@ -2912,9 +3256,9 @@ export default function PBCModelInput() {
                   <Button
                     size="small"
                     variant="contained"
-                    disabled={savingTable}
+                    disabled={savingTable || Object.keys(editedHierarchies).length === 0}
                     onClick={handleSaveTableChanges}
-                    startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
+                    // startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
                     sx={{
                       textTransform: "none",
                       fontSize: "12px",
@@ -2929,26 +3273,68 @@ export default function PBCModelInput() {
                   </Button>
                 )}
 
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={tableEditing ? handleCancelTableEdit : handleEnterTableEdit}
-                  sx={{
-                    textTransform: "none",
-                    fontSize: "12px",
-                    fontWeight: 600,
-                    borderRadius: "6px",
-                    borderColor: tableEditing ? "#4F46E5" : "#e2e8f0",
-                    color: tableEditing ? "#4F46E5" : "#3d89f3",
-                    px: 1.5,
-                    "&:hover": {
-                      borderColor: "#cbd5e1",
+                {tableEditing ? (
+                  <Box
+                    sx={{
+                      height: 32,
+                      px: 1.5,
+                      display: "flex",
+                      alignItems: "center",
+                      borderRadius: "6px",
+                      border: "1px solid #e2e8f0",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      color: "#94a3b8",
                       backgroundColor: "#f8fafc",
-                    },
-                  }}
-                >
-                  Edit Changes
-                </Button>
+                      userSelect: "none",
+                      cursor: "default",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    Editing...
+                  </Box>
+                ) : (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={handleEnterTableEdit}
+                    sx={{
+                      textTransform: "none",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      borderRadius: "6px",
+                      borderColor: "#e2e8f0",
+                      color: "#3d89f3",
+                      px: 1.5,
+                      "&:hover": {
+                        borderColor: "#cbd5e1",
+                        backgroundColor: "#f8fafc",
+                      },
+                    }}
+                  >
+                    Edit Changes
+                  </Button>
+                )}
+
+                {tableEditing && (
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disabled={!isRefreshed}
+                    onClick={handleConfirmSave}
+                    sx={{
+                      textTransform: "none",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      borderRadius: "6px",
+                      backgroundColor: "#10b981",
+                      px: 2,
+                      "&:hover": { backgroundColor: "#059669" },
+                    }}
+                  >
+                    Save
+                  </Button>
+                )}
 
                 {tableEditing && (
                   <Button
@@ -3324,10 +3710,13 @@ export default function PBCModelInput() {
                     <>
                     {groupedTableHierarchy
                       .filter((group) => {
-                        // On total_market tab: only filter by selected
-                        // compare scenarios (always keep the applied one).
-                        // On other tabs: show all rows regardless.
+                        // On non-total_market tabs: always show all rows.
                         if (activeTab !== "total_market") return true;
+                        // On total_market: only filter when the user has
+                        // explicitly toggled the Compare Scenarios checkboxes.
+                        // Before that, show every row so all scenarios are
+                        // visible on initial load and after apply-filter.
+                        if (!userHasCustomizedCompare) return true;
                         if (!selectedCompareScenarios.length) return true;
                         return (
                           group.brandName === currentlyAppliedScenario ||
@@ -3367,6 +3756,25 @@ export default function PBCModelInput() {
                         isAppliedParent = targetParentLabel === currentBrand;
                       }
 
+                      // Rows whose label starts with "Total" are always
+                      // aggregates and must never be editable, even if they
+                      // have no children in the grouped structure.
+                      const isTotalRow =
+                        (group.brandName || "").trim().toLowerCase().startsWith("total");
+
+                      // total_market tab: only the radio-selected scenario row
+                      // is editable. Other tabs: only leaf rows (no children,
+                      // not a Total row) are editable.
+                      const isEditEligible = (() => {
+                        if (!tableEditing) return false;
+                        if (totalMarketViewMode !== "monthly") return false;
+                        if (isTotalRow) return false;
+                        if (activeTab === "total_market") {
+                          return isSelected && !hasChildren;
+                        }
+                        return !hasChildren;
+                      })();
+
                       return (
                         <React.Fragment key={group.brandName}>
                           {/* Parent */}
@@ -3383,10 +3791,20 @@ export default function PBCModelInput() {
                               position: "relative",
                               isolation: "isolate",
 
-                              backgroundColor: hasChildren ? "#f8fafc" : "white",
+                              backgroundColor:
+                                (isSelected && activeTab === "total_market")
+                                  ? "#fffbeb"
+                                  : hasChildren
+                                    ? "#f8fafc"
+                                    : "white",
 
                               "&:hover": {
-                                backgroundColor: hasChildren ? "#f1f5f9" : "#f8fafc",
+                                backgroundColor:
+                                  (isSelected && activeTab === "total_market")
+                                    ? "#fff3c4"
+                                    : hasChildren
+                                      ? "#f1f5f9"
+                                      : "#f8fafc",
                               },
                             }}
                           >
@@ -3399,9 +3817,11 @@ export default function PBCModelInput() {
 
                                 backgroundColor: isAppliedParent
                                   ? "#fffbeb"
-                                  : hasChildren
-                                    ? "#f8fafc"
-                                    : "white",
+                                  : (isSelected && activeTab === "total_market")
+                                    ? "#fffbeb"
+                                    : hasChildren
+                                      ? "#f8fafc"
+                                      : "white",
 
                                 borderRight: "1px solid #e2e8f0",
 
@@ -3430,6 +3850,12 @@ export default function PBCModelInput() {
                                         group.brandName,
                                       );
                                     }}
+                                    style={{
+                                      accentColor: "#4F46E5",
+                                      width: 14,
+                                      height: 14,
+                                      margin: 0,
+                                    }}
                                   />
                                 )}
 
@@ -3448,96 +3874,74 @@ export default function PBCModelInput() {
                                 <Typography
                                   sx={{
                                     fontSize: "13px",
-
-                                    fontWeight: hasChildren ? 700 : 400,
-
+                                    fontWeight: hasChildren ? 700 : (isSelected && activeTab === "total_market") ? 700 : 400,
                                     color: isAppliedParent
                                       ? "#f59e0b"
-                                      : "#0f172a",
+                                      : (isSelected && activeTab === "total_market")
+                                        ? "#f59e0b"
+                                        : "#0f172a",
                                   }}
                                 >
                                   {group.brandName}
                                 </Typography>
 
-                                {(mainRowApplied ||
-                                  currentlyAppliedScenario ===
-                                    group.brandName) && (
-                                  <Typography
-                                    sx={{
-                                      fontSize: "11px",
-                                      fontWeight: 600,
-                                      color: "#10b981",
-                                    }}
-                                  >
-                                    (Applied)
-                                  </Typography>
-                                )}
                               </Box>
                             </Box>
 
                             {displayColumns.map((col) => {
                               const val = getColumnValue(group.mainRow, col);
-
                               const isF = isForecastColumn(col);
+                              const isLastCol = col === displayColumns[displayColumns.length - 1];
+                              const isEditableCell = isEditEligible;
 
-                              return tableEditing &&
-                                !hasChildren &&
-                                totalMarketViewMode === "monthly" ? (
+                              return (
                                 <Box
-                                  component="td"
+                                  component='td'
                                   key={col}
+                                  onClick={(e) => isEditableCell && e.stopPropagation()}
                                   sx={{
-                                    p: "6px 6px",
-                                    textAlign: "center",
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <TextField
-                                    size="small"
-                                    type="number"
-                                    value={val ?? ""}
-                                    onChange={(e) =>
-                                      handleCellChange(
-                                        group.brandName,
-                                        col,
-                                        e.target.value,
-                                      )
-                                    }
-                                    sx={{
-                                      width: 85,
-                                      "& .MuiOutlinedInput-root": {
-                                        height: 30,
-                                        fontSize: "12px",
-                                      },
-                                    }}
-                                  />
-                                </Box>
-                              ) : (
-                                <Box
-                                  component="td"
-                                  key={col}
-                                  sx={{
-                                    p: "10px 8px",
-                                    textAlign: "center",
-
-                                    fontSize: "13px",
-
+                                    p: isEditableCell ? '4px 3px' : '10px 8px',
+                                    textAlign: 'center',
+                                    fontSize: '13px',
                                     fontWeight: hasChildren ? 700 : 400,
-
-                                    backgroundColor:
-                                      (isAppliedParent || activeTab === "total_market") && isF
-                                        ? "#fffbeb"
-                                        : isF
-                                          ? "#ffffff"
-                                          : "#eef2f7",
-
-                                    color:
-                                      (isAppliedParent || activeTab === "total_market") && isF
-                                        ? "#f59e0b"
-                                        : "#1e3a5f",
+                                    backgroundColor: isEditableCell
+                                      ? isF ? '#eff6ff' : '#f8fafc'
+                                      : (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                        ? '#fffbeb'
+                                        : isF ? '#ffffff' : '#eef2f7',
+                                    color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                      ? '#f59e0b'
+                                      : '#1e3a5f',
+                                    borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
                                   }}
                                 >
-                                  {formatCellValue(val)}
+                                  {isEditableCell ? (
+                                    <input
+                                      value={val == null ? '' : metricUnit === '%'
+                                        ? (Number.isInteger(Number(val)) ? String(Number(val)) : parseFloat(Number(val).toFixed(2)).toString())
+                                        : String(Math.round(Number(val)))}
+                                      onChange={(e) => {
+                                        if (/^-?\d*\.?\d*$/.test(e.target.value)) {
+                                          handleCellChange(group.brandName, col, e.target.value);
+                                        }
+                                      }}
+                                      style={{
+                                        width: '72px',
+                                        height: '22px',
+                                        boxSizing: 'border-box',
+                                        border: '1px solid #93c5fd',
+                                        borderRadius: '4px',
+                                        outline: 'none',
+                                        background: '#eff6ff',
+                                        color: '#1e293b',
+                                        textAlign: 'center',
+                                        fontSize: '12px',
+                                        padding: '1px 4px',
+                                      }}
+                                    />
+                                  ) : (
+                                    formatCellValue(val)
+                                  )}
                                 </Box>
                               );
                             })}
@@ -3545,114 +3949,98 @@ export default function PBCModelInput() {
 
                           {showChildren &&
                             group.children.map((childRow, idx) => {
-                              const childLabel = (
-                                childRow.cleanLabel || ""
-                              ).toLowerCase();
-
-                              // For payer_prod / prod_payer tabs, highlight only
-                              // the specific child whose label matches the
-                              // complementary filter (product under the
-                              // matching payer parent, or vice versa).
+                              const childLabel = (childRow.cleanLabel || "").toLowerCase();
                               let isAppliedChild = false;
                               if (activeTab === "payer_prod") {
-                                isAppliedChild =
-                                  targetParentLabel === currentPayer &&
-                                  childLabel === currentBrand;
+                                isAppliedChild = currentBrand && childLabel.includes(currentBrand);
                               } else if (activeTab === "prod_payer") {
-                                isAppliedChild =
-                                  targetParentLabel === currentBrand &&
-                                  childLabel === currentPayer;
+                                isAppliedChild = currentPayer && childLabel.includes(currentPayer);
                               }
-
                               const isHighlightedChild = isAppliedChild;
 
                               return (
-                              <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
-                                <Box
-                                  component="td"
-                                  sx={{
-                                    position: "sticky",
-                                    left: 0,
-                                    zIndex: 1,
-                                    backgroundColor: isHighlightedChild
-                                      ? "#fffbeb"
-                                      : "white",
-                                    borderRight: "1px solid #e2e8f0",
-                                    pl: "40px",
-                                    p: "10px 16px",
-                                  }}
-                                >
-                                  <Typography
+                                <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
+                                  {/* Sticky label cell */}
+                                  <Box
+                                    component="td"
                                     sx={{
-                                      fontSize: "13px",
-
-                                      fontWeight: 500,
-
-                                      color: isHighlightedChild
-                                        ? "#f59e0b"
-                                        : "#0f172a",
+                                      position: "sticky",
+                                      left: 0,
+                                      zIndex: 1,
+                                      backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
+                                      borderRight: "1px solid #e2e8f0",
+                                      pl: "40px",
+                                      p: "10px 16px",
                                     }}
                                   >
-                                    {childRow.cleanLabel}
-                                  </Typography>
-                                </Box>
-
-                                {displayColumns.map((col) => {
-                                  const isFChild = isForecastColumn(col);
-                                  return tableEditing && totalMarketViewMode === "monthly" ? (
-                                    <Box
-                                      component="td"
-                                      key={col}
-                                      sx={{ p: "6px 6px", textAlign: "center" }}
-                                    >
-                                      <TextField
-                                        size="small"
-                                        type="number"
-                                        value={childRow?.monthly_data?.[col] ?? ""}
-                                        onChange={(e) =>
-                                          handleCellChange(
-                                            childRow.hierarchy,
-                                            col,
-                                            e.target.value,
-                                          )
-                                        }
-                                        sx={{
-                                          width: 85,
-                                          "& .MuiOutlinedInput-root": {
-                                            height: 30,
-                                            fontSize: "12px",
-                                          },
-                                        }}
-                                      />
-                                    </Box>
-                                  ) : (
-                                    <Box
-                                      component="td"
-                                      key={col}
+                                    <Typography
                                       sx={{
-                                        p: "10px 8px",
-                                        textAlign: "center",
-
-                                        backgroundColor:
-                                          isHighlightedChild && isFChild
-                                            ? "#fffbeb"
-                                            : isFChild
-                                              ? "#ffffff"
-                                              : "#eef2f7",
-
-                                        color:
-                                          isHighlightedChild && isFChild
-                                            ? "#f59e0b"
-                                            : "#1e3a5f",
+                                        fontSize: "13px",
+                                        fontWeight: 500,
+                                        color: isHighlightedChild ? "#f59e0b" : "#0f172a",
                                       }}
                                     >
-                                      {formatCellValue(
-                                        getColumnValue(childRow, col),
-                                      )}
-                                    </Box>
-                                  );
-                                })}
-                              </Box>
+                                      {childRow.cleanLabel}
+                                    </Typography>
+                                  </Box>
+
+                                  {/* Data cells */}
+                                  {displayColumns.map((col) => {
+                                    const isFChild = isForecastColumn(col);
+                                    const childVal = childRow?.monthly_data?.[col];
+                                    const isLastCol = col === displayColumns[displayColumns.length - 1];
+                                    const isEditableChild =
+                                      tableEditing &&
+                                      totalMarketViewMode === "monthly" &&
+                                      activeTab !== "total_market" &&
+                                      !isTotalRow;
+
+                                    return (
+                                      <Box
+                                        component='td'
+                                        key={col}
+                                        sx={{
+                                          p: isEditableChild ? '4px 3px' : '10px 8px',
+                                          textAlign: 'center',
+                                          fontSize: '13px',
+                                          backgroundColor: isEditableChild
+                                            ? isFChild ? '#eff6ff' : '#f8fafc'
+                                            : isHighlightedChild && isFChild ? '#fffbeb' : isFChild ? '#ffffff' : '#eef2f7',
+                                          color: !isEditableChild && isHighlightedChild && isFChild ? '#f59e0b' : '#1e3a5f',
+                                          borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                        }}
+                                      >
+                                        {isEditableChild ? (
+                                          <input
+                                            value={childVal == null ? '' : metricUnit === '%'
+                                            ? (Number.isInteger(Number(childVal)) ? String(Number(childVal)) : parseFloat(Number(childVal).toFixed(2)).toString())
+                                            : String(Math.round(Number(childVal)))}
+                                            onChange={(e) => {
+                                              if (/^-?\d*\.?\d*$/.test(e.target.value)) {
+                                                handleCellChange(childRow.hierarchy, col, e.target.value);
+                                              }
+                                            }}
+                                            style={{
+                                              width: '72px',
+                                              height: '22px',
+                                              boxSizing: 'border-box',
+                                              border: '1px solid #93c5fd',
+                                              borderRadius: '4px',
+                                              outline: 'none',
+                                              background: '#eff6ff',
+                                              color: '#1e293b',
+                                              textAlign: 'center',
+                                              fontSize: '12px',
+                                              padding: '1px 4px',
+                                            }}
+                                          />
+                                        ) : (
+                                          formatCellValue(getColumnValue(childRow, col))
+                                        )}
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
                               );
                             })}
                         </React.Fragment>
@@ -3679,7 +4067,8 @@ export default function PBCModelInput() {
                             sx={{
                               position: "relative",
                               isolation: "isolate",
-                              "&:hover": { backgroundColor: "#f8fafc" },
+                              backgroundColor: isSelected ? "#fffbeb" : "white",
+                              "&:hover": { backgroundColor: isSelected ? "#fff3c4" : "#f8fafc" },
                             }}
                           >
                             <Box
@@ -3688,7 +4077,7 @@ export default function PBCModelInput() {
                                 position: "sticky",
                                 left: 0,
                                 zIndex: 1,
-                                backgroundColor: "white",
+                                backgroundColor: isSelected ? "#fffbeb" : "white",
                                 borderRight: "1px solid #e2e8f0",
                                 borderBottom: "1px solid #f1f5f9",
                                 p: "10px 16px",
@@ -3719,21 +4108,11 @@ export default function PBCModelInput() {
                                 <Typography
                                   sx={{
                                     fontSize: "13px",
-                                    fontWeight: 600,
-                                    color: "#0f172a",
+                                    fontWeight: isSelected ? 700 : 600,
+                                    color: isSelected ? "#f59e0b" : "#0f172a",
                                   }}
                                 >
                                   {name}
-                                </Typography>
-                                <Typography
-                                  component="span"
-                                  sx={{
-                                    fontSize: "11px",
-                                    fontWeight: 600,
-                                    color: "#10b981",
-                                  }}
-                                >
-                                  {currentlyAppliedScenario === name ? "(Applied)" : "(Saved)"}
                                 </Typography>
                               </Box>
                             </Box>
