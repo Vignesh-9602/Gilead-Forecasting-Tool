@@ -16,6 +16,7 @@ from app.hiv_treat.services.HIV_helper_functions import (
     parse_month
 )
 from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response
+from app.hiv_treat.services.Model_Input_Save_Scenario import _save_market_analysis,build_save_scenario_response
 # -----------------------------------
 # FORECAST MODELS
 # -----------------------------------
@@ -1247,6 +1248,7 @@ def recalculate(payload: RecalculateRequest):
     
 
 
+
 @router.post("/refresh-edits")
 def refresh_edits(payload: RefreshEditsRequest):
     """
@@ -1396,3 +1398,55 @@ def get_saved_scenarios(ta_name: str):
         "ta_name": ta,
         "available_scenarios": available
     }
+
+
+@router.post("/save-scenarios")
+def save_scenario(payload: SaveScenarioRequest):
+    """
+    Saves the scenario to the DB, then immediately builds and returns the
+    full response -- one round trip, no separate read call needed.
+    """
+    ta = payload.ta_name
+    scenario = payload.scenario_name
+ 
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+            _save_market_analysis(cur, ta, scenario, payload.user_id, payload.market_analysis, payload.factors)
+            conn.commit()
+ 
+            response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+            return response
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    
+@router.post("/apply_selected_scenario")
+def apply_scenario(payload: ApplyScenarioRequest):
+    """
+    User clicks a scenario in the table -> return the same shape as
+    save_scenario's response, but read-only: no DB write, just builds
+    full detail for the clicked scenario and total_market_volume-only
+    for every other scenario. Reuses build_save_scenario_response as-is,
+    since that function already implements exactly this split.
+    """
+    ta = payload.ta_name
+    scenario = payload.scenario_name
+ 
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+            available_scenarios = MIS.get_scenarios(cur, ta)
+            if scenario not in available_scenarios:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Scenario '{scenario}' not found for ta_name '{ta}'"
+                )
+ 
+            response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+            return response
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))

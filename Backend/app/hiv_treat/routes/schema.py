@@ -120,3 +120,24 @@ class RecalculateResponse(BaseModel):
     available_scenarios: List[str]
     active_scenario: str
     scenarios: Dict[str, Scenario]
+
+class SelectedFilter(BaseModel):
+    start_date: str
+    end_date: str
+    market: str
+    product: str
+ 
+ 
+class SaveScenarioRequest(BaseModel):
+    ta_name: str
+    scenario_name: str                          # scenario being saved, e.g. "Scenario ABC" -- becomes active_scenario in the response
+    selected_filter: SelectedFilter              # needed to rebuild market_product/product_market for the active scenario
+    user_id: Optional[str] = "default_user"
+    factors: Optional[Dict[str, Any]] = None     # the "factors" block from the frontend -> stored + echoed back for the active scenario
+    market_analysis: Dict[str, Any]              # the whole "market_analysis" block the frontend is saving, unmodified
+
+class ApplyScenarioRequest(BaseModel):
+    ta_name: str
+    selected_filter: SelectedFilter
+    scenario_name: str    # scenario the user clicked -> becomes active_scenario
+ 
