@@ -136,7 +136,7 @@ class SaveScenarioRequest(BaseModel):
     factors: Optional[Dict[str, Any]] = None     # the "factors" block from the frontend -> stored + echoed back for the active scenario
     market_analysis: Dict[str, Any]              # the whole "market_analysis" block the frontend is saving, unmodified
 
-class ApplyScenarioRequest(BaseModel):
+class ApplySelectedScenarioRequest(BaseModel):
     ta_name: str
     selected_filter: SelectedFilter
     scenario_name: str    # scenario the user clicked -> becomes active_scenario
