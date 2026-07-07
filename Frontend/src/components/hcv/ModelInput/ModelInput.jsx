@@ -24,6 +24,7 @@ import {
   applyLiverFilters,
   recalculateLiver,
   saveLiverScenario,
+  updateLiverScenario,
   refreshLiverTable,
   getMetricFilters,
   applyMetricFilters,
@@ -31,6 +32,7 @@ import {
   saveScenario,
   updateScenario,
   getConfigurationByTherapyAreaHCV,
+  activateLiverScenario,
 } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
@@ -300,6 +302,7 @@ export default function PBCModelInput() {
   const [tableSnapshot, setTableSnapshot] = useState([]);
   const [editedHierarchies, setEditedHierarchies] = useState({});
   const [savingTable, setSavingTable] = useState(false);
+  const [isSavingEditChanges, setIsSavingEditChanges] = useState(false);
   // true only after Refresh succeeds — gates the Save button
   const [isRefreshed, setIsRefreshed] = useState(false);
 
@@ -1005,7 +1008,7 @@ export default function PBCModelInput() {
     fullMarketAnalysis = fullMarketAnalysis || {};
 
     // The backend expects ALL tabs in market_analysis.
-    // We spread fullMarketAnalysis (all tabs) and patch only the active tab's rows.
+    // Spread fullMarketAnalysis (all tabs) and patch only the active tab's rows.
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
 
     // Build the current table values to send as the edited market_analysis.
@@ -1087,8 +1090,7 @@ export default function PBCModelInput() {
 
     const tableType = isHierarchicalTab ? "hierarchical" : "flat";
 
-    // Merged market_analysis: ALL tabs from fullMarketAnalysis,
-    // with the active tab's monthly table rows patched with edited values.
+    // All tabs in market_analysis; only active tab's monthly table rows patched.
     const mergedMarketAnalysis = {
       ...fullMarketAnalysis,
       [backendTabKey]: {
@@ -1248,7 +1250,16 @@ export default function PBCModelInput() {
     const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode);
     setChartData(chart);
     setTableData(table);
-    setExpandedBrands({});
+    // Auto-expand the applied/filtered parent row on hierarchical tabs.
+    if (activeTab === "payer_prod") {
+      const key = appliedPayerFilter || payerFilter;
+      setExpandedBrands(key ? { [key]: true } : {});
+    } else if (activeTab === "prod_payer") {
+      const key = appliedProductFilter || productFilter;
+      setExpandedBrands(key ? { [key]: true } : {});
+    } else {
+      setExpandedBrands({});
+    }
   }, [activeTab, liverTabsRaw, totalMarketViewMode]);
 
   useEffect(() => {
@@ -1263,11 +1274,10 @@ export default function PBCModelInput() {
     }
   }, [filterOptions.scenario_names]);
 
-  // Exit table edit mode whenever the user switches tabs so edits
-  // from one tab never bleed into another tab's view.
+  // Exit table edit mode whenever the user switches tabs.
   useEffect(() => {
     if (tableEditing) {
-      setTableData(tableSnapshot);
+      // setTableData(tableSnapshot);
       setEditedHierarchies({});
       setIsRefreshed(false);
       setTableEditing(false);
@@ -1950,11 +1960,70 @@ export default function PBCModelInput() {
 
   // Called by the Save button after Refresh has already synced data with the backend.
   // Just closes edit mode — no additional API call needed.
-  const handleConfirmSave = () => {
-    setIsRefreshed(false);
-    setTableEditing(false);
-    setEditable(false);
-    showSnackbar("Changes saved successfully", "success");
+  // Base scenario → POST /api/liver/save-scenario (save as new via modal).
+  // Other scenario → PUT /api/liver/update-scenario (update in place).
+  const handleConfirmSave = async () => {
+    const activeScenario = currentlyAppliedScenario || scenarioSelector || "";
+    const isBase = activeScenario.toLowerCase() === "base";
+
+    // Resolve full market_analysis for the active scenario
+    let marketAnalysis = liverRawData?.scenarios?.[activeScenario]?.market_analysis;
+    if (!marketAnalysis && liverRawData?.scenarios) {
+      const matchedKey = Object.keys(liverRawData.scenarios).find(
+        (k) => k.toLowerCase() === activeScenario.toLowerCase()
+      );
+      marketAnalysis = matchedKey
+        ? liverRawData.scenarios[matchedKey]?.market_analysis
+        : Object.values(liverRawData.scenarios)[0]?.market_analysis;
+    }
+    marketAnalysis = marketAnalysis || {};
+
+    if (isBase) {
+      // Base is read-only — prompt user to name a new scenario (POST flow)
+      setNewScenarioName("");
+      setSaveScenarioDialogOpen(true);
+      return;
+    }
+
+    // Non-Base → PUT /api/liver/update-scenario
+    const backendSf = liverRawData?.selected_filter || {};
+    const updatePayload = {
+      ta_name: therapyArea || "HCV",
+      selected_filter: {
+        start_date: backendSf.start_date || resolveFromDate(),
+        end_date: backendSf.end_date || toDate || "",
+        payer: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+      },
+      scenario_name: activeScenario,
+      factors: buildFullFactors(),
+      market_analysis: marketAnalysis,
+    };
+
+    try {
+      setIsSavingEditChanges(true);
+      setLoading(true);
+      const resp = await updateLiverScenario(updatePayload);
+      const respData = resp?.data || {};
+      if (respData && Object.keys(respData).length) {
+        const normalized = normalizeLiverResponse(respData, metric);
+        if (normalized?.tabs && Object.keys(normalized.tabs).length) {
+          setLiverTabsRaw(normalized);
+          setLiverRawData(respData);
+          initializeCompareScenarios(respData);
+        }
+      }
+      setIsRefreshed(false);
+      setTableEditing(false);
+      setEditable(false);
+      showSnackbar(`Scenario "${activeScenario}" updated successfully`, "success");
+    } catch (err) {
+      console.error("[UpdateScenario] error:", err?.response?.data || err);
+      showSnackbar("Failed to update scenario", "error");
+    } finally {
+      setIsSavingEditChanges(false);
+      setLoading(false);
+    }
   };
 
   const handleSaveTableChanges = async () => {
@@ -2103,28 +2172,62 @@ export default function PBCModelInput() {
     setTentativeRadioSelectedScenario(name);
   };
   const clickTableEdit = () => setEditable(true);
-  const applySelectedScenario = () => {
+ const applySelectedScenario = async () => {
     const chosenScenario = tentativeRadioSelectedScenario;
-    setCurrentlyAppliedScenario(chosenScenario);
-
-    // Always keep the newly applied scenario checked in the Compare dropdown.
-    setSelectedCompareScenarios((prev) => {
-      if (prev.includes(chosenScenario)) return prev;
-      return [...prev, chosenScenario];
-    });
-
-    // Re-derive the chart for the chosen scenario using the cached raw data.
-    if (liverRawData) {
-      const patched = { ...liverRawData, active_scenario: chosenScenario };
-      const normalized = normalizeLiverResponse(patched, metric);
-      setLiverTabsRaw(normalized);
+    if (!chosenScenario) {
+      showSnackbar("Please select a scenario to apply", "error");
+      return;
     }
 
-    showSnackbar(
-      `Applied ${chosenScenario} successfully across all tabs!`,
-      "success",
-    );
-    setEditable(false);
+    try {
+      setLoading(true);
+      const backendSf = liverRawData?.selected_filter || {};
+
+      const payload = {
+        ta_name: therapyArea || "HCV",
+        selected_filter: {
+          start_date: backendSf.start_date || resolveFromDate(),
+          end_date: backendSf.end_date || toDate || "",
+          payer: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+          product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+        },
+        scenario_name: chosenScenario,
+      };
+
+      // Hit the new activation endpoint
+      const response = await activateLiverScenario(payload);
+      const respData = response?.data;
+
+      // Update UI configurations
+      setCurrentlyAppliedScenario(chosenScenario);
+
+      // Keep the newly applied scenario checked in the Compare dropdown
+      setSelectedCompareScenarios((prev) => {
+        if (prev.includes(chosenScenario)) return prev;
+        return [...prev, chosenScenario];
+      });
+
+      // If the backend returns updated full scenario data layout, process it.
+      // Otherwise, fall back to manipulating local cache state.
+      if (respData && (respData.scenarios || respData.active_scenario)) {
+        const normalized = normalizeLiverResponse(respData, metric);
+        setLiverTabsRaw(normalized);
+        setLiverRawData(respData);
+      } else if (liverRawData) {
+        const patched = { ...liverRawData, active_scenario: chosenScenario };
+        const normalized = normalizeLiverResponse(patched, metric);
+        setLiverTabsRaw(normalized);
+      }
+
+      showSnackbar(`Applied ${chosenScenario} successfully across all tabs!`, "success");
+      setEditable(false);
+    } catch (error) {
+      console.error("Failed to activate scenario:", error);
+      const msg = error?.response?.data || error?.message || "Unknown error";
+      showSnackbar(typeof msg === "string" ? msg : "Failed to activate scenario", "error");
+    } finally {
+      setLoading(false);
+    }
   };
 
   // ── Forecast helper ───────────────────────────────────────────────────────
@@ -3320,7 +3423,7 @@ export default function PBCModelInput() {
                   <Button
                     size="small"
                     variant="contained"
-                    disabled={!isRefreshed}
+                    disabled={!isRefreshed || isSavingEditChanges}
                     onClick={handleConfirmSave}
                     sx={{
                       textTransform: "none",
@@ -3332,7 +3435,7 @@ export default function PBCModelInput() {
                       "&:hover": { backgroundColor: "#059669" },
                     }}
                   >
-                    Save
+                    {isSavingEditChanges ? "Saving..." : "Save"}
                   </Button>
                 )}
 
@@ -4156,12 +4259,13 @@ export default function PBCModelInput() {
         PaperProps={{ sx: { borderRadius: "12px" } }}
       >
         <DialogTitle sx={{ fontWeight: 700, fontSize: "16px", color: "#0f172a", pb: 1 }}>
-          Save Scenario
+          Save as New Scenario
         </DialogTitle>
         <DialogContent>
           <Typography sx={{ fontSize: "13px", color: "#64748b", mb: 2 }}>
-            Enter a name for this scenario. It will appear in the table as a
-            selectable row — click "Apply Selected Scenario" to load its data.
+            {(currentlyAppliedScenario || scenarioSelector || "").toLowerCase() === "base"
+              ? "The Base scenario cannot be modified. Enter a name to save your changes as a new scenario."
+              : "Enter a name for this scenario. It will appear in the table as a selectable row — click \"Apply Selected Scenario\" to load its data."}
           </Typography>
           <TextField
             autoFocus
