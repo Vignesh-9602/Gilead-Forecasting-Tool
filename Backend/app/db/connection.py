@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 # Go up one level from db/ to reach app/ where .env lives
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv()
 
 def get_connection():
     return psycopg2.connect(
