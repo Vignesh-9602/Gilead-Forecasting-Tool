@@ -27,6 +27,8 @@ from app.liver.schemas.liver_schema import (
     HierarchicalTabData,
     LiverRecalculateFactors,
     LiverGrowthFactors,
+    SaveScenarioRequest,
+    ActivateScenarioRequest,
 )
 from app.liver.repository.liver_repo import (
     get_liver_configs_for_ta,
@@ -1771,6 +1773,231 @@ def update_liver_scenario(payload: LiverSaveScenarioRequest) -> dict:
     return _persist_and_respond(payload, allow_overwrite=True)
 
 
+# ---------------------------------------------------------------------------
+# New scenario endpoints: POST /liver/save  PUT /liver/save  POST /activate-scenario
+# ---------------------------------------------------------------------------
+
+def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market_analysis: dict) -> dict:
+    """Shared response builder: active scenario gets full data, others get TMV stub."""
+    all_names = get_scenarios(cur)
+    if "Base" in all_names:
+        all_names.remove("Base")
+    available_scenarios = ["Base"] + all_names
+
+    cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+    saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+    cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+    train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+    from_year, from_month = _parse_ym(flt.start_date)
+    forecast_periods = _resolve_forecast_periods(
+        flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+    )
+    granularity = cfg.get("model_granularity", "monthly")
+
+    base_factors = _estimate_default_factors(
+        cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+    )
+    _base_ma, _ = _build_market_analysis_both_granularities(
+        cur, ta, from_year, from_month,
+        train_end_year, train_end_month, forecast_periods, base_factors,
+        scenario_name="Base",
+    )
+    base_tmv = _base_ma.get("total_market_volume", {})
+
+    def _tmv_stub(tmv):
+        return {
+            "market_analysis": {
+                "total_market_volume": {
+                    "market_volume": {
+                        "monthly": tmv.get("market_volume", {}).get("monthly", {}),
+                        "yearly":  tmv.get("market_volume", {}).get("yearly",  {}),
+                    },
+                    "market_share": {
+                        "monthly": tmv.get("market_share", {}).get("monthly", {}),
+                        "yearly":  tmv.get("market_share", {}).get("yearly",  {}),
+                    },
+                }
+            }
+        }
+
+    scenarios = {}
+    for sc in available_scenarios:
+        if sc == name:
+            scenarios[sc] = {"factors": factors, "market_analysis": market_analysis}
+        elif sc == "Base":
+            scenarios[sc] = _tmv_stub(base_tmv)
+        else:
+            cd  = saved.get(sc, {})
+            tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+            scenarios[sc] = _tmv_stub(tmv)
+
+    return {
+        "message": "Scenario saved successfully",
+        "available_scenarios": available_scenarios,
+        "active_scenario": name,
+        "scenarios": scenarios,
+    }
+
+
+def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
+    """POST /liver/save — create a new scenario. Rejects if name == 'Base' or already exists."""
+    name = payload.scenario_name.strip()
+    if name.lower() == "base":
+        raise ValueError("Cannot save to Base. Provide a different scenario name.")
+
+    ta  = payload.ta_name
+    flt = payload.selected_filter
+    factors = payload.factors or {}
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        if scenario_exists(cur, name):
+            raise ValueError(f"Scenario '{name}' already exists. Use PUT /liver/save to update it.")
+
+        save_scenario(
+            cur,
+            scenario_name=name,
+            ta=ta,
+            payer=flt.payer or "",
+            product=flt.product or "",
+            from_date=flt.start_date,
+            to_date=flt.end_date,
+            chart_data={"market_analysis": payload.market_analysis},
+            factors=factors,
+        )
+        conn.commit()
+        return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
+    """PUT /liver/save — update an existing scenario. Rejects if name == 'Base' or doesn't exist."""
+    name = payload.scenario_name.strip()
+    if name.lower() == "base":
+        raise ValueError("The Base scenario cannot be updated.")
+
+    ta  = payload.ta_name
+    flt = payload.selected_filter
+    factors = payload.factors or {}
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        if not scenario_exists(cur, name):
+            raise ValueError(f"Scenario '{name}' does not exist. Use POST /liver/save to create it.")
+
+        save_scenario(
+            cur,
+            scenario_name=name,
+            ta=ta,
+            payer=flt.payer or "",
+            product=flt.product or "",
+            from_date=flt.start_date,
+            to_date=flt.end_date,
+            chart_data={"market_analysis": payload.market_analysis},
+            factors=factors,
+        )
+        conn.commit()
+        return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
+    """POST /liver/activate-scenario — load a scenario from DB (or compute Base fresh)."""
+    name = payload.scenario_name.strip()
+    ta   = payload.ta_name
+    flt  = payload.selected_filter
+    is_base = name.lower() == "base"
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+        from_year, from_month = _parse_ym(flt.start_date)
+        forecast_periods = _resolve_forecast_periods(
+            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
+        granularity = cfg.get("model_granularity", "monthly")
+
+        cur.execute(
+            "SELECT scenario_name, chart_data, factors FROM raw_liver.liver_scenarios"
+        )
+        saved = {r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}} for r in cur.fetchall()}
+
+        all_names = get_scenarios(cur)
+        if "Base" in all_names:
+            all_names.remove("Base")
+        available_scenarios = ["Base"] + all_names
+
+        base_factors = _estimate_default_factors(
+            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+        )
+        _base_ma, _ = _build_market_analysis_both_granularities(
+            cur, ta, from_year, from_month,
+            train_end_year, train_end_month, forecast_periods, base_factors,
+            scenario_name="Base",
+        )
+        base_tmv = _base_ma.get("total_market_volume", {})
+
+        if is_base:
+            active_ma      = _base_ma
+            active_factors = base_factors.model_dump()
+        elif name in saved:
+            active_ma      = saved[name]["chart_data"].get("market_analysis", {})
+            active_factors = saved[name]["factors"]
+        else:
+            raise ValueError(f"Scenario '{name}' not found.")
+
+        def _tmv_stub(tmv):
+            return {
+                "market_analysis": {
+                    "total_market_volume": {
+                        "market_volume": {
+                            "monthly": tmv.get("market_volume", {}).get("monthly", {}),
+                            "yearly":  tmv.get("market_volume", {}).get("yearly",  {}),
+                        },
+                        "market_share": {
+                            "monthly": tmv.get("market_share", {}).get("monthly", {}),
+                            "yearly":  tmv.get("market_share", {}).get("yearly",  {}),
+                        },
+                    }
+                }
+            }
+
+        scenarios = {}
+        for sc in available_scenarios:
+            if sc == name or (is_base and sc == "Base"):
+                scenarios[sc] = {"factors": active_factors, "market_analysis": active_ma}
+            elif sc == "Base":
+                scenarios[sc] = _tmv_stub(base_tmv)
+            else:
+                cd  = saved.get(sc, {}).get("chart_data", {})
+                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
+                scenarios[sc] = _tmv_stub(tmv)
+
+        return {
+            "ta_name": ta,
+            "selected_filter": {
+                "start_date": flt.start_date,
+                "end_date":   flt.end_date,
+                "payer":      flt.payer,
+                "product":    flt.product,
+            },
+            "available_scenarios": available_scenarios,
+            "active_scenario": name,
+            "scenarios": scenarios,
+        }
+    finally:
+        cur.close()
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Helper: estimate ETS factors from transaction_data history
@@ -2395,7 +2622,7 @@ def refresh_liver(payload):
                     if r.get("label", "").lower() != "total"
                 }
             if tab4_seed and row_targets and col_targets:
-                new_tab4 = _ipf_fit(tab4_seed, row_targets, col_targets, len(tmv_vals))
+                new_tab4 = _ipf_hier_rows(tab4_seed, row_targets, col_targets)
                 _put_hier("payer_product", "market_volume", gran, new_tab4, to_int=True)
                 tab5_seed = _rows("product_payer", "market_volume", gran)
                 if tab5_seed:
@@ -2411,62 +2638,7 @@ def refresh_liver(payload):
                 _put_hier(tab, "market_volume", gran,
                           _hier_vol_from_parent_share(_rows(tab, "market_share", gran), tmv_vals), to_int=True)
             else:
-                # Volume edited in hier tab: cap each child at its parent total,
-                # then redistribute remaining among siblings proportionally.
-                hier_rows     = _rows(tab, "market_volume", gran)
-                old_hier_rows = _old_rows(tab, "market_volume", gran)
-                old_parent_map = {
-                    r.get("label", ""): [float(v) for v in r.get("values", [])]
-                    for r in old_hier_rows
-                }
-                new_hier_rows = []
-                for parent in hier_rows:
-                    plbl     = parent.get("label", "")
-                    old_pt   = old_parent_map.get(plbl, [float(v) for v in parent.get("values", [])])
-                    children = parent.get("children", [])
-                    n_p      = len(old_pt)
-                    # Cap every child at its parent total, then scale siblings so sum = parent total
-                    new_children = []
-                    for child in children:
-                        capped = [
-                            min(float(child["values"][i]) if i < len(child.get("values", [])) else 0.0,
-                                old_pt[i] if i < len(old_pt) else 0.0)
-                            for i in range(n_p)
-                        ]
-                        new_children.append({"label": child.get("label", ""), "values": capped})
-                    # Redistribute: keep child sums == parent total
-                    for i in range(n_p):
-                        child_sum = sum(float(c["values"][i]) for c in new_children)
-                        if child_sum > old_pt[i] and child_sum > 0:
-                            scale = old_pt[i] / child_sum
-                            for c in new_children:
-                                c["values"][i] = round(float(c["values"][i]) * scale, 4)
-                    new_hier_rows.append({
-                        "label":    plbl,
-                        "values":   [int(round(v)) for v in old_pt],
-                        "children": new_children,
-                    })
-                _put_hier(tab, "market_volume", gran, new_hier_rows, to_int=True)
-
-            # payer_product and product_payer are mirror views of the same payer×product matrix.
-            # After updating the edited tab's volumes, transpose to keep the counterpart in sync.
-            counterpart_tab = "product_payer" if tab == "payer_product" else "payer_product"
-            updated_vol     = _rows(tab, "market_volume", gran)
-            counterpart_old = _old_rows(counterpart_tab, "market_volume", gran)
-            if updated_vol and counterpart_old:
-                _put_hier(counterpart_tab, "market_volume", gran,
-                          _transpose_hier(updated_vol, counterpart_old), to_int=True)
-
-            # Rescale both flat tabs to the effective TMV so they stay in sync.
-            for flat_t in FLAT_DIST_TABS:
-                flat_shares = _rows(flat_t, "market_share", gran)
-                if flat_shares:
-                    _put_flat(flat_t, "market_volume", gran,
-                              _vol_from_share(flat_shares, tmv_vals), to_int=True)
-                # Volume edited in hier tab.
-                # eh = "ParentLabel - ChildLabel" identifies the specific cell the user changed.
-                # Cap that child at its parent total (from payload, not DB), then redistribute
-                # the remaining budget proportionally among siblings (up AND down).
+                # Volume edited in hier tab: edit the specific child (eh), redistribute siblings.
                 hier_rows = _rows(tab, "market_volume", gran)
 
                 edited_parent_lbl = None
@@ -2528,7 +2700,7 @@ def refresh_liver(payload):
 
             # Top-to-bottom rule:
             # Tab4 (payer_product) edit → propagates down to Tab5 (transpose)
-            # Tab5 (product_payer) edit → affects only Tab5, no propagation up or sideways
+            # Tab5 (product_payer) edit → affects only Tab5, no propagation
             if tab == "payer_product":
                 updated_vol = _rows("payer_product", "market_volume", gran)
                 tab5_seed   = _rows("product_payer", "market_volume", gran)

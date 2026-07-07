@@ -273,3 +273,28 @@ class LiverRefreshRequest(BaseModel):
     market_analysis: Dict[str, Any] = {}
 
 
+# ---------------------------------------------------------------------------
+# New Save / Activate scenario endpoints  (/liver/save, /liver/activate-scenario)
+# ---------------------------------------------------------------------------
+
+class ScenarioFilter(BaseModel):
+    start_date: str
+    end_date: str
+    payer: Optional[str] = None
+    product: Optional[str] = None
+
+
+class SaveScenarioRequest(BaseModel):
+    ta_name: str = "HCV"
+    selected_filter: ScenarioFilter
+    scenario_name: str
+    factors: Optional[Dict[str, Any]] = None
+    market_analysis: Dict[str, Any] = {}
+
+
+class ActivateScenarioRequest(BaseModel):
+    ta_name: str = "HCV"
+    selected_filter: ScenarioFilter
+    scenario_name: str
+
+
