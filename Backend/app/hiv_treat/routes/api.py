@@ -1531,7 +1531,7 @@ def scenario_exists_save(cur, ta, scenario):
     return cur.fetchone() is not None
 
 @router.put("/scenarios/{scenario_name}")
-def update_scenario(scenario_name: str, payload: UpdateScenarioRequest):
+def update_scenario(payload: UpdateScenarioRequest):
     """
     Updates an EXISTING scenario's saved data and returns the same response
     shape as save-scenarios. Unlike the create endpoint, this rejects if
@@ -1543,6 +1543,7 @@ def update_scenario(scenario_name: str, payload: UpdateScenarioRequest):
     below if Base should be editable this way too.
     """
     ta = payload.ta_name
+    scenario_name =payload.scenario_name
 
     if scenario_name != payload.scenario_name:
         raise HTTPException(
