@@ -563,6 +563,10 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
     total_vals: raw floats from build_series.
     Monthly display rounds to int. Yearly sums raws then rounds once.
     """
+    print(
+        "build_total_market_volume called, scenario_label=",
+        scenario_label
+    )
     int_vals = round_volume(total_vals)   # display-only rounding
     n        = len(int_vals)
     h, f     = split_series(int_vals, split_idx)
@@ -579,17 +583,17 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
                 "rows": [{"label": scenario_label, "values": int_vals}]}
 
     ms_chart = {"months": months, "forecast_start_index": split_idx,
-                "series": [{"label": "Market Share", "history": sh, "forecast": sf}]}
+                "series": [{"label": scenario_label, "history": sh, "forecast": sf}]}
     ms_table = {"type": "flat",
-                "rows": [{"label": "Market Share", "values": share_vals}]}
+                "rows": [{"label": scenario_label, "values": share_vals}]}
 
     # Yearly descriptors — use raw total_vals (floats) for volume aggregation
     mv_series_data = [{"label": scenario_label, "monthly_values": total_vals}]
     mv_table_rows  = [{"label": scenario_label, "monthly_values": total_vals}]
 
-    ms_series_data = [{"label": "Market Share",
+    ms_series_data = [{"label": scenario_label,
                        "child_vols": total_vals, "parent_vols": total_vals}]
-    ms_table_rows  = [{"label": "Market Share",
+    ms_table_rows  = [{"label": scenario_label,
                        "fixed_values": [100.0] * len(all_years)}]
 
     return {
