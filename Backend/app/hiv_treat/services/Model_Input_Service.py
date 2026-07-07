@@ -556,13 +556,17 @@ def build_factors(cur, ta, scenario):
 # ================= MARKET ANALYSIS BUILDERS ===============
 # =========================================================
 
-def build_total_market_volume(total_vals, months, split_idx):
+def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base"):
     """
     Total market volume — share is always 100%.
 
     total_vals: raw floats from build_series.
     Monthly display rounds to int. Yearly sums raws then rounds once.
     """
+    print(
+        "build_total_market_volume called, scenario_label=",
+        scenario_label
+    )
     int_vals = round_volume(total_vals)   # display-only rounding
     n        = len(int_vals)
     h, f     = split_series(int_vals, split_idx)
@@ -574,22 +578,22 @@ def build_total_market_volume(total_vals, months, split_idx):
 
     # Monthly
     mv_chart = {"months": months, "forecast_start_index": split_idx,
-                "series": [{"label": "Base", "history": h, "forecast": f}]}
+                "series": [{"label": scenario_label, "history": h, "forecast": f}]}
     mv_table = {"type": "flat",
-                "rows": [{"label": "Base", "values": int_vals}]}
+                "rows": [{"label": scenario_label, "values": int_vals}]}
 
     ms_chart = {"months": months, "forecast_start_index": split_idx,
-                "series": [{"label": "Market Share", "history": sh, "forecast": sf}]}
+                "series": [{"label": scenario_label, "history": sh, "forecast": sf}]}
     ms_table = {"type": "flat",
-                "rows": [{"label": "Market Share", "values": share_vals}]}
+                "rows": [{"label": scenario_label, "values": share_vals}]}
 
     # Yearly descriptors — use raw total_vals (floats) for volume aggregation
-    mv_series_data = [{"label": "Base", "monthly_values": total_vals}]
-    mv_table_rows  = [{"label": "Base", "monthly_values": total_vals}]
+    mv_series_data = [{"label": scenario_label, "monthly_values": total_vals}]
+    mv_table_rows  = [{"label": scenario_label, "monthly_values": total_vals}]
 
-    ms_series_data = [{"label": "Market Share",
+    ms_series_data = [{"label": scenario_label,
                        "child_vols": total_vals, "parent_vols": total_vals}]
-    ms_table_rows  = [{"label": "Market Share",
+    ms_table_rows  = [{"label": scenario_label,
                        "fixed_values": [100.0] * len(all_years)}]
 
     return {
@@ -1241,7 +1245,7 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 
     return {
         "total_market_volume": build_total_market_volume(
-            total_vals, months, split_idx),
+            total_vals, months, split_idx,scenario),
         "market_distribution": build_market_distribution(
             cur, ta, scenario, total_vals, months, split_idx, start, end),
         "product_distribution": build_product_distribution(
@@ -1272,28 +1276,40 @@ def build_apply_scenario_response(cur, payload, config):
     scenarios_block = {}
 
     for scenario in available_scenarios:
-        has_data = fetch_forecast_scenario(
-            cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario
-        )
 
-        if has_data:
+        if scenario == active_scenario:
+
             market_analysis = build_scenario_market_analysis(
                 cur, ta, scenario, start, end, flt.market, flt.product
             )
-            if scenario.upper() == "BASE":
-                scenario_block = {
-                    "factors":         build_factors(cur, ta, scenario),
-                    "market_analysis": market_analysis
-                }
-            else:
-                scenario_block = {"market_analysis": market_analysis}
+
+            scenario_block = {
+                "factors": build_factors(cur, ta, scenario),
+                "market_analysis": market_analysis
+            }
+
         else:
+
+            total_data = fetch_forecast_scenario(
+                cur,
+                ta,
+                "ALL",
+                "ALL",
+                "ALL",
+                "market_volume",
+                scenario
+            )
+
+            total = build_series(total_data, start, end)
+
             scenario_block = {
                 "market_analysis": {
-                    "total_market_volume": {
-                        "market_volume": {},
-                        "market_share":  {}
-                    }
+                    "total_market_volume": build_total_market_volume(
+                        total["values"],
+                        total["months"],
+                        total["split_idx"],
+                        scenario
+                    )
                 }
             }
 
