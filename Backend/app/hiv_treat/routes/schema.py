@@ -153,7 +153,8 @@ class UpdateScenarioRequest(BaseModel):
     ta_name: str
     scenario_name: str                          # existing scenario being updated
     selected_filter: SelectedFilterSave
+    model_type: Optional[str] = None   
     user_id: Optional[str] = "default_user"
-    factors: Optional[Dict[str, Any]] = None
+    factors: Optional[Factors] = None
     market_analysis: Dict[str, Any]
  

@@ -279,7 +279,15 @@ export const postLiverConfigurations = (config) => {
 export const saveLiverScenario = (payload) => {
   return axios.post(`/api/liver/save-scenario`, payload);
 };
+// PUT — update an existing non-Base liver scenario
+export const updateLiverScenario = (payload) => {
+  return axios.put(`/api/liver/update-scenario`, payload);
+};
 
+// POST — activate a liver scenario
+export const activateLiverScenario = (payload) => {
+  return axios.post(`/api/liver/activate-scenario`, payload);
+};
 
 
 //HIC API's
