@@ -239,9 +239,12 @@ def get_sources(cur, ta, market):
     cur.execute("""
         SELECT DISTINCT source_of_market
         FROM raw_hiv_treat.forecast_outputs
-        WHERE ta_name = %s AND market = %s
+        WHERE ta_name = %s
+          AND market = %s
           AND source_of_market IS NOT NULL
+          AND UPPER(source_of_market) <> 'ALL'
     """, (ta, market))
+
     return [r[0] for r in cur.fetchall()]
 
 
