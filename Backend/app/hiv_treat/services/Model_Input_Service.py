@@ -1272,28 +1272,39 @@ def build_apply_scenario_response(cur, payload, config):
     scenarios_block = {}
 
     for scenario in available_scenarios:
-        has_data = fetch_forecast_scenario(
-            cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario
-        )
 
-        if has_data:
+        if scenario == active_scenario:
+
             market_analysis = build_scenario_market_analysis(
                 cur, ta, scenario, start, end, flt.market, flt.product
             )
-            if scenario.upper() == "BASE":
-                scenario_block = {
-                    "factors":         build_factors(cur, ta, scenario),
-                    "market_analysis": market_analysis
-                }
-            else:
-                scenario_block = {"market_analysis": market_analysis}
+
+            scenario_block = {
+                "factors": build_factors(cur, ta, scenario),
+                "market_analysis": market_analysis
+            }
+
         else:
+
+            total_data = fetch_forecast_scenario(
+                cur,
+                ta,
+                "ALL",
+                "ALL",
+                "ALL",
+                "market_volume",
+                scenario
+            )
+
+            total = build_series(total_data, start, end)
+
             scenario_block = {
                 "market_analysis": {
-                    "total_market_volume": {
-                        "market_volume": {},
-                        "market_share":  {}
-                    }
+                    "total_market_volume": build_total_market_volume(
+                        total["values"],
+                        total["months"],
+                        total["split_idx"]
+                    )
                 }
             }
 
