@@ -614,11 +614,14 @@ def build_factors(cur, ta, scenario):
 
     # ETS Factors
     if is_base:
-        f = data.get("factors", {})
+        f = data.get("factors", {}) or {}
     else:
-        f = db_factors
+        f = db_factors or {}
 
-    ets_cfg = f.get("ets", f)
+    ets_cfg = f.get("ets")
+
+    if not isinstance(ets_cfg, dict):
+        ets_cfg = {}
 
     ets = {
         "alpha": ets_cfg.get("alpha"),
