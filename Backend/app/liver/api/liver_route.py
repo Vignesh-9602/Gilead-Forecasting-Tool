@@ -8,6 +8,8 @@ from app.liver.schemas.liver_schema import (
     LiverRecalculateRequest,
     LiverSaveScenarioRequest,
     LiverRefreshRequest,
+    SaveScenarioRequest,
+    ActivateScenarioRequest,
 )
 from app.liver.services.liver_service import (
     get_liver_configuration,
@@ -16,7 +18,8 @@ from app.liver.services.liver_service import (
     apply_liver_filters,
     recalculate_liver,
     save_liver_scenario,
-    update_liver_scenario,
+    update_liver_scenario_new,
+    activate_liver_scenario,
     refresh_liver,
 )
 
@@ -110,15 +113,25 @@ def liver_save_scenario(payload: LiverSaveScenarioRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @router.put("/update-scenario")
-def liver_update_scenario(payload: LiverSaveScenarioRequest):
-    """
-    Overwrite an existing non-Base scenario. Rejects if scenario doesn't exist or equals 'Base'.
-    """
+def liver_update_scenario_new(payload: SaveScenarioRequest):
+    """Update an existing scenario. Rejects if name == 'Base' or doesn't exist."""
     try:
-        return update_liver_scenario(payload)
+        return update_liver_scenario_new(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/activate-scenario")
+def liver_activate_scenario(payload: ActivateScenarioRequest):
+    """Load a saved scenario from DB (Base is computed fresh). Inactive scenarios return TMV stub."""
+    try:
+        return activate_liver_scenario(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

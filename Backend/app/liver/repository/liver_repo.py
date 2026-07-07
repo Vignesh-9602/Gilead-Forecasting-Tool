@@ -454,8 +454,17 @@ def scenario_exists(cur, scenario_name: str) -> bool:
     return cur.fetchone() is not None
 
 
+def _to_full_date(d: str) -> str:
+    """Ensure date is YYYY-MM-DD; appends -01 if only YYYY-MM is given."""
+    if d and len(d.strip()) == 7:
+        return d.strip() + "-01"
+    return d
+
+
 def save_scenario(cur, scenario_name: str, ta: str, payer: str, product: str,
                   from_date: str, to_date: str, chart_data: dict, factors: dict):
+    from_date = _to_full_date(from_date)
+    to_date   = _to_full_date(to_date)
     cur.execute("""
         INSERT INTO raw_liver.liver_scenarios
             (scenario_name, ta, payer, product, metric, from_date, to_date, chart_data, factors)
