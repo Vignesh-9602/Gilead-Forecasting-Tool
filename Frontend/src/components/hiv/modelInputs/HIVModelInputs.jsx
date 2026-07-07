@@ -25,7 +25,7 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario } from "../../../services/apiService";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario } from "../../../services/apiService";
 import { useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -118,6 +118,8 @@ export default function HIVModelInput() {
     const [activeTab, setActiveTab] = useState("total_market_volume");
 
     const [selectedMetric, setSelectedMetric] = useState("market_volume");
+
+    const [allScenariosData, setAllScenariosData] = useState({});
 
     // const [showAnalysis, setShowAnalysis] =
     //     useState(false);
@@ -234,6 +236,8 @@ export default function HIVModelInput() {
                     scenario?.market_analysis || {}
                 );
 
+                setAllScenariosData(applyResponse.data.scenarios || {});
+
                 const chartData =
                     scenario?.market_analysis
                         ?.total_market_volume
@@ -313,6 +317,8 @@ export default function HIVModelInput() {
             setMarketAnalysis(
                 scenario?.market_analysis || {}
             );
+
+            setAllScenariosData(response.data.scenarios || {});
 
             console.log(
                 scenario.market_analysis
@@ -475,6 +481,9 @@ export default function HIVModelInput() {
             setMarketAnalysis(
                 scenario.market_analysis || {}
             );
+
+            setAllScenariosData(response.data.scenarios || {});
+
         } catch (err) {
             console.error(err);
         } finally {
@@ -566,6 +575,8 @@ export default function HIVModelInput() {
                 scenario.market_analysis || {}
             );
 
+            setAllScenariosData(response.data.scenarios || {});
+
         } catch (err) {
             console.error(err);
             throw err; // let handleRefresh know it failed
@@ -656,8 +667,82 @@ export default function HIVModelInput() {
                 scenario.market_analysis || {}
             );
 
+            setAllScenariosData(response.data.scenarios || {});
+
         } catch (err) {
             console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleUpdateScenario = async () => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: activeScenario,
+
+                model_type: modelSelection,
+
+                factors: {
+                    multiplier: Number(multiplier),
+
+                    multiplier_horizon: multiplierHorizon,
+
+                    ...(modelSelection === "ets"
+                        ? {
+                            ets: {
+                                alpha: Number(alpha),
+                                beta: Number(beta),
+                                gamma: Number(gamma),
+                            },
+                        }
+                        : modelSelection === "moving_average"
+                            ? {
+                                growth: {
+                                    window: Number(numberOfMonths),
+                                },
+                            }
+                            : {
+                                growth: {
+                                    total_growth: Number(totalGrowth),
+                                    duration: Number(duration),
+                                    k_value:
+                                        modelSelection === "linear"
+                                            ? 0
+                                            : Number(kValue),
+                                    trajectory_start: trajectoryStart,
+                                },
+                            }),
+                },
+
+                market_analysis: JSON.parse(
+                    JSON.stringify(marketAnalysis)
+                ),
+            };
+
+            const response = await updateHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(scenario.factors || {});
+            setAvailableScenarios(response.data.available_scenarios || []);
+            setActiveScenario(response.data.active_scenario || "");
+            setMarketAnalysis(scenario.market_analysis || {});
+            setAllScenariosData(response.data.scenarios || {});
         } finally {
             setLoading(false);
         }
@@ -713,6 +798,8 @@ export default function HIVModelInput() {
             setMarketAnalysis(
                 scenario.market_analysis || {}
             );
+
+            setAllScenariosData(response.data.scenarios || {});
 
         } catch (err) {
 
@@ -1519,6 +1606,7 @@ export default function HIVModelInput() {
             </Paper>
             <HIVMarketAnalysis
                 marketAnalysis={marketAnalysis}
+                allScenariosData={allScenariosData}
                 availableScenarios={availableScenarios}
                 activeScenario={activeScenario}
                 selectedMarket={marketFilter}
@@ -1529,6 +1617,7 @@ export default function HIVModelInput() {
                 onEdit={handleEdit}
                 onSaveScenario={handleSaveScenario}
                 onApplyScenario={handleApplySelectedScenario}
+                onUpdateScenario={handleUpdateScenario}
             />
             {/* <Dialog
                 open={openSaveScenario}

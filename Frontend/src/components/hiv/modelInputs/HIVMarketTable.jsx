@@ -47,7 +47,9 @@ export default function HIVMarketTable({
     marketAnalysis,
     onEdit,
     onSaveScenario,
-    onApplyScenario
+    onApplyScenario,
+    allScenariosData,
+    onUpdateScenario
 }) {
     if (!tableData?.rows?.length) {
         return null;
@@ -57,7 +59,35 @@ export default function HIVMarketTable({
     //     setSelectedRow("");
     // }, [tableData]);
 
-    const { type, rows } = tableData;
+    const [compareScenario, setCompareScenario] =
+        useState([]);
+
+
+    const isTmvTab = activeTab === "total_market_volume";
+
+    const tmvMergedRows = React.useMemo(() => {
+        if (!isTmvTab) return null;
+
+        return compareScenario
+            .map((scenarioName) => {
+                const scenarioRow =
+                    allScenariosData?.[scenarioName]
+                        ?.market_analysis
+                        ?.total_market_volume
+                        ?.[selectedMetric]
+                        ?.[viewMode]
+                        ?.table
+                        ?.rows?.[0];
+
+                return scenarioRow || null;
+            })
+            .filter(Boolean);
+    }, [isTmvTab, allScenariosData, compareScenario, selectedMetric, viewMode]);
+
+
+    const effectiveRows = isTmvTab && tmvMergedRows?.length ? tmvMergedRows : tableData.rows;
+    const { type } = tableData;
+    const rows = effectiveRows;
 
     // const months =
     //     tableData?.months || [];
@@ -72,12 +102,15 @@ export default function HIVMarketTable({
         setSelectedRow(activeScenario || "");
     }, [activeScenario]);
 
-    const [compareScenario, setCompareScenario] =
-        useState([]);
 
     useEffect(() => {
         setCompareScenario(availableScenarios);
     }, [availableScenarios]);
+
+
+
+
+
     // const [selectedMetric, setSelectedMetric] =
     //     useState("market_volume");
 
@@ -105,20 +138,15 @@ export default function HIVMarketTable({
     const [editedRows, setEditedRows] = useState([]);
 
     useEffect(() => {
-        if (!tableData?.rows?.length) return;
+        const sourceRows = isTmvTab && tmvMergedRows?.length ? tmvMergedRows : tableData?.rows;
+        if (!sourceRows?.length) return;
 
-        const cloned =
-            JSON.parse(JSON.stringify(tableData.rows));
+        const cloned = JSON.parse(JSON.stringify(sourceRows));
 
         setTableRows(cloned);
-
-        setOriginalRows(
-            JSON.parse(JSON.stringify(cloned))
-        );
-
+        setOriginalRows(JSON.parse(JSON.stringify(cloned)));
         setEditedRows([]);
-
-    }, [tableData]);
+    }, [tableData, tmvMergedRows, isTmvTab]);
 
     const handleCancel = () => {
 
@@ -221,7 +249,7 @@ export default function HIVMarketTable({
 
         switch (activeTab) {
             case "total_market_volume":
-                return true;
+                return row.label === activeScenario;
 
             case "market_distribution":
                 // Allow editing except the Overall row
@@ -546,11 +574,15 @@ export default function HIVMarketTable({
                                     multiple
                                     displayEmpty
                                     value={compareScenario}
-                                    onChange={(e) =>
-                                        setCompareScenario(
-                                            e.target.value
-                                        )
-                                    }
+                                    onChange={(e) => {
+                                        let value = e.target.value;
+
+                                        if (!value.includes(activeScenario)) {
+                                            value = [...value, activeScenario];
+                                        }
+
+                                        setCompareScenario(value);
+                                    }}
                                     input={
                                         <OutlinedInput />
                                     }
@@ -567,23 +599,30 @@ export default function HIVMarketTable({
                                         return selected.join(", ");
                                     }}
                                 >
-                                    {availableScenarios.map((option) => (
-                                        <MenuItem
-                                            key={option}
-                                            value={option}
-                                        >
-                                            <Checkbox
-                                                checked={compareScenario.includes(
-                                                    option
-                                                )}
-                                            />
+                                    {availableScenarios.map((option) => {
+                                        const isActive = option === activeScenario;
 
-                                            <ListItemText
-                                                primary={option}
-                                            />
-                                        </MenuItem>
-                                    )
-                                    )}
+                                        return (
+                                            <MenuItem
+                                                key={option}
+                                                value={option}
+                                                disabled={isActive}
+                                            >
+                                                <Checkbox
+                                                    checked={compareScenario.includes(option)}
+                                                    disabled={isActive}
+                                                />
+
+                                                <ListItemText
+                                                    primary={
+                                                        isActive
+                                                            ? `${option} (Active)`
+                                                            : option
+                                                    }
+                                                />
+                                            </MenuItem>
+                                        );
+                                    })}
                                 </Select>
                             </FormControl>
 
@@ -614,11 +653,26 @@ export default function HIVMarketTable({
                         </Select>
                     </FormControl>
 
-                    <Button
+                    {/* <Button
                         variant="contained"
                         sx={primaryButtonStyle}
                         disabled={editable}
                     // onClick={handleSave} // your save handler
+                    >
+                        Save
+                    </Button> */}
+
+                    <Button
+                        variant="contained"
+                        sx={primaryButtonStyle}
+                        disabled={editable}
+                        onClick={async () => {
+                            if (activeScenario === "Base") {
+                                setOpenSaveScenario(true);
+                            } else {
+                                await onUpdateScenario();
+                            }
+                        }}
                     >
                         Save
                     </Button>
