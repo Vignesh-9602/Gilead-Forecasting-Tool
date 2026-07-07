@@ -560,6 +560,7 @@ def wrap_monthly_yearly_share(monthly_chart, monthly_table,
 
 def build_factors(cur, ta, scenario):
     is_base = scenario.upper() == "BASE"
+
     print("================================")
     print("BUILD FACTORS")
     print("TA:", ta)
@@ -599,10 +600,12 @@ def build_factors(cur, ta, scenario):
     else:
         db_factors = row[0] or {}
         data = row[1] or {}
+
     print("ROW:", row)
     print("DB_FACTORS TYPE:", type(db_factors))
     print("DB_FACTORS:", db_factors)
     print("DATA TYPE:", type(data))
+
     months = data.get("months", [])
     split_idx = data.get("forecast_start_index", 0)
 
@@ -612,13 +615,25 @@ def build_factors(cur, ta, scenario):
         else None
     )
 
-    # ETS Factors
+    # --------------------------------------------------------
+    # FACTORS SOURCE
+    # --------------------------------------------------------
     if is_base:
-        f = data.get("factors", {}) or {}
+        factors_data = data.get("factors", {}) or {}
     else:
-        f = db_factors or {}
+        factors_data = db_factors or {}
 
-    ets_cfg = f.get("ets")
+    print("FACTORS DATA:", factors_data)
+
+    # --------------------------------------------------------
+    # ETS
+    # --------------------------------------------------------
+    if is_base:
+        # BASE stores alpha/beta/gamma directly
+        ets_cfg = factors_data
+    else:
+        # Saved scenarios store inside factors["ets"]
+        ets_cfg = factors_data.get("ets")
 
     if not isinstance(ets_cfg, dict):
         ets_cfg = {}
@@ -629,33 +644,11 @@ def build_factors(cur, ta, scenario):
         "gamma": ets_cfg.get("gamma")
     }
 
-    # ------------------------------------------------------------------
-    # Base scenarios still read factors from forecast_data->factors
-    # Saved scenarios read directly from factors column
-    # ------------------------------------------------------------------
-    if is_base:
-
-        cur.execute("""
-            SELECT forecast_data->'factors'
-            FROM raw_hiv_treat.forecast_outputs
-            WHERE ta_name = %s
-              AND metric = 'market_volume'
-              AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
-            LIMIT 1
-        """, (ta,))
-
-        row = cur.fetchone()
-
-        factors_data = (row[0] or {}) if row else {}
-
-    else:
-
-        factors_data = db_factors or {}
-
-    m_data = factors_data
-
+    # --------------------------------------------------------
+    # MOVING AVERAGE
+    # --------------------------------------------------------
     moving_average = {
-        "window": m_data.get("window")
+        "window": factors_data.get("window")
     }
 
     default_duration = max(
@@ -663,6 +656,9 @@ def build_factors(cur, ta, scenario):
         len(months) - split_idx
     )
 
+    # --------------------------------------------------------
+    # GROWTH MODELS
+    # --------------------------------------------------------
     linear_cfg = factors_data.get("linear") or {}
 
     scurve_cfg = (
@@ -792,17 +788,17 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
                 "rows": [{"label": scenario_label, "values": int_vals}]}
 
     ms_chart = {"months": months, "forecast_start_index": split_idx,
-                "series": [{"label": "Market Share", "history": sh, "forecast": sf}]}
+                "series": [{"label": scenario_label, "history": sh, "forecast": sf}]}
     ms_table = {"type": "flat",
-                "rows": [{"label": "Market Share", "values": share_vals}]}
+                "rows": [{"label": scenario_label, "values": share_vals}]}
 
     # Yearly descriptors — use raw total_vals (floats) for volume aggregation
     mv_series_data = [{"label": scenario_label, "monthly_values": total_vals}]
     mv_table_rows  = [{"label": scenario_label, "monthly_values": total_vals}]
 
-    ms_series_data = [{"label": "Market Share",
+    ms_series_data = [{"label": scenario_label,
                        "child_vols": total_vals, "parent_vols": total_vals}]
-    ms_table_rows  = [{"label": "Market Share",
+    ms_table_rows  = [{"label": scenario_label,
                        "fixed_values": [100.0] * len(all_years)}]
 
     return {
