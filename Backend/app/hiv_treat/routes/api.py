@@ -1569,10 +1569,27 @@ def update_scenario(payload: UpdateScenarioRequest):
                 )
 
             user_id = payload.user_id or "default_user"
+            factors = payload.factors.model_dump() if payload.factors else {}
+
+            if payload.model_type == "linear":
+                factors["linear"] = factors.pop("growth", None)
+                factors["active_model"] = "linear"
+
+            elif payload.model_type == "scurve":
+                factors["scurve"] = factors.pop("growth", None)
+                factors["active_model"] = "scurve"
+
+            elif payload.model_type == "exponential":
+                factors["exponential"] = factors.pop("growth", None)
+                factors["active_model"] = "exponential"
+
+            elif payload.model_type == "logarithmic":
+                factors["logarithmic"] = factors.pop("growth", None)
+                factors["active_model"] = "logarithmic"
 
             _save_market_analysis(
                 cur, ta, scenario, user_id,
-                payload.market_analysis, payload.factors
+                payload.market_analysis,factors
             )
 
             conn.commit()
