@@ -16,6 +16,7 @@ from app.liver.schemas.liver_schema import (
     SCurveParams,
     ExponentialParams,
     LogarithmicParams,
+    MovingAverageParams,
     ChartSeries,
     TableRow,
     TabChart,
@@ -247,6 +248,32 @@ def save_liver_configuration(payload) -> dict:
 # is_selected=False + linear → auto-estimate linear growth from the series' own history
 # ---------------------------------------------------------------------------
 
+def _forecast_moving_average(train_values: list, forecast_count: int, window: int) -> list:
+    """Rolling moving average — mirrors HIV process_moving_average_forecast core logic.
+    Used for the user-selected MA model (Tab1/Tab2/Tab3 selected series).
+    """
+    window = max(1, int(window))
+    history = list(train_values)
+    result = []
+    for _ in range(forecast_count):
+        avg = sum(history[-window:]) / window
+        history.append(avg)
+        result.append(round(avg, 2))
+    return result
+
+
+def _simple_moving_average_forecast(train_values: list, forecast_count: int, window: int = 6) -> list:
+    """Simple (non-rolling) moving average: constant flat line = mean of last N non-zero values.
+    Used for auto_model='moving_average' on individual payer-product series (Tab4/Tab5).
+    Rolling MA on sparse/seasonal series produces zig-zag; simple MA gives clean IPF starting points.
+    """
+    window = max(1, int(window))
+    non_zero = [v for v in train_values if v > 0]
+    pool = (non_zero if non_zero else train_values)[-window:]
+    avg = sum(pool) / len(pool) if pool else 0.0
+    return [round(avg, 2)] * forecast_count
+
+
 def _estimate_linear_growth(values: list) -> float:
     """
     Estimate total_growth by comparing the average of the first few points
@@ -287,6 +314,8 @@ def _build_series_with_forecast(month_range, data_map, forecast_start_index, fac
             )
             fc = forecast_ets(values=original_train, forecast_periods=forecast_count,
                               alpha=alpha, beta=beta, gamma=gamma, metric="nps")
+        elif auto_model == "moving_average":
+            fc = _simple_moving_average_forecast(original_train, forecast_count, window=6)
         else:
             total_growth = _estimate_linear_growth(original_train)
             fc = forecast_linear(original_train[-1], forecast_count,
@@ -307,6 +336,9 @@ def _build_series_with_forecast(month_range, data_map, forecast_start_index, fac
         f  = factors.ets
         fc = forecast_ets(values=original_train, forecast_periods=forecast_count,
                           alpha=f.alpha, beta=f.beta, gamma=f.gamma, metric="nps")
+    elif active == "moving_average":
+        window = getattr(factors.moving_average, "window", 6) if factors.moving_average else 6
+        fc = _forecast_moving_average(original_train, forecast_count, window=window)
     else:
         base_value = original_train[-1]
         traj_idx   = 0
@@ -459,6 +491,7 @@ def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -
             d["k_value"] = model_params.k_value
         return d
 
+    ma_params = factors.moving_average or MovingAverageParams()
     return {
         "active_model":       factors.active_model,
         "multiplier":         factors.multiplier,
@@ -468,10 +501,11 @@ def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -
             "beta":  factors.ets.beta,
             "gamma": factors.ets.gamma,
         },
-        "linear":      _growth(factors.linear),
-        "exponential": _growth(factors.exponential),
-        "logarithmic": _growth(factors.logarithmic),
-        "scurve":      _growth(factors.scurve),
+        "linear":          _growth(factors.linear),
+        "exponential":     _growth(factors.exponential),
+        "logarithmic":     _growth(factors.logarithmic),
+        "scurve":          _growth(factors.scurve),
+        "moving_average":  {"window": ma_params.window},
     }
 
 
@@ -667,7 +701,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   granularity="monthly",
                                   sel_payer=None, sel_product=None,
                                   force_tab1_ets=True,
-                                  scenario_name="Base"):
+                                  scenario_name="Base",
+                                  auto_model="moving_average"):
     """
     Build all 5 tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
@@ -746,35 +781,41 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         pwpy_mv = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_volume")
         pwpy_ms = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_share")
 
-    # TMV forecast values — used to scale tabs 2-5 so their totals match Tab 1
-    _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
+    # TMV forecast values used to scale Tabs 2-5.
+    # When Tab 1 is forced to ETS (first load), derive the scaling target from a rolling
+    # moving average of the training data instead of the ETS forecast. This keeps
+    # Tabs 2-5 self-consistent on MA without inheriting ETS seasonal fluctuations
+    # through _scale_flat_to_tmv / IPF.
+    if force_tab1_ets:
+        _fc_count = n - fsi
+        _tmv_fc = _forecast_moving_average(_tmv_values, _fc_count, window=6)
+    else:
+        _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
 
     def bflat_mv(rows, label, to_int=False):
         tab_data = _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
-                                   selected_label=label, auto_model="linear", add_total=True)
+                                   selected_label=label, auto_model=auto_model, add_total=True)
         _scale_flat_to_tmv(tab_data, _tmv_fc, fsi)
         return _fmt_flat(tab_data, month_labels, fsi, to_int=to_int)
 
     def bflat_ms(rows, label):
         return _fmt_flat(
             _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
-                            selected_label=label, auto_model="linear", add_total=True),
+                            selected_label=label, auto_model=auto_model, add_total=True),
             month_labels, fsi,
         )
 
     def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
-        # selected_parent="" forces all series to use auto_model="linear" (no ETS for hier tabs).
-        # No _scale_hier_to_tmv: scaling by an ETS-shaped TMV would curve the linear forecasts.
         hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
                                                  selected_parent="", selected_child="",
-                                                 auto_model="linear")
+                                                 auto_model=auto_model)
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
 
     def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
                                          selected_parent="", selected_child="",
-                                         auto_model="linear"),
+                                         auto_model=auto_model),
             month_labels, fsi, chart_parent_filter=parent_lbl,
         )
 
@@ -1035,6 +1076,7 @@ def _build_market_analysis_both_granularities(
     train_end_year, train_end_month, forecast_periods_months, factors,
     sel_payer=None, sel_product=None,
     force_tab1_ets=True, scenario_name="Base",
+    auto_model="moving_average",
 ):
     """
     Builds market_analysis for both monthly and yearly granularities.
@@ -1047,6 +1089,7 @@ def _build_market_analysis_both_granularities(
         granularity="monthly",
         sel_payer=sel_payer, sel_product=sel_product,
         force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
+        auto_model=auto_model,
     )
     ma_yearly = _aggregate_monthly_to_yearly(ma_monthly)
 
@@ -1371,6 +1414,8 @@ def _factors_from_request(f: LiverRecalculateFactors, model_type: str,
     log_tg,  log_dur,  log_traj,  log_k = _g(log_)
     sc_tg,   sc_dur,   sc_traj,   sc_k  = _g(sc)
 
+    ma_window = (f.moving_average.window if f.moving_average else 6)
+
     return LiverFactors(
         active_model       = model_type,
         multiplier         = f.multiplier,
@@ -1380,6 +1425,7 @@ def _factors_from_request(f: LiverRecalculateFactors, model_type: str,
         exponential        = ExponentialParams(k_value=exp_k, total_growth=exp_tg, duration=exp_dur, trajectory_start=exp_traj),
         logarithmic        = LogarithmicParams(k_value=log_k, total_growth=log_tg, duration=log_dur, trajectory_start=log_traj),
         scurve             = SCurveParams(k_value=sc_k,  total_growth=sc_tg,  duration=sc_dur,  trajectory_start=sc_traj),
+        moving_average     = MovingAverageParams(window=ma_window),
     )
 
 
@@ -1425,12 +1471,13 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         all_scenario_names = get_scenarios(cur)
         available_scenarios = ["Base"] + all_scenario_names
 
-        force_tab1 = (payload.selected_tab != "total_market_volume")
         market_analysis, tab1_ets = _build_market_analysis_both_granularities(
             cur, payload.ta_name, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, factors,
             sel_payer=market, sel_product=product,
-            force_tab1_ets=force_tab1, scenario_name=payload.scenario_name,
+            force_tab1_ets=False,
+            scenario_name=payload.scenario_name,
+            auto_model=model_type,
         )
         market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
@@ -2042,9 +2089,10 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
         scurve=SCurveParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
         exponential=ExponentialParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
         logarithmic=LogarithmicParams(k_value=1, duration=default_duration, total_growth=est_growth, trajectory_start=trajectory_start),
+        moving_average=MovingAverageParams(window=6),
         multiplier=1.0,
         multiplier_horizon="Forecast",
-        active_model="linear",
+        active_model="moving_average",
     )
 
 
