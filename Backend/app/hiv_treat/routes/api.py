@@ -1250,42 +1250,6 @@ def recalculate(payload: RecalculateRequest):
 
 
 
-@router.post("/refresh-edits")
-def refresh_edits(payload: RefreshEditsRequest):
-    """
-    Applies table edits and recalculates related tabs.
-    Does NOT save anything.
-    """
-
-    market_analysis = extract_market_analysis(payload)
-
-    for edit in payload.edits:
-        update_table_cell(
-            market_analysis=market_analysis,
-            selected_tab=payload.selected_tab,
-            selected_metric=payload.selected_metric,
-            edit=edit
-        )
-
-    updated_market_analysis = recompute_related_tabs(
-        market_analysis=market_analysis,
-        selected_tab=payload.selected_tab,
-        selected_metric=payload.selected_metric
-    )
-
-    
-    with get_connection() as conn, conn.cursor() as cur:
-        available_scenarios = get_available_scenarios(cur, payload.ta_name)
-
-    return build_hiv_edit_response(
-        payload=payload,
-        active_market_analysis=updated_market_analysis,
-        available_scenarios=available_scenarios
-    )
-
-
-
-
 
 @router.post("/save-scenario")
 def save_scenario(payload: SaveScenarioRequest):
