@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional , List
 from pydantic import BaseModel
 
 
@@ -23,45 +23,58 @@ class GrowthFactors(BaseModel):
 
 
 class Factors(BaseModel):
+    multiplier: Optional[float] = 1.0
+    multiplier_horizon: Optional[str] = "Forecast"
+
     ets: Optional[ETSFactors] = None
     linear: Optional[GrowthFactors] = None
     scurve: Optional[GrowthFactors] = None
     exponential: Optional[GrowthFactors] = None
     logarithmic: Optional[GrowthFactors] = None
-
-    multiplier: Optional[float] = 1.0
-    multiplier_horizon: Optional[str] = "Forecast"
     active_model: Optional[str] = None
 
 
-class CellEdit(BaseModel):
-    frequency: str = "monthly"      # monthly/yearly
-    category: str                  # Overall, Retail, Non-retail, Biktarvy, etc.
-    month: str                     # 2024-06-01
-    value: float
-
-
-class RefreshEditsRequest(BaseModel):
+class RefreshScenarioRequest(BaseModel):
     ta_name: str
     selected_filter: SelectedFilter
-
     scenario_name: Optional[str] = "Base"
     model_type: Optional[str] = "ets"
     factors: Optional[Factors] = None
 
-    selected_tab: str              # market_distribution
-    selected_metric: str           # market_share
+    selected_tab: str
+    selected_metric: str
 
     market_analysis: Dict[str, Any]
-    edits: List[CellEdit]
 
 
 class SaveScenarioRequest(BaseModel):
     ta_name: str
     selected_filter: SelectedFilter
-
     scenario_name: str
     model_type: Optional[str] = "ets"
     factors: Optional[Factors] = None
-
     market_analysis: Dict[str, Any]
+
+class Scenario(BaseModel):
+    factors: Dict[str, Any]
+    market_analysis: Dict[str, Any]
+
+
+# class RefreshEditsRequest(BaseModel):
+#     ta_name: str
+
+#     selected_filter: Dict[str, Any]
+
+#     scenario_name: str
+
+#     active_scenario: str
+
+#     model_type: str
+
+#     factors: Dict[str, Any]
+
+#     selected_tab: str
+
+#     selected_metric: str
+
+#     market_analysis: Dict[str, Any]

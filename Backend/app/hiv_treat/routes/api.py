@@ -1,6 +1,6 @@
 from datetime import date , datetime
 from psycopg2.extras import RealDictCursor
-from fastapi import APIRouter, HTTPException , Depends
+from fastapi import APIRouter, HTTPException , Depends , Body
 from uuid import uuid4
 import json
 from app.db.connection import get_connection
@@ -15,7 +15,7 @@ from app.hiv_treat.services.HIV_helper_functions import (
     get_market_wise_product,
     parse_month
 )
-from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response
+from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response , get_scenarios
 # -----------------------------------
 # FORECAST MODELS
 # -----------------------------------
@@ -29,16 +29,19 @@ from app.hiv_treat.services.HIV_helper_functions import (
 from app.services.growth_forecast_service import process_growth_forecast
 from app.hiv_treat.services import Model_Input_Service as MIS
 from app.hiv_treat.services.HIV_Treat_Retaining_Filters import get_user_configuration, save_user_configuration
-from app.hiv_treat.services.scenario_service import get_available_scenarios
-from app.hiv_treat.routes.models import RefreshEditsRequest, SaveScenarioRequest
-from app.hiv_treat.services.edit_refresh_service import (
-    extract_market_analysis,
-    update_table_cell,
-    recompute_related_tabs,
-    build_hiv_edit_response,
-    model_to_dict,
-)
+
+
 import json as Json
+from app.hiv_treat.services.Model_Input_Service import (
+    build_apply_scenario_response,
+    build_factors,
+)
+
+# from app.hiv_treat.services.helpers import (
+#     load_market_analysis_from_db
+# )
+
+from app.hiv_treat.services.scenario_service import get_available_scenarios
 
 router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat"])
 
@@ -1247,152 +1250,44 @@ def recalculate(payload: RecalculateRequest):
     
 
 
+from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response
+from app.hiv_treat.routes.refresh_models import RefreshEditsRequest
+
+
 @router.post("/refresh-edits")
 def refresh_edits(payload: RefreshEditsRequest):
-    """
-    Applies table edits and recalculates related tabs.
-    Does NOT save anything.
-    """
 
-    market_analysis = extract_market_analysis(payload)
+    print("==============================")
+    print("TA :", payload.ta_name)
+    print("Scenario :", payload.scenario_name)
+    print("Tab :", payload.selected_tab)
+    print("Metric :", payload.selected_metric)
+    print("==============================")
 
-    for edit in payload.edits:
-        update_table_cell(
-            market_analysis=market_analysis,
-            selected_tab=payload.selected_tab,
-            selected_metric=payload.selected_metric,
-            edit=edit
+    market_analysis = refresh_engine(payload)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        factors = build_factors(
+            cur,
+            payload.ta_name,
+            payload.scenario_name,
         )
 
-    updated_market_analysis = recompute_related_tabs(
-        market_analysis=market_analysis,
-        selected_tab=payload.selected_tab,
-        selected_metric=payload.selected_metric
-    )
+        available_scenarios = get_scenarios(
+            cur,
+            payload.ta_name,
+        )
 
-    
-    with get_connection() as conn, conn.cursor() as cur:
-        available_scenarios = get_available_scenarios(cur, payload.ta_name)
+    finally:
+        cur.close()
+        conn.close()
 
-    return build_hiv_edit_response(
+    return build_refresh_response(
         payload=payload,
-        active_market_analysis=updated_market_analysis,
-        available_scenarios=available_scenarios
+        market_analysis=market_analysis,
+        factors=factors,
+        available_scenarios=available_scenarios,
     )
-
-
-
-
-
-@router.post("/save-scenario")
-def save_scenario(payload: SaveScenarioRequest):
-    """
-    Saves refreshed scenario.
-    Base cannot be overwritten.
-    """
-
-    scenario_name = payload.scenario_name.strip()
-
-    if scenario_name.lower() == "base":
-        raise HTTPException(
-            status_code=400,
-            detail="Base scenario cannot be overwritten. Save as a named scenario."
-        )
-
-    ta = payload.ta_name.replace("_", " ").strip()
-
-    scenario_payload = {
-        "ta_name": ta,
-        "selected_filter": model_to_dict(payload.selected_filter),
-        "scenario_name": scenario_name,
-        "model_type": payload.model_type,
-        "factors": model_to_dict(payload.factors),
-        "market_analysis": payload.market_analysis,
-        "saved_at": datetime.utcnow().isoformat()
-    }
-
-    user_id = None
-    market = payload.selected_filter.market
-    product = payload.selected_filter.product
-
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM raw_hiv_treat.forecast_outputs
-            WHERE LOWER(REPLACE(TRIM(ta_name), '_', ' '))
-                  = LOWER(REPLACE(TRIM(%s), '_', ' '))
-              AND scenario_name = %s
-              AND COALESCE(market, '') = COALESCE(%s, '')
-              AND COALESCE(product, '') = COALESCE(%s, '')
-              AND metric = 'market_analysis'
-        """, (
-            ta,
-            scenario_name,
-            market,
-            product
-        ))
-
-        cur.execute("""
-            INSERT INTO raw_hiv_treat.forecast_outputs (
-                user_id,
-                scenario_name,
-                ta_name,
-                market,
-                product,
-                metric,
-                factors,
-                forecast_data,
-                created_at,
-                updated_at
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s,
-                CURRENT_TIMESTAMP,
-                CURRENT_TIMESTAMP
-            )
-        """, (
-            user_id,
-            scenario_name,
-            ta,
-            market,
-            product,
-            "market_analysis",
-            Json(model_to_dict(payload.factors)),
-            Json(scenario_payload)
-        ))
-
-        conn.commit()
-
-    return {
-        "ta_name": ta,
-        "scenario_name": scenario_name,
-        "status": "scenario_saved"
-    }
-
-
-@router.get("/scenarios/{ta_name}")
-def get_saved_scenarios(ta_name: str):
-    ta = ta_name.replace("_", " ").strip()
-
-    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT DISTINCT scenario_name
-            FROM raw_hiv_treat.forecast_outputs
-            WHERE LOWER(REPLACE(TRIM(ta_name), '_', ' '))
-                  = LOWER(REPLACE(TRIM(%s), '_', ' '))
-              AND scenario_name IS NOT NULL
-            ORDER BY scenario_name
-        """, (ta,))
-
-        rows = cur.fetchall()
-
-    scenario_names = [r["scenario_name"] for r in rows]
-
-    available = list(dict.fromkeys(["Base"] + [
-        s for s in scenario_names
-        if s and s.lower() != "base"
-    ]))
-
-    return {
-        "ta_name": ta,
-        "available_scenarios": available
-    }
