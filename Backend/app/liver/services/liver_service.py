@@ -478,6 +478,263 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
+def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range, month_labels,
+                                  forecast_start_index, factors, tmv_fc,
+                                  selected_label=None, add_total=False):
+    """
+    Forecast each series' market share (%), normalize to 100 per period, then multiply
+    by TMV forecast to produce volume forecasts.  Historical values come from actual
+    volume data (vol_series_dict) so actuals are never touched.
+
+    selected_label: that label uses user factors on its share; all others use simple MA.
+    """
+    fsi = forecast_start_index
+    historical_months = month_range[:fsi]
+    forecast_count = len(month_range) - fsi
+
+    # ── Step 1: forecast the selected label's share directly ─────────────────
+    # When a label is explicitly selected, apply the user's model to that series
+    # and distribute the remainder proportionally to all other labels based on
+    # their last-training-period shares.  This avoids the normalization-denominator
+    # problem: if we normalize all forecasts together, simple-MA inflation on other
+    # series can depress the selected series below its base even when growth > 0.
+    labels = list(share_series_dict.keys())
+
+    # Collect last-training share for every label (used for remainder distribution)
+    last_train_share = {}
+    for label, share_map in share_series_dict.items():
+        vals = [float(share_map.get((y, m), 0)) for y, m in historical_months]
+        last_train_share[label] = vals[-1] if vals else 0.0
+
+    sel_fc_shares = {}   # final per-period share for each label
+
+    if selected_label is not None and selected_label in share_series_dict:
+        # -- Selected series: apply user's model directly --
+        sel_share_map = share_series_dict[selected_label]
+        sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in historical_months]
+        if not sel_train or all(v == 0 for v in sel_train):
+            sel_raw = [0.0] * forecast_count
+        else:
+            active = factors.active_model.lower()
+            if active == "ets":
+                a, b, g = (estimate_parameters(sel_train) if len(sel_train) >= 4
+                           else (0.30, 0.20, 0.98))
+                sel_raw = forecast_ets(sel_train, forecast_count, a, b, g, "nps")
+            elif active == "moving_average":
+                window = getattr(factors.moving_average, "window", 3) if factors.moving_average else 3
+                sel_raw = _forecast_moving_average(sel_train, forecast_count, window=window)
+            else:
+                f_params = getattr(factors, active, None)
+                base = sel_train[-1]
+                if f_params and hasattr(f_params, "total_growth"):
+                    sel_raw = forecast_linear(base, forecast_count,
+                                             f_params.total_growth, f_params.duration, "nps")
+                else:
+                    sel_raw = _simple_moving_average_forecast(sel_train, forecast_count, window=3)
+        sel_fc_shares[selected_label] = [min(100.0, max(0.0, v)) for v in sel_raw]
+
+        # -- Other series: distribute remainder proportionally --
+        other_labels = [l for l in labels if l != selected_label]
+        other_base_sum = sum(last_train_share.get(l, 0.0) for l in other_labels)
+        for i in range(forecast_count):
+            remainder = max(0.0, 100.0 - sel_fc_shares[selected_label][i])
+            for l in other_labels:
+                base_share = last_train_share.get(l, 0.0)
+                if other_base_sum > 0:
+                    sel_fc_shares[l] = sel_fc_shares.get(l, [])
+                    if len(sel_fc_shares[l]) == i:
+                        sel_fc_shares[l].append(remainder * base_share / other_base_sum)
+                else:
+                    sel_fc_shares.setdefault(l, []).append(0.0)
+                    if len(sel_fc_shares[l]) == i:
+                        sel_fc_shares[l].append(0.0)
+    else:
+        # No explicit selection — forecast all series with simple MA then normalize
+        raw_fc = {}
+        for label, share_map in share_series_dict.items():
+            share_train = [float(share_map.get((y, m), 0)) for y, m in historical_months]
+            if not share_train or all(v == 0 for v in share_train):
+                raw_fc[label] = [0.0] * forecast_count
+            else:
+                raw_fc[label] = _simple_moving_average_forecast(share_train, forecast_count, window=3)
+        for i in range(forecast_count):
+            total = sum(raw_fc[l][i] for l in raw_fc)
+            for l in raw_fc:
+                sel_fc_shares.setdefault(l, []).append(
+                    raw_fc[l][i] / total * 100.0 if total > 0 else 0.0
+                )
+
+    # Volume forecast = share% / 100 * TMV forecast
+    chart_series, table_rows = [], []
+    for label in share_series_dict:
+        vol_map   = vol_series_dict.get(label, {})
+        vol_train = [float(vol_map.get((y, m), 0)) for y, m in historical_months]
+        fc_share  = sel_fc_shares.get(label, [0.0] * forecast_count)
+        vol_fc    = [fc_share[i] / 100.0 * (tmv_fc[i] if i < len(tmv_fc) else 0.0)
+                     for i in range(forecast_count)]
+        chart_series.append(ChartSeries(label=label, train_values=vol_train, forecast_values=vol_fc))
+        table_rows.append(TableRow(hierarchy=label, values=vol_train + vol_fc))
+
+    if add_total and table_rows:
+        n = len(month_range)
+        total_vals = [0.0] * n
+        for row in table_rows:
+            for i, v in enumerate(row.values[:n]):
+                total_vals[i] += v
+        table_rows.insert(0, TableRow(hierarchy="Total", values=[round(v, 4) for v in total_vals]))
+
+    return TabData(
+        chart=TabChart(series=chart_series),
+        table=TabTable(headers=month_labels, rows=table_rows),
+    )
+
+
+def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, month_labels,
+                                               forecast_start_index, factors=None,
+                                               selected_child=None):
+    """
+    Build hierarchical tab data (Tab4/Tab5) by forecasting within-parent market shares,
+    normalizing within each parent to 100 %, then converting to volume using a simple
+    MA parent-volume estimate.  IPF (called after this) corrects absolute levels to
+    match Tab2/Tab3 constraints.
+
+    selected_child: the child label matching the UI filter — uses the user's projection
+    model on its within-parent share; all other children use simple MA.
+    """
+    fsi = forecast_start_index
+    historical_months = month_range[:fsi]
+    forecast_count = len(month_range) - fsi
+
+    # Group share rows: parent → child → {(year,month): share%}
+    grouped_ms = {}
+    for r in rows_ms:
+        key = (r[0], r[1])
+        parent, child = r[2], r[3]
+        val = float(r[4]) if r[4] is not None else 0.0
+        grouped_ms.setdefault(parent, {}).setdefault(child, {})[key] = val
+
+    # Group volume rows: parent → child → {(year,month): volume}
+    grouped_mv = {}
+    for r in rows_mv:
+        key = (r[0], r[1])
+        parent, child = r[2], r[3]
+        val = float(r[4]) if r[4] is not None else 0.0
+        grouped_mv.setdefault(parent, {}).setdefault(child, {})[key] = val
+
+    chart_series, table_rows = [], []
+
+    for parent, children_ms in grouped_ms.items():
+        children_mv = grouped_mv.get(parent, {})
+
+        # Forecast within-parent share for each child.
+        # Same approach as _build_tab_data_from_shares: when a child is selected,
+        # apply the user model directly; distribute remainder to others proportionally
+        # from their last-training shares (avoids denominator-inflation dip).
+        child_list = list(children_ms.keys())
+        last_child_share = {}
+        for child, share_map in children_ms.items():
+            vals = [float(share_map.get((y, m), 0)) for y, m in historical_months]
+            last_child_share[child] = vals[-1] if vals else 0.0
+
+        norm_shares = {}  # final per-period within-parent share for each child
+
+        if selected_child is not None and selected_child in children_ms and factors is not None:
+            sel_share_map = children_ms[selected_child]
+            sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in historical_months]
+            if not sel_train or all(v == 0 for v in sel_train):
+                sel_child_fc = [0.0] * forecast_count
+            else:
+                active = factors.active_model.lower()
+                if active == "ets":
+                    a, b, g = (estimate_parameters(sel_train) if len(sel_train) >= 4
+                               else (0.30, 0.20, 0.98))
+                    sel_child_fc = forecast_ets(sel_train, forecast_count, a, b, g, "nps")
+                elif active == "moving_average":
+                    window = getattr(factors.moving_average, "window", 3) if factors.moving_average else 3
+                    sel_child_fc = _forecast_moving_average(sel_train, forecast_count, window=window)
+                else:
+                    f_params = getattr(factors, active, None)
+                    base = sel_train[-1]
+                    if f_params and hasattr(f_params, "total_growth"):
+                        sel_child_fc = forecast_linear(base, forecast_count,
+                                                       f_params.total_growth, f_params.duration, "nps")
+                    else:
+                        sel_child_fc = _simple_moving_average_forecast(sel_train, forecast_count, window=3)
+            norm_shares[selected_child] = [min(100.0, max(0.0, v)) for v in sel_child_fc]
+
+            other_children = [c for c in child_list if c != selected_child]
+            other_base_sum = sum(last_child_share.get(c, 0.0) for c in other_children)
+            for i in range(forecast_count):
+                remainder = max(0.0, 100.0 - norm_shares[selected_child][i])
+                for c in other_children:
+                    base_s = last_child_share.get(c, 0.0)
+                    val = remainder * base_s / other_base_sum if other_base_sum > 0 else 0.0
+                    norm_shares.setdefault(c, []).append(val)
+        else:
+            # No selection: simple MA for all, then normalize within parent
+            raw_shares = {}
+            for child, share_map in children_ms.items():
+                share_train = [float(share_map.get((y, m), 0)) for y, m in historical_months]
+                if not share_train or all(v == 0 for v in share_train):
+                    raw_shares[child] = [0.0] * forecast_count
+                else:
+                    raw_shares[child] = _simple_moving_average_forecast(share_train, forecast_count, window=3)
+            for i in range(forecast_count):
+                total = sum(raw_shares[c][i] for c in raw_shares)
+                for c in raw_shares:
+                    norm_shares.setdefault(c, []).append(
+                        raw_shares[c][i] / total * 100.0 if total > 0 else 0.0
+                    )
+
+        # Parent volume history = sum of children's actual volumes
+        parent_vol_by_period = {}
+        for child_mv in children_mv.values():
+            for k, v in child_mv.items():
+                parent_vol_by_period[k] = parent_vol_by_period.get(k, 0.0) + v
+        parent_vol_train = [float(parent_vol_by_period.get((y, m), 0)) for y, m in historical_months]
+
+        # Parent volume forecast placeholder: simple MA of parent history
+        # (IPF will correct this to match Tab3/Tab2 row/column targets)
+        if parent_vol_train and not all(v == 0 for v in parent_vol_train):
+            parent_vol_fc = _simple_moving_average_forecast(parent_vol_train, forecast_count, window=3)
+        else:
+            parent_vol_fc = [0.0] * forecast_count
+
+        # Child volume = normalized share% / 100 * parent volume forecast
+        child_trains, child_forecasts, child_items = [], [], []
+        for child in children_ms:
+            vol_map = children_mv.get(child, {})
+            child_train = [float(vol_map.get((y, m), 0)) for y, m in historical_months]
+            fc_share = norm_shares.get(child, [0.0] * forecast_count)
+            child_fc = [fc_share[i] / 100.0 * parent_vol_fc[i] for i in range(forecast_count)]
+            child_trains.append(child_train)
+            child_forecasts.append(child_fc)
+            child_items.append((child, child_train, child_fc))
+
+        n_tr = max((len(t) for t in child_trains), default=0)
+        n_fc = max((len(f) for f in child_forecasts), default=0)
+        parent_train_agg = [sum(t[i] if i < len(t) else 0 for t in child_trains) for i in range(n_tr)]
+        parent_fc_agg    = [sum(f[i] if i < len(f) else 0 for f in child_forecasts) for i in range(n_fc)]
+
+        chart_series.append(ChartSeries(label=parent, train_values=parent_train_agg,
+                                         forecast_values=parent_fc_agg))
+        child_rows = []
+        for child, child_train, child_fc in child_items:
+            chart_series.append(ChartSeries(label=f"{parent} - {child}",
+                                             train_values=child_train, forecast_values=child_fc))
+            child_rows.append(ChildRow(label=child, values=child_train + child_fc))
+
+        table_rows.append(HierarchicalRow(
+            hierarchy=parent,
+            total=parent_train_agg + parent_fc_agg,
+            children=child_rows,
+        ))
+
+    return HierarchicalTabData(
+        chart=TabChart(series=chart_series),
+        table=HierarchicalTabTable(headers=month_labels, rows=table_rows),
+    )
+
 
 def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -> dict:
     """Return full oncology-format factors dict for the API response."""
@@ -782,20 +1039,24 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         pwpy_ms = get_product_wise_payer(cur, ta, from_year, from_month, train_end_year, train_end_month, None, "market_share")
 
     # TMV forecast values used to scale Tabs 2-5.
-    # When Tab 1 is forced to ETS (first load), derive the scaling target from a rolling
-    # moving average of the training data instead of the ETS forecast. This keeps
-    # Tabs 2-5 self-consistent on MA without inheriting ETS seasonal fluctuations
-    # through _scale_flat_to_tmv / IPF.
-    if force_tab1_ets:
-        _fc_count = n - fsi
-        _tmv_fc = _forecast_moving_average(_tmv_values, _fc_count, window=6)
-    else:
-        _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
+    # Always use Tab1's ETS forecast as the TMV multiplier for Tabs 2-5.
+    # share-based flow: volume = share% × ETS_TMV; _recompute_all_market_shares then divides
+    # by the same ETS_TMV, so recomputed share == forecasted share exactly. Using a different
+    # TMV here (e.g. rolling MA) would cause a ratio mismatch and distort displayed shares.
+    _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
 
-    def bflat_mv(rows, label, to_int=False):
-        tab_data = _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
-                                   selected_label=label, auto_model=auto_model, add_total=True)
-        _scale_flat_to_tmv(tab_data, _tmv_fc, fsi)
+    def bflat_mv(rows_mv, rows_ms, label, to_int=False):
+        tab_data = _build_tab_data_from_shares(
+            share_series_dict=_rows_to_series(rows_ms, 2, 3),
+            vol_series_dict=_rows_to_series(rows_mv, 2, 3),
+            month_range=month_range,
+            month_labels=month_labels,
+            forecast_start_index=fsi,
+            factors=factors,
+            tmv_fc=_tmv_fc,
+            selected_label=label,
+            add_total=True,
+        )
         return _fmt_flat(tab_data, month_labels, fsi, to_int=to_int)
 
     def bflat_ms(rows, label):
@@ -805,16 +1066,23 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             month_labels, fsi,
         )
 
-    def bhier_mv(rows, parent_lbl, child_lbl, to_int=False):
-        hier_data = _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                                 selected_parent="", selected_child="",
-                                                 auto_model=auto_model)
+    def bhier_mv(rows_mv, rows_ms, parent_lbl, child_lbl, to_int=False):
+        hier_data = _build_hierarchical_tab_data_from_shares(
+            rows_ms=rows_ms,
+            rows_mv=rows_mv,
+            month_range=month_range,
+            month_labels=month_labels,
+            forecast_start_index=fsi,
+            factors=factors,
+            selected_child=child_lbl,
+        )
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
 
     def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
             _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
-                                         selected_parent="", selected_child="",
+                                         selected_parent=parent_lbl or "",
+                                         selected_child=child_lbl or "",
                                          auto_model=auto_model),
             month_labels, fsi, chart_parent_filter=parent_lbl,
         )
@@ -825,27 +1093,26 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             "market_share":  tab1_ms,
         },
         "product_distribution": {
-            "market_volume": bflat_mv(pd_mv,  tab2_label, to_int=True),
-            "market_share":  bflat_ms(pd_ms,  tab2_label),
+            "market_volume": bflat_mv(pd_mv,   pd_ms,   tab2_label, to_int=True),
+            "market_share":  bflat_ms(pd_ms,   tab2_label),
         },
         "market_distribution": {
-            "market_volume": bflat_mv(pyd_mv, tab3_label, to_int=True),
-            "market_share":  bflat_ms(pyd_ms, tab3_label),
+            "market_volume": bflat_mv(pyd_mv,  pyd_ms,  tab3_label, to_int=True),
+            "market_share":  bflat_ms(pyd_ms,  tab3_label),
         },
         "payer_product": {
-            "market_volume": bhier_mv(pwp_mv,  tab3_label, tab2_label, to_int=True),
+            "market_volume": bhier_mv(pwp_mv,  pwp_ms,  tab3_label, tab2_label, to_int=True),
             "market_share":  bhier_ms(pwp_ms,  tab3_label, tab2_label),
         },
         "product_payer": {
-            "market_volume": bhier_mv(pwpy_mv, tab2_label, tab3_label, to_int=True),
+            "market_volume": bhier_mv(pwpy_mv, pwpy_ms, tab2_label, tab3_label, to_int=True),
             "market_share":  bhier_ms(pwpy_ms, tab2_label, tab3_label),
         },
     }
 
     # Align Tab4 (payer_product) and Tab5 (product_payer) so their parent totals match
     # Tab2 (product_distribution) and Tab3 (market_distribution) respectively.
-    # bflat_mv scales Tab2/Tab3 forecasts via _scale_flat_to_tmv; bhier_mv has no
-    # such scaling, so IPF bridges the gap and ensures all tabs are self-consistent.
+    # Tab2/Tab3 forecast from share → volume; IPF corrects Tab4/Tab5 absolute levels.
     _tab2_mv_rows = market_analysis["product_distribution"]["market_volume"]["table"]["rows"]
     _tab3_mv_rows = market_analysis["market_distribution"]["market_volume"]["table"]["rows"]
     _tab4_mv = market_analysis["payer_product"]["market_volume"]
