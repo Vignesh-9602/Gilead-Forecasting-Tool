@@ -952,7 +952,7 @@ export default function PBCModelInput() {
       start_date: resolveFromDate(),
       end_date: toDate || "",
     },
-    scenario_name: scenarioSelector || "Base",
+    scenario_name:currentlyAppliedScenario || scenarioSelector || "Base",
     model_type: modelSelection,
     factors: buildFullFactors(),
   });
@@ -1000,7 +1000,7 @@ export default function PBCModelInput() {
       "Base";
 
     // Resolve full market_analysis for the active scenario
-    let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis;
+    let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis || {};
     if (!fullMarketAnalysis && liverRawData?.scenarios) {
       const matchedKey = Object.keys(liverRawData.scenarios).find(
         (k) => k.toLowerCase() === sourceScenario.toLowerCase()
