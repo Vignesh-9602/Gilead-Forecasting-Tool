@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useMemo, useRef } from "react";
+​import React, { useState, useEffect, useContext, useMemo, useRef } from "react";
 import {
   Box,
   Paper,
@@ -266,7 +266,7 @@ export default function PBCModelInput() {
   const [totalGrowth, setTotalGrowth] = useState(10);
   const [duration, setDuration] = useState(12);
   const [kValue, setKValue] = useState(1);
-  const [windowSize, setWindowSize] = useState(3);
+  const [windowSize, setWindowSize] = useState(6);
   const [multiplier, setMultiplier] = useState(1.0);
   const [multiplierHorizon, setMultiplierHorizon] = useState("Forecast");
   const [trajectoryStart, setTrajectoryStart] = useState("");
@@ -438,7 +438,7 @@ export default function PBCModelInput() {
       if (x == null || x === "") return null;
       const n = Number(x);
       if (Number.isNaN(n)) return null;
-      if (asPercent && Math.abs(n) <= 1) return n * 100;
+      
       return n;
     };
     const parseValues = (v, asPercent = false) => {
@@ -938,6 +938,9 @@ export default function PBCModelInput() {
       trajectory_start: trajectoryStart,
       k_value: Number(kValue),
     },
+    moving_average: {
+      window: Math.max(3, Number(windowSize)),
+    },
     active_model: modelSelection,
   });
 
@@ -1194,7 +1197,7 @@ export default function PBCModelInput() {
         ? modelSelection === "linear"     // switching TO total_market, was linear
         : modelSelection === "ets";       // switching AWAY from total_market, was ets
     if (isDefaultForOtherTab && modelSelection) {
-      const newDefault = activeTab === "total_market" ? "ets" : "linear";
+      const newDefault = activeTab === "total_market" ? "ets" : "moving_average";
       setModelSelection(newDefault);
     }
 
@@ -1603,7 +1606,7 @@ export default function PBCModelInput() {
   //   - A concrete non-null value from the backend is always respected.
   const resolveModelForTab = (backendModel) => {
     if (!backendModel) {
-      return activeTab === "total_market" ? "ets" : "linear";
+      return activeTab === "total_market" ? "ets" : "moving_average";
     }
     // If we're NOT on total_market and the backend explicitly returned "ets",
     // honour it — the user may have saved an ETS scenario on another tab.
@@ -2940,10 +2943,10 @@ export default function PBCModelInput() {
                     disabled={!editable}
                     onChange={(e) => {
                       const v = e.target.value;
-                      if (v === "" || (Number(v) >= 1 && Number(v) <= 24))
+                      if (v === "" || (Number(v) >= 3 && Number(v) <= 24))
                         setWindowSize(v);
                     }}
-                    inputProps={{ min: 1, max: 24, step: 1 }}
+                    inputProps={{ min: 3, max: 24, step: 1 }}
                     sx={recalculateInputStyle}
                   />
                 </Box>
@@ -3491,27 +3494,28 @@ export default function PBCModelInput() {
                     Editing...
                   </Box>
                 ) : (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={handleEnterTableEdit}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                      borderRadius: "6px",
-                      borderColor: "#e2e8f0",
-                      color: "#3d89f3",
-                      px: 1.5,
-                      "&:hover": {
-                        borderColor: "#cbd5e1",
-                        backgroundColor: "#f8fafc",
-                      },
-                    }}
-                  >
-                    Edit Changes
-                  </Button>
-                )}
+  <Button
+    size="small"
+    variant="outlined"
+    onClick={handleEnterTableEdit}
+    disabled={activeTab !== "total_market" && metric === "market_volume"}
+    sx={{
+      textTransform: "none",
+      fontSize: "12px",
+      fontWeight: 600,
+      borderRadius: "6px",
+      borderColor: "#e2e8f0",
+      color: "#3d89f3",
+      px: 1.5,
+      "&:hover": {
+        borderColor: "#cbd5e1",
+        backgroundColor: "#f8fafc",
+      },
+    }}
+  >
+    Edit Changes
+  </Button>
+)}
 
                 {tableEditing && (
                   <Button
