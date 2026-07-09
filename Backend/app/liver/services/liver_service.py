@@ -478,6 +478,38 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
+def _forecast_share_by_factors(train_values: list, forecast_count: int, factors) -> list:
+    """Apply the user's active model to a share (%) training series.
+    MA window is clamped to a minimum of 3.
+    """
+    if not train_values or all(v == 0 for v in train_values):
+        return [0.0] * forecast_count
+    active = factors.active_model.lower()
+    base   = train_values[-1]
+    if active == "ets":
+        a, b, g = (estimate_parameters(train_values) if len(train_values) >= 4
+                   else (0.30, 0.20, 0.98))
+        return forecast_ets(train_values, forecast_count, a, b, g, "nps")
+    if active == "moving_average":
+        window = max(3, getattr(factors.moving_average, "window", 6) if factors.moving_average else 6)
+        return _forecast_moving_average(train_values, forecast_count, window=window)
+    f_params = getattr(factors, active, None)
+    if f_params is None or not hasattr(f_params, "total_growth"):
+        return _simple_moving_average_forecast(train_values, forecast_count, window=6)
+    tg  = f_params.total_growth
+    dur = f_params.duration
+    k   = getattr(f_params, "k_value", None)
+    if active == "linear":
+        return forecast_linear(base, forecast_count, tg, dur, "nps")
+    if active == "exponential":
+        return forecast_exponential(base, forecast_count, tg, dur, k, "nps")
+    if active == "logarithmic":
+        return forecast_logarithmic(base, forecast_count, tg, dur, k, "nps")
+    if active == "scurve":
+        return forecast_s_curve(base, forecast_count, tg, dur, k, "nps")
+    return _simple_moving_average_forecast(train_values, forecast_count, window=6)
+
+
 def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range, month_labels,
                                   forecast_start_index, factors, tmv_fc,
                                   selected_label=None, add_total=False):
@@ -512,51 +544,27 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
         # -- Selected series: apply user's model directly --
         sel_share_map = share_series_dict[selected_label]
         sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in historical_months]
-        if not sel_train or all(v == 0 for v in sel_train):
-            sel_raw = [0.0] * forecast_count
-        else:
-            active = factors.active_model.lower()
-            if active == "ets":
-                a, b, g = (estimate_parameters(sel_train) if len(sel_train) >= 4
-                           else (0.30, 0.20, 0.98))
-                sel_raw = forecast_ets(sel_train, forecast_count, a, b, g, "nps")
-            elif active == "moving_average":
-                window = getattr(factors.moving_average, "window", 3) if factors.moving_average else 3
-                sel_raw = _forecast_moving_average(sel_train, forecast_count, window=window)
-            else:
-                f_params = getattr(factors, active, None)
-                base = sel_train[-1]
-                if f_params and hasattr(f_params, "total_growth"):
-                    sel_raw = forecast_linear(base, forecast_count,
-                                             f_params.total_growth, f_params.duration, "nps")
-                else:
-                    sel_raw = _simple_moving_average_forecast(sel_train, forecast_count, window=3)
+        sel_raw = _forecast_share_by_factors(sel_train, forecast_count, factors)
         sel_fc_shares[selected_label] = [min(100.0, max(0.0, v)) for v in sel_raw]
 
-        # -- Other series: distribute remainder proportionally --
+        # -- Other series: distribute remainder proportionally from last training shares --
         other_labels = [l for l in labels if l != selected_label]
         other_base_sum = sum(last_train_share.get(l, 0.0) for l in other_labels)
+        for l in other_labels:
+            sel_fc_shares[l] = []
         for i in range(forecast_count):
             remainder = max(0.0, 100.0 - sel_fc_shares[selected_label][i])
             for l in other_labels:
                 base_share = last_train_share.get(l, 0.0)
-                if other_base_sum > 0:
-                    sel_fc_shares[l] = sel_fc_shares.get(l, [])
-                    if len(sel_fc_shares[l]) == i:
-                        sel_fc_shares[l].append(remainder * base_share / other_base_sum)
-                else:
-                    sel_fc_shares.setdefault(l, []).append(0.0)
-                    if len(sel_fc_shares[l]) == i:
-                        sel_fc_shares[l].append(0.0)
+                sel_fc_shares[l].append(
+                    remainder * base_share / other_base_sum if other_base_sum > 0 else 0.0
+                )
     else:
-        # No explicit selection — forecast all series with simple MA then normalize
+        # No explicit selection — apply user's model to every series then normalize
         raw_fc = {}
         for label, share_map in share_series_dict.items():
             share_train = [float(share_map.get((y, m), 0)) for y, m in historical_months]
-            if not share_train or all(v == 0 for v in share_train):
-                raw_fc[label] = [0.0] * forecast_count
-            else:
-                raw_fc[label] = _simple_moving_average_forecast(share_train, forecast_count, window=3)
+            raw_fc[label] = _forecast_share_by_factors(share_train, forecast_count, factors)
         for i in range(forecast_count):
             total = sum(raw_fc[l][i] for l in raw_fc)
             for l in raw_fc:
@@ -641,44 +649,30 @@ def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, mont
         if selected_child is not None and selected_child in children_ms and factors is not None:
             sel_share_map = children_ms[selected_child]
             sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in historical_months]
-            if not sel_train or all(v == 0 for v in sel_train):
-                sel_child_fc = [0.0] * forecast_count
-            else:
-                active = factors.active_model.lower()
-                if active == "ets":
-                    a, b, g = (estimate_parameters(sel_train) if len(sel_train) >= 4
-                               else (0.30, 0.20, 0.98))
-                    sel_child_fc = forecast_ets(sel_train, forecast_count, a, b, g, "nps")
-                elif active == "moving_average":
-                    window = getattr(factors.moving_average, "window", 3) if factors.moving_average else 3
-                    sel_child_fc = _forecast_moving_average(sel_train, forecast_count, window=window)
-                else:
-                    f_params = getattr(factors, active, None)
-                    base = sel_train[-1]
-                    if f_params and hasattr(f_params, "total_growth"):
-                        sel_child_fc = forecast_linear(base, forecast_count,
-                                                       f_params.total_growth, f_params.duration, "nps")
-                    else:
-                        sel_child_fc = _simple_moving_average_forecast(sel_train, forecast_count, window=3)
+            sel_child_fc = _forecast_share_by_factors(sel_train, forecast_count, factors)
             norm_shares[selected_child] = [min(100.0, max(0.0, v)) for v in sel_child_fc]
 
             other_children = [c for c in child_list if c != selected_child]
             other_base_sum = sum(last_child_share.get(c, 0.0) for c in other_children)
+            for c in other_children:
+                norm_shares[c] = []
             for i in range(forecast_count):
                 remainder = max(0.0, 100.0 - norm_shares[selected_child][i])
                 for c in other_children:
                     base_s = last_child_share.get(c, 0.0)
-                    val = remainder * base_s / other_base_sum if other_base_sum > 0 else 0.0
-                    norm_shares.setdefault(c, []).append(val)
+                    norm_shares[c].append(
+                        remainder * base_s / other_base_sum if other_base_sum > 0 else 0.0
+                    )
         else:
-            # No selection: simple MA for all, then normalize within parent
+            # No selection: apply user's model to every child then normalize within parent
             raw_shares = {}
             for child, share_map in children_ms.items():
                 share_train = [float(share_map.get((y, m), 0)) for y, m in historical_months]
-                if not share_train or all(v == 0 for v in share_train):
-                    raw_shares[child] = [0.0] * forecast_count
-                else:
-                    raw_shares[child] = _simple_moving_average_forecast(share_train, forecast_count, window=3)
+                raw_shares[child] = (
+                    _forecast_share_by_factors(share_train, forecast_count, factors)
+                    if factors is not None
+                    else _simple_moving_average_forecast(share_train, forecast_count, window=6)
+                )
             for i in range(forecast_count):
                 total = sum(raw_shares[c][i] for c in raw_shares)
                 for c in raw_shares:
