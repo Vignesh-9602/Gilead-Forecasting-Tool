@@ -1,15 +1,38 @@
-def build_chart_from_table(table):
+def build_chart_from_table(table, existing_chart=None):
 
-    chart = {
-        "series": []
-    }
+    chart = {}
+
+    forecast_start_index = None
+
+    if existing_chart:
+
+        if "months" in existing_chart:
+            chart["months"] = existing_chart["months"]
+
+        if "forecast_start_index" in existing_chart:
+            forecast_start_index = existing_chart["forecast_start_index"]
+            chart["forecast_start_index"] = forecast_start_index
+
+    chart["series"] = []
 
     for row in table["rows"]:
 
-        series = {
-            "label": row["label"],
-            "history": row["values"].copy()
-        }
+        values = row["values"]
+
+        if forecast_start_index is not None:
+
+            series = {
+                "label": row["label"],
+                "history": values[:forecast_start_index],
+                "forecast": values[forecast_start_index:]
+            }
+
+        else:
+
+            series = {
+                "label": row["label"],
+                "history": values.copy()
+            }
 
         if "children" in row:
 
@@ -17,10 +40,24 @@ def build_chart_from_table(table):
 
             for child in row["children"]:
 
-                series["children"].append({
-                    "label": child["label"],
-                    "history": child["values"].copy()
-                })
+                child_values = child["values"]
+
+                if forecast_start_index is not None:
+
+                    child_series = {
+                        "label": child["label"],
+                        "history": child_values[:forecast_start_index],
+                        "forecast": child_values[forecast_start_index:]
+                    }
+
+                else:
+
+                    child_series = {
+                        "label": child["label"],
+                        "history": child_values.copy()
+                    }
+
+                series["children"].append(child_series)
 
         chart["series"].append(series)
 
