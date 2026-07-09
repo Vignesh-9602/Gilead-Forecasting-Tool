@@ -454,7 +454,7 @@ function CurvePreviewChart({ events }) {
 
 // ── Constants for tab section ─────────────────────────────────────────────────
 const EVENT_TABS = [
-  { label: "Payer Event",  value: "payer_event"  },
+  { label: "Market Event",  value: "market_event"  },
   { label: "Product Event", value: "product_event" },
   { label: "Overall Event", value: "overall_event" },
 ];
@@ -703,7 +703,7 @@ function ImpactCurveSection() {
   const headers = isOverallEvent
     ? ["Overall Event","Start Date","Peak %","Months","Curve","Factor","Coverage","Coverage Peak %","Coverage Peak Months",""]
     : [
-        isMarketEvent ? "Payer Event" : "Product Event",
+        isMarketEvent ? "Market Event" : "Product Event",
         "Products","Markets",
         isMarketEvent ? "Impacted Markets" : "Impacted Products",
         "Start Date","Peak %","Months","Curve","Factor","Coverage",
@@ -715,285 +715,291 @@ function ImpactCurveSection() {
 
   return (
     <>
-      {/* ── Tabs — Box sx={{ mt:3 }} inside Paper, outside Accordion ── */}
-      <div style={{ marginTop: 24, borderBottom: "1px solid #e2e8f0" }}>
-        <div style={{ display: "flex" }}>
-          {EVENT_TABS.map((tab) => {
-            const active = tab.value === activeTab;
-            return (
-              <button
-                key={tab.value}
-                onClick={() => setActiveTab(tab.value)}
-                style={{
-                  padding: "12px 16px",
-                  fontSize: 14,
-                  fontWeight: active ? 700 : 500,
-                  color: active ? "#4F46E5" : "#64748b",
-                  background: "none",
-                  border: "none",
-                  borderBottom: active ? "2px solid #4F46E5" : "2px solid transparent",
-                  marginBottom: -1,
-                  cursor: "pointer",
-                  textTransform: "none",
-                  letterSpacing: 0,
-                  transition: "color 0.15s",
-                }}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Accordion — mt:2, border #D8DEE8, borderRadius 12px, no shadow ── */}
+      {/* Single Paper wrapping both Tabs + Accordion — matches HIV source: same Paper card */}
       <div style={{
-        marginTop: 16,
-        borderRadius: 12,
-        border: "1px solid #D8DEE8",
-        overflow: "hidden",
-        boxShadow: "none",
         background: "#fff",
+        borderRadius: 16,
+        border: "1px solid #D8DEE8",
+        boxShadow: "none",
+        padding: 24,
       }}>
 
-        {/* AccordionSummary — expand icon on left via ExpandMoreIcon, title + buttons ── */}
-        <div
-          style={{
-            display: "flex", alignItems: "center", gap: 8,
-            padding: "14px 16px",
-            cursor: "pointer",
-            background: "#fff",
-            borderBottom: collapsed ? "none" : "1px solid #e2e8f0",
-            userSelect: "none",
-          }}
-          onClick={() => setCollapsed((c) => !c)}
-        >
-          {/* ExpandMoreIcon equivalent — rotates when collapsed */}
-          <span style={{
-            display: "inline-flex", alignItems: "center", justifyContent: "center",
-            width: 24, height: 24, color: "#64748b",
-            transition: "transform 0.2s",
-            transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
-            fontSize: 20, flexShrink: 0,
-          }}>
-            ▾
-          </span>
-
-          {/* Title + action buttons — justifyContent: space-between, width: 100% ── */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: "#1e293b" }}>
-              Impact Curve Configuration
-            </span>
-            <div style={{ display: "flex", gap: 12 }} onClick={(e) => e.stopPropagation()}>
-              <button style={{
-                height: 33, padding: "0 12px", background: "#4F46E5", color: "#fff",
-                border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
-                cursor: "pointer", textTransform: "none",
-              }}>
-                Run Calculation
-              </button>
-              <button onClick={handleAdd} style={{
-                height: 33, padding: "0 12px", background: "#4F46E5", color: "#fff",
-                border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
-                cursor: "pointer", whiteSpace: "nowrap", textTransform: "none",
-              }}>
-                + Add New Event
-              </button>
-            </div>
+        {/* Tabs — Box sx={{ mt: 3 }} in source (but we're inside padding so mt:0) */}
+        <div style={{ borderBottom: "1px solid #e0e0e0" }}>
+          <div style={{ display: "flex" }}>
+            {EVENT_TABS.map((tab) => {
+              const active = tab.value === activeTab;
+              return (
+                <button
+                  key={tab.value}
+                  onClick={() => setActiveTab(tab.value)}
+                  style={{
+                    padding: "12px 16px",
+                    fontSize: 14,
+                    fontWeight: active ? 600 : 400,
+                    color: active ? "#4F46E5" : "rgba(0,0,0,0.6)",
+                    background: "none",
+                    border: "none",
+                    borderBottom: active ? "2px solid #4F46E5" : "2px solid transparent",
+                    marginBottom: -1,
+                    cursor: "pointer",
+                    letterSpacing: "0.02857em",
+                    lineHeight: 1.25,
+                    minWidth: 90,
+                    textTransform: "uppercase",
+                    transition: "color 0.15s",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* AccordionDetails → nested Paper for the table ── */}
-        {!collapsed && (
-          <div style={{ padding: "16px 16px 16px" }}>
-            <div style={{
-              marginTop: 8,
-              border: "1px solid #D8DEE8",
-              borderRadius: 12,
-              overflowX: "auto",
-              overflowY: "auto",
-              maxHeight: 380,
-              boxShadow: "none",
+        {/* Accordion — mt:2 (16px), border #D8DEE8, borderRadius 12px, no shadow */}
+        <div style={{
+          marginTop: 16,
+          borderRadius: 12,
+          border: "1px solid #D8DEE8",
+          overflow: "hidden",
+          boxShadow: "none",
+          background: "#fff",
+        }}>
+
+          {/* AccordionSummary — minHeight 48px, padding "0 16px", expand icon left */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              minHeight: 48,
+              padding: "0 16px",
+              cursor: "pointer",
+              background: "#fff",
+              borderBottom: collapsed ? "none" : "1px solid #e2e8f0",
+              userSelect: "none",
+              boxSizing: "border-box",
+            }}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            <span style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              width: 24, height: 24, color: "#64748b", fontSize: 20, flexShrink: 0,
+              marginRight: 8, transition: "transform 0.2s",
+              transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
             }}>
-              <div style={{ minWidth: isOverallEvent ? 900 : 1450 }}>
-
-                {/* ── Header — bg #f8fafc, gap:2(16px), px:2(16px), py:1.5(12px), border-bottom #D8DEE8 ── */}
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: gridCols,
-                  gap: 16,
-                  padding: "12px 16px",
-                  backgroundColor: "#f8fafc",
-                  borderBottom: "1px solid #D8DEE8",
+              ▾
+            </span>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "12px 0" }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: "#1e293b" }}>
+                Impact Curve Configuration
+              </span>
+              <div style={{ display: "flex", gap: 12 }} onClick={(e) => e.stopPropagation()}>
+                <button style={{
+                  height: 33, padding: "0 12px", background: "#4F46E5", color: "#fff",
+                  border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                  cursor: "pointer",
                 }}>
-                  {headers.map((h, i) => (
-                    <div key={i} style={{ fontSize: 13, fontWeight: 700, color: "#64748b" }}>
-                      {h}
-                    </div>
-                  ))}
-                </div>
-
-                {/* ── Data rows — gap:2(16px), px:2(16px), py:1.5(12px), no alternating bg ── */}
-                {rows.map((row, idx) => (
-                  <div
-                    key={row.id}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: gridCols,
-                      gap: 16,
-                      padding: "12px 16px",
-                      alignItems: "center",
-                      borderBottom: idx < rows.length - 1 ? "1px solid #f1f5f9" : "none",
-                      background: "#fff",
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "#f8fafc")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}
-                  >
-                    {/* ── MARKET / PRODUCT EVENT columns ── */}
-                    {(isMarketEvent || isProductEvent) && (<>
-                      <div style={cellStyle}>
-                        <input value={row.event_name}
-                          placeholder={isMarketEvent ? "Payer Event" : "Product Event"}
-                          onChange={(e) => handleRowChange(idx, "event_name", e.target.value)}
-                          style={tblInp}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")}
-                          onBlur={(e)  => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <TblMultiSelect value={row.products} onChange={(v) => handleRowChange(idx, "products", v)}
-                          options={PRODUCT_OPTIONS} placeholder="Select" />
-                      </div>
-                      <div style={cellStyle}>
-                        <TblMultiSelect value={row.markets} onChange={(v) => handleRowChange(idx, "markets", v)}
-                          options={PAYER_OPTIONS} placeholder="Select" />
-                      </div>
-                      <div style={cellStyle}>
-                        <button
-                          onClick={() => { setImpactIdx(idx); setOpenImpact(true); }}
-                          style={{
-                            height: 32, padding: "0 12px", background: "#fff",
-                            border: "1px solid #4F46E5", borderRadius: 6,
-                            fontSize: 12, fontWeight: 600, color: "#4F46E5",
-                            cursor: "pointer", whiteSpace: "nowrap", textTransform: "none",
-                          }}
-                          onMouseEnter={(e) => (e.currentTarget.style.background = "#eef2ff")}
-                          onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}>
-                          Edit Source
-                        </button>
-                      </div>
-                      <div style={cellStyle}>
-                        <TblSelect value={row.start_date} onChange={(v) => handleRowChange(idx, "start_date", v)}
-                          options={AVAILABLE_MONTHS_OPTS.map((m) => ({ value: m, label: fmtMonth(m) }))} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.peak_percent} onChange={(e) => handleRowChange(idx, "peak_percent", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.months} onChange={(e) => handleRowChange(idx, "months", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <TblSelect value={row.curve_type} onChange={(v) => handleRowChange(idx, "curve_type", v)} options={CURVE_TYPES} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.factor} disabled={row.curve_type === "Linear"}
-                          onChange={(e) => handleRowChange(idx, "factor", e.target.value)}
-                          style={{ ...tblInp, opacity: row.curve_type === "Linear" ? 0.45 : 1 }}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      {/* Coverage toggle — Switch for Product, dash for Market ── */}
-                      <div style={{ ...cellStyle, justifyContent: "center" }}>
-                        {isProductEvent ? (
-                          <div
-                            onClick={() => handleRowChange(idx, "enable_coverage", !row.enable_coverage)}
-                            style={{
-                              width: 36, height: 20, borderRadius: 10, cursor: "pointer",
-                              background: row.enable_coverage ? "#4F46E5" : "#e2e8f0",
-                              position: "relative", flexShrink: 0, transition: "background .2s",
-                            }}>
-                            <div style={{
-                              position: "absolute", top: 2, left: row.enable_coverage ? 18 : 2,
-                              width: 16, height: 16, borderRadius: "50%", background: "#fff",
-                              transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
-                            }} />
-                          </div>
-                        ) : (
-                          <span style={{ fontSize: 11, color: "#94a3b8" }}>—</span>
-                        )}
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.coverage_peak_percent}
-                          disabled={isProductEvent ? !row.enable_coverage : false}
-                          onChange={(e) => handleRowChange(idx, "coverage_peak_percent", e.target.value)}
-                          style={{ ...tblInp, opacity: (isProductEvent && !row.enable_coverage) ? 0.45 : 1 }}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.coverage_peak_months}
-                          disabled={isProductEvent ? !row.enable_coverage : false}
-                          onChange={(e) => handleRowChange(idx, "coverage_peak_months", e.target.value)}
-                          style={{ ...tblInp, opacity: (isProductEvent && !row.enable_coverage) ? 0.45 : 1 }}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                    </>)}
-
-                    {/* ── OVERALL EVENT columns ── */}
-                    {isOverallEvent && (<>
-                      <div style={cellStyle}>
-                        <input value={row.event_name} placeholder="Overall Event"
-                          onChange={(e) => handleRowChange(idx, "event_name", e.target.value)}
-                          style={tblInp}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <TblSelect value={row.start_date} onChange={(v) => handleRowChange(idx, "start_date", v)}
-                          options={AVAILABLE_MONTHS_OPTS.map((m) => ({ value: m, label: fmtMonth(m) }))} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.peak_percent} onChange={(e) => handleRowChange(idx, "peak_percent", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.months} onChange={(e) => handleRowChange(idx, "months", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <TblSelect value={row.curve_type} onChange={(v) => handleRowChange(idx, "curve_type", v)} options={CURVE_TYPES} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.factor} disabled={row.curve_type === "Linear"}
-                          onChange={(e) => handleRowChange(idx, "factor", e.target.value)}
-                          style={{ ...tblInp, opacity: row.curve_type === "Linear" ? 0.45 : 1 }}
-                          onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.coverage_peak_percent} onChange={(e) => handleRowChange(idx, "coverage_peak_percent", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                      <div style={cellStyle}>
-                        <input value={row.coverage_peak_months} onChange={(e) => handleRowChange(idx, "coverage_peak_months", e.target.value)}
-                          style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
-                      </div>
-                    </>)}
-
-                    {/* ── Row ⋮ menu ── */}
-                    <div style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
-                      <RowActionMenu
-                        onDuplicate={() => handleDuplicate(idx)}
-                        onDelete={() => { setDeleteIdx(idx); setOpenDelete(true); }}
-                      />
-                    </div>
-                  </div>
-                ))}
-
+                  Run Calculation
+                </button>
+                <button onClick={handleAdd} style={{
+                  height: 33, padding: "0 12px", background: "#4F46E5", color: "#fff",
+                  border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600,
+                  cursor: "pointer", whiteSpace: "nowrap",
+                }}>
+                  + Add New Event
+                </button>
               </div>
             </div>
           </div>
-        )}
+
+          {/* AccordionDetails — padding 16px, nested Paper for the table */}
+          {!collapsed && (
+            <div style={{ padding: 16 }}>
+              <div style={{
+                marginTop: 8,
+                border: "1px solid #D8DEE8",
+                borderRadius: 12,
+                overflowX: "auto",
+                overflowY: "auto",
+                maxHeight: 380,
+                boxShadow: "none",
+              }}>
+                <div style={{ minWidth: isOverallEvent ? 900 : 1450 }}>
+
+                  {/* Header — bg #f8fafc, gap 16px, px 16px, py 12px, borderBottom #D8DEE8 */}
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: gridCols,
+                    gap: 16,
+                    padding: "12px 16px",
+                    backgroundColor: "#f8fafc",
+                    borderBottom: "1px solid #D8DEE8",
+                  }}>
+                    {headers.map((h, i) => (
+                      <div key={i} style={{ fontSize: 13, fontWeight: 700, color: "#64748b" }}>
+                        {h}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Data rows — gap 16px, px 16px, py 12px, borderBottom #f1f5f9 between rows */}
+                  {rows.map((row, idx) => (
+                    <div
+                      key={row.id}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: gridCols,
+                        gap: 16,
+                        padding: "12px 16px",
+                        alignItems: "center",
+                        borderBottom: idx < rows.length - 1 ? "1px solid #f1f5f9" : "none",
+                        background: "#fff",
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "#f8fafc")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}
+                    >
+                      {(isMarketEvent || isProductEvent) && (<>
+                        <div style={cellStyle}>
+                          <input value={row.event_name}
+                            placeholder={isMarketEvent ? "Market Event" : "Product Event"}
+                            onChange={(e) => handleRowChange(idx, "event_name", e.target.value)}
+                            style={tblInp}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")}
+                            onBlur={(e)  => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <TblMultiSelect value={row.products} onChange={(v) => handleRowChange(idx, "products", v)}
+                            options={PRODUCT_OPTIONS} placeholder="Select" />
+                        </div>
+                        <div style={cellStyle}>
+                          <TblMultiSelect value={row.markets} onChange={(v) => handleRowChange(idx, "markets", v)}
+                            options={PAYER_OPTIONS} placeholder="Select" />
+                        </div>
+                        <div style={cellStyle}>
+                          <button
+                            onClick={() => { setImpactIdx(idx); setOpenImpact(true); }}
+                            style={{
+                              height: 32, padding: "0 12px", background: "#fff",
+                              border: "1px solid #4F46E5", borderRadius: 6,
+                              fontSize: 12, fontWeight: 600, color: "#4F46E5",
+                              cursor: "pointer", whiteSpace: "nowrap",
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = "#eef2ff")}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}>
+                            Edit Source
+                          </button>
+                        </div>
+                        <div style={cellStyle}>
+                          <TblSelect value={row.start_date} onChange={(v) => handleRowChange(idx, "start_date", v)}
+                            options={AVAILABLE_MONTHS_OPTS.map((m) => ({ value: m, label: fmtMonth(m) }))} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.peak_percent} onChange={(e) => handleRowChange(idx, "peak_percent", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.months} onChange={(e) => handleRowChange(idx, "months", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <TblSelect value={row.curve_type} onChange={(v) => handleRowChange(idx, "curve_type", v)} options={CURVE_TYPES} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.factor} disabled={row.curve_type === "Linear"}
+                            onChange={(e) => handleRowChange(idx, "factor", e.target.value)}
+                            style={{ ...tblInp, opacity: row.curve_type === "Linear" ? 0.45 : 1 }}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={{ ...cellStyle, justifyContent: "center" }}>
+                          {isProductEvent ? (
+                            <div
+                              onClick={() => handleRowChange(idx, "enable_coverage", !row.enable_coverage)}
+                              style={{
+                                width: 36, height: 20, borderRadius: 10, cursor: "pointer",
+                                background: row.enable_coverage ? "#4F46E5" : "#e2e8f0",
+                                position: "relative", flexShrink: 0, transition: "background .2s",
+                              }}>
+                              <div style={{
+                                position: "absolute", top: 2,
+                                left: row.enable_coverage ? 18 : 2,
+                                width: 16, height: 16, borderRadius: "50%", background: "#fff",
+                                transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.2)",
+                              }} />
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: 11, color: "#94a3b8" }}>—</span>
+                          )}
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.coverage_peak_percent}
+                            disabled={isProductEvent ? !row.enable_coverage : false}
+                            onChange={(e) => handleRowChange(idx, "coverage_peak_percent", e.target.value)}
+                            style={{ ...tblInp, opacity: (isProductEvent && !row.enable_coverage) ? 0.45 : 1 }}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.coverage_peak_months}
+                            disabled={isProductEvent ? !row.enable_coverage : false}
+                            onChange={(e) => handleRowChange(idx, "coverage_peak_months", e.target.value)}
+                            style={{ ...tblInp, opacity: (isProductEvent && !row.enable_coverage) ? 0.45 : 1 }}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                      </>)}
+
+                      {isOverallEvent && (<>
+                        <div style={cellStyle}>
+                          <input value={row.event_name} placeholder="Overall Event"
+                            onChange={(e) => handleRowChange(idx, "event_name", e.target.value)}
+                            style={tblInp}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <TblSelect value={row.start_date} onChange={(v) => handleRowChange(idx, "start_date", v)}
+                            options={AVAILABLE_MONTHS_OPTS.map((m) => ({ value: m, label: fmtMonth(m) }))} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.peak_percent} onChange={(e) => handleRowChange(idx, "peak_percent", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.months} onChange={(e) => handleRowChange(idx, "months", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <TblSelect value={row.curve_type} onChange={(v) => handleRowChange(idx, "curve_type", v)} options={CURVE_TYPES} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.factor} disabled={row.curve_type === "Linear"}
+                            onChange={(e) => handleRowChange(idx, "factor", e.target.value)}
+                            style={{ ...tblInp, opacity: row.curve_type === "Linear" ? 0.45 : 1 }}
+                            onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.coverage_peak_percent} onChange={(e) => handleRowChange(idx, "coverage_peak_percent", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                        <div style={cellStyle}>
+                          <input value={row.coverage_peak_months} onChange={(e) => handleRowChange(idx, "coverage_peak_months", e.target.value)}
+                            style={tblInp} onFocus={(e) => (e.target.style.borderColor = "#4F46E5")} onBlur={(e) => (e.target.style.borderColor = "#e2e8f0")} />
+                        </div>
+                      </>)}
+
+                      <div style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
+                        <RowActionMenu
+                          onDuplicate={() => handleDuplicate(idx)}
+                          onDelete={() => { setDeleteIdx(idx); setOpenDelete(true); }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* ── Dialogs ── */}
       <ImpactDialog
         open={openImpact}
         onClose={() => setOpenImpact(false)}
