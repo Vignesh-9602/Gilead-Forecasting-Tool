@@ -8,13 +8,18 @@ def build_refresh_response(
 ):
 
     return {
-        "market_analysis": market_analysis,
-        "factors": factors,
+        "ta_name": payload.ta_name,
+        "selected_filter": payload.selected_filter,
+
         "available_scenarios": available_scenarios,
-        "active_scenario": available_scenarios[0],
-        "scenario_name": payload.scenario_name,
-        "model_type": payload.model_type,
-        "selected_tab": payload.selected_tab
+        "active_scenario": payload.scenario_name,
+
+        "scenarios": {
+            payload.scenario_name: {
+                "factors": factors,
+                "market_analysis": market_analysis,
+            }
+        },
     }
 
 def refresh_engine(payload):
@@ -70,6 +75,9 @@ def recompute_from_total_market_volume(
     market_analysis,
     selected_filter,
 ):
+
+    print("selelcted",selected_filter)
+
     print(
         market_analysis["total_market_volume"]
         ["market_volume"]["monthly"]["table"]["rows"][0]["values"][0]
@@ -471,11 +479,11 @@ def build_total_market_volume(market_analysis,selected_filter):
 
     overall = total_volume_rows[0]["values"]
 
-    market_analysis["total_market_volume"]["market_volume"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["total_market_volume"]
-            ["market_volume"]["monthly"]["table"]
-        )
+    monthly = market_analysis["total_market_volume"]["market_volume"]["monthly"]
+
+    monthly["chart"] = build_chart_from_table(
+        monthly["table"],
+        monthly["chart"],      # pass the existing chart
     )
 
     # ==========================================================
@@ -489,11 +497,11 @@ def build_total_market_volume(market_analysis,selected_filter):
 
     total_share_rows[0]["values"] = [100] * len(overall)
 
-    market_analysis["total_market_volume"]["market_share"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["total_market_volume"]
-            ["market_share"]["monthly"]["table"]
-        )
+    monthly10 = market_analysis["total_market_volume"]["market_share"]["monthly"]
+
+    monthly10["chart"] = build_chart_from_table(
+        monthly10["table"],
+        monthly10["chart"],      # pass the existing chart
     )
 
     # ==========================================================
@@ -554,16 +562,18 @@ def build_market_distribution(market_analysis):
 
     rebuild_market_distribution_share(market_analysis)
 
-    market_analysis["market_distribution"]["market_volume"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["market_distribution"]["market_volume"]["monthly"]["table"]
-        )
+    monthly = market_analysis["market_distribution"]["market_volume"]["monthly"]
+
+    monthly["chart"] = build_chart_from_table(
+        monthly["table"],
+        monthly["chart"],      # pass the existing chart
     )
 
-    market_analysis["market_distribution"]["market_share"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["market_distribution"]["market_share"]["monthly"]["table"]
-        )
+    monthly10 = market_analysis["market_distribution"]["market_share"]["monthly"]
+
+    monthly10["chart"] = build_chart_from_table(
+        monthly10["table"],
+        monthly10["chart"],      # pass the existing chart
     )
 
     return market_analysis
@@ -736,16 +746,18 @@ def build_product_distribution(market_analysis):
 
     rebuild_product_distribution_share(market_analysis)
     
-    market_analysis["product_distribution"]["market_volume"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["product_distribution"]["market_volume"]["monthly"]["table"]
-        )
+    monthly = market_analysis["product_distribution"]["market_volume"]["monthly"]
+
+    monthly["chart"] = build_chart_from_table(
+        monthly["table"],
+        monthly["chart"],      # pass the existing chart
     )
 
-    market_analysis["product_distribution"]["market_share"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["product_distribution"]["market_share"]["monthly"]["table"]
-        )
+    monthly10 = market_analysis["product_distribution"]["market_share"]["monthly"]
+
+    monthly10["chart"] = build_chart_from_table(
+        monthly10["table"],
+        monthly10["chart"],      # pass the existing chart
     )
 
     return market_analysis
@@ -878,16 +890,18 @@ def build_market_product(market_analysis):
         market_analysis
     )
 
-    market_analysis["market_product"]["market_volume"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["market_product"]["market_volume"]["monthly"]["table"]
-        )
+    monthly = market_analysis["market_product"]["market_volume"]["monthly"]
+
+    monthly["chart"] = build_chart_from_table(
+        monthly["table"],
+        monthly["chart"],      # pass the existing chart
     )
 
-    market_analysis["market_product"]["market_share"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["market_product"]["market_share"]["monthly"]["table"]
-        )
+    monthly10 = market_analysis["market_product"]["market_share"]["monthly"]
+
+    monthly10["chart"] = build_chart_from_table(
+        monthly10["table"],
+        monthly10["chart"],      # pass the existing chart
     )
 
     return market_analysis
@@ -1158,16 +1172,18 @@ def build_product_market(market_analysis):
     rebuild_product_market_volume(market_analysis)
     rebuild_product_market_share(market_analysis)
 
-    market_analysis["product_market"]["market_volume"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["product_market"]["market_volume"]["monthly"]["table"]
-        )
+    monthly = market_analysis["product_market"]["market_volume"]["monthly"]
+
+    monthly["chart"] = build_chart_from_table(
+        monthly["table"],
+        monthly["chart"],      # pass the existing chart
     )
 
-    market_analysis["product_market"]["market_share"]["monthly"]["chart"] = (
-        build_chart_from_table(
-            market_analysis["product_market"]["market_share"]["monthly"]["table"]
-        )
+    monthly10 = market_analysis["product_market"]["market_share"]["monthly"]
+
+    monthly10["chart"] = build_chart_from_table(
+        monthly10["table"],
+        monthly10["chart"],      # pass the existing chart
     )
 
     return market_analysis
@@ -1488,8 +1504,11 @@ def rebuild_all_monthly_charts(market_analysis):
             if "table" not in monthly:
                 continue
 
+            existing_chart = monthly.get("chart", {})
+
             monthly["chart"] = build_chart_from_table(
-                monthly["table"]
+                monthly["table"],
+                existing_chart,
             )
 
     return market_analysis
