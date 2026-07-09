@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useMemo, useRef } from "react";
+​import React, { useState, useEffect, useContext, useMemo, useRef } from "react";
 import {
   Box,
   Paper,
@@ -266,6 +266,7 @@ export default function PBCModelInput() {
   const [totalGrowth, setTotalGrowth] = useState(10);
   const [duration, setDuration] = useState(12);
   const [kValue, setKValue] = useState(1);
+  const [windowSize, setWindowSize] = useState(6);
   const [multiplier, setMultiplier] = useState(1.0);
   const [multiplierHorizon, setMultiplierHorizon] = useState("Forecast");
   const [trajectoryStart, setTrajectoryStart] = useState("");
@@ -437,9 +438,7 @@ export default function PBCModelInput() {
       if (x == null || x === "") return null;
       const n = Number(x);
       if (Number.isNaN(n)) return null;
-      // Backend sends market_share values already in percentage-point scale
-      // (e.g. 7.29 means 7.29%, and 0.6676 means 0.6676% — NOT 66.76%).
-      // No ×100 conversion is needed; pass the value through as-is.
+      
       return n;
     };
     const parseValues = (v, asPercent = false) => {
@@ -939,6 +938,9 @@ export default function PBCModelInput() {
       trajectory_start: trajectoryStart,
       k_value: Number(kValue),
     },
+    moving_average: {
+      window: Math.max(3, Number(windowSize)),
+    },
     active_model: modelSelection,
   });
 
@@ -1195,7 +1197,7 @@ export default function PBCModelInput() {
         ? modelSelection === "linear"     // switching TO total_market, was linear
         : modelSelection === "ets";       // switching AWAY from total_market, was ets
     if (isDefaultForOtherTab && modelSelection) {
-      const newDefault = activeTab === "total_market" ? "ets" : "linear";
+      const newDefault = activeTab === "total_market" ? "ets" : "moving_average";
       setModelSelection(newDefault);
     }
 
@@ -1604,7 +1606,7 @@ export default function PBCModelInput() {
   //   - A concrete non-null value from the backend is always respected.
   const resolveModelForTab = (backendModel) => {
     if (!backendModel) {
-      return activeTab === "total_market" ? "ets" : "linear";
+      return activeTab === "total_market" ? "ets" : "moving_average";
     }
     // If we're NOT on total_market and the backend explicitly returned "ets",
     // honour it — the user may have saved an ETS scenario on another tab.
@@ -2783,7 +2785,7 @@ export default function PBCModelInput() {
                 >
                   <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
                   <MenuItem value="linear">Linear</MenuItem>
-                  <MenuItem value="linear">Moving Average</MenuItem>
+                  <MenuItem value="moving_average">Moving Average</MenuItem>
                   <MenuItem value="exponential">Exponential</MenuItem>
                   <MenuItem value="logarithmic">Logarithmic</MenuItem>
                   <MenuItem value="scurve">S-Curve</MenuItem>
@@ -2905,6 +2907,94 @@ export default function PBCModelInput() {
                     inputProps={{ min: 0, max: 1, step: 0.01 }}
                     sx={recalculateInputStyle}
                   />
+                </Box>
+              </>
+            )}
+
+            {modelSelection === "moving_average" && (
+              <>
+                <Box>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.5,
+                      mb: 1,
+                    }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>WINDOW</Typography>
+                    <Tooltip
+                      title="Number of periods to average (e.g. 3 = 3-month rolling average)"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{
+                          fontSize: 16,
+                          color: "#64748b",
+                          cursor: "pointer",
+                        }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={windowSize}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 3 && Number(v) <= 24))
+                        setWindowSize(v);
+                    }}
+                    inputProps={{ min: 3, max: 24, step: 1 }}
+                    sx={recalculateInputStyle}
+                  />
+                </Box>
+                <Box>
+                  <Box
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
+                    <Tooltip
+                      title="Please enter value from 1 to 5"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={multiplier}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
+                        setMultiplier(v);
+                    }}
+                    inputProps={{ min: 1, max: 5, step: 0.01 }}
+                    sx={recalculateInputStyle}
+                  />
+                </Box>
+                <Box>
+                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                    MULTIPLIER HORIZON
+                  </Typography>
+                  <FormControl sx={inputStyle}>
+                    <Select
+                      value={multiplierHorizon}
+                      onChange={(e) => setMultiplierHorizon(e.target.value)}
+                      disabled={!editable}
+                    >
+                      <MenuItem value="History">History</MenuItem>
+                      <MenuItem value="Forecast">Forecast</MenuItem>
+                      <MenuItem value="Both History & Forecast">
+                        Both History &amp; Forecast
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
                 </Box>
               </>
             )}
@@ -3085,53 +3175,57 @@ export default function PBCModelInput() {
               </>
             )}
 
-            <Box>
-              <Box
-                sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
-              >
-                <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
-                <Tooltip
-                  title="Please enter value from 1 to 5"
-                  arrow
-                  placement="top"
-                >
-                  <InfoOutlinedIcon
-                    sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+            {modelSelection !== "moving_average" && (
+              <>
+                <Box>
+                  <Box
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
+                    <Tooltip
+                      title="Please enter value from 1 to 5"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={multiplier}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
+                        setMultiplier(v);
+                    }}
+                    inputProps={{ min: 1, max: 5, step: 0.01 }}
+                    sx={recalculateInputStyle}
                   />
-                </Tooltip>
-              </Box>
-              <TextField
-                type="number"
-                value={multiplier}
-                disabled={!editable}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
-                    setMultiplier(v);
-                }}
-                inputProps={{ min: 1, max: 5, step: 0.01 }}
-                sx={recalculateInputStyle}
-              />
-            </Box>
+                </Box>
 
-            <Box>
-              <Typography sx={{ mb: 1, fontSize: "14px" }}>
-                MULTIPLIER HORIZON
-              </Typography>
-              <FormControl sx={inputStyle}>
-                <Select
-                  value={multiplierHorizon}
-                  onChange={(e) => setMultiplierHorizon(e.target.value)}
-                  disabled={!editable}
-                >
-                  <MenuItem value="History">History</MenuItem>
-                  <MenuItem value="Forecast">Forecast</MenuItem>
-                  <MenuItem value="Both History & Forecast">
-                    Both History & Forecast
-                  </MenuItem>
-                </Select>
-              </FormControl>
-            </Box>
+                <Box>
+                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                    MULTIPLIER HORIZON
+                  </Typography>
+                  <FormControl sx={inputStyle}>
+                    <Select
+                      value={multiplierHorizon}
+                      onChange={(e) => setMultiplierHorizon(e.target.value)}
+                      disabled={!editable}
+                    >
+                      <MenuItem value="History">History</MenuItem>
+                      <MenuItem value="Forecast">Forecast</MenuItem>
+                      <MenuItem value="Both History & Forecast">
+                        Both History & Forecast
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+              </>
+            )}
 
             <Button
               variant="contained"
@@ -3400,47 +3494,28 @@ export default function PBCModelInput() {
                     Editing...
                   </Box>
                 ) : (
-                  <Tooltip
-                    title={
-                      ["prod_dist", "payer_dist", "payer_prod", "prod_payer"].includes(activeTab) && metric === "market_volume"
-                        ? "Editing is disabled for Market Volume. Switch to Market Share to edit."
-                        : ""
-                    }
-                    arrow
-                    placement="top"
-                  >
-                    <span>
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        onClick={handleEnterTableEdit}
-                        disabled={
-                          ["prod_dist", "payer_dist", "payer_prod", "prod_payer"].includes(activeTab) &&
-                          metric === "market_volume"
-                        }
-                        sx={{
-                          textTransform: "none",
-                          fontSize: "12px",
-                          fontWeight: 600,
-                          borderRadius: "6px",
-                          borderColor: "#e2e8f0",
-                          color: "#3d89f3",
-                          px: 1.5,
-                          "&:hover": {
-                            borderColor: "#cbd5e1",
-                            backgroundColor: "#f8fafc",
-                          },
-                          "&.Mui-disabled": {
-                            borderColor: "#e2e8f0",
-                            color: "#cbd5e1",
-                          },
-                        }}
-                      >
-                        Edit Changes
-                      </Button>
-                    </span>
-                  </Tooltip>
-                )}
+  <Button
+    size="small"
+    variant="outlined"
+    onClick={handleEnterTableEdit}
+    disabled={activeTab !== "total_market" && metric === "market_volume"}
+    sx={{
+      textTransform: "none",
+      fontSize: "12px",
+      fontWeight: 600,
+      borderRadius: "6px",
+      borderColor: "#e2e8f0",
+      color: "#3d89f3",
+      px: 1.5,
+      "&:hover": {
+        borderColor: "#cbd5e1",
+        backgroundColor: "#f8fafc",
+      },
+    }}
+  >
+    Edit Changes
+  </Button>
+)}
 
                 {tableEditing && (
                   <Button
