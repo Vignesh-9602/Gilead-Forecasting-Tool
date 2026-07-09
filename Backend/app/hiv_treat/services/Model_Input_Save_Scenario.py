@@ -1,6 +1,180 @@
-import pandas as pd
 from collections import OrderedDict
+import json
+
 from app.db.connection import get_connection
+import pandas as pd
+# import app.hiv_treat.services.Model_Input_Service as MIS
+
+# =========================================================
+# ================= CHART -> DB ROW CONVERSION =================
+# =========================================================
+ 
+def _chart_row_to_forecast_data(months_bkt, forecast_start_index, values, factors=None):
+    """
+    Converts one response row's monthly chart data back into the DB's
+    forecast_data JSON shape: ISO months, train_values, forecast_values,
+    forecast_start_index.
+    """
+    iso_months = [pd.to_datetime(m, format="%b-%y").strftime("%Y-%m-%d") for m in months_bkt]
+    train_values = values[:forecast_start_index]
+    forecast_values = values[forecast_start_index:]
+ 
+    data = {
+        "months": iso_months,
+        "train_values": train_values,
+        "forecast_values": forecast_values,
+        "forecast_start_index": forecast_start_index,
+    }
+    if factors is not None:
+        data["factors"] = factors
+    return data
+ 
+ 
+def _upsert_row(
+    cur,
+    ta,
+    scenario_name,
+    user_id,
+    market,
+    source,
+    product,
+    metric,
+    forecast_data,
+    factors_col=None
+):
+    source = source or "ALL"
+
+    cur.execute("""
+        INSERT INTO raw_hiv_treat.forecast_outputs
+        (
+            user_id,
+            scenario_name,
+            ta_name,
+            market,
+            source_of_market,
+            product,
+            metric,
+            factors,
+            forecast_data,
+            created_at,
+            updated_at
+        )
+        VALUES
+        (%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),now())
+
+        ON CONFLICT ON CONSTRAINT unique_forecast_combination
+        DO UPDATE
+        SET
+            forecast_data = EXCLUDED.forecast_data,
+            factors       = EXCLUDED.factors,
+            updated_at    = now()
+    """,
+    (
+        user_id,
+        scenario_name,
+        ta,
+        market,
+        source,
+        product,
+        metric,
+        json.dumps(factors_col) if factors_col else None,
+        json.dumps(forecast_data)
+    ))
+ 
+ 
+def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
+    """
+    Persists the frontend's market_analysis payload:
+      - total_market_volume         -> ("ALL","ALL","ALL","market_volume")   [ONLY volume row saved]
+      - market_distribution shares  -> market-level shares (Retail, Non-retail, ...)
+      - market_distribution children -> source-level shares (e.g. Non-retail/Kaiser/ALL)
+      - market_product children     -> per-product shares for EVERY market, aggregated
+                                        across sources (source=None placeholder)
+    Everything else (other market_volume blocks) is intentionally not saved.
+    """
+    if hasattr(factors, "model_dump"):
+        factors = factors.model_dump()
+    tmv = ma.get("total_market_volume", {}).get("market_volume", {}).get("monthly", {})
+    if tmv:
+        chart = tmv["chart"]
+        row = chart["series"][0]
+        values = row["history"] + row["forecast"]
+        data = _chart_row_to_forecast_data(chart["months"], chart["forecast_start_index"], values)
+        _upsert_row(cur, ta, scenario, user_id, "ALL", "ALL", "ALL", "market_volume", data, factors_col=factors)
+ 
+    md_share = ma.get("market_distribution", {}).get("market_share", {}).get("monthly", {})
+    if md_share:
+        chart = md_share["chart"]
+        fsi, months = chart["forecast_start_index"], chart["months"]
+        for series in chart["series"]:
+            mkt = series["label"]
+            values = series["history"] + series["forecast"]
+            data = _chart_row_to_forecast_data(months, fsi, values)
+            _upsert_row(cur, ta, scenario, user_id, mkt, None, "ALL", "market_share", data)
+ 
+        for row in md_share.get("table", {}).get("rows", []):
+            mkt = row.get("label")
+            if mkt in (None, "Overall") or "children" not in row:
+                continue
+            for child in row["children"]:
+                src = child["label"]
+                data = _chart_row_to_forecast_data(months, fsi, child["values"])
+                _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", data)
+ 
+    mp_share = ma.get("market_product", {}).get("market_share", {}).get("monthly", {})
+    if mp_share:
+        mp_chart = mp_share["chart"]
+        fsi, months = mp_chart["forecast_start_index"], mp_chart["months"]
+        for row in mp_share["table"]["rows"]:
+            mkt = row.get("label")
+            for child in row.get("children", []):
+                prod = child["label"]
+                data = _chart_row_to_forecast_data(months, fsi, child["values"])
+                _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
+ 
+ 
+# =========================================================
+# ================= RESPONSE BUILDER ==========================
+# =========================================================
+ 
+def _build_total_only_block(cur, ta, scenario, start, end):
+    """
+    Minimal block for every scenario that ISN'T the one just saved --
+    only total_market_volume, no factors, no other tabs. Matches the
+    target shape where Base/other scenarios only ever show
+    market_analysis.total_market_volume.
+    """
+    total_data = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
+    if not total_data:
+        return {
+            "market_analysis": {
+                "total_market_volume": {"market_volume": {}, "market_share": {}}
+            }
+        }
+ 
+    total = build_series(total_data, start, end)
+    return {
+        "market_analysis": {
+            "total_market_volume": build_total_market_volume(
+                total["values"], total["months"], total["split_idx"],scenario
+            )
+        }
+    }
+ 
+ 
+def _build_full_block(cur, ta, scenario, start, end, selected_market, selected_product, factors):
+    """
+    Full detail for the scenario that was just saved: all 5 tabs
+    (monthly+yearly, chart+table) plus the factors block the frontend sent.
+    """
+    market_analysis = build_scenario_market_analysis(
+        cur, ta, scenario, start, end, selected_market, selected_product
+    )
+    return {
+        "factors": factors or {},
+        "market_analysis": market_analysis
+    }
+ 
 
 
 # =========================================================
@@ -424,6 +598,13 @@ def wrap_monthly_yearly_share(monthly_chart, monthly_table,
 def build_factors(cur, ta, scenario):
     is_base = scenario.upper() == "BASE"
 
+    print("================================")
+    print("BUILD FACTORS")
+    print("TA:", ta)
+    print("SCENARIO:", scenario)
+    print("IS BASE:", is_base)
+    print("================================")
+
     if is_base:
         cur.execute("""
             SELECT forecast_data
@@ -436,7 +617,7 @@ def build_factors(cur, ta, scenario):
         """, (ta,))
     else:
         cur.execute("""
-            SELECT forecast_data
+            SELECT factors, forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_volume'
@@ -446,65 +627,92 @@ def build_factors(cur, ta, scenario):
         """, (ta, scenario))
 
     row = cur.fetchone()
+
     if not row:
         return {}
 
-    data      = row[0]
-    print("================================")
-    print("Forecast Factors:")
-    print(data.get("factors"))
-    print("================================")
-    factors = data.get("factors", {})
-    months    = data.get("months", [])
-    split_idx = data.get("forecast_start_index", 0)
-    trajectory_start = months[split_idx] if split_idx < len(months) else None
-
-    f   = data.get("factors", {})
-    ets = {
-        "alpha": f.get("alpha"),
-        "beta":  f.get("beta"),
-        "gamma": f.get("gamma")
-    }
-
-
     if is_base:
-        cur.execute("""
-            SELECT forecast_data->'factors'
-            FROM raw_hiv_treat.forecast_outputs
-            WHERE ta_name = %s
-              AND metric = 'market_share'
-              AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
-            LIMIT 1
-        """, (ta,))
+        data = row[0] or {}
+        db_factors = {}
     else:
-        cur.execute("""
-            SELECT forecast_data->'factors' as factors
-            FROM raw_hiv_treat.forecast_outputs
-            WHERE ta_name = %s
-              AND metric = 'market_share'
-              AND scenario_name = %s
-            LIMIT 1
-        """, (ta, scenario))
+        db_factors = row[0] or {}
+        data = row[1] or {}
 
-    
-    row = cur.fetchone()
+    print("ROW:", row)
+    print("DB_FACTORS TYPE:", type(db_factors))
+    print("DB_FACTORS:", db_factors)
+    print("DATA TYPE:", type(data))
 
-    factors_data = row[0] if row else {}
-    m_data = row[0] if row else {}
-    moving_average = {
-        "window": m_data.get("window")
+    months = data.get("months", [])
+    split_idx = data.get("forecast_start_index", 0)
+
+    trajectory_start = (
+        months[split_idx]
+        if split_idx < len(months)
+        else None
+    )
+
+    # --------------------------------------------------------
+    # FACTORS SOURCE
+    # --------------------------------------------------------
+    if is_base:
+        factors_data = data.get("factors", {}) or {}
+    else:
+        factors_data = db_factors or {}
+
+    print("FACTORS DATA:", factors_data)
+
+    # --------------------------------------------------------
+    # ETS
+    # --------------------------------------------------------
+    if is_base:
+        # BASE stores alpha/beta/gamma directly
+        ets_cfg = factors_data
+    else:
+        # Saved scenarios store inside factors["ets"]
+        ets_cfg = factors_data.get("ets")
+
+    if not isinstance(ets_cfg, dict):
+        ets_cfg = {}
+
+    ets = {
+        "alpha": ets_cfg.get("alpha"),
+        "beta": ets_cfg.get("beta"),
+        "gamma": ets_cfg.get("gamma")
     }
 
-    # Default duration = forecast months count
-    default_duration = max(0, len(months) - split_idx)
+    # --------------------------------------------------------
+    # MOVING AVERAGE
+    # --------------------------------------------------------
+    moving_average = {
+        "window": factors_data.get("window")
+    }
 
-    linear_cfg = factors_data.get("linear", {})
-    scurve_cfg = factors_data.get("s_curve", {})
-    exp_cfg = factors_data.get("exponential", {})
-    log_cfg = factors_data.get("logarithmic", {})
+    default_duration = max(
+        0,
+        len(months) - split_idx
+    )
+
+    # --------------------------------------------------------
+    # GROWTH MODELS
+    # --------------------------------------------------------
+    linear_cfg = factors_data.get("linear") or {}
+
+    scurve_cfg = (
+        factors_data.get("s_curve")
+        or factors_data.get("scurve")
+        or {}
+    )
+
+    exp_cfg = factors_data.get("exponential") or {}
+
+    log_cfg = factors_data.get("logarithmic") or {}
 
     linear = {
-        "duration": linear_cfg.get("duration", default_duration),
+        "duration": linear_cfg.get(
+            "duration",
+            default_duration
+        ),
         "total_growth": linear_cfg.get("total_growth"),
         "trajectory_start": linear_cfg.get(
             "trajectory_start",
@@ -513,8 +721,14 @@ def build_factors(cur, ta, scenario):
     }
 
     scurve = {
-        "k_value": scurve_cfg.get("k_value", 1),
-        "duration": scurve_cfg.get("duration", default_duration),
+        "k_value": scurve_cfg.get(
+            "k_value",
+            1
+        ),
+        "duration": scurve_cfg.get(
+            "duration",
+            default_duration
+        ),
         "total_growth": scurve_cfg.get("total_growth"),
         "trajectory_start": scurve_cfg.get(
             "trajectory_start",
@@ -523,8 +737,14 @@ def build_factors(cur, ta, scenario):
     }
 
     exponential = {
-        "k_value": exp_cfg.get("k_value", 1),
-        "duration": exp_cfg.get("duration", default_duration),
+        "k_value": exp_cfg.get(
+            "k_value",
+            1
+        ),
+        "duration": exp_cfg.get(
+            "duration",
+            default_duration
+        ),
         "total_growth": exp_cfg.get("total_growth"),
         "trajectory_start": exp_cfg.get(
             "trajectory_start",
@@ -533,8 +753,14 @@ def build_factors(cur, ta, scenario):
     }
 
     logarithmic = {
-        "k_value": log_cfg.get("k_value", 1),
-        "duration": log_cfg.get("duration", default_duration),
+        "k_value": log_cfg.get(
+            "k_value",
+            1
+        ),
+        "duration": log_cfg.get(
+            "duration",
+            default_duration
+        ),
         "total_growth": log_cfg.get("total_growth"),
         "trajectory_start": log_cfg.get(
             "trajectory_start",
@@ -544,14 +770,31 @@ def build_factors(cur, ta, scenario):
 
     return {
         "ets": ets,
+
         "moving_average": moving_average,
+
         "linear": linear,
+
         "scurve": scurve,
-        "multiplier": factors_data.get("multiplier", 1),
+
+        "multiplier": factors_data.get(
+            "multiplier",
+            1
+        ),
+
         "exponential": exponential,
+
         "logarithmic": logarithmic,
-        "active_model": "ets",
-        "multiplier_horizon": "Forecast"
+
+        "active_model": factors_data.get(
+            "active_model",
+            "ets"
+        ),
+
+        "multiplier_horizon": factors_data.get(
+            "multiplier_horizon",
+            "Forecast"
+        )
     }
 
 
@@ -566,10 +809,6 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
     total_vals: raw floats from build_series.
     Monthly display rounds to int. Yearly sums raws then rounds once.
     """
-    print(
-        "build_total_market_volume called, scenario_label=",
-        scenario_label
-    )
     int_vals = round_volume(total_vals)   # display-only rounding
     n        = len(int_vals)
     h, f     = split_series(int_vals, split_idx)
@@ -779,22 +1018,32 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
                     prod_vol_map[prod][i] += prod_vol[i]
 
             else:
-                sources = get_sources(cur, ta, mkt)
-                for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
-                    if not src_d:
-                        continue
-                    src_series = build_series(src_d, start, end)
-                    src_vol    = build_volume_from_share(mkt_vol, src_series["values"])  # raw
+                prod_d = fetch_forecast_scenario(
+                    cur,
+                    ta,
+                    mkt,
+                    None,
+                    prod,
+                    "market_share",
+                    scenario
+                )
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
-                    if not prod_d:
-                        continue
-                    prod_series = build_series(prod_d, start, end)
-                    prod_vol    = build_volume_from_share(src_vol, prod_series["values"])  # raw
+                if not prod_d:
+                    continue
 
-                    for i in range(min(len(prod_vol), n)):
-                        prod_vol_map[prod][i] += prod_vol[i]
+                prod_series = build_series(
+                    prod_d,
+                    start,
+                    end
+                )
+
+                prod_vol = build_volume_from_share(
+                    mkt_vol,
+                    prod_series["values"]
+                )
+
+                for i in range(min(len(prod_vol), n)):
+                    prod_vol_map[prod][i] += prod_vol[i]
 
     prod_labels = list(prod_vol_map.keys())
     raw_vols    = [prod_vol_map[p] for p in prod_labels]
@@ -913,36 +1162,37 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                     market_totals[mkt][:min_len], s["values"][:min_len])  # raw
 
             else:
-                total_prod_vol = [0.0] * n
-                sources        = get_sources(cur, ta, mkt)
 
-                for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
-                    if not src_d:
-                        continue
-                    src_series = build_series(src_d, start, end)
+                prod_d = fetch_forecast_scenario(
+                    cur,
+                    ta,
+                    mkt,
+                    None,
+                    prod,
+                    "market_share",
+                    scenario
+                )
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
-                    if not prod_d:
-                        continue
-                    prod_series = build_series(prod_d, start, end)
+                if not prod_d:
+                    continue
 
-                    min_len = min(len(market_totals[mkt]),
-                                  len(src_series["values"]),
-                                  len(prod_series["values"]))
+                prod_series = build_series(
+                    prod_d,
+                    start,
+                    end
+                )
 
-                    src_vol  = build_volume_from_share(
-                        market_totals[mkt][:min_len], src_series["values"][:min_len])
-                    prod_vol = build_volume_from_share(src_vol, prod_series["values"][:min_len])
+                min_len = min(
+                    len(market_totals[mkt]),
+                    len(prod_series["values"])
+                )
 
-                    for i in range(min_len):
-                        total_prod_vol[i] += prod_vol[i]
-
-                vol = total_prod_vol
-
+                vol = build_volume_from_share(
+                    market_totals[mkt][:min_len],
+                    prod_series["values"][:min_len]
+                )
             vol = vol + [0.0] * (n - len(vol))
-            mp_vol[mkt][prod] = vol   # raw floats
-
+            mp_vol[mkt][prod] = vol
     # --- CHART: selected market only ---
     vol_chart_series   = []
     share_chart_series = []
@@ -1086,48 +1336,66 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
                 vol     = build_volume_from_share(mkt_vol, s["values"][:min_len])  # raw
 
             else:
-                total_prod_vol = [0.0] * n
 
-                mkt_d = fetch_forecast_scenario(cur, ta, mkt, None, "ALL", "market_share", scenario)
+                mkt_d = fetch_forecast_scenario(
+                    cur,
+                    ta,
+                    mkt,
+                    None,
+                    "ALL",
+                    "market_share",
+                    scenario
+                )
+
                 if not mkt_d:
                     continue
-                mkt_series  = build_series(mkt_d, start, end)
-                min_len_mkt = min(len(total_vals), len(mkt_series["values"]))
-                mkt_vol     = build_volume_from_share(
-                    total_vals[:min_len_mkt], mkt_series["values"][:min_len_mkt])  # raw
 
-                sources = get_sources(cur, ta, mkt)
-                for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
-                    if not src_d:
-                        continue
-                    src_series = build_series(src_d, start, end)
+                mkt_series = build_series(
+                    mkt_d,
+                    start,
+                    end
+                )
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
-                    if not prod_d:
-                        continue
-                    prod_series = build_series(prod_d, start, end)
+                prod_d = fetch_forecast_scenario(
+                    cur,
+                    ta,
+                    mkt,
+                    None,
+                    prod,
+                    "market_share",
+                    scenario
+                )
 
-                    min_len  = min(len(mkt_vol),
-                                   len(src_series["values"]),
-                                   len(prod_series["values"]))
-                    src_vol  = build_volume_from_share(
-                        mkt_vol[:min_len], src_series["values"][:min_len])
-                    prod_vol = build_volume_from_share(
-                        src_vol, prod_series["values"][:min_len])
+                if not prod_d:
+                    continue
 
-                    for i in range(min_len):
-                        total_prod_vol[i] += prod_vol[i]
+                prod_series = build_series(
+                    prod_d,
+                    start,
+                    end
+                )
 
-                vol = total_prod_vol
+                min_len = min(
+                    len(total_vals),
+                    len(mkt_series["values"]),
+                    len(prod_series["values"])
+                )
 
+                mkt_vol = build_volume_from_share(
+                    total_vals[:min_len],
+                    mkt_series["values"][:min_len]
+                )
+
+                vol = build_volume_from_share(
+                    mkt_vol,
+                    prod_series["values"][:min_len]
+                )
             vol = vol + [0.0] * (n - len(vol))
-            pm_vol[prod][mkt] = vol   # raw floats
-
+            pm_vol[prod][mkt] = vol
             for i in range(n):
                 prod_total[i] += vol[i]
 
-        product_totals[prod] = prod_total   # raw floats
+        product_totals[prod] = prod_total
 
     # --- CHART: selected product only ---
     vol_chart_series   = []
@@ -1279,40 +1547,28 @@ def build_apply_scenario_response(cur, payload, config):
     scenarios_block = {}
 
     for scenario in available_scenarios:
+        has_data = fetch_forecast_scenario(
+            cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario
+        )
 
-        if scenario == active_scenario:
-
+        if has_data:
             market_analysis = build_scenario_market_analysis(
                 cur, ta, scenario, start, end, flt.market, flt.product
             )
-
-            scenario_block = {
-                "factors": build_factors(cur, ta, scenario),
-                "market_analysis": market_analysis
-            }
-
+            if scenario.upper() == "BASE":
+                scenario_block = {
+                    "factors":         build_factors(cur, ta, scenario),
+                    "market_analysis": market_analysis
+                }
+            else:
+                scenario_block = {"market_analysis": market_analysis}
         else:
-
-            total_data = fetch_forecast_scenario(
-                cur,
-                ta,
-                "ALL",
-                "ALL",
-                "ALL",
-                "market_volume",
-                scenario
-            )
-
-            total = build_series(total_data, start, end)
-
             scenario_block = {
                 "market_analysis": {
-                    "total_market_volume": build_total_market_volume(
-                        total["values"],
-                        total["months"],
-                        total["split_idx"],
-                        scenario
-                    )
+                    "total_market_volume": {
+                        "market_volume": {},
+                        "market_share":  {}
+                    }
                 }
             }
 
@@ -1330,3 +1586,58 @@ def build_apply_scenario_response(cur, payload, config):
         "active_scenario":     active_scenario,
         "scenarios":           scenarios_block
     }
+
+
+def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
+    """
+    Builds the full response shape:
+      - available_scenarios: every scenario in the DB (Base first, then others)
+      - active_scenario: explicitly the scenario just saved (NOT available_scenarios[0])
+      - scenarios[active_scenario]: full detail (factors + all 5 tabs)
+      - scenarios[every other scenario]: total_market_volume ONLY, no factors
+    """
+    start = selected_filter.start_date
+    end = selected_filter.end_date
+ 
+    available_scenarios = get_scenarios(cur, ta)
+    if active_scenario not in available_scenarios:
+        available_scenarios.append(active_scenario)
+ 
+    scenarios_block = {}
+    for scenario in available_scenarios:
+        has_data = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
+        if not has_data:
+            scenarios_block[scenario] = {
+                "market_analysis": {
+                    "total_market_volume": {"market_volume": {}, "market_share": {}}
+                }
+            }
+            continue
+ 
+        if scenario == active_scenario:
+            # factors were saved onto this scenario's total-volume row already;
+            # re-read them so the response reflects what's actually persisted,
+            # rather than trusting the just-submitted payload blindly.
+            saved_total = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
+            saved_factors = build_factors(cur, ta, scenario)
+            scenarios_block[scenario] = _build_full_block(
+                cur, ta, scenario, start, end,
+                selected_filter.market, selected_filter.product,
+                saved_factors
+            )
+        else:
+            scenarios_block[scenario] = _build_total_only_block(cur, ta, scenario, start, end)
+ 
+    return {
+        "ta_name": ta,
+        "selected_filter": {
+            "start_date": start,
+            "end_date": end,
+            "market": selected_filter.market,
+            "product": selected_filter.product
+        },
+        "available_scenarios": available_scenarios,
+        "active_scenario": active_scenario,
+        "scenarios": scenarios_block
+    }
+ 

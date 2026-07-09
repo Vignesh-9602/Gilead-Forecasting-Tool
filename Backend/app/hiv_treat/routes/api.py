@@ -15,7 +15,8 @@ from app.hiv_treat.services.HIV_helper_functions import (
     get_market_wise_product,
     parse_month
 )
-from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response , get_scenarios
+from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response,get_scenarios
+from app.hiv_treat.services.Model_Input_Save_Scenario import _save_market_analysis,build_save_scenario_response
 # -----------------------------------
 # FORECAST MODELS
 # -----------------------------------
@@ -29,8 +30,8 @@ from app.hiv_treat.services.HIV_helper_functions import (
 from app.services.growth_forecast_service import process_growth_forecast
 from app.hiv_treat.services import Model_Input_Service as MIS
 from app.hiv_treat.services.HIV_Treat_Retaining_Filters import get_user_configuration, save_user_configuration
-
-
+from app.hiv_treat.services.scenario_service import get_available_scenarios
+from app.hiv_treat.routes.schema import  SaveScenarioRequest
 import json as Json
 from app.hiv_treat.services.Model_Input_Service import (
     build_apply_scenario_response,
@@ -1291,3 +1292,207 @@ def refresh_edits(payload: RefreshEditsRequest):
         factors=factors,
         available_scenarios=available_scenarios,
     )
+
+
+def scenario_exists(cur, ta, scenario_name):
+    cur.execute("""
+        SELECT 1
+        FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND scenario_name = %s
+        LIMIT 1
+    """, (ta, scenario_name))
+
+    return cur.fetchone() is not None
+
+@router.post("/save-scenarios")
+def save_scenario(payload: SaveScenarioRequest):
+
+    ta = payload.ta_name
+    scenario = payload.scenario_name
+    # print("================================")
+    # print("FULL PAYLOAD")
+    # print(payload.model_dump())
+    # print("FACTORS CLASS:", type(payload.factors))
+    # print("FACTORS MODULE:", type(payload.factors).__module__)
+    # print("FACTORS ATTRS:", payload.factors.model_dump())
+    # print("================================")
+
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+
+            if scenario.upper() != "BASE" and scenario_exists(
+                cur,
+                ta,
+                scenario
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Scenario '{scenario}' already exists"
+                )
+
+            user_id = getattr(
+                payload,
+                "user_id",
+                None
+            ) or "default_user"
+            factors = payload.factors.model_dump() if payload.factors else {}
+
+            if payload.model_type == "linear":
+                factors["linear"] = factors.pop("growth", None)
+                factors["active_model"] = "linear"
+
+            elif payload.model_type == "scurve":
+                factors["scurve"] = factors.pop("growth", None)
+                factors["active_model"] = "scurve"
+
+            elif payload.model_type == "exponential":
+                factors["exponential"] = factors.pop("growth", None)
+                factors["active_model"] = "exponential"
+
+            elif payload.model_type == "logarithmic":
+                factors["logarithmic"] = factors.pop("growth", None)
+                factors["active_model"] = "logarithmic"
+
+            print("================================")
+            print("MODEL TYPE:", payload.model_type)
+            print("ORIGINAL FACTORS:", payload.factors)
+            print("TRANSFORMED FACTORS:", factors)
+            print("================================")
+            _save_market_analysis(
+                cur,
+                ta,
+                scenario,
+                user_id,
+                payload.market_analysis,
+                factors
+            )
+
+            conn.commit()
+
+            response = build_save_scenario_response(
+                cur,
+                ta,
+                scenario,
+                payload.selected_filter
+            )
+
+            return response
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    
+@router.post("/apply_selected_scenario")
+def apply_scenario(payload: ApplySelectedScenarioRequest):
+    """
+    User clicks a scenario in the table -> return the same shape as
+    save_scenario's response, but read-only: no DB write, just builds
+    full detail for the clicked scenario and total_market_volume-only
+    for every other scenario. Reuses build_save_scenario_response as-is,
+    since that function already implements exactly this split.
+    """
+    ta = payload.ta_name
+    scenario = payload.scenario_name
+ 
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+            available_scenarios = MIS.get_scenarios(cur, ta)
+            if scenario not in available_scenarios:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Scenario '{scenario}' not found for ta_name '{ta}'"
+                )
+ 
+            response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+            return response
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+def scenario_exists_save(cur, ta, scenario):
+    cur.execute("""
+        SELECT 1 FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND UPPER(COALESCE(scenario_name, 'BASE')) = UPPER(%s)
+        LIMIT 1
+    """, (ta, scenario))
+    return cur.fetchone() is not None
+
+@router.put("/scenarios/{scenario_name}")
+def update_scenario(payload: UpdateScenarioRequest):
+    """
+    Updates an EXISTING scenario's saved data and returns the same response
+    shape as save-scenarios. Unlike the create endpoint, this rejects if
+    the scenario does NOT already exist (a PUT updates a resource that's
+    there, it doesn't silently create one) and blocks updating "Base"
+    directly through this endpoint -- Base is treated as the source-of-
+    truth engine forecast, not something this UI action should overwrite.
+    Confirm that restriction is actually what you want; remove the check
+    below if Base should be editable this way too.
+    """
+    ta = payload.ta_name
+    scenario_name =payload.scenario_name
+
+    if scenario_name != payload.scenario_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL scenario '{scenario_name}' does not match body scenario_name '{payload.scenario_name}'"
+        )
+
+    scenario = payload.scenario_name
+
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+
+            if scenario.upper() == "BASE":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Base cannot be updated through this endpoint"
+                )
+
+            if not scenario_exists_save(cur, ta, scenario):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Scenario '{scenario}' does not exist for ta_name '{ta}'"
+                )
+
+            user_id = payload.user_id or "default_user"
+            factors = payload.factors.model_dump() if payload.factors else {}
+
+            if payload.model_type == "linear":
+                factors["linear"] = factors.pop("growth", None)
+                factors["active_model"] = "linear"
+
+            elif payload.model_type == "scurve":
+                factors["scurve"] = factors.pop("growth", None)
+                factors["active_model"] = "scurve"
+
+            elif payload.model_type == "exponential":
+                factors["exponential"] = factors.pop("growth", None)
+                factors["active_model"] = "exponential"
+
+            elif payload.model_type == "logarithmic":
+                factors["logarithmic"] = factors.pop("growth", None)
+                factors["active_model"] = "logarithmic"
+
+            _save_market_analysis(
+                cur, ta, scenario, user_id,
+                payload.market_analysis,factors
+            )
+
+            conn.commit()
+
+            response = build_save_scenario_response(
+                cur, ta, scenario, payload.selected_filter
+            )
+            return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))

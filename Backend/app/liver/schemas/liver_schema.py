@@ -161,6 +161,10 @@ class LogarithmicParams(BaseModel):
     trajectory_start: str
 
 
+class MovingAverageParams(BaseModel):
+    window: int = 6
+
+
 class LiverFactors(BaseModel):
     """Internal type used by the service layer."""
     ets: EtsParams
@@ -168,9 +172,10 @@ class LiverFactors(BaseModel):
     scurve: SCurveParams
     exponential: ExponentialParams
     logarithmic: LogarithmicParams
+    moving_average: MovingAverageParams = MovingAverageParams()
     multiplier: float = 1.0
     multiplier_horizon: str = "Forecast"
-    active_model: str = "ets"
+    active_model: str = "moving_average"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +190,10 @@ class LiverGrowthFactors(BaseModel):
     trajectory_start: Optional[str] = None
 
 
+class LiverMovingAverageFactors(BaseModel):
+    window: int = 6
+
+
 class LiverRecalculateFactors(BaseModel):
     """
     factors: only the active model's params need to be provided.
@@ -197,6 +206,7 @@ class LiverRecalculateFactors(BaseModel):
     exponential: Optional[LiverGrowthFactors] = None
     logarithmic: Optional[LiverGrowthFactors] = None
     scurve: Optional[LiverGrowthFactors] = None
+    moving_average: Optional[LiverMovingAverageFactors] = None
     growth: Optional[LiverGrowthFactors] = None  # legacy fallback
 
     @model_validator(mode="before")
@@ -235,7 +245,7 @@ class LiverRecalculateRequest(BaseModel):
     ta_name: str = "HCV"
     selected_filter: LiverSelectedFilter
     scenario_name: str = "Base"
-    model_type: str = "ets"             # "ets" | "linear" | "exponential" | "logarithmic" | "scurve"
+    model_type: str = "moving_average"   # "ets" | "linear" | "exponential" | "logarithmic" | "scurve" | "moving_average"
     factors: LiverRecalculateFactors
     selected_tab: str = "total_market_volume"  # "total_market_volume" → affects all tabs; others → tab1 stays ETS
 
@@ -271,5 +281,30 @@ class LiverRefreshRequest(BaseModel):
     edited_hierarchy: Optional[str] = None   # row label that was edited (for redistribution)
     factors: Optional[Dict[str, Any]] = None # pass-through; returned as-is for active scenario
     market_analysis: Dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# New Save / Activate scenario endpoints  (/liver/save, /liver/activate-scenario)
+# ---------------------------------------------------------------------------
+
+class ScenarioFilter(BaseModel):
+    start_date: str
+    end_date: str
+    payer: Optional[str] = None
+    product: Optional[str] = None
+
+
+class SaveScenarioRequest(BaseModel):
+    ta_name: str = "HCV"
+    selected_filter: ScenarioFilter
+    scenario_name: str
+    factors: Optional[Dict[str, Any]] = None
+    market_analysis: Dict[str, Any] = {}
+
+
+class ActivateScenarioRequest(BaseModel):
+    ta_name: str = "HCV"
+    selected_filter: ScenarioFilter
+    scenario_name: str
 
 

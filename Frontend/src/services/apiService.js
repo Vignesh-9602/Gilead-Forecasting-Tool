@@ -268,9 +268,7 @@ export const recalculateLiver = (payload) => {
 };
 
 // POST — refresh liver table after manual edits
-export const refreshLiverTable = (payload) => {
-  return axios.post(`/api/liver/refresh-table`, payload);
-};
+export const refreshLiverTable = (payload) => axios.post('/api/liver/refresh', payload);
 
 // POST — create/update liver configurations with required envelope { config: { ... } }
 export const postLiverConfigurations = (config) => {
@@ -281,7 +279,15 @@ export const postLiverConfigurations = (config) => {
 export const saveLiverScenario = (payload) => {
   return axios.post(`/api/liver/save-scenario`, payload);
 };
+// PUT — update an existing non-Base liver scenario
+export const updateLiverScenario = (payload) => {
+  return axios.put(`/api/liver/update-scenario`, payload);
+};
 
+// POST — activate a liver scenario
+export const activateLiverScenario = (payload) => {
+  return axios.post(`/api/liver/activate-scenario`, payload);
+};
 
 
 //HIC API's
