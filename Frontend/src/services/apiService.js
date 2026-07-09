@@ -339,9 +339,11 @@ export const applySelectedHIVScenario = (payload) =>
     payload
   );
 
-export const updateHIVScenario = (payload) =>
-  httpClient.post("/hiv_treat/model-input/update-scenario", payload);
-
+export const updateHIVScenario = (scenarioName, payload) =>
+  httpClient.put(
+    `/api/hiv_treat/scenarios/${encodeURIComponent(scenarioName)}`,
+    payload
+  );
 
 
 

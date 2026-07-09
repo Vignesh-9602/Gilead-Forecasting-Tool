@@ -731,7 +731,10 @@ export default function HIVModelInput() {
                 ),
             };
 
-            const response = await updateHIVScenario(payload);
+            const response = await updateHIVScenario(
+                activeScenario,
+                payload
+            );
 
             const scenario =
                 response.data.scenarios[
