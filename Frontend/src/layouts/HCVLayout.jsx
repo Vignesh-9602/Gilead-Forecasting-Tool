@@ -4,6 +4,7 @@ import Header from "../components/Header";
 import SnackbarNotification from "../components/snackBar/SnackBar";
 import PBCGlobalConfigurations from "../components/hcv/GlobalConfiguration/GlobalConfigurations";
 import PBCModelInput from "../components/hcv/ModelInput/ModelInput";
+import MarketEvent from "../components/hcv/MarketEvent/MarketEvent";
 
 const tabs = [
     "Configurations",
@@ -30,12 +31,7 @@ export default function HCVLayout() {
                 return <PBCModelInput />;
 
             default:
-                return (
-                    <Box p={3}>
-                        <h2>{activeTab}</h2>
-                        <p>PBC component coming soon...</p>
-                    </Box>
-                );
+                return <MarketEvent />;
         }
     };
 
