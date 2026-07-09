@@ -30,22 +30,56 @@ def _chart_row_to_forecast_data(months_bkt, forecast_start_index, values, factor
     return data
  
  
-def _upsert_row(cur, ta, scenario_name, user_id, market, source, product, metric, forecast_data, factors_col=None):
-    """
-    Matches the actual unique constraint: unique_forecast_combination on
-    (user_id, scenario_name, ta_name, market, source_of_market, product, metric).
-    """
+def _upsert_row(
+    cur,
+    ta,
+    scenario_name,
+    user_id,
+    market,
+    source,
+    product,
+    metric,
+    forecast_data,
+    factors_col=None
+):
+    source = source or "ALL"
+
     cur.execute("""
         INSERT INTO raw_hiv_treat.forecast_outputs
-            (user_id, scenario_name, ta_name, market, source_of_market, product, metric, factors, forecast_data, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+        (
+            user_id,
+            scenario_name,
+            ta_name,
+            market,
+            source_of_market,
+            product,
+            metric,
+            factors,
+            forecast_data,
+            created_at,
+            updated_at
+        )
+        VALUES
+        (%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),now())
+
         ON CONFLICT ON CONSTRAINT unique_forecast_combination
-        DO UPDATE SET forecast_data = EXCLUDED.forecast_data,
-                      factors = EXCLUDED.factors,
-                      updated_at = now()
-    """, (user_id, scenario_name, ta, market, source, product, metric,
-          json.dumps(factors_col) if factors_col else None,
-          json.dumps(forecast_data)))
+        DO UPDATE
+        SET
+            forecast_data = EXCLUDED.forecast_data,
+            factors       = EXCLUDED.factors,
+            updated_at    = now()
+    """,
+    (
+        user_id,
+        scenario_name,
+        ta,
+        market,
+        source,
+        product,
+        metric,
+        json.dumps(factors_col) if factors_col else None,
+        json.dumps(forecast_data)
+    ))
  
  
 def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
@@ -205,9 +239,12 @@ def get_sources(cur, ta, market):
     cur.execute("""
         SELECT DISTINCT source_of_market
         FROM raw_hiv_treat.forecast_outputs
-        WHERE ta_name = %s AND market = %s
+        WHERE ta_name = %s
+          AND market = %s
           AND source_of_market IS NOT NULL
+          AND UPPER(source_of_market) <> 'ALL'
     """, (ta, market))
+
     return [r[0] for r in cur.fetchall()]
 
 
