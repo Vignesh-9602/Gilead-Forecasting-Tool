@@ -266,6 +266,7 @@ export default function PBCModelInput() {
   const [totalGrowth, setTotalGrowth] = useState(10);
   const [duration, setDuration] = useState(12);
   const [kValue, setKValue] = useState(1);
+  const [windowSize, setWindowSize] = useState(3);
   const [multiplier, setMultiplier] = useState(1.0);
   const [multiplierHorizon, setMultiplierHorizon] = useState("Forecast");
   const [trajectoryStart, setTrajectoryStart] = useState("");
@@ -2781,6 +2782,7 @@ export default function PBCModelInput() {
                 >
                   <MenuItem value="ets">Exponential Smoothing (ETS)</MenuItem>
                   <MenuItem value="linear">Linear</MenuItem>
+                  <MenuItem value="moving_average">Moving Average</MenuItem>
                   <MenuItem value="exponential">Exponential</MenuItem>
                   <MenuItem value="logarithmic">Logarithmic</MenuItem>
                   <MenuItem value="scurve">S-Curve</MenuItem>
@@ -2902,6 +2904,94 @@ export default function PBCModelInput() {
                     inputProps={{ min: 0, max: 1, step: 0.01 }}
                     sx={recalculateInputStyle}
                   />
+                </Box>
+              </>
+            )}
+
+            {modelSelection === "moving_average" && (
+              <>
+                <Box>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.5,
+                      mb: 1,
+                    }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>WINDOW</Typography>
+                    <Tooltip
+                      title="Number of periods to average (e.g. 3 = 3-month rolling average)"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{
+                          fontSize: 16,
+                          color: "#64748b",
+                          cursor: "pointer",
+                        }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={windowSize}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 1 && Number(v) <= 24))
+                        setWindowSize(v);
+                    }}
+                    inputProps={{ min: 1, max: 24, step: 1 }}
+                    sx={recalculateInputStyle}
+                  />
+                </Box>
+                <Box>
+                  <Box
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
+                    <Tooltip
+                      title="Please enter value from 1 to 5"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={multiplier}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
+                        setMultiplier(v);
+                    }}
+                    inputProps={{ min: 1, max: 5, step: 0.01 }}
+                    sx={recalculateInputStyle}
+                  />
+                </Box>
+                <Box>
+                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                    MULTIPLIER HORIZON
+                  </Typography>
+                  <FormControl sx={inputStyle}>
+                    <Select
+                      value={multiplierHorizon}
+                      onChange={(e) => setMultiplierHorizon(e.target.value)}
+                      disabled={!editable}
+                    >
+                      <MenuItem value="History">History</MenuItem>
+                      <MenuItem value="Forecast">Forecast</MenuItem>
+                      <MenuItem value="Both History & Forecast">
+                        Both History &amp; Forecast
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
                 </Box>
               </>
             )}
@@ -3082,53 +3172,57 @@ export default function PBCModelInput() {
                 </>
               )}
 
-            <Box>
-              <Box
-                sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
-              >
-                <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
-                <Tooltip
-                  title="Please enter value from 1 to 5"
-                  arrow
-                  placement="top"
-                >
-                  <InfoOutlinedIcon
-                    sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+            {modelSelection !== "moving_average" && (
+              <>
+                <Box>
+                  <Box
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}
+                  >
+                    <Typography sx={{ fontSize: "14px" }}>MULTIPLIER</Typography>
+                    <Tooltip
+                      title="Please enter value from 1 to 5"
+                      arrow
+                      placement="top"
+                    >
+                      <InfoOutlinedIcon
+                        sx={{ fontSize: 16, color: "#64748b", cursor: "pointer" }}
+                      />
+                    </Tooltip>
+                  </Box>
+                  <TextField
+                    type="number"
+                    value={multiplier}
+                    disabled={!editable}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
+                        setMultiplier(v);
+                    }}
+                    inputProps={{ min: 1, max: 5, step: 0.01 }}
+                    sx={recalculateInputStyle}
                   />
-                </Tooltip>
-              </Box>
-              <TextField
-                type="number"
-                value={multiplier}
-                disabled={!editable}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "" || (Number(v) >= 1 && Number(v) <= 5))
-                    setMultiplier(v);
-                }}
-                inputProps={{ min: 1, max: 5, step: 0.01 }}
-                sx={recalculateInputStyle}
-              />
-            </Box>
+                </Box>
 
-            <Box>
-              <Typography sx={{ mb: 1, fontSize: "14px" }}>
-                MULTIPLIER HORIZON
-              </Typography>
-              <FormControl sx={inputStyle}>
-                <Select
-                  value={multiplierHorizon}
-                  onChange={(e) => setMultiplierHorizon(e.target.value)}
-                  disabled={!editable}
-                >
-                  <MenuItem value="History">History</MenuItem>
-                  <MenuItem value="Forecast">Forecast</MenuItem>
-                  <MenuItem value="Both History & Forecast">
-                    Both History & Forecast
-                  </MenuItem>
-                </Select>
-              </FormControl>
-            </Box>
+                <Box>
+                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                    MULTIPLIER HORIZON
+                  </Typography>
+                  <FormControl sx={inputStyle}>
+                    <Select
+                      value={multiplierHorizon}
+                      onChange={(e) => setMultiplierHorizon(e.target.value)}
+                      disabled={!editable}
+                    >
+                      <MenuItem value="History">History</MenuItem>
+                      <MenuItem value="Forecast">Forecast</MenuItem>
+                      <MenuItem value="Both History & Forecast">
+                        Both History & Forecast
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+              </>
+            )}
 
             <Button
               variant="contained"
@@ -4050,16 +4144,18 @@ export default function PBCModelInput() {
                                 })}
                               </Box>
 
-                              {showChildren &&
-                                group.children.map((childRow, idx) => {
-                                  const childLabel = (childRow.cleanLabel || "").toLowerCase();
-                                  let isAppliedChild = false;
-                                  if (activeTab === "payer_prod") {
-                                    isAppliedChild = currentBrand && childLabel.includes(currentBrand);
-                                  } else if (activeTab === "prod_payer") {
-                                    isAppliedChild = currentPayer && childLabel.includes(currentPayer);
-                                  }
-                                  const isHighlightedChild = isAppliedChild;
+                          {showChildren &&
+                            group.children.map((childRow, idx) => {
+                              const childLabel = (childRow.cleanLabel || "").toLowerCase();
+                              let isAppliedChild = false;
+                              if (activeTab === "payer_prod") {
+                                // Only highlight the child if its parent payer is also selected
+                                isAppliedChild = isAppliedParent && currentBrand && childLabel === currentBrand;
+                              } else if (activeTab === "prod_payer") {
+                                // Only highlight the child if its parent product is also selected
+                                isAppliedChild = isAppliedParent && currentPayer && childLabel === currentPayer;
+                              }
+                              const isHighlightedChild = isAppliedChild;
 
                                   return (
                                     <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
