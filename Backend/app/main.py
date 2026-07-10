@@ -12,6 +12,7 @@ from app.api.monte_carlo_route import router as monte_carlo_router
 from app.api.auth import router as login
 from app.liver.api.liver_route import router as liver_router
 from app.hiv_treat.routes.api import router as hiv_router
+from app.hiv_treat.routes.market_events import router as hiv_market_events_router
 app = FastAPI(title="TA Forecast API")
 
 # Allow all CORS (frontend can be any origin)
@@ -35,3 +36,4 @@ app.include_router(monte_carlo_router)
 app.include_router(login)
 app.include_router(liver_router)
 app.include_router(hiv_router)
+app.include_router(hiv_market_events_router)
