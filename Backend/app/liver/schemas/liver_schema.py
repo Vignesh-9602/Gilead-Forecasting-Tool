@@ -164,6 +164,13 @@ class LogarithmicParams(BaseModel):
 class MovingAverageParams(BaseModel):
     window: int = 6
 
+    @model_validator(mode="before")
+    @classmethod
+    def clamp_window(cls, data):
+        if isinstance(data, dict) and "window" in data:
+            data["window"] = max(3, int(data["window"]))
+        return data
+
 
 class LiverFactors(BaseModel):
     """Internal type used by the service layer."""
@@ -192,6 +199,13 @@ class LiverGrowthFactors(BaseModel):
 
 class LiverMovingAverageFactors(BaseModel):
     window: int = 6
+
+    @model_validator(mode="before")
+    @classmethod
+    def clamp_window(cls, data):
+        if isinstance(data, dict) and "window" in data:
+            data["window"] = max(3, int(data["window"]))
+        return data
 
 
 class LiverRecalculateFactors(BaseModel):
