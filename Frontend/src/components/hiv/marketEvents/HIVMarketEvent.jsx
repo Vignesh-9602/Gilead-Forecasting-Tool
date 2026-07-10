@@ -19,6 +19,7 @@ import {
     Checkbox,
     ListItemText,
     IconButton,
+    Switch
 } from "@mui/material";
 
 import { LocalizationProvider } from "@mui/x-date-pickers";
@@ -37,6 +38,8 @@ import AccordionDetails from "@mui/material/AccordionDetails";
 
 import { GlobalContext } from "../../../context/Provider";
 import { marketEventMock } from "./MEMockData";
+import HIVImpactCurveChart from "./HIVMEChart";
+import HIVImpactCurveTable from "./HIVMETable";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
@@ -78,6 +81,12 @@ export default function HIVMarketEvent() {
     const [eventRows, setEventRows] =
         useState([]);
 
+    const [selectedMetric, setSelectedMetric] =
+        useState("market_volume");
+
+    const [selectedView, setSelectedView] =
+        useState("monthly");
+
     useEffect(() => {
 
         if (!currentConfig) return;
@@ -95,6 +104,14 @@ export default function HIVMarketEvent() {
     const currentConfig =
         eventTabsData?.[activeTab]
             ?.impact_curve_configuration || {};
+
+    const currentMetricData =
+        eventTabsData?.[activeTab]
+            ?.metrics_views?.[
+        selectedMetric
+        ]?.[
+        selectedView
+        ] || {};
 
     const createEmptyRow = (config) => ({
 
@@ -119,6 +136,8 @@ export default function HIVMarketEvent() {
             config.curve_types?.[0] || "",
 
         factor: "",
+
+        enable_coverage: false,
 
         coverage_peak_percent: "",
 
@@ -330,6 +349,12 @@ export default function HIVMarketEvent() {
             [field]: value,
         };
 
+        // Clear coverage values when Coverage is turned OFF
+        if (field === "enable_coverage" && !value) {
+            updated[index].coverage_peak_percent = "";
+            updated[index].coverage_peak_months = "";
+        }
+
         setEventRows(updated);
 
     };
@@ -397,8 +422,8 @@ export default function HIVMarketEvent() {
     };
 
     const headerColumns = isOverallEvent
-        ? "0.7fr 0.4fr 0.28fr 0.28fr 0.38fr 0.25fr 0.35fr 0.35fr 40px"
-        : "0.7fr 0.55fr 0.45fr 0.55fr 0.4fr 0.28fr 0.28fr 0.38fr 0.25fr 0.35fr 0.35fr 40px";
+        ? "0.9fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 40px"
+        : "0.8fr 0.6fr 0.55fr 0.65fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 40px";
 
     const headers = isOverallEvent
         ? [
@@ -408,6 +433,7 @@ export default function HIVMarketEvent() {
             "Months",
             "Curve",
             "Factor",
+            "Coverage",
             "Coverage Peak %",
             "Coverage Peak Months",
             "",
@@ -424,6 +450,7 @@ export default function HIVMarketEvent() {
             "Months",
             "Curve",
             "Factor",
+            "Coverage",
             "Coverage Peak %",
             "Coverage Peak Months",
             "",
@@ -1352,13 +1379,35 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            row.curve_type === "Linear"
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
+                                            <Switch
+                                                size="small"
+                                                checked={row.enable_coverage}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "enable_coverage",
+                                                        e.target.checked
+                                                    )
+                                                }
                                             />
 
                                             {/* COVERAGE % */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_percent}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1367,13 +1416,23 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* COVERAGE MONTH */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_months}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1382,7 +1441,16 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* MENU */}
@@ -1736,13 +1804,35 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            row.curve_type === "Linear"
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
+                                            <Switch
+                                                size="small"
+                                                checked={row.enable_coverage}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "enable_coverage",
+                                                        e.target.checked
+                                                    )
+                                                }
                                             />
 
                                             {/* COVERAGE PEAK % */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_percent}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1751,13 +1841,23 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* COVERAGE PEAK MONTHS */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_months}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1766,7 +1866,16 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* MENU */}
@@ -1916,13 +2025,35 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            row.curve_type === "Linear"
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
+                                            <Switch
+                                                size="small"
+                                                checked={row.enable_coverage}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "enable_coverage",
+                                                        e.target.checked
+                                                    )
+                                                }
                                             />
 
                                             {/* COVERAGE PEAK % */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_percent}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1931,13 +2062,23 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* COVERAGE PEAK MONTHS */}
 
                                             <TextField
                                                 size="small"
+                                                disabled={!row.enable_coverage}
                                                 value={row.coverage_peak_months}
                                                 onChange={(e) =>
                                                     handleRowChange(
@@ -1946,7 +2087,16 @@ export default function HIVMarketEvent() {
                                                         e.target.value
                                                     )
                                                 }
-                                                sx={tableInputStyle}
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
                                             />
 
                                             {/* MENU */}
@@ -1974,8 +2124,25 @@ export default function HIVMarketEvent() {
                         </Paper>
 
                     </AccordionDetails>
+                    <HIVImpactCurveChart
+                        chartData={
+                            currentMetricData.chart
+                        }
+                    />
 
                 </Accordion>
+                <HIVImpactCurveTable
+
+                    tableData={currentMetricData.table}
+
+                    metricFilters={marketEventMock.metric_filters}
+
+                    selectedMetric={selectedMetric}
+
+                    setSelectedMetric={setSelectedMetric}
+
+                />
+
                 <Menu
                     anchorEl={menuAnchorEl}
                     open={Boolean(menuAnchorEl)}
@@ -2155,6 +2322,7 @@ export default function HIVMarketEvent() {
 
                 </Dialog>
             </Paper>
+
 
         </Box>
 
