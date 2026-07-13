@@ -17,6 +17,7 @@ from app.hiv_treat.services.HIV_helper_functions import (
 )
 from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response,get_scenarios
 from app.hiv_treat.services.Model_Input_Save_Scenario import _save_market_analysis,build_save_scenario_response
+from app.hiv_treat.services.Market_Events_Run_Calculation import run_calculation
 # -----------------------------------
 # FORECAST MODELS
 # -----------------------------------
@@ -1496,3 +1497,17 @@ def update_scenario(payload: UpdateScenarioRequest):
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+class RunCalculationRequest(BaseModel):
+    ta_name: str
+    selected_filter: dict
+    selected_tab: str
+    impact_curve_configuration: dict
+
+
+@router.post("/run-calculation")
+def run_calculation_endpoint(payload: RunCalculationRequest) -> dict:
+    try:
+        return run_calculation(payload.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

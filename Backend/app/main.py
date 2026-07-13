@@ -39,3 +39,4 @@ app.include_router(liver_router)
 app.include_router(hiv_router)
 app.include_router(liver_market_events_router)
 app.include_router(hiv_market_events_router)
+
