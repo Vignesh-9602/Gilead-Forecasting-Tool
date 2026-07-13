@@ -289,6 +289,16 @@ export const activateLiverScenario = (payload) => {
   return axios.post(`/api/liver/activate-scenario`, payload);
 };
 
+export const getLiverMarketEventsFilters = (ta = "HCV") => {
+  return httpClient.get("/api/liver-market-events/filters", {
+    params: { ta },
+  });
+};
+
+export const applyLiverMarketEventsFilters = (payload) => {
+  return httpClient.post("/api/liver-market-events/apply-filters", payload);
+};
+
 
 //HIC API's
 export const getHIVConfigurationByTherapyArea = (taName) => {
