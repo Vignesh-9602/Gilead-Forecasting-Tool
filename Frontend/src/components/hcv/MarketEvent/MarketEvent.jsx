@@ -41,7 +41,6 @@ import {
     getLiverMarketEventsFilters,
     applyLiverMarketEventsFilters,
 } from "../../../services/apiService";
-import { marketEventMock } from "./MEMockData.js";
 import HIVImpactCurveChart from "./MarketEventChart";
 import HIVImpactCurveTable from "./MarketEventTable";
 
@@ -371,9 +370,7 @@ export default function HIVMarketEvent() {
 
     const [availableMonths, setAvailableMonths] = useState([]);
     const [availableScenarios, setAvailableScenarios] = useState([]);
-    const [metricFilters, setMetricFilters] = useState(
-        normalizeMetricFilters(marketEventMock.metric_filters || [])
-    );
+    const [metricFilters, setMetricFilters] = useState([]);
 
     const [eventTabsData, setEventTabsData] = useState({});
 
@@ -512,9 +509,6 @@ export default function HIVMarketEvent() {
     }, []);
 
     const fetchFilters = async () => {
-
-        const fallbackResponse = marketEventMock;
-
         try {
             const response = await getLiverMarketEventsFilters("HCV");
             const apiData = response?.data || {};
@@ -522,20 +516,16 @@ export default function HIVMarketEvent() {
             setAvailableScenarios(
                 apiData.available_scenarios ||
                 apiData.scenario_names ||
-                fallbackResponse.available_scenarios ||
-                fallbackResponse.scenario_names ||
                 []
             );
 
             setAvailableMonths(
                 apiData.available_months ||
-                fallbackResponse.available_months ||
                 []
             );
 
             const filter =
                 apiData.selected_filter ||
-                fallbackResponse.selected_filter ||
                 {};
 
             setScenarioName(filter.scenario_name || "Base");
@@ -564,24 +554,17 @@ export default function HIVMarketEvent() {
             setToDate(filter.end_date || "");
 
             const initialMetricFilters = normalizeMetricFilters(
-                apiData.metric_filters || fallbackResponse.metric_filters || []
+                apiData.metric_filters || []
             );
 
-            setMetricFilters(
-                initialMetricFilters.length
-                    ? initialMetricFilters
-                    : normalizeMetricFilters(marketEventMock.metric_filters || [])
-            );
+            setMetricFilters(initialMetricFilters);
 
             setSelectedMetric((prevSelectedMetric) => {
-                const allowedValues = (initialMetricFilters.length
-                    ? initialMetricFilters
-                    : normalizeMetricFilters(marketEventMock.metric_filters || [])
-                ).map((item) => item.value);
+                const allowedValues = initialMetricFilters.map((item) => item.value);
 
                 return allowedValues.includes(prevSelectedMetric)
                     ? prevSelectedMetric
-                    : getDefaultMetricValue(initialMetricFilters.length ? initialMetricFilters : normalizeMetricFilters(marketEventMock.metric_filters || []));
+                    : getDefaultMetricValue(initialMetricFilters);
             });
 
             const applyResponse = await applyLiverMarketEventsFilters({
@@ -592,79 +575,40 @@ export default function HIVMarketEvent() {
             const applyData = applyResponse?.data || {};
 
             const appliedMetricFilters = normalizeMetricFilters(
-                applyData.metric_filters || apiData.metric_filters || fallbackResponse.metric_filters || []
+                applyData.metric_filters || apiData.metric_filters || []
             );
 
-            setMetricFilters(
-                appliedMetricFilters.length
+            const effectiveMetricFilters =
+                appliedMetricFilters.length > 0
                     ? appliedMetricFilters
-                    : normalizeMetricFilters(marketEventMock.metric_filters || [])
-            );
+                    : initialMetricFilters;
+
+            setMetricFilters(effectiveMetricFilters);
 
             setSelectedMetric((prevSelectedMetric) => {
-                const allowedValues = (appliedMetricFilters.length
-                    ? appliedMetricFilters
-                    : normalizeMetricFilters(marketEventMock.metric_filters || [])
-                ).map((item) => item.value);
+                const allowedValues = effectiveMetricFilters.map((item) => item.value);
 
                 return allowedValues.includes(prevSelectedMetric)
                     ? prevSelectedMetric
-                    : getDefaultMetricValue(appliedMetricFilters.length ? appliedMetricFilters : normalizeMetricFilters(marketEventMock.metric_filters || []));
+                    : getDefaultMetricValue(effectiveMetricFilters);
             });
 
             const normalizedTabs =
                 applyData.event_tabs && Object.keys(applyData.event_tabs).length
-                    ? normalizeEventTabs(applyData.event_tabs, apiData.event_tabs || fallbackResponse.event_tabs)
+                    ? normalizeEventTabs(applyData.event_tabs, apiData.event_tabs || {})
                     : null;
 
             setEventTabsData(
                 normalizedTabs ||
-                normalizeEventTabs(apiData.event_tabs || fallbackResponse.event_tabs, fallbackResponse.event_tabs) ||
+                normalizeEventTabs(apiData.event_tabs || {}, apiData.event_tabs || {}) ||
                 {}
             );
         } catch (error) {
             console.error("Failed to fetch liver market event filters", error);
-
-            setAvailableScenarios(
-                fallbackResponse.available_scenarios ||
-                fallbackResponse.scenario_names ||
-                []
-            );
-
-            setAvailableMonths(
-                fallbackResponse.available_months ||
-                []
-            );
-
-            const filter = fallbackResponse.selected_filter || {};
-
-            setScenarioName(filter.scenario_name || "Base");
-
-            setSelectedPayers(
-                Array.isArray(filter.payers)
-                    ? filter.payers
-                    : Array.isArray(filter.markets)
-                        ? filter.markets
-                        : filter.payer
-                            ? [filter.payer]
-                            : filter.market
-                                ? [filter.market]
-                                : []
-            );
-
-            setSelectedProducts(
-                Array.isArray(filter.products)
-                    ? filter.products
-                    : filter.product
-                        ? [filter.product]
-                        : []
-            );
-
-            setFromDate(filter.start_date || "");
-            setToDate(filter.end_date || "");
-            setMetricFilters(normalizeMetricFilters(marketEventMock.metric_filters || []));
-            setSelectedMetric(getDefaultMetricValue(normalizeMetricFilters(marketEventMock.metric_filters || [])));
-            setEventTabsData(normalizeEventTabs(fallbackResponse.event_tabs, fallbackResponse.event_tabs) || {});
+            setAvailableScenarios([]);
+            setAvailableMonths([]);
+            setMetricFilters([]);
+            setEventTabsData({});
         }
     };
 
@@ -702,17 +646,19 @@ export default function HIVMarketEvent() {
                 apiData.metric_filters || metricFilters || []
             );
 
-            setMetricFilters(normalizedMetricFilters.length ? normalizedMetricFilters : normalizeMetricFilters(marketEventMock.metric_filters || []));
+            const effectiveMetricFilters =
+                normalizedMetricFilters.length > 0
+                    ? normalizedMetricFilters
+                    : metricFilters;
+
+            setMetricFilters(effectiveMetricFilters);
 
             setSelectedMetric((prevSelectedMetric) => {
-                const allowedValues = (normalizedMetricFilters.length
-                    ? normalizedMetricFilters
-                    : normalizeMetricFilters(marketEventMock.metric_filters || [])
-                ).map((item) => item.value);
+                const allowedValues = effectiveMetricFilters.map((item) => item.value);
 
                 return allowedValues.includes(prevSelectedMetric)
                     ? prevSelectedMetric
-                    : getDefaultMetricValue(normalizedMetricFilters.length ? normalizedMetricFilters : normalizeMetricFilters(marketEventMock.metric_filters || []));
+                    : getDefaultMetricValue(effectiveMetricFilters);
             });
 
             const appliedFilter = apiData.selected_filter || payload.selected_filter;
@@ -731,13 +677,10 @@ export default function HIVMarketEvent() {
             setEventTabsData(
                 normalizedTabs
                     ? normalizedTabs
-                    : normalizeEventTabs(marketEventMock.event_tabs, marketEventMock.event_tabs) || {}
+                    : normalizeEventTabs(apiData.event_tabs || {}, eventTabsData) || {}
             );
         } catch (error) {
             console.error("Failed to apply liver market event filters", error);
-            setMetricFilters(normalizeMetricFilters(marketEventMock.metric_filters || []));
-            setSelectedMetric(getDefaultMetricValue(normalizeMetricFilters(marketEventMock.metric_filters || [])));
-            setEventTabsData(normalizeEventTabs(marketEventMock.event_tabs, marketEventMock.event_tabs) || {});
         }
     };
 
