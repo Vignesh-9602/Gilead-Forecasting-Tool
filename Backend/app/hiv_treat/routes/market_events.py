@@ -1,9 +1,41 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
+from app.hiv_treat.routes.market_events_models import *
+from app.hiv_treat.services.market_event_helpers import *
+from app.hiv_treat.services.calculation_tree_market_events import *
+from app.hiv_treat.services.generic_builders_market_events import *
 
 from app.db.connection import get_connection
 
 router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat_market_events"])
+
+
+def generate_months(start_date: date, end_date: date):
+    """
+    Generate a list of months between start_date and end_date (inclusive).
+    Format: YYYY-MM-01
+    """
+    months = []
+
+    current = start_date.replace(day=1)
+    end = end_date.replace(day=1)
+
+    while current <= end:
+        months.append(current.strftime("%Y-%m-%d"))
+
+        if current.month == 12:
+            current = current.replace(
+                year=current.year + 1,
+                month=1
+            )
+        else:
+            current = current.replace(
+                month=current.month + 1
+            )
+
+    return months
 
 
 @router.get("/get_market_event_filters")
@@ -16,7 +48,7 @@ def get_market_event_filters(
     try:
         user_id = "system"
 
-        # Selected Filter
+        # Selected Filter (System Configuration)
         cursor.execute(
             """
             SELECT
@@ -42,7 +74,9 @@ def get_market_event_filters(
                 detail="No configuration found."
             )
 
+        # --------------------------------------------------
         # Available Scenarios
+        # --------------------------------------------------
         cursor.execute(
             """
             SELECT DISTINCT scenario_name
@@ -59,14 +93,14 @@ def get_market_event_filters(
             if row["scenario_name"]
         ]
 
-        # -----------------------------
         # Available Markets
-        # -----------------------------
         cursor.execute(
             """
             SELECT DISTINCT market
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
+            AND market IS NOT NULL
+            AND UPPER(TRIM(market)) <> 'ALL'
             ORDER BY market
             """,
             (ta_name,),
@@ -84,6 +118,8 @@ def get_market_event_filters(
             SELECT DISTINCT product
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
+            AND product IS NOT NULL
+            AND UPPER(TRIM(product)) <> 'ALL'
             ORDER BY product
             """,
             (ta_name,),
@@ -96,21 +132,11 @@ def get_market_event_filters(
         ]
 
         # Available Months
-        cursor.execute(
-            """
-            SELECT DISTINCT
-                make_date(year, month, 1) AS month_date
-            FROM raw_hiv_treat.volume
-            WHERE ta = %s
-            ORDER BY month_date
-            """,
-            (ta_name,),
+        # Generated from configured start & end dates
+        available_months = generate_months(
+            config["start_date"],
+            config["end_date"]
         )
-
-        available_months = [
-            row["month_date"].strftime("%Y-%m-%d")
-            for row in cursor.fetchall()
-        ]
 
         return {
             "ta_name": ta_name,
@@ -128,6 +154,108 @@ def get_market_event_filters(
                 "end_date": config["end_date"].strftime("%Y-%m-%d")
                 if config["end_date"]
                 else None,
+            },
+        }
+
+    finally:
+        cursor.close()
+
+#apply filter
+
+
+
+
+
+@router.post("/apply_market_event_filters")
+def apply_market_event_filters(
+    payload: ApplyFiltersRequest,
+    db=Depends(get_connection),
+):
+
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+
+        # -----------------------------------------
+        # Load metadata
+        # -----------------------------------------
+
+        metadata = load_metadata(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            scenario_name=payload.selected_filter.scenario_name,
+            start_date=payload.selected_filter.start_date,
+            end_date=payload.selected_filter.end_date,
+        )
+
+        # -----------------------------------------
+        # Load forecast outputs
+        # -----------------------------------------
+
+        metrics = load_forecast_outputs(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            scenario_name=payload.selected_filter.scenario_name,
+        )
+
+        # -----------------------------------------
+        # Build calculation tree
+        # -----------------------------------------
+
+        tree = build_calculation_tree(metrics)
+
+        tree = filter_tree_by_date(
+            tree,
+            payload.selected_filter.start_date,
+            payload.selected_filter.end_date,
+        )
+
+        # -----------------------------------------
+        # Build Events
+        # -----------------------------------------
+
+        overall_event = build_overall_event(tree)
+
+        market_event = build_market_event(tree)
+
+        product_event = build_product_event(tree)
+
+        # -----------------------------------------
+        # Response
+        # -----------------------------------------
+
+        print(metadata)
+        print(type(metadata))
+
+        return {
+
+            "ta_name": payload.ta_name,
+
+            "available_scenarios": metadata["available_scenarios"],
+
+            "available_months": metadata["available_months"],
+
+            "selected_filter": payload.selected_filter.model_dump(),
+
+            "metric_filters": [
+                {
+                    "label": "Market Share",
+                    "value": "market_share",
+                },
+                {
+                    "label": "Overall Market Volume",
+                    "value": "market_volume",
+                },
+            ],
+
+            "event_tabs": {
+
+                "overall_event": overall_event,
+
+                "market_event": market_event,
+
+                "product_event": product_event,
+
             },
         }
 
