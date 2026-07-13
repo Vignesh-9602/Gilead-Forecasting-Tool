@@ -30,9 +30,6 @@ export default function HIVImpactCurveChart({
     //             ? "Product Event Impact Trend"
     //             : "Overall Event Impact Trend";
 
-    if (!chartData)
-        return null;
-
     const {
 
         months,
@@ -41,9 +38,9 @@ export default function HIVImpactCurveChart({
 
         forecast_start_index,
 
-        series,
+        series = [],
 
-    } = chartData;
+    } = chartData || {};
 
     const labels =
         months || years || [];
@@ -171,7 +168,7 @@ export default function HIVImpactCurveChart({
                 }}
             >
 
-                {!series?.length ? (
+                {!chartData || !series?.length ? (
 
                     <Box
                         sx={{
