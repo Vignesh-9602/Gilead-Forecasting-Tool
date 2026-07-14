@@ -345,6 +345,25 @@ export const updateHIVScenario = (scenarioName, payload) =>
     payload
   );
 
+export const getHIVMarketEventFilters = (taName) =>
+  httpClient.get("/api/hiv_treat/get_market_event_filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+
+export const applyHIVMarketEventFilter = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/apply_market_event_filters",
+    payload
+  );
+
+export const runHIVMarketEventCalculation = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/run-market-event-calculation",
+    payload
+  );
+
 
 
 // export const mainConversation = () => {

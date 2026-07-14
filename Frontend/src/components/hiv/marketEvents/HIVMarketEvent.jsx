@@ -37,9 +37,12 @@ import AccordionSummary from "@mui/material/AccordionSummary";
 import AccordionDetails from "@mui/material/AccordionDetails";
 
 import { GlobalContext } from "../../../context/Provider";
-import { marketEventMock } from "./MEMockData";
+// import { marketEventMock } from "./MEMockData";
+import { marketEventMock } from "./updatedMock";
 import HIVImpactCurveChart from "./HIVMEChart";
 import HIVImpactCurveTable from "./HIVMETable";
+import { getHIVMarketEventFilters, applyHIVMarketEventFilter, runHIVMarketEventCalculation } from "../../../services/apiService";
+import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
@@ -49,6 +52,9 @@ const globalConfigDateLocaleText = {
 export default function HIVMarketEvent() {
 
     const { favState } = useContext(GlobalContext);
+
+    const { showSnackbar } = useSnackbarStore();
+    const { setLoading } = useLoadingStore();
 
     const therapyArea =
         favState?.selectedTherapyArea || "HIV Treatment";
@@ -65,9 +71,11 @@ export default function HIVMarketEvent() {
 
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
+    const [availableMarkets, setAvailableMarkets] = useState([]);
+    const [availableProducts, setAvailableProducts] = useState([]);
 
     const [activeTab, setActiveTab] =
-        useState("market_event");
+        useState("overall_event");
 
     const isMarketEvent =
         activeTab === "market_event";
@@ -82,10 +90,14 @@ export default function HIVMarketEvent() {
         useState([]);
 
     const [selectedMetric, setSelectedMetric] =
-        useState("market_volume");
+        useState("market_share");
 
     const [selectedView, setSelectedView] =
         useState("monthly");
+
+    const [metricFilters, setMetricFilters] =
+        useState([]);
+
 
     useEffect(() => {
 
@@ -113,6 +125,11 @@ export default function HIVMarketEvent() {
         selectedView
         ] || {};
 
+    const impactOptions =
+        isMarketEvent
+            ? currentConfig.impact_markets || []
+            : currentConfig.impact_products || [];
+
     const createEmptyRow = (config) => ({
 
         id: Date.now(),
@@ -124,6 +141,7 @@ export default function HIVMarketEvent() {
         markets: [],
 
         impacted_items: [],
+        source_percentages: {},
 
         start_date:
             config.forecast_start_date || "",
@@ -143,6 +161,10 @@ export default function HIVMarketEvent() {
 
         coverage_peak_months: "",
 
+        coverage_curve_type: config.curve_types?.[0] || "",
+
+        coverage_factor: "",
+
     });
 
     const [menuAnchorEl, setMenuAnchorEl] =
@@ -157,64 +179,319 @@ export default function HIVMarketEvent() {
     const [openImpactDialog, setOpenImpactDialog] =
         useState(false);
 
-    const [selectedImpactRowIndex, setSelectedImpactRowIndex] =
-        useState(null);
+    // const [selectedImpactRowIndex, setSelectedImpactRowIndex] =
+    //     useState(null);
+
+    const [impactValues, setImpactValues] = useState({});
 
     useEffect(() => {
-        fetchFilters();
-    }, []);
+        if (therapyArea) {
+            fetchFilters();
+        }
+    }, [therapyArea]);
 
-    const fetchFilters = () => {
+    // useEffect(() => {
 
-        const response = marketEventMock;
+    //     if (!openImpactDialog) return;
 
-        setAvailableScenarios(
-            response.available_scenarios
-        );
+    //     const source = isMarketEvent
+    //         ? currentConfig.impact_markets || []
+    //         : currentConfig.impact_products || [];
 
-        setAvailableMonths(
-            response.available_months
-        );
+    //     const initial = {};
 
-        const filter = response.selected_filter;
+    //     source.forEach((item) => {
+    //         initial[item] = 0;
+    //     });
 
-        setScenarioName(filter.scenario_name);
+    //     setImpactValues(initial);
 
-        setSelectedMarkets(filter.markets);
+    // }, [openImpactDialog, activeTab, currentConfig]);
 
-        setSelectedProducts(filter.products);
+    const fetchFilters = async () => {
+        try {
+            setLoading(true);
 
-        setFromDate(filter.start_date);
+            const { data: response } =
+                await getHIVMarketEventFilters(therapyArea);
 
-        setToDate(filter.end_date);
+            setAvailableScenarios(
+                response.available_scenarios || []
+            );
 
-        setEventTabsData(response.event_tabs);
+            setAvailableMonths(
+                response.available_months || []
+            );
+
+            setAvailableMarkets(response.markets || []);
+            setAvailableProducts(response.products || []);
+
+            const filter = response.selected_filter || {};
+
+            setScenarioName(
+                filter.scenario_name || ""
+            );
+
+            setSelectedMarkets(
+                filter.markets || []
+            );
+
+            setSelectedProducts(
+                filter.products || []
+            );
+
+            setFromDate(
+                filter.start_date || ""
+            );
+
+            setToDate(
+                filter.end_date || ""
+            );
+        } catch (error) {
+            console.error(
+                "Failed to fetch market event filters",
+                error
+            );
+            showSnackbar(
+                "Failed to fetch market event filters",
+                "error"
+            );
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const handleApplyFilter = () => {
+    // const handleApplyFilter = () => {
+
+    //     const payload = {
+    //         ta_name: therapyArea,
+
+    //         scenario_name: scenarioName,
+
+    //         markets: selectedMarkets,
+
+    //         products: selectedProducts,
+
+    //         start_date: fromDate,
+
+    //         end_date: toDate,
+    //     };
+
+    //     console.log(payload);
+    //     const rows = currentConfig.rows || [];
+
+    //     const response = marketEventMock;
+
+    //     setEventTabsData(response.event_tabs);
+
+    //     setEventRows(
+    //         rows.length
+    //             ? rows
+    //             : [createEmptyRow(currentConfig)]
+    //     );
+    // };
+
+    const handleRunCalculation = async () => {
+
+        const payload = {
+
+            ta_name: therapyArea,
+
+            selected_filter: {
+
+                scenario_name: scenarioName,
+
+                markets: selectedMarkets,
+
+                products: selectedProducts,
+
+                start_date: fromDate,
+
+                end_date: toDate,
+
+            },
+
+            selected_tab: activeTab,
+
+            impact_curve_configuration: {
+
+                rows: eventRows.map((row) => {
+
+                    const payloadRow = {
+
+                        event_name: row.event_name,
+
+                        start_date: row.start_date,
+
+                        peak_percent: Number(row.peak_percent),
+
+                        months: Number(row.months),
+
+                        curve_type: row.curve_type,
+
+                        factor:
+                            row.curve_type === "Linear"
+                                ? 0
+                                : Number(row.factor),
+
+                    };
+
+                    if (activeTab !== "overall_event") {
+
+                        payloadRow.products =
+                            row.products;
+
+                        payloadRow.markets =
+                            row.markets;
+
+                        if (activeTab === "market_event") {
+
+                            payloadRow.impacted_markets =
+                                row.impacted_items || [];
+
+                        } else {
+
+                            payloadRow.impacted_products =
+                                row.impacted_items || [];
+
+                        }
+
+                        payloadRow.source_percentages =
+                            row.source_percentages || {};
+
+                    }
+
+                    if (row.enable_coverage) {
+
+                        payloadRow.coverage_peak_percent =
+                            Number(
+                                row.coverage_peak_percent
+                            );
+
+                        payloadRow.coverage_peak_months =
+                            Number(
+                                row.coverage_peak_months
+                            );
+
+                        payloadRow.coverage_curve_type =
+                            row.coverage_curve_type;
+
+                        payloadRow.coverage_factor =
+                            row.coverage_curve_type ===
+                                "Linear"
+                                ? 0
+                                : Number(
+                                    row.coverage_factor
+                                );
+
+                    }
+
+                    return payloadRow;
+
+                }),
+
+            },
+
+
+        };
+
+        console.log("payload--------->", payload)
+
+
+
+        try {
+
+            setLoading(true);
+
+            const { data: response } =
+                await runHIVMarketEventCalculation(
+                    payload
+                );
+
+            setEventTabsData(
+                response.event_tabs || {}
+            );
+
+            setSelectedMetric(
+                response.metric_filters?.[0]
+                    ?.value || "market_share"
+            );
+
+            setMetricFilters(
+                response.metric_filters || []
+            );
+
+            setSelectedView("monthly");
+
+        } catch (error) {
+
+            console.error(error);
+
+            showSnackbar(
+                "Failed to run calculation",
+                "error"
+            );
+
+        } finally {
+
+            setLoading(false);
+
+        }
+
+    };
+
+
+    const handleApplyFilter = async () => {
 
         const payload = {
             ta_name: therapyArea,
 
-            scenario_name: scenarioName,
-
-            markets: selectedMarkets,
-
-            products: selectedProducts,
-
-            start_date: fromDate,
-
-            end_date: toDate,
+            selected_filter: {
+                scenario_name: scenarioName,
+                start_date: fromDate,
+                end_date: toDate,
+                markets: selectedMarkets,
+                products: selectedProducts,
+            },
         };
 
-        console.log(payload);
-        const rows = currentConfig.rows || [];
+        try {
 
-        setEventRows(
-            rows.length
-                ? rows
-                : [createEmptyRow(currentConfig)]
-        );
+            setLoading(true);
+
+            const { data: response } =
+                await applyHIVMarketEventFilter(payload);
+
+            setEventTabsData(
+                response.event_tabs || {}
+            );
+
+            setSelectedMetric(
+                response.metric_filters?.[0]?.value ||
+                "market_share"
+            );
+
+            setMetricFilters(
+                response.metric_filters || []
+            );
+
+            setSelectedView("monthly");
+
+        } catch (error) {
+
+            console.error(error);
+
+            showSnackbar(
+                "Failed to apply filters",
+                "error"
+            );
+
+        } finally {
+
+            setLoading(false);
+
+        }
+
     };
 
     const inputStyle = {
@@ -238,17 +515,17 @@ export default function HIVMarketEvent() {
 
     const EVENT_TABS = [
         {
+            label: "Overall Event",
+            value: "overall_event",
+        },
+        {
             label: "Market Event",
             value: "market_event",
         },
         {
             label: "Product Event",
             value: "product_event",
-        },
-        {
-            label: "Overall Event",
-            value: "overall_event",
-        },
+        }
     ];
 
 
@@ -320,13 +597,61 @@ export default function HIVMarketEvent() {
 
     };
 
-    const handleOpenImpactDialog = (
-        index
-    ) => {
+    // const handleOpenImpactDialog = (
+    //     index
+    // ) => {
 
-        setSelectedImpactRowIndex(index);
+    //     setSelectedImpactRowIndex(index);
+
+    //     setOpenImpactDialog(true);
+
+    // };
+
+    const handleOpenImpactDialog = (index) => {
+
+        setSelectedRowIndex(index);
+
+        const row = eventRows[index];
+
+        const source = isMarketEvent
+            ? currentConfig.impact_markets || []
+            : currentConfig.impact_products || [];
+
+        const values = {};
+
+        source.forEach((item) => {
+            values[item] =
+                row.source_percentages?.[item] ?? 0;
+        });
+
+        setImpactValues(values);
 
         setOpenImpactDialog(true);
+
+    };
+
+    const handleSaveImpactDialog = () => {
+
+        const selectedItems =
+            isMarketEvent
+                ? eventRows[selectedRowIndex].markets
+                : eventRows[selectedRowIndex].products;
+
+        const impactedItems = impactOptions.filter(
+            (item) => !selectedItems.includes(item)
+        );
+
+        const updatedRows = [...eventRows];
+
+        updatedRows[selectedRowIndex] = {
+            ...updatedRows[selectedRowIndex],
+            impacted_items: impactedItems,
+            source_percentages: impactValues,
+        };
+
+        setEventRows(updatedRows);
+
+        setOpenImpactDialog(false);
 
     };
 
@@ -353,25 +678,27 @@ export default function HIVMarketEvent() {
         if (field === "enable_coverage" && !value) {
             updated[index].coverage_peak_percent = "";
             updated[index].coverage_peak_months = "";
+            updated[index].coverage_curve_type = "";
+            updated[index].coverage_factor = "";
         }
 
         setEventRows(updated);
 
     };
 
-    const handleImpactSelection = (
-        value
-    ) => {
+    // const handleImpactSelection = (
+    //     value
+    // ) => {
 
-        const updated = [...eventRows];
+    //     const updated = [...eventRows];
 
-        updated[
-            selectedImpactRowIndex
-        ].impacted_items = value;
+    //     updated[
+    //         selectedImpactRowIndex
+    //     ].impacted_items = value;
 
-        setEventRows(updated);
+    //     setEventRows(updated);
 
-    };
+    // };
 
     const tableInputStyle = {
         borderRadius: "8px",
@@ -422,8 +749,8 @@ export default function HIVMarketEvent() {
     };
 
     const headerColumns = isOverallEvent
-        ? "0.9fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 40px"
-        : "0.8fr 0.6fr 0.55fr 0.65fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 40px";
+        ? "0.9fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 0.45fr 0.3fr 40px"
+        : "0.8fr 0.6fr 0.55fr 0.65fr 0.45fr 0.35fr 0.35fr 0.45fr 0.3fr 0.3fr 0.45fr 0.45fr 0.45fr 0.3fr 40px"
 
     const headers = isOverallEvent
         ? [
@@ -436,25 +763,45 @@ export default function HIVMarketEvent() {
             "Coverage",
             "Coverage Peak %",
             "Coverage Peak Months",
+            "Coverage Curve",
+            "Coverage Factor",
             "",
         ]
-        : [
-            isMarketEvent ? "Market Event" : "Product Event",
-            "Products",
-            "Markets",
-            isMarketEvent
-                ? "Impacted Markets"
-                : "Impacted Products",
-            "Start Date",
-            "Peak %",
-            "Months",
-            "Curve",
-            "Factor",
-            "Coverage",
-            "Coverage Peak %",
-            "Coverage Peak Months",
-            "",
-        ];
+        : isMarketEvent
+            ? [
+                "Market Event",
+                "Products",
+                "Markets",
+                "Impacted Markets",
+                "Start Date",
+                "Peak %",
+                "Months",
+                "Curve",
+                "Factor",
+                "Coverage",
+                "Coverage Peak %",
+                "Coverage Peak Months",
+                "Coverage Curve",
+                "Coverage Factor",
+                "",
+            ]
+            : [
+                "Product Event",
+                "Markets",
+                "Products",
+                "Impacted Products",
+                "Start Date",
+                "Peak %",
+                "Months",
+                "Curve",
+                "Factor",
+                "Coverage",
+                "Coverage Peak %",
+                "Coverage Peak Months",
+                "Coverage Curve",
+                "Coverage Factor",
+                "",
+            ];
 
     return (
 
@@ -692,7 +1039,7 @@ export default function HIVMarketEvent() {
 
                                         if (
                                             selectedMarkets.length ===
-                                            (currentConfig.markets || []).length
+                                            (availableMarkets || []).length
                                         ) {
 
                                             setSelectedMarkets([]);
@@ -700,7 +1047,7 @@ export default function HIVMarketEvent() {
                                         } else {
 
                                             setSelectedMarkets(
-                                                currentConfig.markets || []
+                                                availableMarkets || []
                                             );
 
                                         }
@@ -724,12 +1071,12 @@ export default function HIVMarketEvent() {
                                     <Checkbox
                                         checked={
                                             selectedMarkets.length ===
-                                            (currentConfig.markets || []).length
+                                            (availableMarkets || []).length
                                         }
                                         indeterminate={
                                             selectedMarkets.length > 0 &&
                                             selectedMarkets.length <
-                                            (currentConfig.markets || []).length
+                                            (availableMarkets || []).length
                                         }
                                     />
 
@@ -739,7 +1086,7 @@ export default function HIVMarketEvent() {
 
                                 </MenuItem>
 
-                                {(currentConfig.markets || []).map((item) => (
+                                {(availableMarkets || []).map((item) => (
 
                                     <MenuItem
                                         key={item}
@@ -792,7 +1139,7 @@ export default function HIVMarketEvent() {
 
                                         if (
                                             selectedProducts.length ===
-                                            (currentConfig.products || []).length
+                                            (availableProducts || []).length
                                         ) {
 
                                             setSelectedProducts(
@@ -802,7 +1149,7 @@ export default function HIVMarketEvent() {
                                         } else {
 
                                             setSelectedProducts(
-                                                currentConfig.products || []
+                                                availableProducts || []
                                             );
 
                                         }
@@ -827,13 +1174,13 @@ export default function HIVMarketEvent() {
 
                                         checked={
                                             selectedProducts.length ===
-                                            (currentConfig.products || []).length
+                                            (availableProducts || []).length
                                         }
                                         indeterminate={
                                             selectedProducts.length >
                                             0 &&
                                             selectedProducts.length <
-                                            (currentConfig.products || []).length
+                                            (availableProducts || []).length
                                         }
 
                                     />
@@ -844,7 +1191,7 @@ export default function HIVMarketEvent() {
 
                                 </MenuItem>
 
-                                {(currentConfig.products || []).map((item) => (
+                                {(availableProducts || []).map((item) => (
 
                                     <MenuItem
                                         key={item}
@@ -944,7 +1291,7 @@ export default function HIVMarketEvent() {
                                     variant="contained"
                                     onClick={(e) => {
                                         e.stopPropagation();
-                                        // handleRunCalculation();
+                                        handleRunCalculation();
                                     }}
                                     sx={{
                                         height: "33px",
@@ -1254,9 +1601,7 @@ export default function HIVMarketEvent() {
 
                                             <Button
                                                 variant="outlined"
-                                                onClick={() =>
-                                                    handleOpenImpactDialog(index)
-                                                }
+                                                onClick={() => handleOpenImpactDialog(index)}
                                                 sx={{
                                                     textTransform: "none",
                                                     borderRadius: "6px",
@@ -1453,6 +1798,73 @@ export default function HIVMarketEvent() {
                                                 }}
                                             />
 
+                                            <FormControl
+                                                size="small"
+                                                sx={{
+                                                    ...tableSelectStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableSelectStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor: !row.enable_coverage
+                                                            ? "#F3F4F6"
+                                                            : "#fff",
+                                                    },
+                                                }}
+                                            >
+                                                <Select
+                                                    disabled={!row.enable_coverage}
+                                                    value={row.coverage_curve_type}
+                                                    MenuProps={menuProps}
+                                                    onChange={(e) =>
+                                                        handleRowChange(
+                                                            index,
+                                                            "coverage_curve_type",
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                >
+
+                                                    {(currentConfig.curve_types || []).map((item) => (
+
+                                                        <MenuItem
+                                                            key={item}
+                                                            value={item}
+                                                        >
+                                                            {item}
+                                                        </MenuItem>
+
+                                                    ))}
+
+                                                </Select>
+
+                                            </FormControl>
+
+                                            <TextField
+                                                size="small"
+                                                disabled={
+                                                    !row.enable_coverage ||
+                                                    row.coverage_curve_type === "Linear"
+                                                }
+                                                value={row.coverage_factor}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "coverage_factor",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage ||
+                                                                row.coverage_curve_type === "Linear"
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
                                             {/* MENU */}
 
                                             <Box
@@ -1489,98 +1901,6 @@ export default function HIVMarketEvent() {
                                                 }
                                                 sx={tableInputStyle}
                                             />
-
-                                            {/* PRODUCTS */}
-                                            <FormControl
-                                                size="small"
-                                                sx={tableSelectStyle}
-                                            >
-                                                <Select
-                                                    multiple
-                                                    MenuProps={menuProps}
-                                                    value={row.products}
-                                                    renderValue={(selected) =>
-                                                        selected.length
-                                                            ? selected.join(", ")
-                                                            : "Select"
-                                                    }
-                                                    onChange={(e) => {
-
-                                                        const value = e.target.value;
-
-                                                        if (value.includes("SELECT_ALL")) {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "products",
-                                                                row.products.length ===
-                                                                    (currentConfig.products || []).length
-                                                                    ? []
-                                                                    : currentConfig.products || []
-                                                            );
-
-                                                        } else {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "products",
-                                                                value
-                                                            );
-
-                                                        }
-
-                                                    }}
-                                                >
-
-                                                    <MenuItem value="SELECT_ALL">
-
-                                                        <Checkbox
-                                                            size="small"
-                                                            checked={
-                                                                row.products.length ===
-                                                                (currentConfig.products || []).length
-                                                            }
-                                                            indeterminate={
-                                                                row.products.length > 0 &&
-                                                                row.products.length <
-                                                                (currentConfig.products || []).length
-                                                            }
-                                                        />
-
-                                                        <ListItemText primary="Select All" />
-
-                                                    </MenuItem>
-
-                                                    {(currentConfig.products || []).map((item) => (
-
-                                                        <MenuItem
-                                                            key={item}
-                                                            value={item}
-                                                            sx={{
-                                                                py: 0.5,
-                                                            }}
-                                                        >
-
-                                                            <Checkbox
-                                                                checked={row.products.includes(item)}
-                                                                size="small"
-                                                            // sx={{
-                                                            //     p: 0.5,
-                                                            //     mr: 1,
-                                                            // }}
-                                                            />
-
-                                                            <ListItemText
-                                                                primary={item}
-                                                            />
-
-                                                        </MenuItem>
-
-                                                    ))}
-
-                                                </Select>
-
-                                            </FormControl>
 
                                             {/* MARKETS */}
 
@@ -1675,13 +1995,103 @@ export default function HIVMarketEvent() {
 
                                             </FormControl>
 
+                                            {/* PRODUCTS */}
+                                            <FormControl
+                                                size="small"
+                                                sx={tableSelectStyle}
+                                            >
+                                                <Select
+                                                    multiple
+                                                    MenuProps={menuProps}
+                                                    value={row.products}
+                                                    renderValue={(selected) =>
+                                                        selected.length
+                                                            ? selected.join(", ")
+                                                            : "Select"
+                                                    }
+                                                    onChange={(e) => {
+
+                                                        const value = e.target.value;
+
+                                                        if (value.includes("SELECT_ALL")) {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "products",
+                                                                row.products.length ===
+                                                                    (currentConfig.products || []).length
+                                                                    ? []
+                                                                    : currentConfig.products || []
+                                                            );
+
+                                                        } else {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "products",
+                                                                value
+                                                            );
+
+                                                        }
+
+                                                    }}
+                                                >
+
+                                                    <MenuItem value="SELECT_ALL">
+
+                                                        <Checkbox
+                                                            size="small"
+                                                            checked={
+                                                                row.products.length ===
+                                                                (currentConfig.products || []).length
+                                                            }
+                                                            indeterminate={
+                                                                row.products.length > 0 &&
+                                                                row.products.length <
+                                                                (currentConfig.products || []).length
+                                                            }
+                                                        />
+
+                                                        <ListItemText primary="Select All" />
+
+                                                    </MenuItem>
+
+                                                    {(currentConfig.products || []).map((item) => (
+
+                                                        <MenuItem
+                                                            key={item}
+                                                            value={item}
+                                                            sx={{
+                                                                py: 0.5,
+                                                            }}
+                                                        >
+
+                                                            <Checkbox
+                                                                checked={row.products.includes(item)}
+                                                                size="small"
+                                                            // sx={{
+                                                            //     p: 0.5,
+                                                            //     mr: 1,
+                                                            // }}
+                                                            />
+
+                                                            <ListItemText
+                                                                primary={item}
+                                                            />
+
+                                                        </MenuItem>
+
+                                                    ))}
+
+                                                </Select>
+
+                                            </FormControl>
+
                                             {/* IMPACTED PRODUCTS */}
 
                                             <Button
                                                 variant="outlined"
-                                                onClick={() =>
-                                                    handleOpenImpactDialog(index)
-                                                }
+                                                onClick={() => handleOpenImpactDialog(index)}
                                                 sx={{
                                                     textTransform: "none",
                                                     borderRadius: "6px",
@@ -1872,6 +2282,73 @@ export default function HIVMarketEvent() {
                                                         ...tableInputStyle["& .MuiOutlinedInput-root"],
                                                         backgroundColor:
                                                             !row.enable_coverage
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
+                                            <FormControl
+                                                size="small"
+                                                sx={{
+                                                    ...tableSelectStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableSelectStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor: !row.enable_coverage
+                                                            ? "#F3F4F6"
+                                                            : "#fff",
+                                                    },
+                                                }}
+                                            >
+                                                <Select
+                                                    disabled={!row.enable_coverage}
+                                                    value={row.coverage_curve_type}
+                                                    MenuProps={menuProps}
+                                                    onChange={(e) =>
+                                                        handleRowChange(
+                                                            index,
+                                                            "coverage_curve_type",
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                >
+
+                                                    {(currentConfig.curve_types || []).map((item) => (
+
+                                                        <MenuItem
+                                                            key={item}
+                                                            value={item}
+                                                        >
+                                                            {item}
+                                                        </MenuItem>
+
+                                                    ))}
+
+                                                </Select>
+
+                                            </FormControl>
+
+                                            <TextField
+                                                size="small"
+                                                disabled={
+                                                    !row.enable_coverage ||
+                                                    row.coverage_curve_type === "Linear"
+                                                }
+                                                value={row.coverage_factor}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "coverage_factor",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage ||
+                                                                row.coverage_curve_type === "Linear"
                                                                 ? "#F3F4F6"
                                                                 : "#fff",
                                                     },
@@ -2099,6 +2576,73 @@ export default function HIVMarketEvent() {
                                                 }}
                                             />
 
+                                            <FormControl
+                                                size="small"
+                                                sx={{
+                                                    ...tableSelectStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableSelectStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor: !row.enable_coverage
+                                                            ? "#F3F4F6"
+                                                            : "#fff",
+                                                    },
+                                                }}
+                                            >
+                                                <Select
+                                                    disabled={!row.enable_coverage}
+                                                    value={row.coverage_curve_type}
+                                                    MenuProps={menuProps}
+                                                    onChange={(e) =>
+                                                        handleRowChange(
+                                                            index,
+                                                            "coverage_curve_type",
+                                                            e.target.value
+                                                        )
+                                                    }
+                                                >
+
+                                                    {(currentConfig.curve_types || []).map((item) => (
+
+                                                        <MenuItem
+                                                            key={item}
+                                                            value={item}
+                                                        >
+                                                            {item}
+                                                        </MenuItem>
+
+                                                    ))}
+
+                                                </Select>
+
+                                            </FormControl>
+
+                                            <TextField
+                                                size="small"
+                                                disabled={
+                                                    !row.enable_coverage ||
+                                                    row.coverage_curve_type === "Linear"
+                                                }
+                                                value={row.coverage_factor}
+                                                onChange={(e) =>
+                                                    handleRowChange(
+                                                        index,
+                                                        "coverage_factor",
+                                                        e.target.value
+                                                    )
+                                                }
+                                                sx={{
+                                                    ...tableInputStyle,
+                                                    "& .MuiOutlinedInput-root": {
+                                                        ...tableInputStyle["& .MuiOutlinedInput-root"],
+                                                        backgroundColor:
+                                                            !row.enable_coverage ||
+                                                                row.coverage_curve_type === "Linear"
+                                                                ? "#F3F4F6"
+                                                                : "#fff",
+                                                    },
+                                                }}
+                                            />
+
                                             {/* MENU */}
 
                                             <Box
@@ -2132,15 +2676,14 @@ export default function HIVMarketEvent() {
 
                 </Accordion>
                 <HIVImpactCurveTable
-
                     tableData={currentMetricData.table}
-
                     metricFilters={marketEventMock.metric_filters}
-
+                    // metricFilters={metricFilters}
                     selectedMetric={selectedMetric}
-
                     setSelectedMetric={setSelectedMetric}
-
+                    selectedView={selectedView}
+                    setSelectedView={setSelectedView}
+                    activeTab={activeTab}
                 />
 
                 <Menu
@@ -2214,111 +2757,185 @@ export default function HIVMarketEvent() {
                 <Dialog
                     open={openImpactDialog}
                     onClose={handleCloseImpactDialog}
-                    maxWidth="sm"
-                    fullWidth
+                    PaperProps={{
+                        sx: {
+                            width: "320px",
+                            maxWidth: "90vw",
+                            borderRadius: "12px",
+                        },
+                    }}
                 >
                     <DialogTitle
                         sx={{
+                            fontWeight: 700,
+                            fontSize: "16px",
                             display: "flex",
-                            justifyContent: "space-between",
                             alignItems: "center",
+                            justifyContent: "space-between",
+                            pr: 1,
                         }}
                     >
-
                         {isMarketEvent
-                            ? "Edit Impacted Markets"
-                            : "Edit Impacted Products"}
+                            ? "Impacted Markets (%)"
+                            : "Impacted Products (%)"}
 
                         <IconButton
+                            size="small"
                             onClick={handleCloseImpactDialog}
                         >
-                            <CloseIcon />
+                            <CloseIcon fontSize="small" />
                         </IconButton>
-
                     </DialogTitle>
+
                     <DialogContent>
 
-                        <Typography
-                            sx={{
-                                mb: 2,
-                                fontWeight: 600,
-                            }}
-                        >
-                            Select impacted items
-                        </Typography>
+                        {(() => {
 
-                        <FormControl fullWidth>
+                            const selectedItems =
+                                isMarketEvent
+                                    ? eventRows[selectedRowIndex]?.markets || []
+                                    : eventRows[selectedRowIndex]?.products || [];
 
-                            <Select
-                                multiple
-                                value={
-                                    selectedImpactRowIndex !== null
-                                        ? eventRows[selectedImpactRowIndex]
-                                            ?.impacted_items || []
-                                        : []
-                                }
-                                renderValue={(selected) =>
-                                    selected.join(", ")
-                                }
-                                onChange={(e) =>
-                                    handleImpactSelection(
-                                        e.target.value
-                                    )
-                                }
-                            >
+                            const impactTotal =
+                                impactOptions.reduce(
+                                    (sum, item) =>
+                                        selectedItems.includes(item)
+                                            ? sum
+                                            : sum + Number(impactValues[item] || 0),
+                                    0
+                                );
 
-                                {(
-                                    isMarketEvent
-                                        ? currentConfig.impacted_markets
-                                        : currentConfig.impacted_products
-                                )?.map((item) => (
+                            const isImpactValid =
+                                impactTotal === 100;
 
-                                    <MenuItem
-                                        key={item}
-                                        value={item}
+                            return (
+
+                                <>
+
+                                    <Box
+                                        sx={{
+                                            mt: 1,
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            gap: 2,
+                                        }}
                                     >
 
-                                        <Checkbox
-                                            checked={
-                                                selectedImpactRowIndex !==
-                                                null &&
-                                                eventRows[
-                                                    selectedImpactRowIndex
-                                                ]?.impacted_items.includes(
-                                                    item
-                                                )
-                                            }
-                                        />
+                                        {impactOptions.map((item) => {
 
-                                        <ListItemText
-                                            primary={item}
-                                        />
+                                            const disabled =
+                                                selectedItems.includes(item);
 
-                                    </MenuItem>
+                                            return (
 
-                                ))}
+                                                <Box
+                                                    key={item}
+                                                    sx={{
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: 7,
+                                                    }}
+                                                >
 
-                            </Select>
+                                                    <Typography
+                                                        sx={{
+                                                            width: "120px",
+                                                            flexShrink: 0,
+                                                            fontSize: "14px",
+                                                            color: disabled
+                                                                ? "#94A3B8"
+                                                                : "#334155",
+                                                        }}
+                                                    >
+                                                        {item}
+                                                    </Typography>
 
-                        </FormControl>
+                                                    <TextField
+                                                        type="number"
+                                                        size="small"
+                                                        disabled={disabled}
+                                                        value={
+                                                            impactValues[item] ?? 0
+                                                        }
+                                                        onChange={(e) =>
+                                                            setImpactValues((prev) => ({
+                                                                ...prev,
+                                                                [item]: Number(
+                                                                    e.target.value || 0
+                                                                ),
+                                                            }))
+                                                        }
+                                                        sx={{
+                                                            width: "65px",
+
+                                                            "& .MuiOutlinedInput-root": {
+                                                                height: "30px",
+                                                                fontSize: "13px",
+                                                                backgroundColor:
+                                                                    disabled
+                                                                        ? "#E2E8F0"
+                                                                        : "#fff",
+                                                            },
+
+                                                            "& input": {
+                                                                padding: "6px 8px",
+                                                            },
+                                                        }}
+                                                    />
+
+                                                </Box>
+
+                                            );
+
+                                        })}
+
+                                        {!isImpactValid && (
+
+                                            <Typography
+                                                sx={{
+                                                    fontSize: "12px",
+                                                    color: "#EF4444",
+                                                    mt: 1,
+                                                }}
+                                            >
+                                                Total must equal 100%.
+                                            </Typography>
+
+                                        )}
+
+                                    </Box>
+
+                                    <DialogActions
+                                        sx={{
+                                            p: 0,
+                                            pt: 3,
+                                        }}
+                                    >
+
+                                        <Button
+                                            fullWidth
+                                            variant="contained"
+                                            disabled={!isImpactValid}
+                                            onClick={handleSaveImpactDialog}
+                                            sx={{
+                                                textTransform: "none",
+                                                borderRadius: "8px",
+                                                height: "42px",
+                                                backgroundColor: "#4F46E5",
+                                            }}
+                                        >
+                                            Done
+                                        </Button>
+
+                                    </DialogActions>
+
+                                </>
+
+                            );
+
+                        })()}
 
                     </DialogContent>
-                    <DialogActions>
-
-                        <Button
-                            onClick={handleCloseImpactDialog}
-                        >
-                            Cancel
-                        </Button>
-
-                        <Button
-                            variant="contained"
-                            onClick={handleCloseImpactDialog}
-                        >
-                            Apply
-                        </Button>
-
-                    </DialogActions>
 
                 </Dialog>
             </Paper>

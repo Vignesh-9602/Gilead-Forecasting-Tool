@@ -7,6 +7,7 @@ import {
 } from "@mui/material";
 
 import Plot from "react-plotly.js";
+import dayjs from "dayjs";
 
 const PlotComponent =
     Plot.default || Plot;
@@ -39,8 +40,9 @@ export default function HIVImpactCurveChart({
 
     } = chartData;
 
-    const labels =
-        months || years || [];
+    const labels = months
+        ? months.map((item) => dayjs(item).format("MMM-YY"))
+        : years || [];
 
     const historyX =
         labels.slice(
