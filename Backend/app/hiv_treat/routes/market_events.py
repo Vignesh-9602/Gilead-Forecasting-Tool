@@ -6,6 +6,9 @@ from app.hiv_treat.routes.market_events_models import *
 from app.hiv_treat.services.market_event_helpers import *
 from app.hiv_treat.services.calculation_tree_market_events import *
 from app.hiv_treat.services.generic_builders_market_events import *
+from app.hiv_treat.services.edit_helpers import *
+
+router = APIRouter()
 
 from app.db.connection import get_connection
 
@@ -162,10 +165,6 @@ def get_market_event_filters(
 
 #apply filter
 
-
-
-
-
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -258,6 +257,117 @@ def apply_market_event_filters(
 
             },
         }
+
+    finally:
+        cursor.close()
+
+#edits
+@router.post("/edit_save")
+def edit_save(
+    payload: EditSaveRequest,
+    db=Depends(get_connection),
+):
+    cursor = db.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    try:
+        scenario_name = payload.selected_filter.scenario_name
+        selected_filter = payload.selected_filter.model_dump()
+
+        original_metrics = load_forecast_outputs(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+        )
+
+        if not original_metrics.get("market_share"):
+            raise HTTPException(
+                status_code=404,
+                detail="No market-share forecast data was found",
+            )
+
+        if not original_metrics.get("market_volume"):
+            raise HTTPException(
+                status_code=404,
+                detail="No market-volume forecast data was found",
+            )
+
+        tree = build_calculation_tree(original_metrics)
+
+        edited_indexes = resolve_edited_indexes(
+            tree,
+            payload,
+        )
+
+        validate_edited_rows(
+            payload.edited_table_rows,
+            len(payload.edited_headers),
+        )
+
+        matrix = build_market_product_volume_matrix(tree)
+
+        if payload.selected_tab == "market_event":
+            apply_market_event_edits(
+                tree,
+                matrix,
+                payload,
+                edited_indexes,
+            )
+        else:
+            apply_product_event_edits(
+                tree,
+                matrix,
+                payload,
+                edited_indexes,
+            )
+
+        apply_matrix_to_tree(
+            tree,
+            matrix,
+            edited_indexes,
+        )
+
+        recompute_tree(
+            tree,
+            edited_indexes,
+        )
+
+        save_tree_to_forecast_outputs(
+            cursor,
+            tree=tree,
+            original_metrics=original_metrics,
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+        )
+
+        db.commit()
+
+        return build_apply_filters_response(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            selected_filter=selected_filter,
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except ValueError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to save forecast edits: {exc}",
+        ) from exc
 
     finally:
         cursor.close()
