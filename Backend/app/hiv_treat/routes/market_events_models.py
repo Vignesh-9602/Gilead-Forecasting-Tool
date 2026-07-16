@@ -3,7 +3,6 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field , model_validator
 
 
-
 class SelectedFilter(BaseModel):
     scenario_name: str
     markets: List[str]
@@ -23,6 +22,7 @@ class EditSelectedFilter(BaseModel):
     scenario_name: str
     start_date: str
     end_date: str
+
     markets: list[str] = Field(default_factory=list)
     products: list[str] = Field(default_factory=list)
 
@@ -31,13 +31,18 @@ class EditedTableRow(BaseModel):
     label: str
     editable: bool = True
     values: list[float] = Field(default_factory=list)
-    children: list["EditedTableRow"] = Field(default_factory=list)
+
+    children: list["EditedTableRow"] = Field(
+        default_factory=list
+    )
 
 
 class EditSaveRequest(BaseModel):
     ta_name: str
+
     selected_filter: EditSelectedFilter
 
+    # overall_event is intentionally excluded.
     selected_tab: Literal[
         "market_event",
         "product_event",
@@ -49,40 +54,45 @@ class EditSaveRequest(BaseModel):
     ]
 
     selected_table_view: Literal[
-        "product_level",
-        "product_market_level",
         "market_level",
         "market_product_level",
+        "product_level",
+        "product_market_level",
     ]
 
-    edited_headers: list[str]
+    # Labels reported by the frontend as edited.
     edited_rows: list[str] = Field(default_factory=list)
+
+    # Every values array must contain one value for every
+    # month between start_date and end_date.
     edited_table_rows: list[EditedTableRow]
 
     @model_validator(mode="after")
     def validate_request(self):
         allowed_views = {
             "market_event": {
-                "product_level",
-                "product_market_level",
-            },
-            "product_event": {
                 "market_level",
                 "market_product_level",
             },
+            "product_event": {
+                "product_level",
+                "product_market_level",
+            },
         }
 
-        if self.selected_table_view not in allowed_views[self.selected_tab]:
+        allowed = allowed_views[self.selected_tab]
+
+        if self.selected_table_view not in allowed:
             raise ValueError(
                 f"{self.selected_table_view!r} is invalid for "
-                f"{self.selected_tab!r}"
+                f"{self.selected_tab!r}. "
+                f"Allowed values: {sorted(allowed)}"
             )
 
-        if not self.edited_headers:
-            raise ValueError("edited_headers cannot be empty")
-
-        if len(self.edited_headers) != len(set(self.edited_headers)):
-            raise ValueError("edited_headers contains duplicates")
+        if not self.edited_table_rows:
+            raise ValueError(
+                "edited_table_rows cannot be empty."
+            )
 
         return self
 
