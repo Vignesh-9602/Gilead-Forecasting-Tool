@@ -117,80 +117,237 @@ def validate_row_labels(
     payload: EditSaveRequest,
 ):
     """
-    Ensure the submitted hierarchy matches the selected tab.
+    Validate submitted row hierarchy for the selected tab/view.
+
+    Current structures:
+
+    market_event
+        market_level:
+            Market
+
+        product_market_level:
+            Product
+                Market
+
+    product_event
+        product_level:
+            Product
+
+        market_product_level:
+            Market
+                Product
     """
 
     market_names = set(tree["markets"])
     product_names = set(tree["products"])
 
-    submitted_rows = {
-        row.label: row
-        for row in payload.edited_table_rows
-    }
-
-    allowed_top_level = (
-        market_names
-        if payload.selected_tab == "market_event"
-        else product_names
-    )
-
     for row in payload.edited_table_rows:
 
         if row.label == "Overall":
-            if row.editable:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Overall is read-only and cannot be edited."
-                    ),
-                )
-
+            # Overall is always read-only.
             continue
 
-        if row.label not in allowed_top_level:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Unexpected top-level row {row.label!r} "
-                    f"for {payload.selected_tab!r}."
-                ),
-            )
+        # =================================================
+        # MARKET EVENT
+        # =================================================
 
         if payload.selected_tab == "market_event":
-            allowed_children = product_names
-        else:
-            allowed_children = market_names
 
-        for child in row.children:
-            if child.label not in allowed_children:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Unexpected child row {child.label!r} "
-                        f"under {row.label!r}."
-                    ),
-                )
+            # ---------------------------------------------
+            # Market Level
+            #
+            # Overall
+            # Retail
+            # Non-retail
+            # ---------------------------------------------
 
-    if payload.edited_rows:
-        unknown_edited_rows = [
-            label
-            for label in payload.edited_rows
+            if payload.selected_table_view == "market_level":
+
+                if row.label not in market_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Unexpected top-level row "
+                            f"{row.label!r} for "
+                            "'market_event/market_level'."
+                        ),
+                    )
+
+                if row.children:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Row {row.label!r} must not contain "
+                            "children for market_level."
+                        ),
+                    )
+
+                continue
+
+            # ---------------------------------------------
+            # Product-Market Level
+            #
+            # Overall
+            # Product
+            #     Market
+            # ---------------------------------------------
+
             if (
-                label != "Overall"
-                and label not in submitted_rows
-                and label not in market_names
-                and label not in product_names
-            )
-        ]
+                payload.selected_table_view
+                == "product_market_level"
+            ):
+                if row.label not in product_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Unexpected top-level row "
+                            f"{row.label!r} for "
+                            "'market_event/product_market_level'."
+                        ),
+                    )
 
-        if unknown_edited_rows:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": "Unknown edited row labels.",
-                    "labels": unknown_edited_rows,
-                },
-            )
+                child_labels = set()
+
+                for child in row.children:
+
+                    if child.label in child_labels:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Duplicate child row "
+                                f"{child.label!r} under "
+                                f"{row.label!r}."
+                            ),
+                        )
+
+                    child_labels.add(child.label)
+
+                    if child.label not in market_names:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Unexpected child row "
+                                f"{child.label!r} under product "
+                                f"{row.label!r}. Expected a market."
+                            ),
+                        )
+
+                    if child.children:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Child row {child.label!r} must "
+                                "not contain another child level."
+                            ),
+                        )
+
+                continue
+
+        # =================================================
+        # PRODUCT EVENT
+        # =================================================
+
+        if payload.selected_tab == "product_event":
+
+            # ---------------------------------------------
+            # Product Level
+            #
+            # Overall
+            # Biktarvy
+            # Descovy
+            # Truvada
+            # ---------------------------------------------
+
+            if payload.selected_table_view == "product_level":
+
+                if row.label not in product_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Unexpected top-level row "
+                            f"{row.label!r} for "
+                            "'product_event/product_level'."
+                        ),
+                    )
+
+                if row.children:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Row {row.label!r} must not contain "
+                            "children for product_level."
+                        ),
+                    )
+
+                continue
+
+            # ---------------------------------------------
+            # Market-Product Level
+            #
+            # Overall
+            # Market
+            #     Product
+            # ---------------------------------------------
+
+            if (
+                payload.selected_table_view
+                == "market_product_level"
+            ):
+                if row.label not in market_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Unexpected top-level row "
+                            f"{row.label!r} for "
+                            "'product_event/market_product_level'."
+                        ),
+                    )
+
+                child_labels = set()
+
+                for child in row.children:
+
+                    if child.label in child_labels:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Duplicate child row "
+                                f"{child.label!r} under "
+                                f"{row.label!r}."
+                            ),
+                        )
+
+                    child_labels.add(child.label)
+
+                    if child.label not in product_names:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Unexpected child row "
+                                f"{child.label!r} under market "
+                                f"{row.label!r}. Expected a product."
+                            ),
+                        )
+
+                    if child.children:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Child row {child.label!r} must "
+                                "not contain another child level."
+                            ),
+                        )
+
+                continue
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported tab/view combination: "
+                f"{payload.selected_tab}/"
+                f"{payload.selected_table_view}."
+            ),
+        )
         
 def build_market_product_volume_matrix(
     tree: dict,
@@ -391,13 +548,30 @@ def apply_market_event_edits(
     selected_indexes: list[int],
 ):
     """
-    Apply Market Event edits.
+    Apply edits made from Market Event.
 
-    First:
-        normalize market totals to Overall.
+    Supported views
+    ---------------
+    market_level:
+        Overall
+        Market
 
-    Then:
-        normalize product contributions inside each market.
+    product_market_level:
+        Overall
+        Product
+            Market
+
+    The canonical matrix is:
+
+        matrix[market][product][month_index] = volume
+
+    Notes
+    -----
+    - Overall is never edited.
+    - Only values that differ from the current calculated value are
+      treated as actual edits.
+    - This is important because the frontend sends the full table,
+      not only the changed cells.
     """
 
     markets = list(tree["markets"])
@@ -405,126 +579,310 @@ def apply_market_event_edits(
 
     overall_volumes = tree["overall"]["volume"]
 
-    edited_market_rows = rows_by_label(
+    submitted_rows = rows_by_label(
         payload.edited_table_rows
     )
 
-    for value_position, month_index in enumerate(
-        selected_indexes
-    ):
-        overall_volume = overall_volumes[month_index]
+    tolerance = 0.0001
 
-        # ================================================
-        # Current market totals
-        # ================================================
+    # =====================================================
+    # MARKET LEVEL
+    #
+    # Overall
+    # Retail
+    # Non-retail
+    # =====================================================
 
-        current_market_totals = [
-            sum(
-                matrix[market_name][product_name][month_index]
-                for product_name in products
-            )
-            for market_name in markets
-        ]
+    if payload.selected_table_view == "market_level":
 
-        locked_market_totals: dict[int, float] = {}
-
-        for market_position, market_name in enumerate(
-            markets
+        for value_position, month_index in enumerate(
+            selected_indexes
         ):
-            market_row = edited_market_rows.get(
-                market_name
-            )
+            overall_volume = overall_volumes[month_index]
 
-            if market_row is None:
-                continue
+            current_market_totals = [
+                sum(
+                    matrix[market_name][product_name][month_index]
+                    for product_name in products
+                )
+                for market_name in markets
+            ]
 
-            if not market_row.editable:
-                continue
+            locked_market_totals: dict[int, float] = {}
 
-            locked_market_totals[market_position] = (
-                edited_value_to_volume(
+            for market_position, market_name in enumerate(
+                markets
+            ):
+                market_row = submitted_rows.get(market_name)
+
+                if market_row is None:
+                    continue
+
+                submitted_volume = edited_value_to_volume(
                     value=market_row.values[value_position],
                     selected_metric=payload.selected_metric,
                     overall_volume=overall_volume,
                 )
-            )
 
-        normalized_market_totals = normalize_distribution(
-            current_values=current_market_totals,
-            target_total=overall_volume,
-            locked_values=locked_market_totals,
-        )
-
-        # ================================================
-        # Products inside every market
-        # ================================================
-
-        for market_position, market_name in enumerate(
-            markets
-        ):
-            target_market_total = (
-                normalized_market_totals[
+                current_volume = current_market_totals[
                     market_position
                 ]
+
+                # The complete table is submitted.
+                # Treat the value as edited only when it changed.
+                if abs(
+                    submitted_volume - current_volume
+                ) <= tolerance:
+                    continue
+
+                locked_market_totals[
+                    market_position
+                ] = submitted_volume
+
+            normalized_market_totals = normalize_distribution(
+                current_values=current_market_totals,
+                target_total=overall_volume,
+                locked_values=locked_market_totals,
             )
 
-            current_product_values = [
-                matrix[market_name][product_name][month_index]
-                for product_name in products
-            ]
-
-            locked_product_values: dict[int, float] = {}
-
-            market_row = edited_market_rows.get(
-                market_name
-            )
-
-            if (
-                market_row is not None
-                and payload.selected_table_view
-                == "market_product_level"
+            # Preserve the existing product split inside each market.
+            for market_position, market_name in enumerate(
+                markets
             ):
-                product_children = rows_by_label(
-                    market_row.children
+                target_market_total = (
+                    normalized_market_totals[
+                        market_position
+                    ]
+                )
+
+                current_product_values = [
+                    matrix[market_name][product_name][month_index]
+                    for product_name in products
+                ]
+
+                normalized_product_values = normalize_distribution(
+                    current_values=current_product_values,
+                    target_total=target_market_total,
                 )
 
                 for product_position, product_name in enumerate(
                     products
                 ):
-                    product_child = product_children.get(
-                        product_name
-                    )
-
-                    if product_child is None:
-                        continue
-
-                    if not product_child.editable:
-                        continue
-
-                    locked_product_values[
+                    matrix[market_name][product_name][
+                        month_index
+                    ] = normalized_product_values[
                         product_position
-                    ] = edited_value_to_volume(
-                        value=product_child.values[
-                            value_position
-                        ],
-                        selected_metric=payload.selected_metric,
-                        overall_volume=overall_volume,
-                    )
+                    ]
 
-            normalized_product_values = normalize_distribution(
-                current_values=current_product_values,
-                target_total=target_market_total,
-                locked_values=locked_product_values,
-            )
+        return
+
+    # =====================================================
+    # PRODUCT-MARKET LEVEL
+    #
+    # Overall
+    # Product
+    #     Market
+    # =====================================================
+
+    if payload.selected_table_view == "product_market_level":
+
+        explicitly_edited_rows = set(
+            payload.edited_rows or []
+        )
+
+        for value_position, month_index in enumerate(
+            selected_indexes
+        ):
+            overall_volume = overall_volumes[month_index]
+
+            # Current total for every product across markets.
+            current_product_totals = [
+                sum(
+                    matrix[market_name][product_name][month_index]
+                    for market_name in markets
+                )
+                for product_name in products
+            ]
+
+            # Product totals that must remain fixed during normalization.
+            locked_product_totals: dict[int, float] = {}
+
+            # Edited market children that must remain fixed.
+            edited_market_values_by_product: dict[
+                int,
+                dict[int, float],
+            ] = {}
 
             for product_position, product_name in enumerate(
                 products
             ):
-                matrix[market_name][product_name][
-                    month_index
-                ] = normalized_product_values[
-                    product_position
+                product_row = submitted_rows.get(product_name)
+
+                if product_row is None:
+                    continue
+
+                market_children = rows_by_label(
+                    product_row.children
+                )
+
+                locked_market_values: dict[int, float] = {}
+
+                # ============================================
+                # Detect explicitly edited market children
+                # ============================================
+
+                for market_position, market_name in enumerate(
+                    markets
+                ):
+                    child_row = market_children.get(market_name)
+
+                    if child_row is None:
+                        continue
+
+                    child_path = (
+                        f"{product_name}|{market_name}"
+                    )
+
+                    # Lock only the row actually edited by the user.
+                    if child_path not in explicitly_edited_rows:
+                        continue
+
+                    edited_child_volume = (
+                        edited_value_to_volume(
+                            value=child_row.values[
+                                value_position
+                            ],
+                            selected_metric=(
+                                payload.selected_metric
+                            ),
+                            overall_volume=overall_volume,
+                        )
+                    )
+
+                    locked_market_values[
+                        market_position
+                    ] = edited_child_volume
+
+                if locked_market_values:
+                    edited_market_values_by_product[
+                        product_position
+                    ] = locked_market_values
+
+                # ============================================
+                # Determine the new product total
+                # ============================================
+
+                product_path = product_name
+
+                if product_path in explicitly_edited_rows:
+                    # Parent itself was edited.
+                    submitted_product_total = (
+                        edited_value_to_volume(
+                            value=product_row.values[
+                                value_position
+                            ],
+                            selected_metric=(
+                                payload.selected_metric
+                            ),
+                            overall_volume=overall_volume,
+                        )
+                    )
+
+                    locked_product_totals[
+                        product_position
+                    ] = submitted_product_total
+
+                elif locked_market_values:
+                    # A child was edited, so recompute the parent from:
+                    #
+                    # edited child values
+                    # +
+                    # existing untouched child values
+
+                    recomputed_product_total = 0.0
+
+                    for market_position, market_name in enumerate(
+                        markets
+                    ):
+                        if market_position in locked_market_values:
+                            recomputed_product_total += (
+                                locked_market_values[
+                                    market_position
+                                ]
+                            )
+                        else:
+                            recomputed_product_total += matrix[
+                                market_name
+                            ][product_name][month_index]
+
+                    locked_product_totals[
+                        product_position
+                    ] = round(
+                        recomputed_product_total,
+                        6,
+                    )
+
+            # ================================================
+            # Normalize product totals to Overall
+            # ================================================
+
+            normalized_product_totals = normalize_distribution(
+                current_values=current_product_totals,
+                target_total=overall_volume,
+                locked_values=locked_product_totals,
+            )
+
+            # ================================================
+            # Normalize markets within every product
+            # ================================================
+
+            for product_position, product_name in enumerate(
+                products
+            ):
+                target_product_total = (
+                    normalized_product_totals[
+                        product_position
+                    ]
+                )
+
+                current_market_values = [
+                    matrix[market_name][product_name][month_index]
+                    for market_name in markets
                 ]
+
+                locked_market_values = (
+                    edited_market_values_by_product.get(
+                        product_position,
+                        {},
+                    )
+                )
+
+                normalized_market_values = (
+                    normalize_distribution(
+                        current_values=current_market_values,
+                        target_total=target_product_total,
+                        locked_values=locked_market_values,
+                    )
+                )
+
+                for market_position, market_name in enumerate(
+                    markets
+                ):
+                    matrix[market_name][product_name][
+                        month_index
+                    ] = normalized_market_values[
+                        market_position
+                    ]
+
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported Market Event table view: "
+            f"{payload.selected_table_view!r}."
+        ),
+    )
 
 def apply_product_event_edits(
     tree: dict,
@@ -533,13 +891,26 @@ def apply_product_event_edits(
     selected_indexes: list[int],
 ):
     """
-    Apply Product Event edits.
+    Apply edits made from Product Event.
 
-    First:
-        normalize product totals to Overall.
+    Supported views
+    ---------------
+    product_level:
+        Overall
+        Product
 
-    Then:
-        normalize market contributions inside each product.
+    market_product_level:
+        Overall
+        Market
+            Product
+
+    Canonical matrix
+    ----------------
+        matrix[market][product][month_index] = volume
+
+    The frontend sends the complete visible table. Therefore, only
+    rows listed in payload.edited_rows, or values that differ from the
+    current calculated values, are treated as explicit edits.
     """
 
     markets = list(tree["markets"])
@@ -547,126 +918,347 @@ def apply_product_event_edits(
 
     overall_volumes = tree["overall"]["volume"]
 
-    edited_product_rows = rows_by_label(
+    submitted_rows = rows_by_label(
         payload.edited_table_rows
     )
 
-    for value_position, month_index in enumerate(
-        selected_indexes
-    ):
-        overall_volume = overall_volumes[month_index]
+    explicitly_edited_labels = set(
+        payload.edited_rows or []
+    )
 
-        # ================================================
-        # Current product totals
-        # ================================================
+    tolerance = 0.0001
 
-        current_product_totals = [
-            sum(
-                matrix[market_name][product_name][month_index]
-                for market_name in markets
-            )
-            for product_name in products
-        ]
+    # =====================================================
+    # PRODUCT LEVEL
+    #
+    # Overall
+    # Biktarvy
+    # Descovy
+    # Truvada
+    # =====================================================
 
-        locked_product_totals: dict[int, float] = {}
+    if payload.selected_table_view == "product_level":
 
-        for product_position, product_name in enumerate(
-            products
+        for value_position, month_index in enumerate(
+            selected_indexes
         ):
-            product_row = edited_product_rows.get(
-                product_name
-            )
+            overall_volume = overall_volumes[month_index]
 
-            if product_row is None:
-                continue
+            current_product_totals = [
+                sum(
+                    matrix[market_name][product_name][month_index]
+                    for market_name in markets
+                )
+                for product_name in products
+            ]
 
-            if not product_row.editable:
-                continue
+            locked_product_totals: dict[int, float] = {}
 
-            locked_product_totals[product_position] = (
-                edited_value_to_volume(
+            for product_position, product_name in enumerate(
+                products
+            ):
+                product_row = submitted_rows.get(product_name)
+
+                if product_row is None:
+                    continue
+
+                submitted_volume = edited_value_to_volume(
                     value=product_row.values[value_position],
                     selected_metric=payload.selected_metric,
                     overall_volume=overall_volume,
                 )
-            )
 
-        normalized_product_totals = normalize_distribution(
-            current_values=current_product_totals,
-            target_total=overall_volume,
-            locked_values=locked_product_totals,
-        )
-
-        # ================================================
-        # Markets inside each product
-        # ================================================
-
-        for product_position, product_name in enumerate(
-            products
-        ):
-            target_product_total = (
-                normalized_product_totals[
+                current_volume = current_product_totals[
                     product_position
                 ]
+
+                row_was_explicitly_edited = (
+                    product_name in explicitly_edited_labels
+                )
+
+                value_changed = (
+                    abs(submitted_volume - current_volume)
+                    > tolerance
+                )
+
+                if not row_was_explicitly_edited and not value_changed:
+                    continue
+
+                locked_product_totals[
+                    product_position
+                ] = submitted_volume
+
+            normalized_product_totals = normalize_distribution(
+                current_values=current_product_totals,
+                target_total=overall_volume,
+                locked_values=locked_product_totals,
             )
 
-            current_market_values = [
-                matrix[market_name][product_name][month_index]
-                for market_name in markets
-            ]
-
-            locked_market_values: dict[int, float] = {}
-
-            product_row = edited_product_rows.get(
-                product_name
-            )
-
-            if (
-                product_row is not None
-                and payload.selected_table_view
-                == "product_market_level"
+            # Preserve the existing market split inside each product.
+            for product_position, product_name in enumerate(
+                products
             ):
-                market_children = rows_by_label(
-                    product_row.children
+                target_product_total = (
+                    normalized_product_totals[
+                        product_position
+                    ]
+                )
+
+                current_market_values = [
+                    matrix[market_name][product_name][month_index]
+                    for market_name in markets
+                ]
+
+                normalized_market_values = normalize_distribution(
+                    current_values=current_market_values,
+                    target_total=target_product_total,
                 )
 
                 for market_position, market_name in enumerate(
                     markets
                 ):
-                    market_child = market_children.get(
-                        market_name
-                    )
-
-                    if market_child is None:
-                        continue
-
-                    if not market_child.editable:
-                        continue
-
-                    locked_market_values[
+                    matrix[market_name][product_name][
+                        month_index
+                    ] = normalized_market_values[
                         market_position
-                    ] = edited_value_to_volume(
-                        value=market_child.values[
-                            value_position
-                        ],
-                        selected_metric=payload.selected_metric,
-                        overall_volume=overall_volume,
-                    )
+                    ]
 
-            normalized_market_values = normalize_distribution(
-                current_values=current_market_values,
-                target_total=target_product_total,
-                locked_values=locked_market_values,
-            )
+        return
+
+    # =====================================================
+    # MARKET-PRODUCT LEVEL
+    #
+    # Overall
+    # Non-retail
+    #     Biktarvy
+    #     Descovy
+    #     Truvada
+    # Retail
+    #     Biktarvy
+    #     Descovy
+    #     Truvada
+    # =====================================================
+
+    if payload.selected_table_view == "market_product_level":
+
+        for value_position, month_index in enumerate(
+            selected_indexes
+        ):
+            overall_volume = overall_volumes[month_index]
+
+            # -------------------------------------------------
+            # Current market totals
+            # -------------------------------------------------
+
+            current_market_totals = [
+                sum(
+                    matrix[market_name][product_name][month_index]
+                    for product_name in products
+                )
+                for market_name in markets
+            ]
+
+            locked_market_totals: dict[int, float] = {}
+
+            # Explicitly edited products inside each market.
+            #
+            # {
+            #     market_position: {
+            #         product_position: edited_volume
+            #     }
+            # }
+            edited_product_values_by_market: dict[
+                int,
+                dict[int, float],
+            ] = {}
+
+            # -------------------------------------------------
+            # Detect parent market and child product edits
+            # -------------------------------------------------
 
             for market_position, market_name in enumerate(
                 markets
             ):
-                matrix[market_name][product_name][
-                    month_index
-                ] = normalized_market_values[
+                market_row = submitted_rows.get(market_name)
+
+                if market_row is None:
+                    continue
+
+                current_market_total = current_market_totals[
                     market_position
                 ]
+
+                submitted_market_total = edited_value_to_volume(
+                    value=market_row.values[value_position],
+                    selected_metric=payload.selected_metric,
+                    overall_volume=overall_volume,
+                )
+
+                market_was_explicitly_edited = (
+                    market_name in explicitly_edited_labels
+                )
+
+                parent_value_changed = (
+                    abs(
+                        submitted_market_total
+                        - current_market_total
+                    )
+                    > tolerance
+                )
+
+                submitted_children = rows_by_label(
+                    market_row.children
+                )
+
+                edited_product_values: dict[int, float] = {}
+
+                for product_position, product_name in enumerate(
+                    products
+                ):
+                    product_child = submitted_children.get(
+                        product_name
+                    )
+
+                    if product_child is None:
+                        continue
+
+                    submitted_product_volume = (
+                        edited_value_to_volume(
+                            value=product_child.values[
+                                value_position
+                            ],
+                            selected_metric=payload.selected_metric,
+                            overall_volume=overall_volume,
+                        )
+                    )
+
+                    current_product_volume = matrix[
+                        market_name
+                    ][product_name][month_index]
+
+                    product_was_explicitly_edited = (
+                        product_name in explicitly_edited_labels
+                    )
+
+                    child_value_changed = (
+                        abs(
+                            submitted_product_volume
+                            - current_product_volume
+                        )
+                        > tolerance
+                    )
+
+                    if (
+                        product_was_explicitly_edited
+                        or child_value_changed
+                    ):
+                        edited_product_values[
+                            product_position
+                        ] = submitted_product_volume
+
+                if edited_product_values:
+                    edited_product_values_by_market[
+                        market_position
+                    ] = edited_product_values
+
+                if (
+                    market_was_explicitly_edited
+                    or parent_value_changed
+                ):
+                    # Explicit parent value takes priority.
+                    locked_market_totals[
+                        market_position
+                    ] = submitted_market_total
+
+                elif edited_product_values:
+                    # Parent was untouched, but one or more products
+                    # inside the market changed. Recalculate the market
+                    # total using edited children plus untouched children.
+                    recomputed_market_total = 0.0
+
+                    for product_position, product_name in enumerate(
+                        products
+                    ):
+                        if (
+                            product_position
+                            in edited_product_values
+                        ):
+                            recomputed_market_total += (
+                                edited_product_values[
+                                    product_position
+                                ]
+                            )
+                        else:
+                            recomputed_market_total += matrix[
+                                market_name
+                            ][product_name][month_index]
+
+                    locked_market_totals[
+                        market_position
+                    ] = round(
+                        recomputed_market_total,
+                        6,
+                    )
+
+            # -------------------------------------------------
+            # Normalize markets to Overall
+            # -------------------------------------------------
+
+            normalized_market_totals = normalize_distribution(
+                current_values=current_market_totals,
+                target_total=overall_volume,
+                locked_values=locked_market_totals,
+            )
+
+            # -------------------------------------------------
+            # Normalize products inside each market
+            # -------------------------------------------------
+
+            for market_position, market_name in enumerate(
+                markets
+            ):
+                target_market_total = (
+                    normalized_market_totals[
+                        market_position
+                    ]
+                )
+
+                current_product_values = [
+                    matrix[market_name][product_name][month_index]
+                    for product_name in products
+                ]
+
+                locked_product_values = (
+                    edited_product_values_by_market.get(
+                        market_position,
+                        {},
+                    )
+                )
+
+                normalized_product_values = normalize_distribution(
+                    current_values=current_product_values,
+                    target_total=target_market_total,
+                    locked_values=locked_product_values,
+                )
+
+                for product_position, product_name in enumerate(
+                    products
+                ):
+                    matrix[market_name][product_name][
+                        month_index
+                    ] = normalized_product_values[
+                        product_position
+                    ]
+
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Unsupported Product Event table view: "
+            f"{payload.selected_table_view!r}."
+        ),
+    )
 
 def apply_matrix_to_tree(
     tree: dict,
