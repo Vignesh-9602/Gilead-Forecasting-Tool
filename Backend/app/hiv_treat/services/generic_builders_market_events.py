@@ -257,8 +257,8 @@ def build_product_event(tree):
 
     view_options = [
         {
-            "label": "Market Level",
-            "value": "market_level",
+            "label": "Product Level",
+            "value": "product_level",
         },
         {
             "label": "Market-Product Level",
@@ -270,7 +270,7 @@ def build_product_event(tree):
     # Monthly rows
     # =====================================================
 
-    market_level_share_rows = build_market_level_rows(
+    product_level_share_rows = build_product_level_rows(
         tree,
         metric="share",
     )
@@ -280,7 +280,7 @@ def build_product_event(tree):
         metric="share",
     )
 
-    market_level_volume_rows = build_market_level_rows(
+    product_level_volume_rows = build_product_level_rows(
         tree,
         metric="volume",
     )
@@ -294,10 +294,10 @@ def build_product_event(tree):
     # Monthly tables
     # =====================================================
 
-    market_level_share_monthly = build_monthly_table(
+    product_level_share_monthly = build_monthly_table(
         headers=months,
         forecast_start_index=forecast_start_index,
-        rows=market_level_share_rows,
+        rows=product_level_share_rows,
         hierarchy=False,
     )
 
@@ -308,10 +308,10 @@ def build_product_event(tree):
         hierarchy=True,
     )
 
-    market_level_volume_monthly = build_monthly_table(
+    product_level_volume_monthly = build_monthly_table(
         headers=months,
         forecast_start_index=forecast_start_index,
-        rows=market_level_volume_rows,
+        rows=product_level_volume_rows,
         hierarchy=False,
     )
 
@@ -323,18 +323,18 @@ def build_product_event(tree):
     )
 
     # Flat views should be non-editable
-    market_level_share_monthly["type"] = "flat"
-    market_level_share_monthly["editable"] = False
+    product_level_share_monthly["type"] = "flat"
+    product_level_share_monthly["editable"] = False
 
-    market_level_volume_monthly["type"] = "flat"
-    market_level_volume_monthly["editable"] = False
+    product_level_volume_monthly["type"] = "flat"
+    product_level_volume_monthly["editable"] = False
 
     # =====================================================
     # Yearly tables
     # =====================================================
 
     market_level_share_yearly = build_yearly_table(
-        market_level_share_monthly,
+        product_level_share_monthly,
         aggregation="average",
     )
 
@@ -344,7 +344,7 @@ def build_product_event(tree):
     )
 
     market_level_volume_yearly = build_yearly_table(
-        market_level_volume_monthly,
+        product_level_volume_monthly,
         aggregation="sum",
     )
 
@@ -374,11 +374,11 @@ def build_product_event(tree):
                     "view_options": view_options,
                     "selected_view": "market_product_level",
 
-                    "market_level": {
+                    "product_level": {
                         "chart": build_monthly_chart(
-                            market_level_share_monthly
+                            product_level_share_monthly
                         ),
-                        "table": market_level_share_monthly,
+                        "table": product_level_share_monthly,
                     },
 
                     "market_product_level": {
@@ -393,7 +393,7 @@ def build_product_event(tree):
                     "view_options": view_options,
                     "selected_view": "market_product_level",
 
-                    "market_level": {
+                    "product_level": {
                         "chart": build_yearly_chart(
                             market_level_share_yearly
                         ),
@@ -414,11 +414,11 @@ def build_product_event(tree):
                     "view_options": view_options,
                     "selected_view": "market_product_level",
 
-                    "market_level": {
+                    "product_level": {
                         "chart": build_monthly_chart(
-                            market_level_volume_monthly
+                            product_level_volume_monthly
                         ),
-                        "table": market_level_volume_monthly,
+                        "table": product_level_volume_monthly,
                     },
 
                     "market_product_level": {
@@ -433,7 +433,7 @@ def build_product_event(tree):
                     "view_options": view_options,
                     "selected_view": "market_product_level",
 
-                    "market_level": {
+                    "product_level": {
                         "chart": build_yearly_chart(
                             market_level_volume_yearly
                         ),
@@ -557,8 +557,8 @@ def build_market_event(tree):
 
     view_options = [
         {
-            "label": "Product Level",
-            "value": "product_level",
+            "label": "Market Level",
+            "value": "market_level",
         },
         {
             "label": "Product-Market Level",
@@ -570,7 +570,7 @@ def build_market_event(tree):
     # Monthly rows
     # =====================================================
 
-    product_level_share_rows = build_product_level_rows(
+    market_level_share_rows = build_market_level_rows(
         tree,
         metric="share",
     )
@@ -580,7 +580,7 @@ def build_market_event(tree):
         metric="share",
     )
 
-    product_level_volume_rows = build_product_level_rows(
+    market_level_volume_rows = build_market_level_rows(
         tree,
         metric="volume",
     )
@@ -594,10 +594,10 @@ def build_market_event(tree):
     # Monthly tables
     # =====================================================
 
-    product_level_share_monthly = build_monthly_table(
+    market_level_share_monthly = build_monthly_table(
         headers=months,
         forecast_start_index=forecast_start_index,
-        rows=product_level_share_rows,
+        rows=market_level_share_rows,
         hierarchy=False,
     )
 
@@ -608,10 +608,10 @@ def build_market_event(tree):
         hierarchy=True,
     )
 
-    product_level_volume_monthly = build_monthly_table(
+    market_level_volume_monthly = build_monthly_table(
         headers=months,
         forecast_start_index=forecast_start_index,
-        rows=product_level_volume_rows,
+        rows=market_level_volume_rows,
         hierarchy=False,
     )
 
@@ -623,18 +623,18 @@ def build_market_event(tree):
     )
 
     # Product-level tables should be flat and non-editable.
-    product_level_share_monthly["type"] = "flat"
-    product_level_share_monthly["editable"] = False
+    market_level_share_monthly["type"] = "flat"
+    market_level_share_monthly["editable"] = False
 
-    product_level_volume_monthly["type"] = "flat"
-    product_level_volume_monthly["editable"] = False
+    market_level_volume_monthly["type"] = "flat"
+    market_level_volume_monthly["editable"] = False
 
     # =====================================================
     # Yearly tables
     # =====================================================
 
     product_level_share_yearly = build_yearly_table(
-        product_level_share_monthly,
+        market_level_share_monthly,
         aggregation="average",
     )
 
@@ -644,7 +644,7 @@ def build_market_event(tree):
     )
 
     product_level_volume_yearly = build_yearly_table(
-        product_level_volume_monthly,
+        market_level_volume_monthly,
         aggregation="sum",
     )
 
@@ -674,11 +674,11 @@ def build_market_event(tree):
                     "view_options": view_options,
                     "selected_view": "product_market_level",
 
-                    "product_level": {
+                    "market_level": {
                         "chart": build_monthly_chart(
-                            product_level_share_monthly
+                            market_level_share_monthly
                         ),
-                        "table": product_level_share_monthly,
+                        "table": market_level_share_monthly,
                     },
 
                     "product_market_level": {
@@ -693,7 +693,7 @@ def build_market_event(tree):
                     "view_options": view_options,
                     "selected_view": "product_market_level",
 
-                    "product_level": {
+                    "market_level": {
                         "chart": build_yearly_chart(
                             product_level_share_yearly
                         ),
@@ -714,11 +714,11 @@ def build_market_event(tree):
                     "view_options": view_options,
                     "selected_view": "product_market_level",
 
-                    "product_level": {
+                    "market_level": {
                         "chart": build_monthly_chart(
-                            product_level_volume_monthly
+                            market_level_volume_monthly
                         ),
-                        "table": product_level_volume_monthly,
+                        "table": market_level_volume_monthly,
                     },
 
                     "product_market_level": {
@@ -733,7 +733,7 @@ def build_market_event(tree):
                     "view_options": view_options,
                     "selected_view": "product_market_level",
 
-                    "product_level": {
+                    "market_level": {
                         "chart": build_yearly_chart(
                             product_level_volume_yearly
                         ),
