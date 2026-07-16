@@ -28,11 +28,18 @@ import dayjs from "dayjs";
 export default function HIVImpactCurveTable({
     tableData,
     metricFilters,
+    currentMetricData,
+    selectedTableView,
+    setSelectedTableView,
     selectedMetric,
     setSelectedMetric,
     selectedView,
     setSelectedView,
-    activeTab
+    activeTab,
+    editedTableRows,
+    setEditedTableRows,
+    onEditRefresh,
+    setEditedFields
 }) {
 
     const [editable, setEditable] = useState(false);
@@ -65,6 +72,7 @@ export default function HIVImpactCurveTable({
         );
 
         setEditableRows(cloned);
+        setEditedTableRows(cloned);
         setOriginalRows(cloned);
 
     }, [tableData]);
@@ -199,6 +207,7 @@ export default function HIVImpactCurveTable({
         }
 
         setEditableRows(updated);
+        setEditedTableRows(updated);
 
     };
 
@@ -418,6 +427,69 @@ export default function HIVImpactCurveTable({
         </React.Fragment>
     );
 
+    const viewOptionsLevel = currentMetricData?.view_options || [];
+
+    const getEditedFields = () => {
+
+        const editedFields = [];
+
+        editableRows.forEach((row, rowIndex) => {
+
+            if (row.children?.length) {
+
+                row.children.forEach((child, childIndex) => {
+
+                    const originalChild =
+                        originalRows[rowIndex]?.children?.[childIndex];
+
+                    const isEdited =
+                        JSON.stringify(child.values) !==
+                        JSON.stringify(originalChild?.values);
+
+                    if (isEdited) {
+                        editedFields.push(child.label);
+                    }
+
+                });
+
+            } else {
+
+                const originalRow = originalRows[rowIndex];
+
+                const isEdited =
+                    JSON.stringify(row.values) !==
+                    JSON.stringify(originalRow?.values);
+
+                if (isEdited) {
+                    editedFields.push(row.label);
+                }
+
+            }
+
+        });
+
+        return editedFields;
+
+    };
+
+    const handleSave = async () => {
+
+        const editedFields = getEditedFields();
+
+        const success = await onEditRefresh(editedFields);
+
+        if (success) {
+
+            setOriginalRows(
+                JSON.parse(JSON.stringify(editedTableRows))
+            );
+
+            setEditable(false);
+
+        }
+
+    };
+
     return (
 
         <Paper
@@ -510,6 +582,37 @@ export default function HIVImpactCurveTable({
                         flexWrap: "wrap",
                     }}
                 >
+                    {viewOptionsLevel.length > 1 && (
+
+                        <FormControl
+                            size="small"
+                            sx={{
+                                minWidth: 220,
+
+                                "& .MuiOutlinedInput-root": {
+                                    height: "35px",
+                                    borderRadius: "8px",
+                                    backgroundColor: "#fff",
+                                },
+                            }}
+                        >
+                            <Select
+                                value={selectedTableView}
+                                onChange={(e) =>
+                                    setSelectedTableView(e.target.value)
+                                }
+                            >
+                                {(currentMetricData?.view_options || []).map((item) => (
+                                    <MenuItem
+                                        key={item.value}
+                                        value={item.value}
+                                    >
+                                        {item.label}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    )}
 
                     <Box
                         sx={{
@@ -607,19 +710,7 @@ export default function HIVImpactCurveTable({
                             !editable ||
                             selectedMetric === "market_volume"
                         }
-                        onClick={() => {
-                            console.log(editableRows);
-                            setOriginalRows(
-                                JSON.parse(
-                                    JSON.stringify(
-                                        editableRows
-                                    )
-                                )
-                            );
-
-                            setEditable(false);
-
-                        }}
+                        onClick={handleSave}
                         sx={{
                             height: "35px",
                             borderRadius: "8px",
@@ -723,31 +814,41 @@ export default function HIVImpactCurveTable({
                                 Market
                             </TableCell>
 
-                            {tableData.headers.map(
-                                (header, index) => (
+                            {tableData.headers.map((header, index) => {
 
+                                const displayHeader =
+                                    /^\d{4}-\d{2}-\d{2}$/.test(header)
+                                        ? dayjs(header).format("MMM-YY")
+                                        : header;
+
+                                return (
                                     <TableCell
                                         key={index}
                                         align="center"
                                         sx={{
-                                            minWidth: 90,
+                                            minWidth: 95,
+                                            width: 95,
+                                            padding: "10px 8px",
 
                                             fontWeight: 700,
-
                                             color: "#334155",
 
                                             backgroundColor:
-                                                index <
-                                                    tableData.forecast_start_index
+                                                index < tableData.forecast_start_index
                                                     ? "#F8FAFC"
-                                                    : "#ffffff",
+                                                    : "#FFFFFF",
+
+                                            whiteSpace: "nowrap",
+                                            wordBreak: "keep-all",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
                                         }}
                                     >
-                                        {header}
+                                        {displayHeader}
                                     </TableCell>
+                                );
 
-                                )
-                            )}
+                            })}
 
                         </TableRow>
 

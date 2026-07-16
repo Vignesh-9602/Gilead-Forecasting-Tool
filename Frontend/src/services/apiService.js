@@ -370,7 +370,13 @@ export const applyHIVMarketEventFilter = (payload) =>
 
 export const runHIVMarketEventCalculation = (payload) =>
   httpClient.post(
-    "/api/hiv_treat/run-market-event-calculation",
+    "/api/hiv_treat/run-calculation",
+    payload
+  );
+
+export const editHIVImpactCurveTable = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/edit-impact-curve-table",
     payload
   );
 

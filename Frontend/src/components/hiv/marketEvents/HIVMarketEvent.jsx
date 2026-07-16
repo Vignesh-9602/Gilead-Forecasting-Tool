@@ -41,7 +41,7 @@ import { GlobalContext } from "../../../context/Provider";
 import { marketEventMock } from "./updatedMock";
 import HIVImpactCurveChart from "./HIVMEChart";
 import HIVImpactCurveTable from "./HIVMETable";
-import { getHIVMarketEventFilters, applyHIVMarketEventFilter, runHIVMarketEventCalculation } from "../../../services/apiService";
+import { getHIVMarketEventFilters, applyHIVMarketEventFilter, runHIVMarketEventCalculation, editHIVImpactCurveTable } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -98,6 +98,12 @@ export default function HIVMarketEvent() {
     const [metricFilters, setMetricFilters] =
         useState([]);
 
+    const [selectedTableView, setSelectedTableView] =
+        useState("");
+
+    const [editedTableRows, setEditedTableRows] =
+        useState([]);
+
 
     useEffect(() => {
 
@@ -124,6 +130,30 @@ export default function HIVMarketEvent() {
         ]?.[
         selectedView
         ] || {};
+
+    const effectiveTableView =
+        selectedTableView ||
+        currentMetricData?.selected_view ||
+        currentMetricData?.view_options?.[0]?.value;
+
+    const currentDisplay =
+        currentMetricData?.[effectiveTableView];
+
+    useEffect(() => {
+
+        const options =
+            currentMetricData?.view_options || [];
+
+        if (options.length) {
+
+            setSelectedTableView(
+                currentMetricData.selected_view ||
+                options[0].value
+            );
+
+        }
+
+    }, [activeTab, selectedView]);
 
     const impactOptions =
         isMarketEvent
@@ -183,6 +213,8 @@ export default function HIVMarketEvent() {
     //     useState(null);
 
     const [impactValues, setImpactValues] = useState({});
+
+    const [editedFields, setEditedFields] = useState([]);
 
     useEffect(() => {
         if (therapyArea) {
@@ -483,6 +515,68 @@ export default function HIVMarketEvent() {
 
             showSnackbar(
                 "Failed to apply filters",
+                "error"
+            );
+
+        } finally {
+
+            setLoading(false);
+
+        }
+
+    };
+
+    const handleEditRefresh = async (editedFields) => {
+
+        const payload = {
+
+            ta_name: therapyArea,
+
+            selected_filter: {
+
+                scenario_name: scenarioName,
+
+                start_date: fromDate,
+
+                end_date: toDate,
+
+                markets: selectedMarkets,
+
+                products: selectedProducts,
+
+            },
+
+            selected_tab: activeTab,
+
+            selected_metric: selectedMetric,
+
+            selected_table_view: effectiveTableView,
+
+            edited_table_rows: editedTableRows,
+
+            edited_fields: editedFields,
+
+        };
+
+        console.log("payload-------->", payload)
+
+        try {
+
+            setLoading(true);
+
+            const { data: response } =
+                await editHIVImpactCurveTable(
+                    payload
+                );
+
+            setEventTabsData(
+                response.event_tabs || {}
+            );
+
+        } catch (error) {
+
+            showSnackbar(
+                "Failed to update table",
                 "error"
             );
 
@@ -802,6 +896,8 @@ export default function HIVMarketEvent() {
                 "Coverage Factor",
                 "",
             ];
+
+
 
     return (
 
@@ -2669,21 +2765,28 @@ export default function HIVMarketEvent() {
 
                     </AccordionDetails>
                     <HIVImpactCurveChart
-                        chartData={
-                            currentMetricData.chart
-                        }
+                        chartData={currentDisplay?.chart}
                     />
 
                 </Accordion>
                 <HIVImpactCurveTable
-                    tableData={currentMetricData.table}
-                    metricFilters={marketEventMock.metric_filters}
-                    // metricFilters={metricFilters}
+                    tableData={currentDisplay?.table}
+                    selectedTableView={effectiveTableView}
+                    setSelectedTableView={setSelectedTableView}
+                    currentMetricData={currentMetricData}
+                    // metricFilters={marketEventMock.metric_filters}
+                    metricFilters={metricFilters}
                     selectedMetric={selectedMetric}
                     setSelectedMetric={setSelectedMetric}
                     selectedView={selectedView}
                     setSelectedView={setSelectedView}
                     activeTab={activeTab}
+                    editedTableRows={editedTableRows}
+                    setEditedTableRows={setEditedTableRows}
+                    onEditRefresh={
+                        handleEditRefresh
+                    }
+                    setEditedFields={setEditedFields}
                 />
 
                 <Menu
