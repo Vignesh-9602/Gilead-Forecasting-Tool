@@ -3,18 +3,27 @@ from app.hiv_treat.services.response_builder_market_events import *
 def build_overall_event(tree):
     """
     Build Overall Event from the calculation tree.
+
+    Provides one view:
+        overall_level
     """
 
     months = tree["months"]
     forecast_start_index = tree["forecast_start_index"]
 
     overall_volume = tree["overall"]["volume"]
+    overall_share = [100.0] * len(months)
 
-    overall_share = [100] * len(months)
+    view_options = [
+        {
+            "label": "Overall",
+            "value": "overall_level",
+        }
+    ]
 
-    # ----------------------------------------------------
-    # Monthly Tables
-    # ----------------------------------------------------
+    # =====================================================
+    # Monthly tables
+    # =====================================================
 
     market_share_monthly = build_monthly_table(
         headers=months,
@@ -25,6 +34,7 @@ def build_overall_event(tree):
                 "values": overall_share,
             }
         ],
+        hierarchy=False,
     )
 
     market_volume_monthly = build_monthly_table(
@@ -36,11 +46,19 @@ def build_overall_event(tree):
                 "values": overall_volume,
             }
         ],
+        hierarchy=False,
     )
 
-    # ----------------------------------------------------
-    # Yearly Tables
-    # ----------------------------------------------------
+    # Overall-level tables are flat and non-editable
+    market_share_monthly["type"] = "flat"
+    market_share_monthly["editable"] = False
+
+    market_volume_monthly["type"] = "flat"
+    market_volume_monthly["editable"] = False
+
+    # =====================================================
+    # Yearly tables
+    # =====================================================
 
     market_share_yearly = build_yearly_table(
         market_share_monthly,
@@ -52,50 +70,73 @@ def build_overall_event(tree):
         aggregation="sum",
     )
 
-    # ----------------------------------------------------
+    market_share_yearly["type"] = "flat"
+    market_share_yearly["editable"] = False
+
+    market_volume_yearly["type"] = "flat"
+    market_volume_yearly["editable"] = False
+
+    # =====================================================
     # Response
-    # ----------------------------------------------------
+    # =====================================================
 
     return {
-
-        "impact_curve_configuration": build_overall_impact_curve_configuration(tree),
+        "impact_curve_configuration":
+            build_overall_impact_curve_configuration(tree),
 
         "metrics_views": {
-
             "market_share": {
-
                 "monthly": {
-                    "chart": build_monthly_chart(
-                        market_share_monthly
-                    ),
-                    "table": market_share_monthly,
+                    "view_options": view_options,
+                    "selected_view": "overall_level",
+
+                    "overall_level": {
+                        "chart": build_monthly_chart(
+                            market_share_monthly
+                        ),
+                        "table": market_share_monthly,
+                    },
                 },
 
                 "yearly": {
-                    "chart": build_yearly_chart(
-                        market_share_yearly
-                    ),
-                    "table": market_share_yearly,
+                    "view_options": view_options,
+                    "selected_view": "overall_level",
+
+                    "overall_level": {
+                        "chart": build_yearly_chart(
+                            market_share_yearly
+                        ),
+                        "table": market_share_yearly,
+                    },
                 },
             },
 
             "market_volume": {
-
                 "monthly": {
-                    "chart": build_monthly_chart(
-                        market_volume_monthly
-                    ),
-                    "table": market_volume_monthly,
+                    "view_options": view_options,
+                    "selected_view": "overall_level",
+
+                    "overall_level": {
+                        "chart": build_monthly_chart(
+                            market_volume_monthly
+                        ),
+                        "table": market_volume_monthly,
+                    },
                 },
 
                 "yearly": {
-                    "chart": build_yearly_chart(
-                        market_volume_yearly
-                    ),
-                    "table": market_volume_yearly,
+                    "view_options": view_options,
+                    "selected_view": "overall_level",
+
+                    "overall_level": {
+                        "chart": build_yearly_chart(
+                            market_volume_yearly
+                        ),
+                        "table": market_volume_yearly,
+                    },
                 },
             },
-        }
+        },
     }
 
 def build_product_rows(tree, metric):
