@@ -376,7 +376,7 @@ export const runHIVMarketEventCalculation = (payload) =>
 
 export const editHIVImpactCurveTable = (payload) =>
   httpClient.post(
-    "/api/hiv_treat/edit-impact-curve-table",
+    "/api/hiv_treat/edit_save",
     payload
   );
 

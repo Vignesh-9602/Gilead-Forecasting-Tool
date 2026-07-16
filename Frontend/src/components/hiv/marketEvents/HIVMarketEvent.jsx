@@ -554,7 +554,7 @@ export default function HIVMarketEvent() {
 
             edited_table_rows: editedTableRows,
 
-            edited_fields: editedFields,
+            edited_rows: editedFields,
 
         };
 
@@ -573,12 +573,20 @@ export default function HIVMarketEvent() {
                 response.event_tabs || {}
             );
 
+            showSnackbar(
+                "Table updated successfully",
+                "success"
+            );
+
+            return true; // ✅ tell child API succeeded
+
         } catch (error) {
 
             showSnackbar(
                 "Failed to update table",
                 "error"
             );
+            return false; // ✅ stay in edit mode
 
         } finally {
 
