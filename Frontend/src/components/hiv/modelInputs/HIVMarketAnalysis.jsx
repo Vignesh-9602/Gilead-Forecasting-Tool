@@ -37,6 +37,7 @@ const TABS = [
 
 export default function HIVMarketAnalysis({
     marketAnalysis,
+    allScenariosData,
     availableScenarios,
     activeScenario,
     selectedMarket,
@@ -45,6 +46,9 @@ export default function HIVMarketAnalysis({
     selectedMetric,
     setSelectedMetric,
     onEdit,
+    onSaveScenario,
+    onApplyScenario,
+    onUpdateScenario
 }) {
 
     const DEFAULT_METRIC_BY_TAB = {
@@ -248,6 +252,10 @@ export default function HIVMarketAnalysis({
                             setViewMode={setViewMode}
                             marketAnalysis={marketAnalysis}
                             onEdit={onEdit}
+                            onSaveScenario={onSaveScenario}
+                            onApplyScenario={onApplyScenario}
+                            allScenariosData={allScenariosData}
+                            onUpdateScenario={onUpdateScenario}
                         />
                     </Box>
                 </>

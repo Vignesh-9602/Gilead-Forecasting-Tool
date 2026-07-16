@@ -105,9 +105,9 @@ const ForecastChart = ({
     return parsed.isValid()
       ? parsed.format("MMM-YY")
       : new Date(m).toLocaleDateString("en-US", {
-          month: "short",
-          year: "2-digit",
-        });
+        month: "short",
+        year: "2-digit",
+      });
   });
 
   // All series from the API are always rendered.
@@ -158,9 +158,9 @@ const ForecastChart = ({
     const forecastY =
       fsi > 0
         ? [
-            lastTrain ?? null,
-            ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
-          ]
+          lastTrain ?? null,
+          ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
+        ]
         : Array.isArray(s.forecast_values)
           ? s.forecast_values
           : [];
@@ -469,8 +469,8 @@ export default function PBCModelInput() {
     // Support both old shape (metric.chart) and new shape (metric.monthly.chart)
     const getMonthlyChart = (metric) => metric?.monthly?.chart || metric?.chart || null;
     const getMonthlyTable = (metric) => metric?.monthly?.table || metric?.table || null;
-    const getYearlyChart  = (metric) => metric?.yearly?.chart  || null;
-    const getYearlyTable  = (metric) => metric?.yearly?.table  || null;
+    const getYearlyChart = (metric) => metric?.yearly?.chart || null;
+    const getYearlyTable = (metric) => metric?.yearly?.table || null;
 
     const months =
       (firstMetric && getMonthlyChart(firstMetric)?.months) || [];
@@ -567,8 +567,8 @@ export default function PBCModelInput() {
       const rawYearlyChart = getYearlyChart(chartSelectedMetric);
       const rawYearlyTable = getYearlyTable(tableSelectedMetric);
 
-      const chart       = parseChartObj(rawMonthlyChart, months, fsi, isTabPercent);
-      const table       = parseTableObj(rawMonthlyTable, chart.months, isTabPercent);
+      const chart = parseChartObj(rawMonthlyChart, months, fsi, isTabPercent);
+      const table = parseTableObj(rawMonthlyTable, chart.months, isTabPercent);
       const yearlyChart = rawYearlyChart ? parseChartObj(rawYearlyChart, [], 0, isTabPercent) : null;
       const yearlyTable = rawYearlyTable ? parseTableObj(rawYearlyTable, yearlyChart?.months || [], isTabPercent) : null;
 
@@ -657,13 +657,13 @@ export default function PBCModelInput() {
 
           const singleChartSeries = activeRow
             ? [
-                {
-                  label: activeRow.hierarchy || activeRow.label || "",
-                  lot: activeRow.hierarchy || activeRow.label || "",
-                  train_values: (activeRow.values || []).slice(0, chartFsi),
-                  forecast_values: (activeRow.values || []).slice(chartFsi),
-                },
-              ]
+              {
+                label: activeRow.hierarchy || activeRow.label || "",
+                lot: activeRow.hierarchy || activeRow.label || "",
+                train_values: (activeRow.values || []).slice(0, chartFsi),
+                forecast_values: (activeRow.values || []).slice(chartFsi),
+              },
+            ]
             : tmvChart.series;
 
           tabs["total_market_volume"] = {
@@ -680,9 +680,9 @@ export default function PBCModelInput() {
             // yearly view also shows every scenario, not just the active one.
             yearlyTable: yearlyScenarioRows.length
               ? {
-                  ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
-                  rows: yearlyScenarioRows,
-                }
+                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                rows: yearlyScenarioRows,
+              }
               : tmvTab.yearlyTable,
           };
         }
@@ -1120,13 +1120,13 @@ export default function PBCModelInput() {
       ...(modelSelection === "ets"
         ? { ets: { alpha, beta, gamma } }
         : {
-            [modelSelection]: {
-              total_growth: totalGrowth,
-              duration,
-              trajectory_start: trajectoryStart,
-              k_value: Number(kValue),
-            },
-          }),
+          [modelSelection]: {
+            total_growth: totalGrowth,
+            duration,
+            trajectory_start: trajectoryStart,
+            k_value: Number(kValue),
+          },
+        }),
     };
 
     // Use the backend's own resolved selected_filter when available —
@@ -1750,13 +1750,13 @@ export default function PBCModelInput() {
         modelSelection === "ets"
           ? { ets: { alpha, beta, gamma } }
           : {
-              growth: {
-                total_growth: totalGrowth,
-                duration,
-                trajectory_start: trajectoryStart,
-                ...(modelSelection !== "linear" && { k_value: Number(kValue) }),
-              },
-            };
+            growth: {
+              total_growth: totalGrowth,
+              duration,
+              trajectory_start: trajectoryStart,
+              ...(modelSelection !== "linear" && { k_value: Number(kValue) }),
+            },
+          };
       const response = await recalculateMetrics({
         ...buildBasePayload(),
         model_type: modelSelection,
@@ -2491,19 +2491,19 @@ export default function PBCModelInput() {
                     setFromDate(e.target.value);
                     setToDate("");
                   }}
-                   MenuProps={{
-                                        PaperProps: {
-                                            sx: {
-                                                maxHeight: 300,
-                                                width: 130,
-                                                "& .MuiMenuItem-root": {
-                                                    minHeight: 32,
-                                                    fontSize: "15px",
-                                                    py: 0.5,
-                                                },
-                                            },
-                                        },
-                                    }}
+                  MenuProps={{
+                    PaperProps: {
+                      sx: {
+                        maxHeight: 300,
+                        width: 130,
+                        "& .MuiMenuItem-root": {
+                          minHeight: 32,
+                          fontSize: "15px",
+                          py: 0.5,
+                        },
+                      },
+                    },
+                  }}
                   displayEmpty
                 >
                   <MenuItem value="" disabled>
@@ -2536,18 +2536,18 @@ export default function PBCModelInput() {
                   displayEmpty
                   disabled={!fromDate}
                   MenuProps={{
-                                        PaperProps: {
-                                            sx: {
-                                                maxHeight: 300,
-                                                width: 130,
-                                                "& .MuiMenuItem-root": {
-                                                    minHeight: 32,
-                                                    fontSize: "15px",
-                                                    py: 0.5,
-                                                },
-                                            },
-                                        },
-                                    }}
+                    PaperProps: {
+                      sx: {
+                        maxHeight: 300,
+                        width: 130,
+                        "& .MuiMenuItem-root": {
+                          minHeight: 32,
+                          fontSize: "15px",
+                          py: 0.5,
+                        },
+                      },
+                    },
+                  }}
                 >
                   <MenuItem value="" disabled>
                     Select
@@ -3002,78 +3002,7 @@ export default function PBCModelInput() {
             {["linear", "exponential", "logarithmic", "scurve"].includes(
               modelSelection,
             ) && (
-              <>
-                <Box>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 0.5,
-                      mb: 1,
-                    }}
-                  >
-                    <Typography sx={{ fontSize: "14px" }}>GROWTH %</Typography>
-                    <Tooltip
-                      title="Please enter the total growth%"
-                      arrow
-                      placement="top"
-                    >
-                      <InfoOutlinedIcon
-                        sx={{
-                          fontSize: 16,
-                          color: "#64748b",
-                          cursor: "pointer",
-                        }}
-                      />
-                    </Tooltip>
-                  </Box>
-                  <TextField
-                    type="number"
-                    value={totalGrowth}
-                    disabled={!editable}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "" || (Number(v) >= -100 && Number(v) <= 100))
-                        setTotalGrowth(v);
-                    }}
-                    inputProps={{ min: 0, max: 100, step: 0.1 }}
-                    sx={recalculateInputStyle}
-                  />
-                </Box>
-                <Box>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 0.5,
-                      mb: 1,
-                    }}
-                  >
-                    <Typography sx={{ fontSize: "14px" }}>DURATION</Typography>
-                    <Tooltip
-                      title="Please enter the months"
-                      arrow
-                      placement="top"
-                    >
-                      <InfoOutlinedIcon
-                        sx={{
-                          fontSize: 16,
-                          color: "#64748b",
-                          cursor: "pointer",
-                        }}
-                      />
-                    </Tooltip>
-                  </Box>
-                  <TextField
-                    type="number"
-                    value={duration}
-                    disabled={!editable}
-                    onChange={(e) => setDuration(Number(e.target.value))}
-                    inputProps={{ min: 0, max: 100, step: 1 }}
-                    sx={recalculateInputStyle}
-                  />
-                </Box>
-                {modelSelection !== "linear" && (
+                <>
                   <Box>
                     <Box
                       sx={{
@@ -3083,9 +3012,9 @@ export default function PBCModelInput() {
                         mb: 1,
                       }}
                     >
-                      <Typography sx={{ fontSize: "14px" }}>K VALUE</Typography>
+                      <Typography sx={{ fontSize: "14px" }}>GROWTH %</Typography>
                       <Tooltip
-                        title="Please enter value from 0 to 3"
+                        title="Please enter the total growth%"
                         arrow
                         placement="top"
                       >
@@ -3100,80 +3029,151 @@ export default function PBCModelInput() {
                     </Box>
                     <TextField
                       type="number"
-                      value={kValue}
+                      value={totalGrowth}
                       disabled={!editable}
                       onChange={(e) => {
                         const v = e.target.value;
-                        if (v === "" || (Number(v) >= 0 && Number(v) <= 3))
-                          setKValue(v);
+                        if (v === "" || (Number(v) >= -100 && Number(v) <= 100))
+                          setTotalGrowth(v);
                       }}
-                      inputProps={{ min: 0, max: 3, step: 0.01 }}
+                      inputProps={{ min: 0, max: 100, step: 0.1 }}
                       sx={recalculateInputStyle}
                     />
                   </Box>
-                )}
-                <Box>
-                  <Typography sx={{ mb: 1, fontSize: "14px" }}>
-                    TRAJECTORY START
-                  </Typography>
-                  <FormControl sx={recalculateInputStyle}>
-                    <Select
-                      value={trajectoryStart}
-                      onChange={(e) => setTrajectoryStart(e.target.value)}
-                       MenuProps={{
-                                        PaperProps: {
-                                            sx: {
-                                                maxHeight: 300,
-                                                width: 130,
-                                                "& .MuiMenuItem-root": {
-                                                    minHeight: 32,
-                                                    fontSize: "15px",
-                                                    py: 0.5,
-                                                },
-                                            },
-                                        },
-                                    }}
-                      disabled={!editable}
-                      displayEmpty
-                      renderValue={(sel) => {
-                        // Use dayjs to avoid the UTC-midnight timezone shift
-                        // that makes new Date("YYYY-MM-DD") display one day off.
-                        if (!sel) return "Select";
-                        const p = parseDateString(sel);
-                        return p.isValid() ? p.format("MMM-YY") : sel;
+                  <Box>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 0.5,
+                        mb: 1,
                       }}
                     >
-                      {(() => {
-                        const forecastMonths =
-                          chartData?.months && chartData?.forecast_start_index != null
-                            ? chartData.months.slice(chartData.forecast_start_index)
-                            : trajectoryMonthOptions;
+                      <Typography sx={{ fontSize: "14px" }}>DURATION</Typography>
+                      <Tooltip
+                        title="Please enter the months"
+                        arrow
+                        placement="top"
+                      >
+                        <InfoOutlinedIcon
+                          sx={{
+                            fontSize: 16,
+                            color: "#64748b",
+                            cursor: "pointer",
+                          }}
+                        />
+                      </Tooltip>
+                    </Box>
+                    <TextField
+                      type="number"
+                      value={duration}
+                      disabled={!editable}
+                      onChange={(e) => setDuration(Number(e.target.value))}
+                      inputProps={{ min: 0, max: 100, step: 1 }}
+                      sx={recalculateInputStyle}
+                    />
+                  </Box>
+                  {modelSelection !== "linear" && (
+                    <Box>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 0.5,
+                          mb: 1,
+                        }}
+                      >
+                        <Typography sx={{ fontSize: "14px" }}>K VALUE</Typography>
+                        <Tooltip
+                          title="Please enter value from 0 to 3"
+                          arrow
+                          placement="top"
+                        >
+                          <InfoOutlinedIcon
+                            sx={{
+                              fontSize: 16,
+                              color: "#64748b",
+                              cursor: "pointer",
+                            }}
+                          />
+                        </Tooltip>
+                      </Box>
+                      <TextField
+                        type="number"
+                        value={kValue}
+                        disabled={!editable}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === "" || (Number(v) >= 0 && Number(v) <= 3))
+                            setKValue(v);
+                        }}
+                        inputProps={{ min: 0, max: 3, step: 0.01 }}
+                        sx={recalculateInputStyle}
+                      />
+                    </Box>
+                  )}
+                  <Box>
+                    <Typography sx={{ mb: 1, fontSize: "14px" }}>
+                      TRAJECTORY START
+                    </Typography>
+                    <FormControl sx={recalculateInputStyle}>
+                      <Select
+                        value={trajectoryStart}
+                        onChange={(e) => setTrajectoryStart(e.target.value)}
+                        MenuProps={{
+                          PaperProps: {
+                            sx: {
+                              maxHeight: 300,
+                              width: 130,
+                              "& .MuiMenuItem-root": {
+                                minHeight: 32,
+                                fontSize: "15px",
+                                py: 0.5,
+                              },
+                            },
+                          },
+                        }}
+                        disabled={!editable}
+                        displayEmpty
+                        renderValue={(sel) => {
+                          // Use dayjs to avoid the UTC-midnight timezone shift
+                          // that makes new Date("YYYY-MM-DD") display one day off.
+                          if (!sel) return "Select";
+                          const p = parseDateString(sel);
+                          return p.isValid() ? p.format("MMM-YY") : sel;
+                        }}
+                      >
+                        {(() => {
+                          const forecastMonths =
+                            chartData?.months && chartData?.forecast_start_index != null
+                              ? chartData.months.slice(chartData.forecast_start_index)
+                              : trajectoryMonthOptions;
 
-                        // Dropdown shows only months STRICTLY AFTER the
-                        // current trajectoryStart — the default value itself
-                        // is displayed via renderValue above and acts as the
-                        // "current" selection; the list lets the user pick a
-                        // later start date.
-                        const dropdownOptions = trajectoryStart
-                          ? forecastMonths.filter((m) => m > trajectoryStart)
-                          : forecastMonths;
+                          // Dropdown shows only months STRICTLY AFTER the
+                          // current trajectoryStart — the default value itself
+                          // is displayed via renderValue above and acts as the
+                          // "current" selection; the list lets the user pick a
+                          // later start date.
+                          const dropdownOptions = trajectoryStart
+                            ? forecastMonths.filter((m) => m > trajectoryStart)
+                            : forecastMonths;
 
-                        // Fallback: if nothing passes the filter, show all.
-                        const opts = dropdownOptions.length ? dropdownOptions : forecastMonths;
+                          // Fallback: if nothing passes the filter, show all.
+                          const opts = dropdownOptions.length ? dropdownOptions : forecastMonths;
 
-                        return opts.map((m) => (
-                          <MenuItem key={m} value={m}>
-                            {parseDateString(m).isValid()
-                              ? parseDateString(m).format("MMM-YY")
-                              : m}
-                          </MenuItem>
-                        ));
-                      })()}
-                    </Select>
-                  </FormControl>
-                </Box>
-              </>
-            )}
+                          return opts.map((m) => (
+                            <MenuItem key={m} value={m}>
+                              {parseDateString(m).isValid()
+                                ? parseDateString(m).format("MMM-YY")
+                                : m}
+                            </MenuItem>
+                          ));
+                        })()}
+                      </Select>
+                    </FormControl>
+                  </Box>
+                </>
+              )}
 
             {modelSelection !== "moving_average" && (
               <>
@@ -3909,244 +3909,244 @@ export default function PBCModelInput() {
                     </>
                   ) : (
                     <>
-                    {groupedTableHierarchy
-                      .filter((group) => {
-                        // On non-total_market tabs: always show all rows.
-                        if (activeTab !== "total_market") return true;
-                        // On total_market: only filter when the user has
-                        // explicitly toggled the Compare Scenarios checkboxes.
-                        // Before that, show every row so all scenarios are
-                        // visible on initial load and after apply-filter.
-                        if (!userHasCustomizedCompare) return true;
-                        if (!selectedCompareScenarios.length) return true;
-                        return (
-                          group.brandName === currentlyAppliedScenario ||
-                          selectedCompareScenarios.includes(group.brandName)
-                        );
-                      })
-                      .map((group) => {
-                      const isExpanded = !!expandedBrands[group.brandName];
-                      const hasChildren = group.children.length > 0;
-                      const showChildren = isExpanded;
+                      {groupedTableHierarchy
+                        .filter((group) => {
+                          // On non-total_market tabs: always show all rows.
+                          if (activeTab !== "total_market") return true;
+                          // On total_market: only filter when the user has
+                          // explicitly toggled the Compare Scenarios checkboxes.
+                          // Before that, show every row so all scenarios are
+                          // visible on initial load and after apply-filter.
+                          if (!userHasCustomizedCompare) return true;
+                          if (!selectedCompareScenarios.length) return true;
+                          return (
+                            group.brandName === currentlyAppliedScenario ||
+                            selectedCompareScenarios.includes(group.brandName)
+                          );
+                        })
+                        .map((group) => {
+                          const isExpanded = !!expandedBrands[group.brandName];
+                          const hasChildren = group.children.length > 0;
+                          const showChildren = isExpanded;
 
-                      const mainRowApplied = group.mainRow?.is_applied;
-                      const isSelected =
-                        tentativeRadioSelectedScenario === group.brandName;
+                          const mainRowApplied = group.mainRow?.is_applied;
+                          const isSelected =
+                            tentativeRadioSelectedScenario === group.brandName;
 
-                      const currentBrand = (
-                        appliedProductFilter ||
-                        appliedBrand ||
-                        ""
-                      ).toLowerCase();
+                          const currentBrand = (
+                            appliedProductFilter ||
+                            appliedBrand ||
+                            ""
+                          ).toLowerCase();
 
-                      const currentPayer = (appliedPayerFilter || "").toLowerCase();
+                          const currentPayer = (appliedPayerFilter || "").toLowerCase();
 
-                      const targetParentLabel = (
-                        group.brandName || ""
-                      ).toLowerCase();
+                          const targetParentLabel = (
+                            group.brandName || ""
+                          ).toLowerCase();
 
-                      let isAppliedParent = false;
+                          let isAppliedParent = false;
 
-                      if (activeTab === "prod_dist") {
-                        isAppliedParent = targetParentLabel === currentBrand;
-                      } else if (activeTab === "payer_dist") {
-                        isAppliedParent = targetParentLabel === currentPayer;
-                      } else if (activeTab === "payer_prod") {
-                        isAppliedParent = targetParentLabel === currentPayer;
-                      } else if (activeTab === "prod_payer") {
-                        isAppliedParent = targetParentLabel === currentBrand;
-                      }
+                          if (activeTab === "prod_dist") {
+                            isAppliedParent = targetParentLabel === currentBrand;
+                          } else if (activeTab === "payer_dist") {
+                            isAppliedParent = targetParentLabel === currentPayer;
+                          } else if (activeTab === "payer_prod") {
+                            isAppliedParent = targetParentLabel === currentPayer;
+                          } else if (activeTab === "prod_payer") {
+                            isAppliedParent = targetParentLabel === currentBrand;
+                          }
 
-                      // Rows whose label starts with "Total" are always
-                      // aggregates and must never be editable, even if they
-                      // have no children in the grouped structure.
-                      const isTotalRow =
-                        (group.brandName || "").trim().toLowerCase().startsWith("total");
+                          // Rows whose label starts with "Total" are always
+                          // aggregates and must never be editable, even if they
+                          // have no children in the grouped structure.
+                          const isTotalRow =
+                            (group.brandName || "").trim().toLowerCase().startsWith("total");
 
-                      // total_market tab: only the radio-selected scenario row
-                      // is editable. Other tabs: only leaf rows (no children,
-                      // not a Total row) are editable.
-                      const isEditEligible = (() => {
-                        if (!tableEditing) return false;
-                        if (totalMarketViewMode !== "monthly") return false;
-                        if (isTotalRow) return false;
-                        if (activeTab === "total_market") {
-                          return isSelected && !hasChildren;
-                        }
-                        return !hasChildren;
-                      })();
+                          // total_market tab: only the radio-selected scenario row
+                          // is editable. Other tabs: only leaf rows (no children,
+                          // not a Total row) are editable.
+                          const isEditEligible = (() => {
+                            if (!tableEditing) return false;
+                            if (totalMarketViewMode !== "monthly") return false;
+                            if (isTotalRow) return false;
+                            if (activeTab === "total_market") {
+                              return isSelected && !hasChildren;
+                            }
+                            return !hasChildren;
+                          })();
 
-                      return (
-                        <React.Fragment key={group.brandName}>
-                          {/* Parent */}
-                          <Box
-                            component="tr"
-                            onClick={() => {
-                              if (hasChildren) {
-                                toggleBrandExpand(group.brandName);
-                              }
-                            }}
-                            sx={{
-                              cursor: hasChildren ? "pointer" : "default",
-
-                              position: "relative",
-                              isolation: "isolate",
-
-                              backgroundColor:
-                                (isSelected && activeTab === "total_market")
-                                  ? "#fffbeb"
-                                  : hasChildren
-                                    ? "#f8fafc"
-                                    : "white",
-
-                              "&:hover": {
-                                backgroundColor:
-                                  (isSelected && activeTab === "total_market")
-                                    ? "#fff3c4"
-                                    : hasChildren
-                                      ? "#f1f5f9"
-                                      : "#f8fafc",
-                              },
-                            }}
-                          >
-                            <Box
-                              component="td"
-                              sx={{
-                                position: "sticky",
-                                left: 0,
-                                zIndex: 1,
-
-                                backgroundColor: isAppliedParent
-                                  ? "#fffbeb"
-                                  : (isSelected && activeTab === "total_market")
-                                    ? "#fffbeb"
-                                    : hasChildren
-                                      ? "#f8fafc"
-                                      : "white",
-
-                                borderRight: "1px solid #e2e8f0",
-
-                                borderBottom: hasChildren
-                                    ? "1px solid #cbd5e1"
-                                    : "1px solid #f1f5f9",
-
-                                p: "10px 16px",
-                              }}
-                            >
+                          return (
+                            <React.Fragment key={group.brandName}>
+                              {/* Parent */}
                               <Box
+                                component="tr"
+                                onClick={() => {
+                                  if (hasChildren) {
+                                    toggleBrandExpand(group.brandName);
+                                  }
+                                }}
                                 sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1,
+                                  cursor: hasChildren ? "pointer" : "default",
+
+                                  position: "relative",
+                                  isolation: "isolate",
+
+                                  backgroundColor:
+                                    (isSelected && activeTab === "total_market")
+                                      ? "#fffbeb"
+                                      : hasChildren
+                                        ? "#f8fafc"
+                                        : "white",
+
+                                  "&:hover": {
+                                    backgroundColor:
+                                      (isSelected && activeTab === "total_market")
+                                        ? "#fff3c4"
+                                        : hasChildren
+                                          ? "#f1f5f9"
+                                          : "#f8fafc",
+                                  },
                                 }}
                               >
-                                {activeTab === "total_market" && (
-                                  <input
-                                    type="radio"
-                                    checked={isSelected}
-                                    value={group.brandName}
-                                    onChange={(e) => {
-                                      e.stopPropagation();
-                                      handleActiveScenarioRadioChange(
-                                        group.brandName,
-                                      );
-                                    }}
-                                    style={{
-                                      accentColor: "#4F46E5",
-                                      width: 14,
-                                      height: 14,
-                                      margin: 0,
-                                    }}
-                                  />
-                                )}
+                                <Box
+                                  component="td"
+                                  sx={{
+                                    position: "sticky",
+                                    left: 0,
+                                    zIndex: 1,
 
-                                {hasChildren && (
-                                  <Typography
-                                    component="span"
+                                    backgroundColor: isAppliedParent
+                                      ? "#fffbeb"
+                                      : (isSelected && activeTab === "total_market")
+                                        ? "#fffbeb"
+                                        : hasChildren
+                                          ? "#f8fafc"
+                                          : "white",
+
+                                    borderRight: "1px solid #e2e8f0",
+
+                                    borderBottom: hasChildren
+                                      ? "1px solid #cbd5e1"
+                                      : "1px solid #f1f5f9",
+
+                                    p: "10px 16px",
+                                  }}
+                                >
+                                  <Box
                                     sx={{
-                                      fontSize: "10px",
-                                      width: "12px",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 1,
                                     }}
                                   >
-                                    {isExpanded ? "▼" : "▶"}
-                                  </Typography>
-                                )}
+                                    {activeTab === "total_market" && (
+                                      <input
+                                        type="radio"
+                                        checked={isSelected}
+                                        value={group.brandName}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          handleActiveScenarioRadioChange(
+                                            group.brandName,
+                                          );
+                                        }}
+                                        style={{
+                                          accentColor: "#4F46E5",
+                                          width: 14,
+                                          height: 14,
+                                          margin: 0,
+                                        }}
+                                      />
+                                    )}
 
-                                <Typography
-                                  sx={{
-                                    fontSize: "13px",
-                                    fontWeight: hasChildren ? 700 : (isSelected && activeTab === "total_market") ? 700 : 400,
-                                    color: isAppliedParent
-                                      ? "#f59e0b"
-                                      : (isSelected && activeTab === "total_market")
-                                        ? "#f59e0b"
-                                        : "#0f172a",
-                                  }}
-                                >
-                                  {group.brandName}
-                                </Typography>
+                                    {hasChildren && (
+                                      <Typography
+                                        component="span"
+                                        sx={{
+                                          fontSize: "10px",
+                                          width: "12px",
+                                        }}
+                                      >
+                                        {isExpanded ? "▼" : "▶"}
+                                      </Typography>
+                                    )}
 
-                              </Box>
-                            </Box>
-
-                            {displayColumns.map((col) => {
-                              const val = getColumnValue(group.mainRow, col);
-                              const isF = isForecastColumn(col);
-                              const isLastCol = col === displayColumns[displayColumns.length - 1];
-                              const isEditableCell = isEditEligible;
-
-                              return (
-                                <Box
-                                  component='td'
-                                  key={col}
-                                  onClick={(e) => isEditableCell && e.stopPropagation()}
-                                  sx={{
-                                    p: isEditableCell ? '4px 3px' : '10px 8px',
-                                    textAlign: 'center',
-                                    fontSize: '13px',
-                                    fontWeight: hasChildren ? 700 : 400,
-                                    backgroundColor: isEditableCell
-                                      ? isF ? '#eff6ff' : '#f8fafc'
-                                      : (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
-                                        ? '#fffbeb'
-                                        : isF ? '#ffffff' : '#eef2f7',
-                                    color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
-                                      ? '#f59e0b'
-                                      : '#1e3a5f',
-                                    borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
-                                  }}
-                                >
-                                  {isEditableCell ? (
-                                    <input
-                                      value={val == null ? '' : metricUnit === '%'
-                                        ? (Number.isInteger(Number(val)) ? String(Number(val)) : parseFloat(Number(val).toFixed(2)).toString())
-                                        : String(Math.round(Number(val)))}
-                                      onChange={(e) => {
-                                        if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                          handleCellChange(group.brandName, col, e.target.value);
-                                        }
+                                    <Typography
+                                      sx={{
+                                        fontSize: "13px",
+                                        fontWeight: hasChildren ? 700 : (isSelected && activeTab === "total_market") ? 700 : 400,
+                                        color: isAppliedParent
+                                          ? "#f59e0b"
+                                          : (isSelected && activeTab === "total_market")
+                                            ? "#f59e0b"
+                                            : "#0f172a",
                                       }}
-                                      style={{
-                                        width: '72px',
-                                        height: '22px',
-                                        boxSizing: 'border-box',
-                                        border: '1px solid #93c5fd',
-                                        borderRadius: '4px',
-                                        outline: 'none',
-                                        background: '#eff6ff',
-                                        color: '#1e293b',
-                                        textAlign: 'center',
-                                        fontSize: '12px',
-                                        padding: '1px 4px',
-                                      }}
-                                    />
-                                  ) : (
-                                    formatCellValue(val)
-                                  )}
+                                    >
+                                      {group.brandName}
+                                    </Typography>
+
+                                  </Box>
                                 </Box>
-                              );
-                            })}
-                          </Box>
+
+                                {displayColumns.map((col) => {
+                                  const val = getColumnValue(group.mainRow, col);
+                                  const isF = isForecastColumn(col);
+                                  const isLastCol = col === displayColumns[displayColumns.length - 1];
+                                  const isEditableCell = isEditEligible;
+
+                                  return (
+                                    <Box
+                                      component='td'
+                                      key={col}
+                                      onClick={(e) => isEditableCell && e.stopPropagation()}
+                                      sx={{
+                                        p: isEditableCell ? '4px 3px' : '10px 8px',
+                                        textAlign: 'center',
+                                        fontSize: '13px',
+                                        fontWeight: hasChildren ? 700 : 400,
+                                        backgroundColor: isEditableCell
+                                          ? isF ? '#eff6ff' : '#f8fafc'
+                                          : (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                            ? '#fffbeb'
+                                            : isF ? '#ffffff' : '#eef2f7',
+                                        color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                          ? '#f59e0b'
+                                          : '#1e3a5f',
+                                        borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                      }}
+                                    >
+                                      {isEditableCell ? (
+                                        <input
+                                          value={val == null ? '' : metricUnit === '%'
+                                            ? (Number.isInteger(Number(val)) ? String(Number(val)) : parseFloat(Number(val).toFixed(2)).toString())
+                                            : String(Math.round(Number(val)))}
+                                          onChange={(e) => {
+                                            if (/^-?\d*\.?\d*$/.test(e.target.value)) {
+                                              handleCellChange(group.brandName, col, e.target.value);
+                                            }
+                                          }}
+                                          style={{
+                                            width: '72px',
+                                            height: '22px',
+                                            boxSizing: 'border-box',
+                                            border: '1px solid #93c5fd',
+                                            borderRadius: '4px',
+                                            outline: 'none',
+                                            background: '#eff6ff',
+                                            color: '#1e293b',
+                                            textAlign: 'center',
+                                            fontSize: '12px',
+                                            padding: '1px 4px',
+                                          }}
+                                        />
+                                      ) : (
+                                        formatCellValue(val)
+                                      )}
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
 
                           {showChildren &&
                             group.children.map((childRow, idx) => {
@@ -4161,186 +4161,186 @@ export default function PBCModelInput() {
                               }
                               const isHighlightedChild = isAppliedChild;
 
-                              return (
-                                <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
-                                  {/* Sticky label cell */}
-                                  <Box
-                                    component="td"
-                                    sx={{
-                                      position: "sticky",
-                                      left: 0,
-                                      zIndex: 1,
-                                      backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
-                                      borderRight: "1px solid #e2e8f0",
-                                      pl: "40px",
-                                      p: "10px 16px",
-                                    }}
-                                  >
-                                    <Typography
-                                      sx={{
-                                        fontSize: "13px",
-                                        fontWeight: 500,
-                                        color: isHighlightedChild ? "#f59e0b" : "#0f172a",
-                                      }}
-                                    >
-                                      {childRow.cleanLabel}
-                                    </Typography>
-                                  </Box>
-
-                                  {/* Data cells */}
-                                  {displayColumns.map((col) => {
-                                    const isFChild = isForecastColumn(col);
-                                    const childVal = childRow?.monthly_data?.[col];
-                                    const isLastCol = col === displayColumns[displayColumns.length - 1];
-                                    const isEditableChild =
-                                      tableEditing &&
-                                      totalMarketViewMode === "monthly" &&
-                                      activeTab !== "total_market" &&
-                                      !isTotalRow;
-
-                                    return (
+                                  return (
+                                    <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
+                                      {/* Sticky label cell */}
                                       <Box
-                                        component='td'
-                                        key={col}
+                                        component="td"
                                         sx={{
-                                          p: isEditableChild ? '4px 3px' : '10px 8px',
-                                          textAlign: 'center',
-                                          fontSize: '13px',
-                                          backgroundColor: isEditableChild
-                                            ? isFChild ? '#eff6ff' : '#f8fafc'
-                                            : isHighlightedChild && isFChild ? '#fffbeb' : isFChild ? '#ffffff' : '#eef2f7',
-                                          color: !isEditableChild && isHighlightedChild && isFChild ? '#f59e0b' : '#1e3a5f',
-                                          borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                          position: "sticky",
+                                          left: 0,
+                                          zIndex: 1,
+                                          backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
+                                          borderRight: "1px solid #e2e8f0",
+                                          pl: "40px",
+                                          p: "10px 16px",
                                         }}
                                       >
-                                        {isEditableChild ? (
-                                          <input
-                                            value={childVal == null ? '' : metricUnit === '%'
-                                            ? (Number.isInteger(Number(childVal)) ? String(Number(childVal)) : parseFloat(Number(childVal).toFixed(2)).toString())
-                                            : String(Math.round(Number(childVal)))}
-                                            onChange={(e) => {
-                                              if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                                handleCellChange(childRow.hierarchy, col, e.target.value);
-                                              }
-                                            }}
-                                            style={{
-                                              width: '72px',
-                                              height: '22px',
-                                              boxSizing: 'border-box',
-                                              border: '1px solid #93c5fd',
-                                              borderRadius: '4px',
-                                              outline: 'none',
-                                              background: '#eff6ff',
-                                              color: '#1e293b',
-                                              textAlign: 'center',
-                                              fontSize: '12px',
-                                              padding: '1px 4px',
-                                            }}
-                                          />
-                                        ) : (
-                                          formatCellValue(getColumnValue(childRow, col))
-                                        )}
+                                        <Typography
+                                          sx={{
+                                            fontSize: "13px",
+                                            fontWeight: 500,
+                                            color: isHighlightedChild ? "#f59e0b" : "#0f172a",
+                                          }}
+                                        >
+                                          {childRow.cleanLabel}
+                                        </Typography>
                                       </Box>
-                                    );
-                                  })}
-                                </Box>
-                              );
-                            })}
-                        </React.Fragment>
-                      );
-                    })}
 
-                    {/* Saved-scenario rows — appear immediately after Save
+                                      {/* Data cells */}
+                                      {displayColumns.map((col) => {
+                                        const isFChild = isForecastColumn(col);
+                                        const childVal = childRow?.monthly_data?.[col];
+                                        const isLastCol = col === displayColumns[displayColumns.length - 1];
+                                        const isEditableChild =
+                                          tableEditing &&
+                                          totalMarketViewMode === "monthly" &&
+                                          activeTab !== "total_market" &&
+                                          !isTotalRow;
+
+                                        return (
+                                          <Box
+                                            component='td'
+                                            key={col}
+                                            sx={{
+                                              p: isEditableChild ? '4px 3px' : '10px 8px',
+                                              textAlign: 'center',
+                                              fontSize: '13px',
+                                              backgroundColor: isEditableChild
+                                                ? isFChild ? '#eff6ff' : '#f8fafc'
+                                                : isHighlightedChild && isFChild ? '#fffbeb' : isFChild ? '#ffffff' : '#eef2f7',
+                                              color: !isEditableChild && isHighlightedChild && isFChild ? '#f59e0b' : '#1e3a5f',
+                                              borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                            }}
+                                          >
+                                            {isEditableChild ? (
+                                              <input
+                                                value={childVal == null ? '' : metricUnit === '%'
+                                                  ? (Number.isInteger(Number(childVal)) ? String(Number(childVal)) : parseFloat(Number(childVal).toFixed(2)).toString())
+                                                  : String(Math.round(Number(childVal)))}
+                                                onChange={(e) => {
+                                                  if (/^-?\d*\.?\d*$/.test(e.target.value)) {
+                                                    handleCellChange(childRow.hierarchy, col, e.target.value);
+                                                  }
+                                                }}
+                                                style={{
+                                                  width: '72px',
+                                                  height: '22px',
+                                                  boxSizing: 'border-box',
+                                                  border: '1px solid #93c5fd',
+                                                  borderRadius: '4px',
+                                                  outline: 'none',
+                                                  background: '#eff6ff',
+                                                  color: '#1e293b',
+                                                  textAlign: 'center',
+                                                  fontSize: '12px',
+                                                  padding: '1px 4px',
+                                                }}
+                                              />
+                                            ) : (
+                                              formatCellValue(getColumnValue(childRow, col))
+                                            )}
+                                          </Box>
+                                        );
+                                      })}
+                                    </Box>
+                                  );
+                                })}
+                            </React.Fragment>
+                          );
+                        })}
+
+                      {/* Saved-scenario rows — appear immediately after Save
                         Scenario without reloading chart/table data. Radio is
                         active so the user can click Apply Selected Scenario. */}
-                    {activeTab === "total_market" && savedScenarioRows
-                      .filter(
-                        (name) =>
-                          !groupedTableHierarchy.some(
-                            (g) => g.brandName === name,
-                          ),
-                      )
-                      .map((name) => {
-                        const isSelected =
-                          tentativeRadioSelectedScenario === name;
-                        return (
-                          <Box
-                            component="tr"
-                            key={`saved-${name}`}
-                            sx={{
-                              position: "relative",
-                              isolation: "isolate",
-                              backgroundColor: isSelected ? "#fffbeb" : "white",
-                              "&:hover": { backgroundColor: isSelected ? "#fff3c4" : "#f8fafc" },
-                            }}
-                          >
+                      {activeTab === "total_market" && savedScenarioRows
+                        .filter(
+                          (name) =>
+                            !groupedTableHierarchy.some(
+                              (g) => g.brandName === name,
+                            ),
+                        )
+                        .map((name) => {
+                          const isSelected =
+                            tentativeRadioSelectedScenario === name;
+                          return (
                             <Box
-                              component="td"
+                              component="tr"
+                              key={`saved-${name}`}
                               sx={{
-                                position: "sticky",
-                                left: 0,
-                                zIndex: 1,
+                                position: "relative",
+                                isolation: "isolate",
                                 backgroundColor: isSelected ? "#fffbeb" : "white",
-                                borderRight: "1px solid #e2e8f0",
-                                borderBottom: "1px solid #f1f5f9",
-                                p: "10px 16px",
+                                "&:hover": { backgroundColor: isSelected ? "#fff3c4" : "#f8fafc" },
                               }}
                             >
                               <Box
+                                component="td"
                                 sx={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 1.5,
+                                  position: "sticky",
+                                  left: 0,
+                                  zIndex: 1,
+                                  backgroundColor: isSelected ? "#fffbeb" : "white",
+                                  borderRight: "1px solid #e2e8f0",
+                                  borderBottom: "1px solid #f1f5f9",
+                                  p: "10px 16px",
                                 }}
                               >
-                                <input
-                                  type="radio"
-                                  name="activeScenarioRadio"
-                                  value={name}
-                                  checked={isSelected}
-                                  onChange={() =>
-                                    handleActiveScenarioRadioChange(name)
-                                  }
-                                  style={{
-                                    accentColor: "#4F46E5",
-                                    width: 14,
-                                    height: 14,
-                                    margin: 0,
-                                  }}
-                                />
-                                <Typography
-                                  sx={{
-                                    fontSize: "13px",
-                                    fontWeight: isSelected ? 700 : 600,
-                                    color: isSelected ? "#f59e0b" : "#0f172a",
-                                  }}
-                                >
-                                  {name}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            {displayColumns.map((col, i) => {
-                              const isF = isForecastColumn(col);
-                              return (
                                 <Box
-                                  component="td"
-                                  key={i}
                                   sx={{
-                                    p: "10px 8px",
-                                    textAlign: "center",
-                                    fontSize: "13px",
-                                    backgroundColor: isF ? "#ffffff" : "#f8fafc",
-                                    color: "#94a3b8",
-                                    borderBottom: "1px solid #f1f5f9",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 1.5,
                                   }}
                                 >
-                                  —
+                                  <input
+                                    type="radio"
+                                    name="activeScenarioRadio"
+                                    value={name}
+                                    checked={isSelected}
+                                    onChange={() =>
+                                      handleActiveScenarioRadioChange(name)
+                                    }
+                                    style={{
+                                      accentColor: "#4F46E5",
+                                      width: 14,
+                                      height: 14,
+                                      margin: 0,
+                                    }}
+                                  />
+                                  <Typography
+                                    sx={{
+                                      fontSize: "13px",
+                                      fontWeight: isSelected ? 700 : 600,
+                                      color: isSelected ? "#f59e0b" : "#0f172a",
+                                    }}
+                                  >
+                                    {name}
+                                  </Typography>
                                 </Box>
-                              );
-                            })}
-                          </Box>
-                        );
-                      })}
+                              </Box>
+                              {displayColumns.map((col, i) => {
+                                const isF = isForecastColumn(col);
+                                return (
+                                  <Box
+                                    component="td"
+                                    key={i}
+                                    sx={{
+                                      p: "10px 8px",
+                                      textAlign: "center",
+                                      fontSize: "13px",
+                                      backgroundColor: isF ? "#ffffff" : "#f8fafc",
+                                      color: "#94a3b8",
+                                      borderBottom: "1px solid #f1f5f9",
+                                    }}
+                                  >
+                                    —
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                          );
+                        })}
                     </>
                   )}
                 </Box>
