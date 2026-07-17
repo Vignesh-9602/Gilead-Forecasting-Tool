@@ -1,3 +1,5 @@
+
+
 import React, { useState, useEffect, useMemo, useRef } from "react";
 
 import {
@@ -88,12 +90,12 @@ export default function HIVImpactCurveTable({
     if (isControlled) return;
 
     if (activeTab === "product_event") {
-      setLocalHierarchyView("payer_level");
+      setLocalHierarchyView("product_level");
       return;
     }
 
     if (activeTab === "payer_event") {
-      setLocalHierarchyView("product_level");
+      setLocalHierarchyView("payer_level");
       return;
     }
 
@@ -105,8 +107,8 @@ export default function HIVImpactCurveTable({
   // don't trust it for display. We still use the API's `value` (needed to
   // correctly look up the matching sub-view data), just not its label.
   const HIERARCHY_VIEW_LABELS = {
-    payer_event: ["Product Level", "Payer-Product Level"],
-    product_event: ["Payer Level", "Product-Payer Level"],
+    payer_event:   ["Payer Level", "Product-Payer Level"],
+    product_event: ["Product Level", "Payer-Product Level"],
   };
 
   const rawHierarchyOptions =
@@ -114,13 +116,13 @@ export default function HIVImpactCurveTable({
       ? subViewOptions
       : activeTab === "product_event"
         ? [
-          { value: "payer_level", label: "Payer Level" },
-          { value: "payer_product_level", label: "Product-Payer Level" },
+          { value: "product_level",       label: "Product Level" },
+          { value: "payer_product_level",  label: "Payer-Product Level" },
         ]
         : activeTab === "payer_event"
           ? [
-            { value: "product_level", label: "Product Level" },
-            { value: "product_payer_level", label: "Payer-Product Level" },
+            { value: "payer_level",         label: "Payer Level" },
+            { value: "product_payer_level",  label: "Product-Payer Level" },
           ]
           : [];
 
@@ -181,7 +183,7 @@ export default function HIVImpactCurveTable({
 
     const editedLabel =
       childIndex !== null
-        ? updated[rowIndex]?.children?.[childIndex]?.label || ""
+        ? `${updated[rowIndex]?.label || ""} - ${updated[rowIndex]?.children?.[childIndex]?.label || ""}`
         : updated[rowIndex]?.label || "";
 
     if (childIndex !== null) {

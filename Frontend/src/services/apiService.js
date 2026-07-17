@@ -1,3 +1,5 @@
+
+
 import axios from "axios";
 import { httpClient } from "./httpClient";
 
@@ -341,6 +343,7 @@ export const editHIVScenario = (payload) =>
     payload
   );
 
+
 export const saveHIVScenario = (payload) =>
   httpClient.post(
     "/api/hiv_treat/save-scenarios",
@@ -383,7 +386,6 @@ export const editHIVImpactCurveTable = (payload) =>
     "/api/hiv_treat/edit_save",
     payload
   );
-
 
 
 // export const mainConversation = () => {
@@ -438,3 +440,4 @@ export const editHIVImpactCurveTable = (payload) =>
 // export const getRecentQuestions = (limit = 4) => {
 //   return httpClient.get(`/api/conversations/recent_questions?limit=${limit}`);
 // };
+ 

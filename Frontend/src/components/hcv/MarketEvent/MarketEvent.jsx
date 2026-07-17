@@ -1,4 +1,7 @@
-​import React, { useContext, useEffect, useState } from "react";
+
+
+
+import React, { useContext, useEffect, useState } from "react";
 
 import {
     Box,
@@ -54,14 +57,18 @@ const normalizeMetricsViews = (metricsViews = {}, fallbackMetricsViews = {}) => 
     market_share:
         metricsViews.market_share ||
         metricsViews.payer_share ||
+        metricsViews.product_share ||
         fallbackMetricsViews.market_share ||
         fallbackMetricsViews.payer_share ||
+        fallbackMetricsViews.product_share ||
         {},
     market_volume:
         metricsViews.market_volume ||
         metricsViews.payer_volume ||
+        metricsViews.product_volume ||
         fallbackMetricsViews.market_volume ||
         fallbackMetricsViews.payer_volume ||
+        fallbackMetricsViews.product_volume ||
         {},
 });
 
@@ -344,42 +351,14 @@ const getDisplayMetricData = (
     }
 
     if (activeTabName === "product_event") {
-        const baseMetricData =
-            Object.keys(productMetricData || {}).length
-                ? productMetricData
-                : payerMetricData;
-
-        const resolvedTable = normalizeHierarchyTableForTab(
-            baseMetricData.table,
-            activeConfig.products || [],
-            activeConfig.markets || activeConfig.payers || [],
-            metricName,
-        );
-
-        return {
-            ...baseMetricData,
-            table: resolvedTable,
-            chart: buildChartDataFromTable(resolvedTable, viewName),
-        };
+        return Object.keys(productMetricData || {}).length
+            ? productMetricData
+            : payerMetricData;
     }
 
-    const baseMetricData =
-        Object.keys(payerMetricData || {}).length
-            ? payerMetricData
-            : productMetricData;
-
-    const resolvedTable = normalizeHierarchyTableForTab(
-        baseMetricData.table,
-        activeConfig.markets || activeConfig.payers || [],
-        activeConfig.products || [],
-        metricName,
-    );
-
-    return {
-        ...baseMetricData,
-        table: resolvedTable,
-        chart: buildChartDataFromTable(resolvedTable, viewName),
-    };
+    return Object.keys(payerMetricData || {}).length
+        ? payerMetricData
+        : productMetricData;
 };
 
 const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
