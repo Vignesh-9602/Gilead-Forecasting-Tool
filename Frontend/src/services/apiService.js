@@ -341,6 +341,48 @@ export const editHIVScenario = (payload) =>
     payload
   );
 
+export const saveHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/save-scenarios",
+    payload
+  );
+
+export const applySelectedHIVScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/apply_selected_scenario",
+    payload
+  );
+
+export const updateHIVScenario = (scenarioName, payload) =>
+  httpClient.put(
+    `/api/hiv_treat/scenarios/${encodeURIComponent(scenarioName)}`,
+    payload
+  );
+
+export const getHIVMarketEventFilters = (taName) =>
+  httpClient.get("/api/hiv_treat/get_market_event_filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+
+export const applyHIVMarketEventFilter = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/apply_market_event_filters",
+    payload
+  );
+
+export const runHIVMarketEventCalculation = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/run-calculation",
+    payload
+  );
+
+export const editHIVImpactCurveTable = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/edit_save",
+    payload
+  );
 
 
 

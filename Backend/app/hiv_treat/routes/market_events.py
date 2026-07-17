@@ -6,6 +6,9 @@ from app.hiv_treat.routes.market_events_models import *
 from app.hiv_treat.services.market_event_helpers import *
 from app.hiv_treat.services.calculation_tree_market_events import *
 from app.hiv_treat.services.generic_builders_market_events import *
+from app.hiv_treat.services.edit_helpers import *
+
+router = APIRouter()
 
 from app.db.connection import get_connection
 
@@ -162,10 +165,6 @@ def get_market_event_filters(
 
 #apply filter
 
-
-
-
-
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -258,6 +257,230 @@ def apply_market_event_filters(
 
             },
         }
+
+    finally:
+        cursor.close()
+
+#edits
+@router.post("/edit_save")
+def edit_save(
+    payload: EditSaveRequest,
+    db=Depends(get_connection),
+):
+    """
+    Edit, normalize, recompute and save forecast data.
+
+    Editable:
+        market_event
+        product_event
+
+    Read-only:
+        overall_event
+
+    Response:
+        Exactly the same structure as apply_filters.
+    """
+
+    cursor = db.cursor(
+        cursor_factory=RealDictCursor
+    )
+
+    try:
+        selected_filter = (
+            payload.selected_filter.model_dump()
+        )
+
+        scenario_name = (
+            payload.selected_filter.scenario_name
+        )
+
+        # ================================================
+        # 1. Defensive tab validation
+        # ================================================
+
+        if payload.selected_tab not in {
+            "market_event",
+            "product_event",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Overall Event is read-only and cannot be edited."
+                ),
+            )
+
+        # ================================================
+        # 2. Load complete unfiltered database data
+        # ================================================
+
+        original_metrics = load_forecast_outputs(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+        )
+
+        if not original_metrics.get(
+            "market_share"
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No market-share forecast data was found."
+                ),
+            )
+
+        if not original_metrics.get(
+            "market_volume"
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No market-volume forecast data was found."
+                ),
+            )
+
+        # ================================================
+        # 3. Build complete calculation tree
+        # ================================================
+
+        tree = build_calculation_tree(
+            original_metrics
+        )
+
+        # Do not filter the tree before editing.
+        # The DB save requires the complete timeline.
+
+        # ================================================
+        # 4. Resolve the selected monthly range
+        # ================================================
+
+        selected_months, selected_indexes = (
+            resolve_selected_months(
+                tree=tree,
+                payload=payload,
+            )
+        )
+
+        # ================================================
+        # 5. Validate the submitted rows
+        # ================================================
+
+        validate_edited_rows(
+            rows=payload.edited_table_rows,
+            expected_value_count=len(
+                selected_months
+            ),
+        )
+
+        validate_row_labels(
+            tree=tree,
+            payload=payload,
+        )
+
+        # ================================================
+        # 6. Build canonical market-product matrix
+        # ================================================
+
+        matrix = build_market_product_volume_matrix(
+            tree
+        )
+
+        # ================================================
+        # 7. Apply edits and normalize
+        # ================================================
+
+        if payload.selected_tab == "market_event":
+
+            apply_market_event_edits(
+                tree=tree,
+                matrix=matrix,
+                payload=payload,
+                selected_indexes=selected_indexes,
+            )
+
+        elif payload.selected_tab == "product_event":
+
+            apply_product_event_edits(
+                tree=tree,
+                matrix=matrix,
+                payload=payload,
+                selected_indexes=selected_indexes,
+            )
+
+        # ================================================
+        # 8. Push normalized values into source products
+        # ================================================
+
+        apply_matrix_to_tree(
+            tree=tree,
+            matrix=matrix,
+            selected_indexes=selected_indexes,
+        )
+
+        # ================================================
+        # 9. Recompute both event orientations
+        # ================================================
+
+        recompute_tree(
+            tree=tree,
+            selected_indexes=selected_indexes,
+        )
+
+        # Both event tabs now use the same recomputed tree:
+        #
+        # build_market_event(tree)
+        # build_product_event(tree)
+        #
+        # Yearly tables are regenerated from monthly data
+        # by the existing event builders.
+
+        # ================================================
+        # 10. Save into forecast_outputs
+        # ================================================
+
+        save_tree_to_forecast_outputs(
+            cursor=cursor,
+            tree=tree,
+            original_metrics=original_metrics,
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+        )
+
+        # Save all changes atomically.
+        db.commit()
+
+        # ================================================
+        # 11. Reload DB and return Apply Filters response
+        # ================================================
+
+        return build_apply_filters_response(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            selected_filter=selected_filter,
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except ValueError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unable to edit, normalize, recompute and "
+                f"save the forecast: {exc}"
+            ),
+        ) from exc
 
     finally:
         cursor.close()

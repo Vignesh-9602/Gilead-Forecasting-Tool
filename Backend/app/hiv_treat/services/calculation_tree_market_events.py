@@ -303,99 +303,113 @@ def aggregate_products(tree):
             )
         ]
 
-def filter_tree_by_date(tree, start_date, end_date):
+def filter_tree_by_date(
+    tree: dict,
+    start_date: str,
+    end_date: str,
+) -> dict:
     """
-    Trim the calculation tree to the selected date range.
+    Trim the complete calculation tree to the selected date range.
+
+    This must slice:
+        - overall volume
+        - market share and volume
+        - source share and volume
+        - product share and volume
+        - top-level aggregated products
     """
 
-    months = tree["months"]
-    old_forecast_index = tree["forecast_start_index"]
+    months = tree.get("months", [])
+
+    if not months:
+        return tree
 
     selected_indexes = [
-        i
-        for i, month in enumerate(months)
+        index
+        for index, month in enumerate(months)
         if start_date <= month <= end_date
     ]
 
     if not selected_indexes:
-        return tree
-
-    start_idx = selected_indexes[0]
-    end_idx = selected_indexes[-1] + 1
-
-    # Filter months
-    tree["months"] = months[start_idx:end_idx]
-
-    # Adjust forecast start index
-    if old_forecast_index <= start_idx:
-        # Entire selection is forecast
+        tree["months"] = []
         tree["forecast_start_index"] = 0
 
-    elif old_forecast_index >= end_idx:
-        # Entire selection is history
-        tree["forecast_start_index"] = end_idx - start_idx
+        filter_node_by_date(
+            node=tree,
+            start_index=0,
+            end_index=0,
+        )
 
-    else:
-        # Selection spans history + forecast
-        tree["forecast_start_index"] = old_forecast_index - start_idx
+        return tree
 
-    filter_node(
-        tree,
-        start_idx,
-        end_idx,
-        old_forecast_index,
+    start_index = selected_indexes[0]
+    end_index = selected_indexes[-1] + 1
+
+    original_forecast_start_index = tree.get(
+        "forecast_start_index",
+        0,
+    )
+
+    # Slice all arrays before replacing the month list.
+    filter_node_by_date(
+        node=tree,
+        start_index=start_index,
+        end_index=end_index,
+    )
+
+    tree["months"] = months[
+        start_index:end_index
+    ]
+
+    new_month_count = len(tree["months"])
+
+    adjusted_forecast_index = (
+        original_forecast_start_index
+        - start_index
+    )
+
+    # Cases:
+    # adjusted <= 0            -> all selected data is forecast
+    # adjusted >= month count  -> all selected data is history
+    tree["forecast_start_index"] = max(
+        0,
+        min(
+            adjusted_forecast_index,
+            new_month_count,
+        ),
     )
 
     return tree
 
-def filter_node(node, start_idx, end_idx, old_forecast_index):
+def filter_node_by_date(
+    node,
+    start_index: int,
+    end_index: int,
+):
+    if not isinstance(node, dict):
+        return
 
-    if "values" in node:
-        node["values"] = node["values"][start_idx:end_idx]
+    time_series_keys = {
+        "values",
+        "history",
+        "forecast",
+        "share",
+        "volume",
+    }
 
-    #
-    # Handle chart history/forecast separately
-    #
-    if "history" in node and "forecast" in node:
+    for key, value in node.items():
 
-        full_values = node["history"] + node["forecast"]
+        if (
+            key in time_series_keys
+            and isinstance(value, list)
+        ):
+            node[key] = value[
+                start_index:end_index
+            ]
 
-        full_values = full_values[start_idx:end_idx]
-
-        new_forecast_index = 0
-
-        if old_forecast_index <= start_idx:
-            new_forecast_index = 0
-
-        elif old_forecast_index >= end_idx:
-            new_forecast_index = len(full_values)
-
-        else:
-            new_forecast_index = old_forecast_index - start_idx
-
-        node["history"] = full_values[:new_forecast_index]
-        node["forecast"] = full_values[new_forecast_index:]
-
-    for market in node.get("markets", {}).values():
-        filter_node(
-            market,
-            start_idx,
-            end_idx,
-            old_forecast_index,
-        )
-
-    for source in node.get("sources", {}).values():
-        filter_node(
-            source,
-            start_idx,
-            end_idx,
-            old_forecast_index,
-        )
-
-    for product in node.get("products", {}).values():
-        filter_node(
-            product,
-            start_idx,
-            end_idx,
-            old_forecast_index,
-        )
+        elif isinstance(value, dict):
+            filter_node_by_date(
+                node=value,
+                start_index=start_index,
+                end_index=end_index,
+            )

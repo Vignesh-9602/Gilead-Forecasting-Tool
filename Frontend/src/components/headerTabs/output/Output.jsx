@@ -696,9 +696,7 @@ export default function Output() {
                         />
                     </Tabs>
                 </Box>
-                {/* 
-                <OutputChart chartData={chartData} />
-                <OutputTable outputData={outputData} /> */}
+
                 <OutputChart
                     chartData={currentView?.chart}
                 />
