@@ -299,6 +299,10 @@ export const applyLiverMarketEventsFilters = (payload) => {
   return httpClient.post("/api/liver-market-events/apply-filters", payload);
 };
 
+export const refreshLiverMarketEventsTable = (payload) => {
+  return httpClient.post("/api/liver-market-events/refresh", payload);
+};
+
 
 //HIC API's
 export const getHIVConfigurationByTherapyArea = (taName) => {
