@@ -1,4 +1,7 @@
-​import React, { useContext, useEffect, useState } from "react";
+
+
+
+import React, { useContext, useEffect, useState } from "react";
 
 import {
     Box,
@@ -40,6 +43,7 @@ import { GlobalContext } from "../../../context/Provider";
 import {
     getLiverMarketEventsFilters,
     applyLiverMarketEventsFilters,
+    refreshLiverMarketEventsTable,
 } from "../../../services/apiService";
 import HIVImpactCurveChart from "./MarketEventChart";
 import HIVImpactCurveTable from "./MarketEventTable";
@@ -53,14 +57,18 @@ const normalizeMetricsViews = (metricsViews = {}, fallbackMetricsViews = {}) => 
     market_share:
         metricsViews.market_share ||
         metricsViews.payer_share ||
+        metricsViews.product_share ||
         fallbackMetricsViews.market_share ||
         fallbackMetricsViews.payer_share ||
+        fallbackMetricsViews.product_share ||
         {},
     market_volume:
         metricsViews.market_volume ||
         metricsViews.payer_volume ||
+        metricsViews.product_volume ||
         fallbackMetricsViews.market_volume ||
         fallbackMetricsViews.payer_volume ||
+        fallbackMetricsViews.product_volume ||
         {},
 });
 
@@ -89,6 +97,16 @@ const normalizeMetricFilters = (metricFilters = []) =>
 
 const getDefaultMetricValue = (metricFilters = []) =>
     metricFilters[0]?.value || "market_volume";
+
+// The UI works with "market_share"/"market_volume" (see normalizeMetricFilters
+// above), but the API's own vocabulary is "payer_share"/"payer_volume". Use
+// this whenever building a payload to send back to the backend.
+const denormalizeMetricValue = (value) =>
+    value === "market_share"
+        ? "payer_share"
+        : value === "market_volume"
+            ? "payer_volume"
+            : value;
 
 const cloneTableData = (tableData = {}) =>
     JSON.parse(JSON.stringify(tableData || {}));
@@ -208,8 +226,55 @@ const buildChartDataFromTable = (tableData = {}, selectedView = "monthly") => {
     };
 };
 
-const getMetricViewData = (tabData, metricName, viewName) =>
-    tabData?.metrics_views?.[metricName]?.[viewName] || {};
+// The API nests an extra "sub view" layer under monthly/yearly for the
+// market/payer and product tabs (e.g. product_level vs product_payer_level,
+// or payer_level vs payer_product_level). The overall tab only has a single
+// "overall_level" sub view. This helper figures out which sub view key is
+// available/selected for a given raw monthly/yearly node.
+const getAvailableSubViewKeys = (rawViewData = {}) =>
+    Array.isArray(rawViewData?.view_options)
+        ? rawViewData.view_options.map((option) => option.value).filter(Boolean)
+        : [];
+
+const getDefaultSubViewKey = (rawViewData = {}) => {
+    const availableKeys = getAvailableSubViewKeys(rawViewData);
+
+    if (rawViewData?.selected_view && availableKeys.includes(rawViewData.selected_view)) {
+        return rawViewData.selected_view;
+    }
+
+    return availableKeys[0] || "";
+};
+
+// Resolves the raw monthly/yearly node down to the actual { chart, table }
+// payload, drilling into the requested (or default) sub view when present.
+const resolveMetricViewData = (rawViewData = {}, subViewKey = "") => {
+    if (!rawViewData) {
+        return {};
+    }
+
+    // Already flat (chart/table directly on this node) — nothing to drill into.
+    if (rawViewData.chart || rawViewData.table) {
+        return rawViewData;
+    }
+
+    const availableKeys = getAvailableSubViewKeys(rawViewData);
+
+    if (!availableKeys.length) {
+        return rawViewData;
+    }
+
+    const resolvedKey =
+        (subViewKey && availableKeys.includes(subViewKey) && subViewKey) ||
+        getDefaultSubViewKey(rawViewData);
+
+    return resolvedKey ? rawViewData[resolvedKey] || {} : rawViewData;
+};
+
+const getMetricViewData = (tabData, metricName, viewName, subViewKey = "") => {
+    const rawViewData = tabData?.metrics_views?.[metricName]?.[viewName] || {};
+    return resolveMetricViewData(rawViewData, subViewKey);
+};
 
 const getHierarchyTopLevelLabels = (tableData = {}) =>
     Array.isArray(tableData?.rows)
@@ -254,88 +319,76 @@ const normalizeHierarchyTableForTab = (
 
 const getDisplayMetricData = (
     activeTabName,
-    marketTabData,
+    payerTabData,
     productTabData,
     overallTabData,
     metricName,
     viewName,
     activeConfig = {},
+    subViewKeysByTab = {},
 ) => {
-    const marketMetricData = getMetricViewData(marketTabData, metricName, viewName);
-    const productMetricData = getMetricViewData(productTabData, metricName, viewName);
-    const overallMetricData = getMetricViewData(overallTabData, metricName, viewName);
+    const payerMetricData = getMetricViewData(
+        payerTabData,
+        metricName,
+        viewName,
+        subViewKeysByTab.payer_event,
+    );
+    const productMetricData = getMetricViewData(
+        productTabData,
+        metricName,
+        viewName,
+        subViewKeysByTab.product_event,
+    );
+    const overallMetricData = getMetricViewData(
+        overallTabData,
+        metricName,
+        viewName,
+        subViewKeysByTab.overall_event,
+    );
 
     if (activeTabName === "overall_event") {
         return overallMetricData;
     }
 
     if (activeTabName === "product_event") {
-        const baseMetricData =
-            Object.keys(productMetricData || {}).length
-                ? productMetricData
-                : marketMetricData;
-
-        const resolvedTable = normalizeHierarchyTableForTab(
-            baseMetricData.table,
-            activeConfig.products || [],
-            activeConfig.markets || activeConfig.payers || [],
-            metricName,
-        );
-
-        return {
-            ...baseMetricData,
-            table: resolvedTable,
-            chart: buildChartDataFromTable(resolvedTable, viewName),
-        };
+        return Object.keys(productMetricData || {}).length
+            ? productMetricData
+            : payerMetricData;
     }
 
-    const baseMetricData =
-        Object.keys(marketMetricData || {}).length
-            ? marketMetricData
-            : productMetricData;
-
-    const resolvedTable = normalizeHierarchyTableForTab(
-        baseMetricData.table,
-        activeConfig.markets || activeConfig.payers || [],
-        activeConfig.products || [],
-        metricName,
-    );
-
-    return {
-        ...baseMetricData,
-        table: resolvedTable,
-        chart: buildChartDataFromTable(resolvedTable, viewName),
-    };
+    return Object.keys(payerMetricData || {}).length
+        ? payerMetricData
+        : productMetricData;
 };
 
 const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
-    const marketTab = eventTabs.market_event || eventTabs.payer_event || {};
+    const payerTab = eventTabs.payer_event || {};
     const productTab = eventTabs.product_event || {};
     const overallTab = eventTabs.overall_event || {};
 
-    const fallbackMarketTab = fallbackTabs.market_event || {};
+    const fallbackPayerTab = fallbackTabs.payer_event || {};
     const fallbackProductTab = fallbackTabs.product_event || {};
     const fallbackOverallTab = fallbackTabs.overall_event || {};
 
-    const marketConfig = marketTab.impact_curve_configuration || {};
-    const fallbackMarketConfig = fallbackMarketTab.impact_curve_configuration || {};
+    const payerConfig = payerTab.impact_curve_configuration || {};
+    const fallbackPayerConfig = fallbackPayerTab.impact_curve_configuration || {};
     const productConfig = productTab.impact_curve_configuration || {};
     const fallbackProductConfig = fallbackProductTab.impact_curve_configuration || {};
     const overallConfig = overallTab.impact_curve_configuration || {};
     const fallbackOverallConfig = fallbackOverallTab.impact_curve_configuration || {};
 
     return {
-        market_event: {
-            ...fallbackMarketTab,
-            ...marketTab,
+        payer_event: {
+            ...fallbackPayerTab,
+            ...payerTab,
             impact_curve_configuration: {
-                ...fallbackMarketConfig,
-                ...marketConfig,
-                markets: marketConfig.markets || marketConfig.payers || fallbackMarketConfig.markets || fallbackMarketConfig.payers || [],
+                ...fallbackPayerConfig,
+                ...payerConfig,
+                markets: payerConfig.markets || payerConfig.payers || fallbackPayerConfig.markets || fallbackPayerConfig.payers || [],
                 impact_markets:
-                    marketConfig.impact_markets || marketConfig.impact_payers || fallbackMarketConfig.impact_markets || fallbackMarketConfig.impact_payers || [],
+                    payerConfig.impact_markets || payerConfig.impact_payers || fallbackPayerConfig.impact_markets || fallbackPayerConfig.impact_payers || [],
             },
-            metrics_views: normalizeMetricsViews(marketTab.metrics_views, fallbackMarketTab.metrics_views),
+            metrics_views: normalizeMetricsViews(payerTab.metrics_views, fallbackPayerTab.metrics_views),
         },
         product_event: {
             ...fallbackProductTab,
@@ -355,6 +408,7 @@ const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
             impact_curve_configuration: {
                 ...fallbackOverallConfig,
                 ...overallConfig,
+                markets: overallConfig.markets || overallConfig.payers || fallbackOverallConfig.markets || fallbackOverallConfig.payers || [],
             },
             metrics_views: normalizeMetricsViews(overallTab.metrics_views, fallbackOverallTab.metrics_views),
         },
@@ -385,8 +439,8 @@ export default function HIVMarketEvent() {
     const [activeTab, setActiveTab] =
         useState("overall_event");
 
-    const isMarketEvent =
-        activeTab === "market_event";
+    const isPayerEvent =
+        activeTab === "payer_event";
 
     const isProductEvent =
         activeTab === "product_event";
@@ -402,6 +456,48 @@ export default function HIVMarketEvent() {
 
     const [selectedView, setSelectedView] =
         useState("monthly");
+
+    // Tracks the nested sub-view selection per tab (e.g. "product_level" vs
+    // "product_payer_level" for the Payer Event tab, "payer_level" vs
+    // "payer_product_level" for the Product Event tab, and "overall_level"
+    // for the Overall Event tab).
+    const [selectedSubViewByTab, setSelectedSubViewByTab] = useState({
+        payer_event: "",
+        product_event: "",
+        overall_event: "",
+    });
+
+    useEffect(() => {
+
+        const rawViewData =
+            eventTabsData?.[activeTab]
+                ?.metrics_views?.[selectedMetric]?.[selectedView] || {};
+
+        const availableKeys = getAvailableSubViewKeys(rawViewData);
+
+        if (!availableKeys.length) return;
+
+        setSelectedSubViewByTab((prev) => {
+            const current = prev[activeTab];
+
+            if (current && availableKeys.includes(current)) {
+                return prev;
+            }
+
+            return {
+                ...prev,
+                [activeTab]: getDefaultSubViewKey(rawViewData),
+            };
+        });
+
+    }, [activeTab, eventTabsData, selectedMetric, selectedView]);
+
+    const handleSubViewChange = (nextSubView) => {
+        setSelectedSubViewByTab((prev) => ({
+            ...prev,
+            [activeTab]: nextSubView,
+        }));
+    };
 
     useEffect(() => {
 
@@ -421,22 +517,30 @@ export default function HIVMarketEvent() {
         eventTabsData?.[activeTab]
             ?.impact_curve_configuration || {};
 
-    const currentMetricData =
+    const currentMetricData = getMetricViewData(
+        eventTabsData?.[activeTab],
+        selectedMetric,
+        selectedView,
+        selectedSubViewByTab[activeTab],
+    );
+
+    // Straight from the API response for the active tab/metric/granularity —
+    // this is what should populate the "Product Level / Product-Payer Level"
+    // (or "Payer Level / Payer-Product Level") dropdown above the table.
+    const currentSubViewOptions =
         eventTabsData?.[activeTab]
-            ?.metrics_views?.[
-        selectedMetric
-        ]?.[
-        selectedView
-        ] || {};
+            ?.metrics_views?.[selectedMetric]?.[selectedView]
+            ?.view_options || [];
 
     const displayMetricData = getDisplayMetricData(
         activeTab,
-        eventTabsData?.market_event,
+        eventTabsData?.payer_event,
         eventTabsData?.product_event,
         eventTabsData?.overall_event,
         selectedMetric,
         selectedView,
         currentConfig,
+        selectedSubViewByTab,
     );
 
     useEffect(() => {
@@ -612,6 +716,61 @@ export default function HIVMarketEvent() {
         }
     };
 
+    // Shared by both applyLiverMarketEventsFilters and refreshLiverMarketEventsTable
+    // responses, since the refresh API turns out to return the exact same
+    // full-payload shape (ta_name, available_scenarios, event_tabs, ...) as
+    // apply-filters rather than a scoped fragment.
+    const applyEventTabsApiResponse = (apiData = {}, fallbackSelectedFilter = {}) => {
+        setAvailableScenarios(
+            apiData.available_scenarios ||
+            apiData.scenario_names ||
+            availableScenarios
+        );
+
+        setAvailableMonths(
+            apiData.available_months ||
+            availableMonths
+        );
+
+        const normalizedMetricFilters = normalizeMetricFilters(
+            apiData.metric_filters || metricFilters || []
+        );
+
+        const effectiveMetricFilters =
+            normalizedMetricFilters.length > 0
+                ? normalizedMetricFilters
+                : metricFilters;
+
+        setMetricFilters(effectiveMetricFilters);
+
+        setSelectedMetric((prevSelectedMetric) => {
+            const allowedValues = effectiveMetricFilters.map((item) => item.value);
+
+            return allowedValues.includes(prevSelectedMetric)
+                ? prevSelectedMetric
+                : getDefaultMetricValue(effectiveMetricFilters);
+        });
+
+        const appliedFilter = apiData.selected_filter || fallbackSelectedFilter;
+
+        setScenarioName(appliedFilter.scenario_name || scenarioName);
+        setSelectedPayers(appliedFilter.payers || selectedPayers);
+        setSelectedProducts(appliedFilter.products || selectedProducts);
+        setFromDate(appliedFilter.start_date || fromDate);
+        setToDate(appliedFilter.end_date || toDate);
+
+        const normalizedTabs =
+            apiData.event_tabs && Object.keys(apiData.event_tabs).length
+                ? normalizeEventTabs(apiData.event_tabs, eventTabsData)
+                : null;
+
+        setEventTabsData(
+            normalizedTabs
+                ? normalizedTabs
+                : normalizeEventTabs(apiData.event_tabs || {}, eventTabsData) || {}
+        );
+    };
+
     const handleApplyFilter = async () => {
 
         const taName = "HCV";
@@ -631,57 +790,40 @@ export default function HIVMarketEvent() {
             const response = await applyLiverMarketEventsFilters(payload);
             const apiData = response?.data || {};
 
-            setAvailableScenarios(
-                apiData.available_scenarios ||
-                apiData.scenario_names ||
-                availableScenarios
-            );
-
-            setAvailableMonths(
-                apiData.available_months ||
-                availableMonths
-            );
-
-            const normalizedMetricFilters = normalizeMetricFilters(
-                apiData.metric_filters || metricFilters || []
-            );
-
-            const effectiveMetricFilters =
-                normalizedMetricFilters.length > 0
-                    ? normalizedMetricFilters
-                    : metricFilters;
-
-            setMetricFilters(effectiveMetricFilters);
-
-            setSelectedMetric((prevSelectedMetric) => {
-                const allowedValues = effectiveMetricFilters.map((item) => item.value);
-
-                return allowedValues.includes(prevSelectedMetric)
-                    ? prevSelectedMetric
-                    : getDefaultMetricValue(effectiveMetricFilters);
-            });
-
-            const appliedFilter = apiData.selected_filter || payload.selected_filter;
-
-            setScenarioName(appliedFilter.scenario_name || scenarioName);
-            setSelectedPayers(appliedFilter.payers || selectedPayers);
-            setSelectedProducts(appliedFilter.products || selectedProducts);
-            setFromDate(appliedFilter.start_date || fromDate);
-            setToDate(appliedFilter.end_date || toDate);
-
-            const normalizedTabs =
-                apiData.event_tabs && Object.keys(apiData.event_tabs).length
-                    ? normalizeEventTabs(apiData.event_tabs, eventTabsData)
-                    : null;
-
-            setEventTabsData(
-                normalizedTabs
-                    ? normalizedTabs
-                    : normalizeEventTabs(apiData.event_tabs || {}, eventTabsData) || {}
-            );
+            applyEventTabsApiResponse(apiData, payload.selected_filter);
         } catch (error) {
             console.error("Failed to apply liver market event filters", error);
         }
+    };
+
+    // Called from the table's "Refresh" button (while editing a row's values).
+    // Sends the in-progress edits to the backend so it can recalculate
+    // everything (e.g. redistribute market share so totals still add up,
+    // which can also shift payer_volume and other tabs/views) and applies
+    // the recalculated response the same way an apply-filters response is
+    // applied, since the two endpoints return an identical payload shape.
+    const handleRefreshLiverMarketEventTable = async (editedTableRows, editedLabel) => {
+        const payload = {
+            ta_name: "HCV",
+            selected_filter: {
+                scenario_name: scenarioName,
+                payers: selectedPayers,
+                products: selectedProducts,
+                start_date: fromDate,
+                end_date: toDate,
+            },
+            selected_tab: activeTab,
+            selected_metric: denormalizeMetricValue(selectedMetric),
+            selected_view: selectedView,
+            selected_table_view: selectedSubViewByTab[activeTab] || "",
+            edited_table_rows: editedTableRows,
+            edited_label: editedLabel || "",
+        };
+
+        const response = await refreshLiverMarketEventsTable(payload);
+        const apiData = response?.data || {};
+
+        applyEventTabsApiResponse(apiData, payload.selected_filter);
     };
 
     const inputStyle = {
@@ -712,7 +854,7 @@ export default function HIVMarketEvent() {
         },
         {
             label: "Payer Event",
-            value: "market_event",
+            value: "payer_event",
         },
         {
             label: "Product Event",
@@ -962,10 +1104,10 @@ export default function HIVMarketEvent() {
             "",
         ]
         : [
-            isMarketEvent ? "Payer Event" : "Product Event",
-            isMarketEvent ? "Payers" : "Products",
-            isMarketEvent ? "Products" : "Payers",
-            isMarketEvent
+            isPayerEvent ? "Payer Event" : "Product Event",
+            isPayerEvent ? "Products" : "Payers",
+            isPayerEvent ? "Payers" : "Products",
+            isPayerEvent
                 ? "Impacted Payers"
                 : "Impacted Products",
             "Start Date",
@@ -1674,7 +1816,7 @@ export default function HIVMarketEvent() {
 
                                     {/* MARKET EVENT */}
 
-                                    {isMarketEvent && (
+                                    {isPayerEvent && (
                                         <>
 
                                             {/* EVENT */}
@@ -1692,98 +1834,6 @@ export default function HIVMarketEvent() {
                                                 }
                                                 sx={tableInputStyle}
                                             />
-
-                                            {/* MARKETS */}
-
-                                            <FormControl
-                                                size="small"
-                                                sx={tableSelectStyle}
-                                            >
-                                                <Select
-                                                    multiple
-                                                    MenuProps={menuProps}
-                                                    value={row.markets}
-                                                    renderValue={(selected) =>
-                                                        renderOptionValue(
-                                                            selected,
-                                                            currentConfig.markets || [],
-                                                            "Select"
-                                                        )
-                                                    }
-                                                    onChange={(e) => {
-
-                                                        const value = e.target.value;
-
-                                                        if (value.includes("SELECT_ALL")) {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "markets",
-                                                                row.markets.length ===
-                                                                    (currentConfig.markets || []).length
-                                                                    ? []
-                                                                    : currentConfig.markets || []
-                                                            );
-
-                                                        } else {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "markets",
-                                                                value
-                                                            );
-
-                                                        }
-
-                                                    }}
-                                                >
-                                                    <MenuItem value="SELECT_ALL">
-
-                                                        <Checkbox
-                                                            size="small"
-                                                            checked={
-                                                                row.markets.length ===
-                                                                (currentConfig.markets || []).length
-                                                            }
-                                                            indeterminate={
-                                                                row.markets.length > 0 &&
-                                                                row.markets.length <
-                                                                (currentConfig.markets || []).length
-                                                            }
-                                                        />
-
-                                                        <ListItemText primary="Select All" />
-
-                                                    </MenuItem>
-
-                                                    {(currentConfig.markets || []).map((item) => {
-                                                        const optionValue = getOptionValue(item);
-                                                        const optionLabel = getOptionLabel(item);
-                                                        return (
-                                                            <MenuItem
-                                                                key={optionValue}
-                                                                value={optionValue}
-                                                                sx={{
-                                                                    py: 0.5,
-                                                                }}
-                                                            >
-
-                                                                <Checkbox
-                                                                    checked={row.markets.includes(optionValue)}
-                                                                    size="small"
-                                                                />
-
-                                                                <ListItemText
-                                                                    primary={optionLabel}
-                                                                />
-
-                                                            </MenuItem>
-                                                        );
-                                                    })}
-
-                                                </Select>
-
-                                            </FormControl>
 
                                             {/* PRODUCTS */}
 
@@ -1829,7 +1879,6 @@ export default function HIVMarketEvent() {
 
                                                     }}
                                                 >
-
                                                     <MenuItem value="SELECT_ALL">
 
                                                         <Checkbox
@@ -1863,6 +1912,99 @@ export default function HIVMarketEvent() {
 
                                                                 <Checkbox
                                                                     checked={row.products.includes(optionValue)}
+                                                                    size="small"
+                                                                />
+
+                                                                <ListItemText
+                                                                    primary={optionLabel}
+                                                                />
+
+                                                            </MenuItem>
+                                                        );
+                                                    })}
+
+                                                </Select>
+
+                                            </FormControl>
+
+                                            {/* MARKETS */}
+
+                                            <FormControl
+                                                size="small"
+                                                sx={tableSelectStyle}
+                                            >
+                                                <Select
+                                                    multiple
+                                                    MenuProps={menuProps}
+                                                    value={row.markets}
+                                                    renderValue={(selected) =>
+                                                        renderOptionValue(
+                                                            selected,
+                                                            currentConfig.markets || [],
+                                                            "Select"
+                                                        )
+                                                    }
+                                                    onChange={(e) => {
+
+                                                        const value = e.target.value;
+
+                                                        if (value.includes("SELECT_ALL")) {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "markets",
+                                                                row.markets.length ===
+                                                                    (currentConfig.markets || []).length
+                                                                    ? []
+                                                                    : currentConfig.markets || []
+                                                            );
+
+                                                        } else {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "markets",
+                                                                value
+                                                            );
+
+                                                        }
+
+                                                    }}
+                                                >
+
+                                                    <MenuItem value="SELECT_ALL">
+
+                                                        <Checkbox
+                                                            size="small"
+                                                            checked={
+                                                                row.markets.length ===
+                                                                (currentConfig.markets || []).length
+                                                            }
+                                                            indeterminate={
+                                                                row.markets.length > 0 &&
+                                                                row.markets.length <
+                                                                (currentConfig.markets || []).length
+                                                            }
+                                                        />
+
+                                                        <ListItemText primary="Select All" />
+
+                                                    </MenuItem>
+
+                                                    {(currentConfig.markets || []).map((item) => {
+                                                        const optionValue = getOptionValue(item);
+                                                        const optionLabel = getOptionLabel(item);
+                                                        return (
+                                                            <MenuItem
+                                                                key={optionValue}
+                                                                value={optionValue}
+                                                                sx={{
+                                                                    py: 0.5,
+                                                                }}
+                                                            >
+
+                                                                <Checkbox
+                                                                    checked={row.markets.includes(optionValue)}
                                                                     size="small"
                                                                 />
 
@@ -2180,100 +2322,7 @@ export default function HIVMarketEvent() {
                                                 sx={tableInputStyle}
                                             />
 
-                                            {/* PRODUCTS */}
-                                            <FormControl
-                                                size="small"
-                                                sx={tableSelectStyle}
-                                            >
-                                                <Select
-                                                    multiple
-                                                    MenuProps={menuProps}
-                                                    value={row.products}
-                                                    renderValue={(selected) =>
-                                                        renderOptionValue(
-                                                            selected,
-                                                            currentConfig.products || [],
-                                                            "Select"
-                                                        )
-                                                    }
-                                                    onChange={(e) => {
-
-                                                        const value = e.target.value;
-
-                                                        if (value.includes("SELECT_ALL")) {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "products",
-                                                                row.products.length ===
-                                                                    (currentConfig.products || []).length
-                                                                    ? []
-                                                                    : currentConfig.products || []
-                                                            );
-
-                                                        } else {
-
-                                                            handleRowChange(
-                                                                index,
-                                                                "products",
-                                                                value
-                                                            );
-
-                                                        }
-
-                                                    }}
-                                                >
-
-                                                    <MenuItem value="SELECT_ALL">
-
-                                                        <Checkbox
-                                                            size="small"
-                                                            checked={
-                                                                row.products.length ===
-                                                                (currentConfig.products || []).length
-                                                            }
-                                                            indeterminate={
-                                                                row.products.length > 0 &&
-                                                                row.products.length <
-                                                                (currentConfig.products || []).length
-                                                            }
-                                                        />
-
-                                                        <ListItemText primary="Select All" />
-
-                                                    </MenuItem>
-
-                                                    {(currentConfig.products || []).map((item) => {
-                                                        const optionValue = getOptionValue(item);
-                                                        const optionLabel = getOptionLabel(item);
-                                                        return (
-                                                            <MenuItem
-                                                                key={optionValue}
-                                                                value={optionValue}
-                                                                sx={{
-                                                                    py: 0.5,
-                                                                }}
-                                                            >
-
-                                                                <Checkbox
-                                                                    checked={row.products.includes(optionValue)}
-                                                                    size="small"
-                                                                />
-
-                                                                <ListItemText
-                                                                    primary={optionLabel}
-                                                                />
-
-                                                            </MenuItem>
-                                                        );
-                                                    })}
-
-                                                </Select>
-
-                                            </FormControl>
-
-                                            {/* MARKETS */}
-
+                                            {/* PAYERS */}
                                             <FormControl
                                                 size="small"
                                                 sx={tableSelectStyle}
@@ -2350,6 +2399,99 @@ export default function HIVMarketEvent() {
 
                                                                 <Checkbox
                                                                     checked={row.markets.includes(optionValue)}
+                                                                    size="small"
+                                                                />
+
+                                                                <ListItemText
+                                                                    primary={optionLabel}
+                                                                />
+
+                                                            </MenuItem>
+                                                        );
+                                                    })}
+
+                                                </Select>
+
+                                            </FormControl>
+
+                                            {/* PRODUCTS */}
+
+                                            <FormControl
+                                                size="small"
+                                                sx={tableSelectStyle}
+                                            >
+                                                <Select
+                                                    multiple
+                                                    MenuProps={menuProps}
+                                                    value={row.products}
+                                                    renderValue={(selected) =>
+                                                        renderOptionValue(
+                                                            selected,
+                                                            currentConfig.products || [],
+                                                            "Select"
+                                                        )
+                                                    }
+                                                    onChange={(e) => {
+
+                                                        const value = e.target.value;
+
+                                                        if (value.includes("SELECT_ALL")) {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "products",
+                                                                row.products.length ===
+                                                                    (currentConfig.products || []).length
+                                                                    ? []
+                                                                    : currentConfig.products || []
+                                                            );
+
+                                                        } else {
+
+                                                            handleRowChange(
+                                                                index,
+                                                                "products",
+                                                                value
+                                                            );
+
+                                                        }
+
+                                                    }}
+                                                >
+
+                                                    <MenuItem value="SELECT_ALL">
+
+                                                        <Checkbox
+                                                            size="small"
+                                                            checked={
+                                                                row.products.length ===
+                                                                (currentConfig.products || []).length
+                                                            }
+                                                            indeterminate={
+                                                                row.products.length > 0 &&
+                                                                row.products.length <
+                                                                (currentConfig.products || []).length
+                                                            }
+                                                        />
+
+                                                        <ListItemText primary="Select All" />
+
+                                                    </MenuItem>
+
+                                                    {(currentConfig.products || []).map((item) => {
+                                                        const optionValue = getOptionValue(item);
+                                                        const optionLabel = getOptionLabel(item);
+                                                        return (
+                                                            <MenuItem
+                                                                key={optionValue}
+                                                                value={optionValue}
+                                                                sx={{
+                                                                    py: 0.5,
+                                                                }}
+                                                            >
+
+                                                                <Checkbox
+                                                                    checked={row.products.includes(optionValue)}
                                                                     size="small"
                                                                 />
 
@@ -2882,15 +3024,44 @@ export default function HIVMarketEvent() {
                     />
 
             </Accordion>
-            <HIVImpactCurveTable
-                tableData={displayMetricData.table || currentMetricData.table}
-                metricFilters={metricFilters}
-                selectedMetric={selectedMetric}
-                setSelectedMetric={setSelectedMetric}
-                selectedView={selectedView}
-                setSelectedView={setSelectedView}
-                activeTab={activeTab}
-            />
+
+            <Accordion
+                defaultExpanded
+                sx={{
+                    mt: 2,
+                    borderRadius: "12px !important",
+                    border: "1px solid #D8DEE8",
+                    boxShadow: "none",
+                }}
+            >
+                <AccordionSummary
+                    expandIcon={<ExpandMoreIcon />}
+                >
+                    <Typography
+                        sx={{
+                            fontWeight: 700,
+                        }}
+                    >
+                        Impact Curve Metrics Table
+                    </Typography>
+                </AccordionSummary>
+
+                <AccordionDetails sx={{ p: 0 }}>
+                    <HIVImpactCurveTable
+                        tableData={displayMetricData.table || currentMetricData.table}
+                        metricFilters={metricFilters}
+                        selectedMetric={selectedMetric}
+                        setSelectedMetric={setSelectedMetric}
+                        selectedView={selectedView}
+                        setSelectedView={setSelectedView}
+                        activeTab={activeTab}
+                        hierarchyView={selectedSubViewByTab[activeTab] || ""}
+                        onHierarchyViewChange={handleSubViewChange}
+                        subViewOptions={currentSubViewOptions}
+                        onRefreshTable={handleRefreshLiverMarketEventTable}
+                    />
+                </AccordionDetails>
+            </Accordion>
 
                 <Menu
                     anchorEl={menuAnchorEl}
@@ -2974,7 +3145,7 @@ export default function HIVMarketEvent() {
                         }}
                     >
 
-                        {isMarketEvent
+                        {isPayerEvent
                             ? "Edit Impacted Payers"
                             : "Edit Impacted Products"}
 
@@ -3009,7 +3180,7 @@ export default function HIVMarketEvent() {
                                 renderValue={(selected) =>
                                     renderOptionValue(
                                         selected,
-                                        isMarketEvent
+                                        isPayerEvent
                                             ? currentConfig.impacted_markets || []
                                             : currentConfig.impacted_products || [],
                                         "Select"
@@ -3021,7 +3192,7 @@ export default function HIVMarketEvent() {
                                     )
                                 }
                             >
-                                {(isMarketEvent
+                                {(isPayerEvent
                                     ? currentConfig.impacted_markets
                                     : currentConfig.impacted_products
                                 )?.map((item) => {

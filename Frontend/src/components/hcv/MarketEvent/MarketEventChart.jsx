@@ -3,7 +3,6 @@ import React from "react";
 import {
     Box,
     Typography,
-    Paper,
 } from "@mui/material";
 
 import Plot from "react-plotly.js";
@@ -22,13 +21,6 @@ export default function HIVImpactCurveChart({
             : activeTab === "overall_event"
                 ? "Overall Event Impact Trend"
                 : "Payer Event Impact Trend";
-
-    // const title =
-    //     activeTab === "market_event"
-    //         ? "Market Event Impact Trend"
-    //         : activeTab === "product_event"
-    //             ? "Product Event Impact Trend"
-    //             : "Overall Event Impact Trend";
 
     const {
 
@@ -130,23 +122,24 @@ export default function HIVImpactCurveChart({
 
     return (
 
-        <Paper
-            elevation={0}
+        <Box
             sx={{
-                m: 2,
+                mt: 3,
                 border: "1px solid #D8DEE8",
                 borderRadius: "12px",
-                overflow: "hidden",
+                backgroundColor: "#fff",
+                p: 2,
             }}
         >
 
             <Box
                 sx={{
-                    px: 2.5,
-                    py: 2,
-                    // borderBottom:
-                    //     "1px solid #E5E7EB",
-                    backgroundColor: "#fff",
+                    mb: 2,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: 2,
                 }}
             >
 
@@ -162,17 +155,11 @@ export default function HIVImpactCurveChart({
 
             </Box>
 
-            <Box
-                sx={{
-                    p: 2,
-                }}
-            >
-
                 {!chartData || !series?.length ? (
 
                     <Box
                         sx={{
-                            height: 250,
+                            height: 50,
                             display: "flex",
                             justifyContent: "center",
                             alignItems: "center",
@@ -180,7 +167,7 @@ export default function HIVImpactCurveChart({
                             fontSize: "14px",
                         }}
                     >
-                        No chart data available.
+                        No chart data available. Please apply filters.
                     </Box>
 
                 ) : (
@@ -193,13 +180,13 @@ export default function HIVImpactCurveChart({
 
                             autosize: true,
 
-                            height: 340,
+                            height: 320,
 
                             margin: {
-                                l: 55,
+                                l: 50,
                                 r: 20,
                                 t: 10,
-                                b: 65,
+                                b: 70,
                             },
 
                             legend: {
@@ -238,9 +225,7 @@ export default function HIVImpactCurveChart({
 
                 )}
 
-            </Box>
-
-        </Paper>
+        </Box>
     );
 
 }
