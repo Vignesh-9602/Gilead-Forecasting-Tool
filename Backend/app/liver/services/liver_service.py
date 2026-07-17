@@ -1704,7 +1704,9 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
     try:
         cfg = _load_config(cur, payload.ta_name, payer=market, brand=product)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-        forecast_periods = cfg["forecast_periods"]
+        forecast_periods = _resolve_forecast_periods(
+            sf.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
         granularity      = cfg.get("model_granularity", "monthly")
 
         to_month_safe = train_end_month if granularity != "yearly" else 1
