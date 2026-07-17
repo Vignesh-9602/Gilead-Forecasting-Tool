@@ -64,3 +64,43 @@ class RefreshRequest(BaseModel):
     edited_label: Optional[str] = None
     # Flat row edit  → "ProductName"  (e.g. "Truvada")
     # Hierarchy edit → "ParentLabel - ChildLabel"  (e.g. "Truvada - Medicare")
+
+
+# ---------------------------------------------------------------------------
+# POST /run-calculation request
+# ---------------------------------------------------------------------------
+
+class ImpactCurveRow(BaseModel):
+    """One event row from the impact_curve_configuration table."""
+    event_id: Optional[int] = None
+    event_name: str = "Event"
+    # Entity selections (which fields are populated depends on the tab)
+    payers: Optional[List[str]] = None          # payer_event: selected payer
+    products: Optional[List[str]] = None        # product_event: selected product / payer_event: context
+    impacted_payers: Optional[List[str]] = None
+    impacted_products: Optional[List[str]] = None
+    # Curve parameters
+    start_date: str
+    peak_percent: float
+    months: int                                 # duration in months
+    curve_type: str = "Linear"
+    factor: float = 1.0
+    # Optional coverage
+    coverage_peak_percent: Optional[float] = None
+    coverage_peak_months: Optional[int] = None
+    coverage_curve_type: Optional[str] = None
+    coverage_factor: float = 1.0
+    # Optional redistribution weights keyed by entity name
+    source_percentages: Optional[dict] = None
+
+
+class ImpactCurveConfiguration(BaseModel):
+    rows: List[ImpactCurveRow] = []
+
+
+class RunCalculationRequest(BaseModel):
+    """Request body for POST /api/liver-market-events/run-calculation."""
+    ta_name: str = "HCV"
+    selected_filter: SelectedFilter
+    selected_tab: str       # "payer_event" | "product_event" | "overall_event"
+    impact_curve_configuration: ImpactCurveConfiguration

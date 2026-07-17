@@ -1,10 +1,17 @@
 from fastapi import APIRouter, HTTPException
 
-from app.liver_market_events.schemas.market_events_schema import ApplyFiltersRequest, RefreshRequest
+from app.liver_market_events.schemas.market_events_schema import (
+    ApplyFiltersRequest,
+    RefreshRequest,
+    RunCalculationRequest,
+)
 from app.liver_market_events.services.market_events_service import (
     get_market_events_filters,
     apply_market_events_filters,
     refresh_market_events,
+)
+from app.liver_market_events.services.run_calculation_service import (
+    run_market_events_calculation,
 )
 
 router = APIRouter(prefix="/api/liver-market-events", tags=["Liver Market Events"])
@@ -56,6 +63,26 @@ def market_events_refresh(payload: RefreshRequest):
     """
     try:
         return refresh_market_events(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run-calculation")
+def market_events_run_calculation(payload: RunCalculationRequest):
+    """
+    Called when the user clicks Run Calculation.
+
+    Applies the configured event curves (from impact_curve_configuration.rows)
+    to the BASE transaction data for the active tab, rebuilds metrics_views for
+    all three tabs, and returns the same structure as /apply-filters.
+
+    Only the active tab's data is modified by the events; the other two tabs
+    continue to reflect BASE scenario values so the user can compare.
+    """
+    try:
+        return run_market_events_calculation(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
