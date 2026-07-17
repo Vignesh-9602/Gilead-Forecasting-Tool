@@ -31,6 +31,10 @@ def get_volume(data: dict, year: int, month: int,
     if product:
         return sum(ym.get(product, {}).values())
 
+    if payer:
+        # Sum across all products for this specific payer
+        return sum(ym.get(p, {}).get(payer, 0.0) for p in ym)
+
     # No filter → total across all products and payers
     return sum(v for prod in ym.values() for v in prod.values())
 
@@ -52,16 +56,15 @@ def build_values_for_series(data: dict, month_tuples: list, forecast_start_index
     Build (history, forecast, all_values) for a single chart/table series.
 
     - History: actual values from data for months before forecast_start_index
-    - Forecast: flat continuation (average of last 3 history values)
+    - Forecast: if transaction_data has values for forecast months (from a model run),
+                use them; otherwise fall back to flat continuation (avg of last 3 history values)
 
     Returns (history_list, forecast_list, full_list)
     """
-    history = [
-        get_volume(data, y, m, product, payer)
-        for y, m in month_tuples[:forecast_start_index]
-    ]
-    forecast_val = flat_forecast(history)
-    forecast = [forecast_val] * max(0, len(month_tuples) - forecast_start_index)
+    all_raw = [get_volume(data, y, m, product, payer) for y, m in month_tuples]
+    history  = all_raw[:forecast_start_index]
+    flat_val = flat_forecast(history)
+    forecast = [v if v > 0 else flat_val for v in all_raw[forecast_start_index:]]
     return history, forecast, history + forecast
 
 
@@ -95,18 +98,23 @@ def build_chart(header_key: str, header_values: list,
     }
 
 
-def build_flat_table(headers: list, forecast_start_index: int, rows: list) -> dict:
+def build_flat_table(headers: list, forecast_start_index: int, rows: list,
+                      editable: bool = True, type_tag: str = None) -> dict:
     """
     Build a flat (non-hierarchical) table dict.
 
     rows is a list of {"label": "...", "values": [...]} dicts.
+    editable=False for read-only sub-views; type_tag="flat" adds a "type" field.
     """
-    return {
-        "headers":             headers,
+    result = {
+        "headers":              headers,
         "forecast_start_index": forecast_start_index,
-        "editable":            True,
-        "rows":                rows,
+        "editable":             editable,
+        "rows":                 rows,
     }
+    if type_tag:
+        result["type"] = type_tag
+    return result
 
 
 def build_hierarchy_table(headers: list, forecast_start_index: int, rows: list) -> dict:
@@ -122,3 +130,44 @@ def build_hierarchy_table(headers: list, forecast_start_index: int, rows: list) 
         "editable":            True,
         "rows":                rows,
     }
+
+
+def aggregate_monthly_to_yearly(month_tuples: list, all_values: list,
+                                 forecast_start_index: int) -> tuple:
+    """
+    Sum monthly values into yearly buckets and split into history/forecast.
+
+    A year is treated as "forecast" if ANY of its months is in the forecast period.
+    This means the first year that overlaps with forecast becomes the forecast_start
+    in the yearly view.
+
+    Returns (year_labels, history, forecast, yearly_forecast_start_index)
+
+    Example:
+        month_tuples = [(2025,10),(2025,11),(2025,12),(2026,1),(2026,2)]
+        forecast_start_index = 3  → 2025 has months 10,11,12 all history;
+                                      2026 has months 1,2 both forecast
+        Result: (["2025","2026"], [sum_2025], [sum_2026], 1)
+    """
+    yearly_sum = {}
+    year_order = []
+    year_is_forecast = {}
+
+    for i, (y, m) in enumerate(month_tuples):
+        if y not in year_is_forecast:
+            year_order.append(y)
+            year_is_forecast[y] = False
+        yearly_sum[y] = yearly_sum.get(y, 0.0) + all_values[i]
+        if i >= forecast_start_index:
+            year_is_forecast[y] = True
+
+    # First year where any month is forecast
+    yearly_fsi = next(
+        (i for i, y in enumerate(year_order) if year_is_forecast[y]),
+        len(year_order)
+    )
+
+    year_labels = [str(y) for y in year_order]
+    history  = [round(yearly_sum[y], 2) for y in year_order[:yearly_fsi]]
+    forecast = [round(yearly_sum[y], 2) for y in year_order[yearly_fsi:]]
+    return year_labels, history, forecast, yearly_fsi
