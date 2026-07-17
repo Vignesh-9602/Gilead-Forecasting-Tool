@@ -1,10 +1,14 @@
-import React, { useState, useEffect } from "react";
+
+
+import React, { useState, useEffect, useMemo, useRef } from "react";
 
 import {
   Box,
   Paper,
   Typography,
   Button,
+  IconButton,
+  Tooltip,
   FormControl,
   Select,
   MenuItem,
@@ -15,6 +19,8 @@ import {
   TableCell,
   TableContainer,
 } from "@mui/material";
+import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
+import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 
 export default function HIVImpactCurveTable({
   tableData,
@@ -24,6 +30,10 @@ export default function HIVImpactCurveTable({
   selectedView,
   setSelectedView,
   activeTab,
+  hierarchyView: hierarchyViewProp,
+  onHierarchyViewChange,
+  subViewOptions,
+  onRefreshTable,
 }) {
   const [editable, setEditable] = useState(false);
 
@@ -36,6 +46,26 @@ export default function HIVImpactCurveTable({
   const [isRefreshed, setIsRefreshed] = useState(false);
 
   const [savingTable, setSavingTable] = useState(false);
+
+  const [lastEditedLabel, setLastEditedLabel] = useState("");
+
+  // The parent refreshes the whole app state (like an apply-filters call) in
+  // response to the Refresh button, which flows back down as a new
+  // `tableData` prop. This ref lets the sync effect below tell "tableData
+  // changed because of a refresh I triggered" apart from "tableData changed
+  // for some other reason (filters/tab/metric/etc.)" — only the former
+  // should leave the Save button enabled.
+  const refreshInFlightRef = useRef(false);
+
+  // Falls back to local state only if the parent doesn't control this
+  // (keeps the component usable standalone / in older call sites).
+  const [localHierarchyView, setLocalHierarchyView] = useState("");
+
+  const isControlled = typeof onHierarchyViewChange === "function";
+
+  const hierarchyView = isControlled ? hierarchyViewProp || "" : localHierarchyView;
+
+  const setHierarchyView = isControlled ? onHierarchyViewChange : setLocalHierarchyView;
 
   const isHierarchy = tableData?.type === "hierarchy";
 
@@ -57,27 +87,90 @@ export default function HIVImpactCurveTable({
         : "Payer";
 
   useEffect(() => {
-    if (!tableData) return;
+    if (isControlled) return;
 
-    const cloned = cloneRows(tableData.rows);
+    if (activeTab === "product_event") {
+      setLocalHierarchyView("product_level");
+      return;
+    }
+
+    if (activeTab === "payer_event") {
+      setLocalHierarchyView("payer_level");
+      return;
+    }
+
+    setLocalHierarchyView("");
+  }, [activeTab, isControlled]);
+
+  // The backend's own `view_options.label` text has been observed swapped
+  // between the Payer Event and Product Event tabs across responses, so we
+  // don't trust it for display. We still use the API's `value` (needed to
+  // correctly look up the matching sub-view data), just not its label.
+  const HIERARCHY_VIEW_LABELS = {
+    payer_event:   ["Payer Level", "Product-Payer Level"],
+    product_event: ["Product Level", "Payer-Product Level"],
+  };
+
+  const rawHierarchyOptions =
+    Array.isArray(subViewOptions) && subViewOptions.length > 0
+      ? subViewOptions
+      : activeTab === "product_event"
+        ? [
+          { value: "product_level",       label: "Product Level" },
+          { value: "payer_product_level",  label: "Payer-Product Level" },
+        ]
+        : activeTab === "payer_event"
+          ? [
+            { value: "payer_level",         label: "Payer Level" },
+            { value: "product_payer_level",  label: "Product-Payer Level" },
+          ]
+          : [];
+
+  const hierarchyOptions = rawHierarchyOptions.map((option, index) => ({
+    ...option,
+    label: HIERARCHY_VIEW_LABELS[activeTab]?.[index] || option.label,
+  }));
+
+  // The parent already resolves `tableData` to the API's pre-built payload
+  // for the currently selected sub-view (e.g. product_level vs
+  // product_payer_level), so it can be rendered as-is — no client-side
+  // aggregation/transposition needed here.
+  const displayTableData = useMemo(() => tableData || {}, [tableData]);
+
+  useEffect(() => {
+    if (!displayTableData) return;
+
+    const cloned = cloneRows(displayTableData.rows);
 
     setEditableRows(cloned);
     setOriginalRows(cloned);
-    setIsRefreshed(false);
+    setLastEditedLabel("");
 
-    const initialExpanded = {};
-    cloned.forEach((row, index) => {
-      if (Array.isArray(row.children) && row.children.length > 0) {
-        initialExpanded[String(index)] = true;
-      }
+    if (refreshInFlightRef.current) {
+      refreshInFlightRef.current = false;
+      setIsRefreshed(true);
+    } else {
+      setIsRefreshed(false);
+    }
+
+    setExpandedRows((prev) => {
+      const nextExpanded = {};
+      cloned.forEach((row, index) => {
+        if (Array.isArray(row.children) && row.children.length > 0) {
+          const rowKey = String(index);
+          nextExpanded[rowKey] = prev[rowKey] ?? true;
+        }
+      });
+      return nextExpanded;
     });
-    setExpandedRows(initialExpanded);
-  }, [tableData]);
+  }, [displayTableData]);
 
   const handleCancel = () => {
+    refreshInFlightRef.current = false;
     setEditableRows(cloneRows(originalRows));
 
     setIsRefreshed(false);
+    setLastEditedLabel("");
     setEditable(false);
   };
 
@@ -88,6 +181,11 @@ export default function HIVImpactCurveTable({
 
     const updated = cloneRows(editableRows);
 
+    const editedLabel =
+      childIndex !== null
+        ? `${updated[rowIndex]?.label || ""} - ${updated[rowIndex]?.children?.[childIndex]?.label || ""}`
+        : updated[rowIndex]?.label || "";
+
     if (childIndex !== null) {
       updated[rowIndex].children[childIndex].values[valueIndex] = value;
     } else {
@@ -96,10 +194,17 @@ export default function HIVImpactCurveTable({
 
     setEditableRows(updated);
     setIsRefreshed(false);
+    setLastEditedLabel(editedLabel);
   };
 
   const hasTableChanges =
     JSON.stringify(editableRows) !== JSON.stringify(originalRows);
+
+  const hasTableData = editableRows.length > 0;
+
+  const hasHierarchyRows = editableRows.some(
+    (row) => Array.isArray(row?.children) && row.children.length > 0,
+  );
 
   const recalculateHierarchyParents = (rows) =>
     rows.map((row) => {
@@ -129,12 +234,42 @@ export default function HIVImpactCurveTable({
       };
     });
 
-  const handleRefreshTable = () => {
+  // The inputs store edited values as strings (to allow partial typing like
+  // "12." while validating), so convert them to real numbers before sending
+  // to the API.
+  const toNumericRow = (row) => ({
+    ...row,
+    values: Array.isArray(row?.values)
+      ? row.values.map((value) => {
+        const numeric = Number(value === "" || value === null || value === undefined ? 0 : value);
+        return Number.isNaN(numeric) ? 0 : numeric;
+      })
+      : row?.values,
+    children: Array.isArray(row?.children) ? row.children.map(toNumericRow) : row?.children,
+  });
+
+  const toNumericRows = (rows = []) => rows.map(toNumericRow);
+
+  const handleRefreshTable = async () => {
+    setSavingTable(true);
+
     try {
-      setSavingTable(true);
-      const refreshedRows = recalculateHierarchyParents(editableRows);
-      setEditableRows(refreshedRows);
-      setIsRefreshed(true);
+      if (typeof onRefreshTable === "function") {
+        refreshInFlightRef.current = true;
+
+        await onRefreshTable(toNumericRows(editableRows), lastEditedLabel);
+
+        // The awaited call updates the parent's state, which re-renders this
+        // component with a new `tableData` prop; the sync effect above picks
+        // that up and sets isRefreshed(true) via refreshInFlightRef. Nothing
+        // further to do here on the happy path.
+      } else {
+        setEditableRows(recalculateHierarchyParents(editableRows));
+        setIsRefreshed(true);
+      }
+    } catch (error) {
+      refreshInFlightRef.current = false;
+      console.error("Failed to refresh liver market event table", error);
     } finally {
       setSavingTable(false);
     }
@@ -145,6 +280,26 @@ export default function HIVImpactCurveTable({
       ...prev,
       [rowKey]: !prev[rowKey],
     }));
+  };
+
+  const handleExpandAll = () => {
+    const expanded = {};
+    editableRows.forEach((row, index) => {
+      if (Array.isArray(row?.children) && row.children.length > 0) {
+        expanded[String(index)] = true;
+      }
+    });
+    setExpandedRows(expanded);
+  };
+
+  const handleCollapseAll = () => {
+    const collapsed = {};
+    editableRows.forEach((row, index) => {
+      if (Array.isArray(row?.children) && row.children.length > 0) {
+        collapsed[String(index)] = false;
+      }
+    });
+    setExpandedRows(collapsed);
   };
 
   const renderEditableCell = (
@@ -221,14 +376,9 @@ export default function HIVImpactCurveTable({
     return (
     <React.Fragment key={`${rowKey}-${row.label}`}>
       <TableRow
-        onClick={() => {
-          if (hasChildren) {
-            toggleRow(rowKey);
-          }
-        }}
         sx={{
-          cursor: hasChildren ? "pointer" : "default",
-          backgroundColor: isChildRow ? "#F8FAFC" : "#fff",
+          cursor: "default",
+          backgroundColor: hasChildren ? "#F8FAFC" : "#fff",
         }}
       >
         <TableCell
@@ -236,7 +386,7 @@ export default function HIVImpactCurveTable({
             position: "sticky",
             left: 0,
             zIndex: 2,
-            backgroundColor: isChildRow ? "#F8FAFC" : "#fff",
+            backgroundColor: hasChildren ? "#F8FAFC" : "#fff",
             minWidth: 360,
             width: 360,
             maxWidth: 360,
@@ -256,9 +406,27 @@ export default function HIVImpactCurveTable({
             }}
           >
             {hasChildren && (
-              <Typography component="span" sx={{ fontSize: "10px", width: "12px" }}>
+              <Box
+                component="button"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleRow(rowKey);
+                }}
+                sx={{
+                  border: "none",
+                  background: "transparent",
+                  color: "#475569",
+                  fontSize: "10px",
+                  width: "16px",
+                  minWidth: "16px",
+                  p: 0,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                }}
+              >
                 {expandedRows[rowKey] ? "▼" : "▶"}
-              </Typography>
+              </Box>
             )}
             <Typography
               sx={{
@@ -280,11 +448,13 @@ export default function HIVImpactCurveTable({
             align="center"
             sx={{
               background:
-                isChildRow
+                hasChildren
                   ? "#F8FAFC"
                   : index < forecastStartIndex
                     ? "#F8FAFC"
                     : "#fff",
+              py: isChildRow ? "4px" : undefined,
+              px: isChildRow ? 1 : undefined,
             }}
           >
             {renderEditableCell(value, rowIndex, index, childIndex, hasChildren)}
@@ -304,38 +474,58 @@ export default function HIVImpactCurveTable({
   return (
     <Paper
       sx={{
-        mt: 3,
+        mt: 0,
+        p: 2,
         border: "1px solid #D8DEE8",
         borderRadius: "16px",
         boxShadow: "none",
-        overflow: "hidden",
       }}
     >
       {/* Header */}
 
       <Box
         sx={{
-          px: 2.5,
-          py: 2,
+          mb: 2,
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           flexWrap: "wrap",
           gap: 2,
-          borderBottom: "1px solid #E5E7EB",
         }}
       >
         {/* Left */}
 
-        <Typography
+        <Box
           sx={{
-            fontSize: "16px",
-            fontWeight: 700,
-            color: "#0f172a",
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
           }}
         >
-          Impact Curve Metrics Table
-        </Typography>
+          <Tooltip title="Expand All">
+            <span>
+              <IconButton
+                size="small"
+                onClick={handleExpandAll}
+                disabled={!hasTableData || !hasHierarchyRows}
+              >
+                <UnfoldMoreIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+
+          <Tooltip title="Collapse All">
+            <span>
+              <IconButton
+                size="small"
+                onClick={handleCollapseAll}
+                disabled={!hasTableData || !hasHierarchyRows}
+              >
+                <UnfoldLessIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </Box>
 
         {/* Right */}
 
@@ -347,6 +537,31 @@ export default function HIVImpactCurveTable({
             flexWrap: "wrap",
           }}
         >
+          {hierarchyOptions.length > 0 && (
+            <FormControl
+              size="small"
+              sx={{
+                minWidth: 210,
+                "& .MuiOutlinedInput-root": {
+                  height: "35px",
+                  borderRadius: "10px",
+                  backgroundColor: "#fff",
+                },
+              }}
+            >
+              <Select
+                value={hierarchyView}
+                onChange={(e) => setHierarchyView(e.target.value)}
+              >
+                {hierarchyOptions.map((item) => (
+                  <MenuItem key={item.value} value={item.value}>
+                    {item.label}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          )}
+
           <Box
             sx={{
               display: "flex",
@@ -394,7 +609,7 @@ export default function HIVImpactCurveTable({
 
               "& .MuiOutlinedInput-root": {
                 height: "35px",
-                borderRadius: "8px",
+                borderRadius: "10px",
                 backgroundColor: "#fff",
               },
             }}
@@ -427,7 +642,7 @@ export default function HIVImpactCurveTable({
             }}
             sx={{
               height: "35px",
-              borderRadius: "8px",
+              borderRadius: "10px",
               textTransform: "none",
             }}
           >
@@ -442,7 +657,7 @@ export default function HIVImpactCurveTable({
             }}
             sx={{
               height: "35px",
-              borderRadius: "8px",
+              borderRadius: "10px",
               textTransform: "none",
             }}
             disabled={
@@ -461,7 +676,7 @@ export default function HIVImpactCurveTable({
               onClick={handleRefreshTable}
               sx={{
                 height: "35px",
-                borderRadius: "8px",
+                borderRadius: "10px",
                 textTransform: "none",
                 backgroundColor: "#4F46E5",
               }}
@@ -476,7 +691,7 @@ export default function HIVImpactCurveTable({
             onClick={handleCancel}
             sx={{
               height: "35px",
-              borderRadius: "8px",
+              borderRadius: "10px",
               textTransform: "none",
             }}
           >
@@ -485,38 +700,42 @@ export default function HIVImpactCurveTable({
         </Box>
       </Box>
 
-      {/* Table Placeholder */}
-      <TableContainer
-        sx={{
-          overflowX: "auto",
-          // borderTop: "1px solid #E2E8F0",
-          // maxHeight: 420,
-
-          // "&::-webkit-scrollbar": {
-          //     height: 8,
-          //     width: 8,
-          // },
-
-          // "&::-webkit-scrollbar-thumb": {
-          //     background: "#CBD5E1",
-          //     borderRadius: "8px",
-          // },
-        }}
-      >
-        <Table
-          stickyHeader
-          size="small"
+      {editableRows.length === 0 ? (
+        <Box
           sx={{
-            width: "100%",
-            tableLayout: "auto",
-            minWidth: "max-content",
-
-            "& .MuiTableCell-root": {
-              borderRight: "1px solid #D6DEE8",
-              borderBottom: "1px solid #D6DEE8",
-            },
+            height: 120,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#94a3b8",
+            fontSize: "14px",
+            border: "1px solid #D8DEE8",
+            borderRadius: "12px",
           }}
         >
+          No table data available. Please apply filters.
+        </Box>
+      ) : (
+        <TableContainer
+          sx={{
+            overflowX: "auto",
+            border: "1px solid #D8DEE8",
+            borderRadius: "12px",
+          }}
+        >
+          <Table
+            size="small"
+            sx={{
+              width: "100%",
+              tableLayout: "auto",
+              minWidth: "max-content",
+
+              "& .MuiTableCell-root": {
+                borderRight: "1px solid #E2E8F0",
+                borderBottom: "1px solid #E2E8F0",
+              },
+            }}
+          >
           <TableHead>
             <TableRow>
               <TableCell
@@ -532,6 +751,7 @@ export default function HIVImpactCurveTable({
                   minWidth: 360,
 
                   color: "#334155",
+                  borderRight: "1px solid #E2E8F0",
                 }}
               >
                 {labelText}
@@ -547,11 +767,8 @@ export default function HIVImpactCurveTable({
                     fontWeight: 700,
 
                     color: "#334155",
-
-                    backgroundColor:
-                      index < forecastStartIndex
-                        ? "#F8FAFC"
-                        : "#ffffff",
+                    borderRight: "1px solid #E2E8F0",
+                    backgroundColor: "#ffffff",
                   }}
                 >
                   {header}
@@ -561,25 +778,11 @@ export default function HIVImpactCurveTable({
           </TableHead>
 
           <TableBody>
-            {editableRows.length ? (
-              editableRows.map((row, index) => renderRow(row, index))
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={Math.max(headers.length + 1, 1)}
-                  sx={{
-                    py: 5,
-                    textAlign: "center",
-                    color: "#94a3b8",
-                  }}
-                >
-                  No table data available.
-                </TableCell>
-              </TableRow>
-            )}
+            {editableRows.map((row, index) => renderRow(row, index))}
           </TableBody>
-        </Table>
-      </TableContainer>
+          </Table>
+        </TableContainer>
+      )}
     </Paper>
   );
 }
