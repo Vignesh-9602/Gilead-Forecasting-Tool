@@ -86,7 +86,10 @@ def fetch_series(
 ) -> List[Dict]:
     """One series entry per matching row. source_of_market=None returns every
     channel row instead of just the pre-aggregated 'ALL' row -- needed for
-    scenarios stored split by payer/channel (see _aggregate_by_cell)."""
+    scenarios stored split by payer/channel (see _aggregate_by_cell).
+    source_of_market="ALL" matches both the literal 'ALL' and legacy empty-
+    string rows -- some rows were written before source normalization was
+    added, so an exact-string match on 'ALL' silently misses them."""
     where = ["scenario_name = %s", "ta_name = %s", "metric = %s"]
     params: List = [scenario_name, ta_name, metric]
 
@@ -95,7 +98,7 @@ def fetch_series(
         params.append(market)
 
     if source_of_market is not None:
-        where.append("source_of_market = %s")
+        where.append("COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s")
         params.append(source_of_market)
 
     if products is not None:
@@ -1101,6 +1104,7 @@ def _monthly_parent_child_view(
     overall_series,
     metric,
     volume_grid=None,
+    overall_volume_series=None,
 ):
     """
     Groups grid cells into parent-with-children rows for the monthly view.
@@ -1109,10 +1113,9 @@ def _monthly_parent_child_view(
         Parent = sum(children)
 
     For market_share:
-        Parent = 100%
-        Children are the values supplied in the grid.
-        (If needed later, these child values can be recomputed from
-        volume_grid exactly like the old build_product_market().)
+        Parent = parent's volume as a % of the OVERALL market volume.
+        Children = each child's volume as a % of the OVERALL market volume.
+        (Parent's children therefore sum to the parent's own share, not to 100.)
     """
     months = grid[0]["months"]
     fsi = grid[0]["forecast_start_index"]
@@ -1128,10 +1131,6 @@ def _monthly_parent_child_view(
 
         if metric == "market_share":
 
-            parent_history = [100.0] * fsi
-            parent_forecast = [100.0] * (len(months) - fsi)
-            parent_values = parent_history + parent_forecast
-
             volume_children = [
                 r for r in volume_grid
                 if r[parent_field] == label
@@ -1140,6 +1139,12 @@ def _monthly_parent_child_view(
             parent_volume = _sum_series(volume_children)
             parent_totals = parent_volume["history"] + parent_volume["forecast"]
 
+            overall_totals = (
+                overall_volume_series["history"] + overall_volume_series["forecast"]
+                if overall_volume_series
+                else [None] * len(parent_totals)
+            )
+
             print("\n==============================")
             print("Metric :", metric)
             print("Parent :", label)
@@ -1147,26 +1152,32 @@ def _monthly_parent_child_view(
             print("Child Field  :", child_field)
 
             print("\nVolume Children:")
-
             for r in volume_children:
                 print(
                     f"{r[parent_field]} | {r[child_field]}",
                     r["history"] + r["forecast"]
                 )
 
-            print("\nParent Totals:")
-            print(parent_totals)
+            print("\nParent Totals:", parent_totals)
+            print("Overall Totals:", overall_totals)
+
+            parent_shares = [
+                round(pv / ov * 100, 2) if ov else 0.0
+                for pv, ov in zip(parent_totals, overall_totals)
+            ]
+            parent_history = parent_shares[:fsi]
+            parent_forecast = parent_shares[fsi:]
+            parent_values = parent_shares
+
+            print("Parent Shares:", parent_shares)
 
             children = []
-
             for child in volume_children:
-
                 child_volumes = child["history"] + child["forecast"]
-
-                shares = []
-
-                for cv, pv in zip(child_volumes, parent_totals):
-                    shares.append(round(cv / pv * 100, 2) if pv else 0.0)
+                shares = [
+                    round(cv / ov * 100, 2) if ov else 0.0
+                    for cv, ov in zip(child_volumes, overall_totals)
+                ]
 
                 print(
                     f"\nChild: {child[child_field]}",
@@ -1453,6 +1464,19 @@ def _yearly_parent_child_view(
     yearly_fsi = years.index(first_forecast_year)
 
     #
+    # Overall market volume, rolled up to yearly, used as the denominator
+    # for every share calculated below (parent AND child).
+    #
+    overall_yearly = None
+    overall_totals = None
+    if overall_volume_series is not None:
+        overall_yearly = _to_yearly_chart(
+            [{"label": OVERALL_LABEL, **overall_volume_series}],
+            "sum",
+        )["series"][0]
+        overall_totals = overall_yearly["history"] + overall_yearly["forecast"]
+
+    #
     # Group rows by parent
     #
     by_parent: Dict[str, List[dict]] = {}
@@ -1466,19 +1490,7 @@ def _yearly_parent_child_view(
     for label, children_rows in by_parent.items():
 
         #
-        # Parent is always 100%
-        #
-        parent_history = [100.0] * yearly_fsi
-        parent_forecast = [100.0] * (len(years) - yearly_fsi)
-
-        parent_series.append({
-            "label": label,
-            "history": parent_history,
-            "forecast": parent_forecast,
-        })
-
-        #
-        # Parent yearly volumes
+        # Parent yearly volume
         #
         parent_volume = _to_yearly_chart(
             [{
@@ -1492,6 +1504,26 @@ def _yearly_parent_child_view(
             parent_volume["history"]
             + parent_volume["forecast"]
         )
+
+        ov = overall_totals or [None] * len(parent_totals)
+
+        #
+        # Parent share = parent's own yearly volume as a % of the
+        # OVERALL market's yearly volume (not hardcoded to 100).
+        #
+        parent_shares = [
+            round(pv / o * 100, 2) if o else 0.0
+            for pv, o in zip(parent_totals, ov)
+        ]
+
+        parent_history = parent_shares[:yearly_fsi]
+        parent_forecast = parent_shares[yearly_fsi:]
+
+        parent_series.append({
+            "label": label,
+            "history": parent_history,
+            "forecast": parent_forecast,
+        })
 
         children = []
 
@@ -1510,14 +1542,15 @@ def _yearly_parent_child_view(
                 + child_yearly["forecast"]
             )
 
-            shares = []
-
-            for cv, pv in zip(child_totals, parent_totals):
-                shares.append(
-                    round(cv / pv * 100, 2)
-                    if pv
-                    else 0.0
-                )
+            #
+            # Child share = child's own yearly volume as a % of the
+            # OVERALL market's yearly volume, so children under a parent
+            # sum to that parent's real share instead of to 100.
+            #
+            shares = [
+                round(cv / o * 100, 2) if o else 0.0
+                for cv, o in zip(child_totals, ov)
+            ]
 
             children.append({
                 "label": child[child_field],
@@ -1632,13 +1665,14 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
                 r["history"] + r["forecast"]
             )
     monthly_parent_chart, hierarchy_rows, overall_row = _monthly_parent_child_view(
-            grid,
-            parent_field,
-            child_field,
-            overall_series,
-            metric,
-            volume_grid,
-        )
+        grid,
+        parent_field,
+        child_field,
+        overall_series,
+        metric,
+        volume_grid,
+        overall_volume_series,   # <-- add this
+    )
     if metric == "market_share":
         monthly_child_chart, flat_rows = _monthly_flat_view(
             volume_grid,
@@ -1775,12 +1809,18 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
         }
 
     overall_volume_rows = _fetch_overall_series(scenario_name, ta_name, "market_volume")
-    market_share_all = fetch_grid(
-        scenario_name,
-        ta_name,
-        "market_share",
-        markets,
-        ["ALL"],
+    # Direct fetch of the single pre-aggregated (market, "", ALL) row per
+    # market -- NOT fetch_grid, which fetches every channel row
+    # (source_of_market=None) and blends them. That blend is correct for
+    # per-product cells split across channels, but wrong here: this is
+    # supposed to be the one row that already IS the market's true total
+    # share of the whole portfolio. Blending it with per-channel rows
+    # (which sum to ~100% WITHIN the market, not the portfolio) silently
+    # replaces the true total with an average of the wrong numbers.
+    market_share_all = fetch_series(
+        scenario_name, ta_name, "market_share",
+        label_field="market", market=markets, products=["ALL"],
+        source_of_market="ALL",
     )
 
     print("\n========== Market Share ALL ==========")

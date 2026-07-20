@@ -431,10 +431,7 @@ export default function HIVMarketEvent() {
 
         };
 
-        console.log("payload--------->", payload)
-
-
-
+        // console.log("payload--------->", payload)
         try {
 
             setLoading(true);
@@ -458,6 +455,10 @@ export default function HIVMarketEvent() {
             );
 
             setSelectedView("monthly");
+            showSnackbar(
+                "Calculation completed successfully",
+                "success"
+            );
 
         } catch (error) {
 
@@ -513,6 +514,11 @@ export default function HIVMarketEvent() {
 
             setSelectedView("monthly");
 
+            showSnackbar(
+                "Filters applied successfully",
+                "success"
+            );
+
         } catch (error) {
 
             console.error(error);
@@ -562,7 +568,7 @@ export default function HIVMarketEvent() {
 
         };
 
-        console.log("payload-------->", payload)
+        // console.log("payload-------->", payload)
 
         try {
 
