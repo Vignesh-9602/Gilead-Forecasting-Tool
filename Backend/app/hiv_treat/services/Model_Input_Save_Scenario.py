@@ -101,17 +101,24 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
         values = row["history"] + row["forecast"]
         data = _chart_row_to_forecast_data(chart["months"], chart["forecast_start_index"], values)
         _upsert_row(cur, ta, scenario, user_id, "ALL", "ALL", "ALL", "market_volume", data, factors_col=factors)
- 
+
     md_share = ma.get("market_distribution", {}).get("market_share", {}).get("monthly", {})
     if md_share:
         chart = md_share["chart"]
         fsi, months = chart["forecast_start_index"], chart["months"]
         for series in chart["series"]:
             mkt = series["label"]
+            if mkt == "Overall":
+                # "Overall" is the total row (always 100%), not a real market
+                # segment. Saving it here pollutes get_markets() and causes
+                # a phantom "Overall" market to appear in every downstream
+                # distribution build (market_distribution, product_distribution,
+                # market_product, product_market).
+                continue
             values = series["history"] + series["forecast"]
             data = _chart_row_to_forecast_data(months, fsi, values)
             _upsert_row(cur, ta, scenario, user_id, mkt, None, "ALL", "market_share", data)
- 
+
         for row in md_share.get("table", {}).get("rows", []):
             mkt = row.get("label")
             if mkt in (None, "Overall") or "children" not in row:
@@ -120,13 +127,15 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 src = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
                 _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", data)
- 
+
     mp_share = ma.get("market_product", {}).get("market_share", {}).get("monthly", {})
     if mp_share:
         mp_chart = mp_share["chart"]
         fsi, months = mp_chart["forecast_start_index"], mp_chart["months"]
         for row in mp_share["table"]["rows"]:
             mkt = row.get("label")
+            if mkt == "Overall":
+                continue
             for child in row.get("children", []):
                 prod = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
@@ -182,15 +191,16 @@ def _build_full_block(cur, ta, scenario, start, end, selected_market, selected_p
 # =========================================================
 
 def fetch_forecast(cur, ta, market, source, product, metric):
+    source_filter = source if source else "ALL"
     cur.execute("""
         SELECT forecast_data
         FROM raw_hiv_treat.forecast_outputs
         WHERE ta_name = %s
           AND market = %s
-          AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
+          AND COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
           AND product = %s
           AND metric = %s
-    """, (ta, market, source, source, product, metric))
+    """, (ta, market, source_filter, product, metric))
 
     row = cur.fetchone()
     return row[0] if row else None
@@ -198,6 +208,9 @@ def fetch_forecast(cur, ta, market, source, product, metric):
 
 def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
     is_base = scenario.upper() == "BASE"
+    # Normalize: no source specified means "the parent/ALL row", never "any row".
+    # Also treat legacy empty-string source_of_market values as equivalent to 'ALL'.
+    source_filter = source if source else "ALL"
 
     if is_base:
         cur.execute("""
@@ -205,22 +218,22 @@ def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
-              AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
+              AND COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
               AND product = %s
               AND metric = %s
               AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
-        """, (ta, market, source, source, product, metric))
+        """, (ta, market, source_filter, product, metric))
     else:
         cur.execute("""
             SELECT forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
-              AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
+              AND COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
               AND product = %s
               AND metric = %s
               AND scenario_name = %s
-        """, (ta, market, source, source, product, metric, scenario))
+        """, (ta, market, source_filter, product, metric, scenario))
 
     row = cur.fetchone()
     return row[0] if row else None
@@ -230,7 +243,9 @@ def get_markets(cur, ta):
     cur.execute("""
         SELECT DISTINCT market
         FROM raw_hiv_treat.forecast_outputs
-        WHERE ta_name = %s AND metric = 'market_share'
+        WHERE ta_name = %s
+          AND metric = 'market_share'
+          AND market <> 'Overall'
     """, (ta,))
     return [r[0] for r in cur.fetchall()]
 
@@ -242,6 +257,7 @@ def get_sources(cur, ta, market):
         WHERE ta_name = %s
           AND market = %s
           AND source_of_market IS NOT NULL
+          AND source_of_market <> ''
           AND UPPER(source_of_market) <> 'ALL'
     """, (ta, market))
 

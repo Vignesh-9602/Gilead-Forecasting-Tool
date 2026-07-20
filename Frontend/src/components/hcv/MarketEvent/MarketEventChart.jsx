@@ -3,7 +3,6 @@ import React from "react";
 import {
     Box,
     Typography,
-    Paper,
 } from "@mui/material";
 
 import Plot from "react-plotly.js";
@@ -23,13 +22,6 @@ export default function HIVImpactCurveChart({
                 ? "Overall Event Impact Trend"
                 : "Payer Event Impact Trend";
 
-    // const title =
-    //     activeTab === "market_event"
-    //         ? "Market Event Impact Trend"
-    //         : activeTab === "product_event"
-    //             ? "Product Event Impact Trend"
-    //             : "Overall Event Impact Trend";
-
     const {
 
         months,
@@ -42,8 +34,29 @@ export default function HIVImpactCurveChart({
 
     } = chartData || {};
 
+    const MONTH_ABBREVIATIONS = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    // Turns an ISO date string like "2020-06-01" into "Jun-20" for display.
+    // Leaves anything that doesn't look like a YYYY-MM date (e.g. the plain
+    // "2020" year headers used in yearly view) untouched.
+    const formatMonthLabel = (value) => {
+        if (typeof value !== "string") return value;
+
+        const match = value.match(/^(\d{4})-(\d{2})/);
+
+        if (!match) return value;
+
+        const [, year, month] = match;
+        const monthAbbr = MONTH_ABBREVIATIONS[Number(month) - 1] || month;
+
+        return `${monthAbbr}-${year.slice(-2)}`;
+    };
+
     const labels =
-        months || years || [];
+        (months || years || []).map(formatMonthLabel);
 
     const historyX =
         labels.slice(
@@ -130,23 +143,24 @@ export default function HIVImpactCurveChart({
 
     return (
 
-        <Paper
-            elevation={0}
+        <Box
             sx={{
-                m: 2,
+                mt: 3,
                 border: "1px solid #D8DEE8",
                 borderRadius: "12px",
-                overflow: "hidden",
+                backgroundColor: "#fff",
+                p: 2,
             }}
         >
 
             <Box
                 sx={{
-                    px: 2.5,
-                    py: 2,
-                    // borderBottom:
-                    //     "1px solid #E5E7EB",
-                    backgroundColor: "#fff",
+                    mb: 2,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: 2,
                 }}
             >
 
@@ -162,17 +176,11 @@ export default function HIVImpactCurveChart({
 
             </Box>
 
-            <Box
-                sx={{
-                    p: 2,
-                }}
-            >
-
                 {!chartData || !series?.length ? (
 
                     <Box
                         sx={{
-                            height: 250,
+                            height: 50,
                             display: "flex",
                             justifyContent: "center",
                             alignItems: "center",
@@ -180,7 +188,7 @@ export default function HIVImpactCurveChart({
                             fontSize: "14px",
                         }}
                     >
-                        No chart data available.
+                        No chart data available. Please apply filters.
                     </Box>
 
                 ) : (
@@ -193,13 +201,13 @@ export default function HIVImpactCurveChart({
 
                             autosize: true,
 
-                            height: 340,
+                            height: 320,
 
                             margin: {
-                                l: 55,
+                                l: 50,
                                 r: 20,
                                 t: 10,
-                                b: 65,
+                                b: 70,
                             },
 
                             legend: {
@@ -209,6 +217,7 @@ export default function HIVImpactCurveChart({
                             },
 
                             xaxis: {
+                                type: "category",
                                 tickangle: -45,
                                 showgrid: true,
                                 gridcolor: "#F1F5F9",
@@ -238,9 +247,7 @@ export default function HIVImpactCurveChart({
 
                 )}
 
-            </Box>
-
-        </Paper>
+        </Box>
     );
 
 }

@@ -1,3 +1,5 @@
+
+
 import axios from "axios";
 import { httpClient } from "./httpClient";
 
@@ -299,6 +301,14 @@ export const applyLiverMarketEventsFilters = (payload) => {
   return httpClient.post("/api/liver-market-events/apply-filters", payload);
 };
 
+export const refreshLiverMarketEventsTable = (payload) => {
+  return httpClient.post("/api/liver-market-events/refresh", payload);
+};
+
+export const runLiverMarketEventsCalculation = (payload) => {
+  return httpClient.post("/api/liver-market-events/run-calculation", payload);
+};
+
 
 //HIC API's
 export const getHIVConfigurationByTherapyArea = (taName) => {
@@ -336,6 +346,7 @@ export const editHIVScenario = (payload) =>
     "/api/hiv_treat/refresh-edits",
     payload
   );
+
 
 export const saveHIVScenario = (payload) =>
   httpClient.post(
@@ -379,7 +390,6 @@ export const editHIVImpactCurveTable = (payload) =>
     "/api/hiv_treat/edit_save",
     payload
   );
-
 
 
 // export const mainConversation = () => {
@@ -434,3 +444,4 @@ export const editHIVImpactCurveTable = (payload) =>
 // export const getRecentQuestions = (limit = 4) => {
 //   return httpClient.get(`/api/conversations/recent_questions?limit=${limit}`);
 // };
+ 

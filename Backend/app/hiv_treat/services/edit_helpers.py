@@ -6,6 +6,2138 @@ from app.hiv_treat.services.generic_builders_market_events import *
 from app.hiv_treat.services.market_event_helpers import *
 import json
 
+
+def is_row_edited(
+    *,
+    edited_rows: set[str],
+    parent_label: str | None = None,
+    row_label: str,
+) -> bool:
+    """
+    Check whether a submitted row was explicitly edited.
+
+    Preferred child format:
+        Biktarvy|Non-retail
+
+    Legacy child format:
+        Non-retail
+    """
+
+    if row_label in edited_rows:
+        return True
+
+    if parent_label:
+        row_path = f"{parent_label}|{row_label}"
+
+        if row_path in edited_rows:
+            return True
+
+    return False
+
+def redistribute_fixed_total(
+    *,
+    current_values: list[float],
+    fixed_total: float,
+    edited_values: dict[int, float],
+    precision: int = 2,
+) -> list[float]:
+    """
+    Redistribute values while keeping their total fixed.
+
+    Parameters
+    ----------
+    current_values:
+        Current values of all children.
+
+    fixed_total:
+        Parent total that must remain unchanged.
+
+    edited_values:
+        Mapping:
+
+            child_position -> submitted value
+
+    Rules
+    -----
+    1. Negative edits become zero.
+    2. Edited values cannot exceed the remaining parent total.
+    3. Untouched children share the remainder according to their
+       existing proportions.
+    4. The returned values always sum to fixed_total.
+
+    Example
+    -------
+    current_values:
+        [24.59, 8.55]
+
+    fixed_total:
+        33.14
+
+    edited_values:
+        {0: 90}
+
+    result:
+        [33.14, 0]
+    """
+
+    if fixed_total is None:
+        fixed_total = 0.0
+
+    fixed_total = max(
+        0.0,
+        float(fixed_total),
+    )
+
+    value_count = len(current_values)
+
+    if value_count == 0:
+        return []
+
+    current_values = [
+        max(0.0, float(value or 0.0))
+        for value in current_values
+    ]
+
+    if not edited_values:
+        current_total = sum(current_values)
+
+        if current_total <= 0:
+            equal_value = fixed_total / value_count
+
+            result = [
+                round(equal_value, precision)
+                for _ in current_values
+            ]
+        else:
+            result = [
+                round(
+                    fixed_total * value / current_total,
+                    precision,
+                )
+                for value in current_values
+            ]
+
+        difference = round(
+            fixed_total - sum(result),
+            precision,
+        )
+
+        if difference:
+            result[-1] = round(
+                result[-1] + difference,
+                precision,
+            )
+
+        return result
+
+    result = [0.0] * value_count
+
+    valid_edits: dict[int, float] = {}
+
+    for position, submitted_value in edited_values.items():
+
+        if position < 0 or position >= value_count:
+            raise ValueError(
+                f"Invalid child position: {position}."
+            )
+
+        valid_edits[position] = max(
+            0.0,
+            float(submitted_value or 0.0),
+        )
+
+    # Apply edited values one by one while respecting the
+    # remaining parent total.
+    remaining_total = fixed_total
+
+    for position, submitted_value in valid_edits.items():
+
+        clamped_value = min(
+            submitted_value,
+            remaining_total,
+        )
+
+        result[position] = round(
+            clamped_value,
+            precision,
+        )
+
+        remaining_total = max(
+            0.0,
+            remaining_total - clamped_value,
+        )
+
+    untouched_positions = [
+        position
+        for position in range(value_count)
+        if position not in valid_edits
+    ]
+
+    # Edited values consumed the entire parent total.
+    if remaining_total <= 0:
+
+        for position in untouched_positions:
+            result[position] = 0.0
+
+        return result
+
+    # Every child was explicitly edited, but their total is below
+    # the fixed parent. Add the difference to the last edited child.
+    if not untouched_positions:
+
+        last_edited_position = list(
+            valid_edits.keys()
+        )[-1]
+
+        result[last_edited_position] = round(
+            result[last_edited_position]
+            + remaining_total,
+            precision,
+        )
+
+        return result
+
+    untouched_current_total = sum(
+        current_values[position]
+        for position in untouched_positions
+    )
+
+    if untouched_current_total > 0:
+
+        for position in untouched_positions:
+
+            current_ratio = (
+                current_values[position]
+                / untouched_current_total
+            )
+
+            result[position] = round(
+                remaining_total * current_ratio,
+                precision,
+            )
+
+    else:
+
+        equal_value = (
+            remaining_total
+            / len(untouched_positions)
+        )
+
+        for position in untouched_positions:
+            result[position] = round(
+                equal_value,
+                precision,
+            )
+
+    # Correct floating-point differences.
+    difference = round(
+        fixed_total - sum(result),
+        precision,
+    )
+
+    if difference:
+
+        correction_position = (
+            untouched_positions[-1]
+            if untouched_positions
+            else list(valid_edits.keys())[-1]
+        )
+
+        result[correction_position] = round(
+            result[correction_position]
+            + difference,
+            precision,
+        )
+
+    return result
+
+def resize_market_products(
+    *,
+    matrix: dict[str, dict[str, list[float]]],
+    market_name: str,
+    products: list[str],
+    month_index: int,
+    target_market_total: float,
+):
+    """
+    Resize all products inside one market while preserving
+    their current proportions.
+    """
+
+    current_product_values = [
+        matrix[market_name][product_name][month_index]
+        for product_name in products
+    ]
+
+    resized_product_values = redistribute_fixed_total(
+        current_values=current_product_values,
+        fixed_total=target_market_total,
+        edited_values={},
+    )
+
+    for product_position, product_name in enumerate(
+        products
+    ):
+        matrix[market_name][product_name][
+            month_index
+        ] = resized_product_values[
+            product_position
+        ]
+
+def apply_market_level_edits(
+    *,
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    """
+    Edit market totals while keeping Overall fixed.
+
+    Example
+    -------
+    Overall:
+        100
+
+    Current:
+        Non-retail = 70
+        Retail = 30
+
+    Edit:
+        Non-retail = 90
+
+    Result:
+        Non-retail = 90
+        Retail = 10
+    """
+
+    markets = list(tree["markets"])
+    products = list(tree["products"])
+
+    overall_volumes = tree["overall"]["volume"]
+
+    submitted_rows = rows_by_label(
+        payload.edited_table_rows
+    )
+
+    edited_rows = set(
+        payload.edited_rows or []
+    )
+
+    for value_position, month_index in enumerate(
+        selected_indexes
+    ):
+        overall_volume = overall_volumes[
+            month_index
+        ]
+
+        current_market_totals = [
+            sum(
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for product_name in products
+            )
+            for market_name in markets
+        ]
+
+        edited_market_values: dict[int, float] = {}
+
+        for market_position, market_name in enumerate(
+            markets
+        ):
+            if not is_row_edited(
+                edited_rows=edited_rows,
+                row_label=market_name,
+            ):
+                continue
+
+            market_row = submitted_rows.get(
+                market_name
+            )
+
+            if market_row is None:
+                raise ValueError(
+                    f"Edited market row {market_name!r} "
+                    "was not found in edited_table_rows."
+                )
+
+            submitted_volume = edited_value_to_volume(
+                value=market_row.values[
+                    value_position
+                ],
+                selected_metric=payload.selected_metric,
+                overall_volume=overall_volume,
+            )
+
+            edited_market_values[
+                market_position
+            ] = submitted_volume
+
+        if not edited_market_values:
+            continue
+
+        normalized_market_totals = (
+            redistribute_fixed_total(
+                current_values=current_market_totals,
+                fixed_total=overall_volume,
+                edited_values=edited_market_values,
+            )
+        )
+
+        # Resize products inside every market according to
+        # the newly calculated market total.
+        for market_position, market_name in enumerate(
+            markets
+        ):
+            resize_market_products(
+                matrix=matrix,
+                market_name=market_name,
+                products=products,
+                month_index=month_index,
+                target_market_total=(
+                    normalized_market_totals[
+                        market_position
+                    ]
+                ),
+            )
+
+def apply_product_market_level_edits(
+    *,
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    """
+    Move each product between markets while keeping the
+    product's total fixed.
+
+    Example
+    -------
+    Biktarvy total:
+        33.14
+
+    Current:
+        Non-retail = 24.59
+        Retail = 8.55
+
+    Submitted edit:
+        Non-retail = 90
+
+    Result:
+        Non-retail = 33.14
+        Retail = 0
+    """
+
+    markets = list(tree["markets"])
+    products = list(tree["products"])
+
+    overall_volumes = tree["overall"]["volume"]
+
+    submitted_rows = rows_by_label(
+        payload.edited_table_rows
+    )
+
+    edited_rows = set(
+        payload.edited_rows or []
+    )
+
+    for value_position, month_index in enumerate(
+        selected_indexes
+    ):
+        overall_volume = overall_volumes[
+            month_index
+        ]
+
+        for product_name in products:
+
+            product_row = submitted_rows.get(
+                product_name
+            )
+
+            if product_row is None:
+                continue
+
+            market_children = rows_by_label(
+                product_row.children
+            )
+
+            current_market_values = [
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for market_name in markets
+            ]
+
+            # This total is captured before applying the edit.
+            # It must never change in this view.
+            fixed_product_total = sum(
+                current_market_values
+            )
+
+            edited_market_values: dict[int, float] = {}
+
+            for market_position, market_name in enumerate(
+                markets
+            ):
+                if not is_row_edited(
+                    edited_rows=edited_rows,
+                    parent_label=product_name,
+                    row_label=market_name,
+                ):
+                    continue
+
+                child_row = market_children.get(
+                    market_name
+                )
+
+                if child_row is None:
+                    raise ValueError(
+                        f"Edited row "
+                        f"{product_name!r}|{market_name!r} "
+                        "was not found in edited_table_rows."
+                    )
+
+                submitted_volume = edited_value_to_volume(
+                    value=child_row.values[
+                        value_position
+                    ],
+                    selected_metric=payload.selected_metric,
+                    overall_volume=overall_volume,
+                )
+
+                edited_market_values[
+                    market_position
+                ] = submitted_volume
+
+            if not edited_market_values:
+                continue
+
+            redistributed_market_values = (
+                redistribute_fixed_total(
+                    current_values=(
+                        current_market_values
+                    ),
+                    fixed_total=(
+                        fixed_product_total
+                    ),
+                    edited_values=(
+                        edited_market_values
+                    ),
+                )
+            )
+
+            for market_position, market_name in enumerate(
+                markets
+            ):
+                matrix[market_name][product_name][
+                    month_index
+                ] = (
+                    redistributed_market_values[
+                        market_position
+                    ]
+                )
+
+            # Defensive verification.
+            recalculated_product_total = sum(
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for market_name in markets
+            )
+
+            if abs(
+                recalculated_product_total
+                - fixed_product_total
+            ) > 0.001:
+                raise ValueError(
+                    f"Product total changed for "
+                    f"{product_name!r}. Expected "
+                    f"{fixed_product_total}, received "
+                    f"{recalculated_product_total}."
+                )
+            
+def apply_market_event_edits(
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    """
+    Apply edits made from Market Event.
+
+    Supported views
+    ---------------
+    market_level:
+        Overall
+        Market
+
+        Overall remains fixed. Editing one market redistributes
+        the remaining volume across other markets.
+
+    product_market_level:
+        Overall
+        Product
+            Market
+
+        Each product total remains fixed. Editing one market
+        child moves that product between markets.
+    """
+
+    if payload.selected_table_view == "market_level":
+
+        apply_market_level_edits(
+            tree=tree,
+            matrix=matrix,
+            payload=payload,
+            selected_indexes=selected_indexes,
+        )
+
+        return
+
+    if (
+        payload.selected_table_view
+        == "product_market_level"
+    ):
+
+        apply_product_market_level_edits(
+            tree=tree,
+            matrix=matrix,
+            payload=payload,
+            selected_indexes=selected_indexes,
+        )
+
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Unsupported Market Event table view: "
+            f"{payload.selected_table_view!r}."
+        ),
+    )
+
+#product_event
+def is_product_event_row_edited(
+    *,
+    edited_rows: set[str],
+    market_name: str,
+    product_name: str,
+) -> bool:
+    """
+    Check whether a product row under a market was explicitly edited.
+
+    Preferred format
+    ----------------
+        Retail|Biktarvy
+        Non-retail|Descovy
+
+    The plain product name is also supported temporarily for
+    backward compatibility, but unique paths should be used.
+    """
+
+    unique_path = f"{market_name}|{product_name}"
+
+    return (
+        unique_path in edited_rows
+        or product_name in edited_rows
+    )
+
+def redistribute_fixed_product_total(
+    *,
+    current_market_values: list[float],
+    fixed_product_total: float,
+    edited_market_values: dict[int, float],
+    precision: int = 6,
+) -> list[float]:
+    """
+    Redistribute one product across markets while keeping
+    its total fixed.
+
+    Parameters
+    ----------
+    current_market_values:
+        Current product volumes across markets.
+
+        Example:
+            [24.59, 8.55]
+
+    fixed_product_total:
+        Product total that must remain unchanged.
+
+        Example:
+            33.14
+
+    edited_market_values:
+        Mapping of:
+
+            market_position -> submitted volume
+
+        Example:
+            {1: 90}
+
+    Rules
+    -----
+    - Negative edits are clamped to zero.
+    - A single edited market cannot exceed the product total.
+    - If an edited value consumes the complete product total,
+      every untouched market becomes zero.
+    - Remaining volume is distributed across untouched markets
+      using their current proportions.
+    - Returned values always sum to fixed_product_total.
+    """
+
+    fixed_product_total = max(
+        0.0,
+        float(fixed_product_total or 0.0),
+    )
+
+    value_count = len(current_market_values)
+
+    if value_count == 0:
+        return []
+
+    current_market_values = [
+        max(0.0, float(value or 0.0))
+        for value in current_market_values
+    ]
+
+    if not edited_market_values:
+        return current_market_values.copy()
+
+    valid_edits: dict[int, float] = {}
+
+    for market_position, submitted_value in (
+        edited_market_values.items()
+    ):
+        if not 0 <= market_position < value_count:
+            raise ValueError(
+                "Invalid market position "
+                f"{market_position}. Expected a value between "
+                f"0 and {value_count - 1}."
+            )
+
+        valid_edits[market_position] = max(
+            0.0,
+            float(submitted_value or 0.0),
+        )
+
+    result = [0.0] * value_count
+
+    # Single edited market:
+    #
+    # Clamp directly to the product total.
+    if len(valid_edits) == 1:
+        edited_position, submitted_value = next(
+            iter(valid_edits.items())
+        )
+
+        clamped_value = min(
+            submitted_value,
+            fixed_product_total,
+        )
+
+        result[edited_position] = round(
+            clamped_value,
+            precision,
+        )
+
+        remaining_total = max(
+            0.0,
+            fixed_product_total - clamped_value,
+        )
+
+        untouched_positions = [
+            position
+            for position in range(value_count)
+            if position != edited_position
+        ]
+
+        distribute_remaining_to_untouched_markets(
+            result=result,
+            current_market_values=current_market_values,
+            untouched_positions=untouched_positions,
+            remaining_total=remaining_total,
+            precision=precision,
+        )
+
+        correct_fixed_total_rounding(
+            values=result,
+            fixed_total=fixed_product_total,
+            preferred_positions=untouched_positions,
+            fallback_position=edited_position,
+            precision=precision,
+        )
+
+        return result
+
+    # Multiple simultaneous edits.
+    submitted_edited_total = sum(
+        valid_edits.values()
+    )
+
+    # If edited values exceed the product total, scale the edited
+    # values proportionally and set all untouched markets to zero.
+    if submitted_edited_total >= fixed_product_total:
+
+        if submitted_edited_total == 0:
+            return result
+
+        scale_factor = (
+            fixed_product_total
+            / submitted_edited_total
+        )
+
+        for market_position, submitted_value in (
+            valid_edits.items()
+        ):
+            result[market_position] = round(
+                submitted_value * scale_factor,
+                precision,
+            )
+
+        correct_fixed_total_rounding(
+            values=result,
+            fixed_total=fixed_product_total,
+            preferred_positions=list(valid_edits),
+            fallback_position=list(valid_edits)[-1],
+            precision=precision,
+        )
+
+        return result
+
+    # Apply all edited values as submitted.
+    for market_position, submitted_value in (
+        valid_edits.items()
+    ):
+        result[market_position] = round(
+            submitted_value,
+            precision,
+        )
+
+    remaining_total = max(
+        0.0,
+        fixed_product_total - sum(result),
+    )
+
+    untouched_positions = [
+        position
+        for position in range(value_count)
+        if position not in valid_edits
+    ]
+
+    # Every market was edited, but edited values do not fill
+    # the fixed product total. Assign the difference to the
+    # final edited market.
+    if not untouched_positions:
+        correction_position = list(valid_edits)[-1]
+
+        result[correction_position] = round(
+            result[correction_position]
+            + remaining_total,
+            precision,
+        )
+
+        return result
+
+    distribute_remaining_to_untouched_markets(
+        result=result,
+        current_market_values=current_market_values,
+        untouched_positions=untouched_positions,
+        remaining_total=remaining_total,
+        precision=precision,
+    )
+
+    correct_fixed_total_rounding(
+        values=result,
+        fixed_total=fixed_product_total,
+        preferred_positions=untouched_positions,
+        fallback_position=list(valid_edits)[-1],
+        precision=precision,
+    )
+
+    return result
+
+def distribute_remaining_to_untouched_markets(
+    *,
+    result: list[float],
+    current_market_values: list[float],
+    untouched_positions: list[int],
+    remaining_total: float,
+    precision: int = 6,
+):
+    """
+    Distribute remaining product volume across untouched markets.
+
+    Existing proportions are preserved whenever possible.
+    """
+
+    if not untouched_positions:
+        return
+
+    remaining_total = max(
+        0.0,
+        float(remaining_total or 0.0),
+    )
+
+    if remaining_total == 0:
+        for position in untouched_positions:
+            result[position] = 0.0
+
+        return
+
+    current_untouched_total = sum(
+        current_market_values[position]
+        for position in untouched_positions
+    )
+
+    if current_untouched_total > 0:
+        for position in untouched_positions:
+            current_ratio = (
+                current_market_values[position]
+                / current_untouched_total
+            )
+
+            result[position] = round(
+                remaining_total * current_ratio,
+                precision,
+            )
+
+        return
+
+    equal_value = (
+        remaining_total
+        / len(untouched_positions)
+    )
+
+    for position in untouched_positions:
+        result[position] = round(
+            equal_value,
+            precision,
+        )
+
+def correct_fixed_total_rounding(
+    *,
+    values: list[float],
+    fixed_total: float,
+    preferred_positions: list[int],
+    fallback_position: int,
+    precision: int = 6,
+):
+    """
+    Correct floating-point differences so values sum exactly
+    to the fixed total.
+    """
+
+    difference = round(
+        fixed_total - sum(values),
+        precision,
+    )
+
+    if difference == 0:
+        return
+
+    correction_position = (
+        preferred_positions[-1]
+        if preferred_positions
+        else fallback_position
+    )
+
+    corrected_value = (
+        values[correction_position]
+        + difference
+    )
+
+    values[correction_position] = round(
+        max(0.0, corrected_value),
+        precision,
+    )
+
+def apply_product_level_edits(
+    *,
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    """
+    Apply Product Event edits at product_level.
+
+    Structure
+    ---------
+    Overall
+    Biktarvy
+    Descovy
+    Truvada
+
+    Rule
+    ----
+    Overall remains fixed.
+
+    Only products listed in payload.edited_rows are treated
+    as edited.
+
+    The remaining Overall value is redistributed across
+    untouched products according to their existing proportions.
+
+    The market split inside every product is preserved.
+    """
+
+    markets = list(tree["markets"])
+    products = list(tree["products"])
+
+    overall_volumes = tree["overall"]["volume"]
+
+    submitted_rows = rows_by_label(
+        payload.edited_table_rows
+    )
+
+    edited_product_labels = set(
+        payload.edited_rows or []
+    )
+
+    for value_position, month_index in enumerate(
+        selected_indexes
+    ):
+        overall_volume = overall_volumes[
+            month_index
+        ]
+
+        current_product_totals = [
+            sum(
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for market_name in markets
+            )
+            for product_name in products
+        ]
+
+        edited_product_values: dict[int, float] = {}
+
+        for product_position, product_name in enumerate(
+            products
+        ):
+            # Important:
+            # Only rows explicitly listed by the frontend
+            # are treated as edited.
+            if product_name not in edited_product_labels:
+                continue
+
+            product_row = submitted_rows.get(
+                product_name
+            )
+
+            if product_row is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Edited product row "
+                        f"{product_name!r} was not found "
+                        "in edited_table_rows."
+                    ),
+                )
+
+            if value_position >= len(
+                product_row.values
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Missing submitted value for "
+                        f"{product_name!r} at position "
+                        f"{value_position}."
+                    ),
+                )
+
+            submitted_volume = edited_value_to_volume(
+                value=product_row.values[
+                    value_position
+                ],
+                selected_metric=payload.selected_metric,
+                overall_volume=overall_volume,
+            )
+
+            edited_product_values[
+                product_position
+            ] = submitted_volume
+
+        if not edited_product_values:
+            continue
+
+        redistributed_product_totals = (
+            redistribute_within_fixed_total(
+                current_values=current_product_totals,
+                fixed_total=overall_volume,
+                edited_values=edited_product_values,
+            )
+        )
+
+        # Preserve each product's existing market split.
+        for product_position, product_name in enumerate(
+            products
+        ):
+            target_product_total = (
+                redistributed_product_totals[
+                    product_position
+                ]
+            )
+
+            current_market_values = [
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for market_name in markets
+            ]
+
+            resized_market_values = resize_values_to_total(
+                current_values=current_market_values,
+                target_total=target_product_total,
+            )
+
+            for market_position, market_name in enumerate(
+                markets
+            ):
+                matrix[market_name][product_name][
+                    month_index
+                ] = resized_market_values[
+                    market_position
+                ]
+
+        recalculated_overall = sum(
+            sum(
+                matrix[market_name][product_name][
+                    month_index
+                ]
+                for market_name in markets
+            )
+            for product_name in products
+        )
+
+        if abs(
+            recalculated_overall - overall_volume
+        ) > 0.001:
+            raise ValueError(
+                "Overall total changed during product "
+                "redistribution. "
+                f"month_index={month_index}, "
+                f"expected={overall_volume}, "
+                f"calculated={recalculated_overall}."
+            )
+
+def redistribute_within_fixed_total(
+    *,
+    current_values: list[float],
+    fixed_total: float,
+    edited_values: dict[int, float],
+    precision: int = 6,
+) -> list[float]:
+    """
+    Keep the parent total fixed while applying edits to
+    selected child values.
+
+    Edited values are clamped to the parent total.
+
+    Remaining value is redistributed proportionally across
+    untouched children.
+    """
+
+    fixed_total = max(
+        0.0,
+        float(fixed_total or 0.0),
+    )
+
+    current_values = [
+        max(0.0, float(value or 0.0))
+        for value in current_values
+    ]
+
+    value_count = len(current_values)
+
+    if value_count == 0:
+        return []
+
+    if not edited_values:
+        return current_values.copy()
+
+    valid_edits: dict[int, float] = {}
+
+    for position, submitted_value in (
+        edited_values.items()
+    ):
+        if not 0 <= position < value_count:
+            raise ValueError(
+                f"Invalid edited position: {position}."
+            )
+
+        valid_edits[position] = max(
+            0.0,
+            float(submitted_value or 0.0),
+        )
+
+    result = [0.0] * value_count
+
+    submitted_edited_total = sum(
+        valid_edits.values()
+    )
+
+    # Edited values consume or exceed the entire parent total.
+    if submitted_edited_total >= fixed_total:
+        if submitted_edited_total <= 0:
+            return result
+
+        if len(valid_edits) == 1:
+            edited_position = next(
+                iter(valid_edits)
+            )
+
+            result[edited_position] = round(
+                fixed_total,
+                precision,
+            )
+
+            return result
+
+        scale_factor = (
+            fixed_total / submitted_edited_total
+        )
+
+        for position, submitted_value in (
+            valid_edits.items()
+        ):
+            result[position] = round(
+                submitted_value * scale_factor,
+                precision,
+            )
+
+        difference = round(
+            fixed_total - sum(result),
+            precision,
+        )
+
+        if difference:
+            correction_position = list(
+                valid_edits
+            )[-1]
+
+            result[correction_position] = round(
+                result[correction_position]
+                + difference,
+                precision,
+            )
+
+        return result
+
+    # Keep explicitly edited values exactly as submitted.
+    for position, submitted_value in (
+        valid_edits.items()
+    ):
+        result[position] = round(
+            submitted_value,
+            precision,
+        )
+
+    remaining_total = max(
+        0.0,
+        fixed_total - sum(result),
+    )
+
+    untouched_positions = [
+        position
+        for position in range(value_count)
+        if position not in valid_edits
+    ]
+
+    if not untouched_positions:
+        correction_position = list(
+            valid_edits
+        )[-1]
+
+        result[correction_position] = round(
+            result[correction_position]
+            + remaining_total,
+            precision,
+        )
+
+        return result
+
+    current_untouched_total = sum(
+        current_values[position]
+        for position in untouched_positions
+    )
+
+    if current_untouched_total > 0:
+        for position in untouched_positions:
+            proportion = (
+                current_values[position]
+                / current_untouched_total
+            )
+
+            result[position] = round(
+                remaining_total * proportion,
+                precision,
+            )
+    else:
+        equal_value = (
+            remaining_total
+            / len(untouched_positions)
+        )
+
+        for position in untouched_positions:
+            result[position] = round(
+                equal_value,
+                precision,
+            )
+
+    difference = round(
+        fixed_total - sum(result),
+        precision,
+    )
+
+    if difference:
+        correction_position = (
+            untouched_positions[-1]
+        )
+
+        result[correction_position] = round(
+            result[correction_position]
+            + difference,
+            precision,
+        )
+
+    return result
+
+def resize_values_to_total(
+    *,
+    current_values: list[float],
+    target_total: float,
+    precision: int = 6,
+) -> list[float]:
+    """
+    Resize values to a new total while preserving their
+    existing proportions.
+    """
+
+    target_total = max(
+        0.0,
+        float(target_total or 0.0),
+    )
+
+    clean_values = [
+        max(0.0, float(value or 0.0))
+        for value in current_values
+    ]
+
+    value_count = len(clean_values)
+
+    if value_count == 0:
+        return []
+
+    current_total = sum(clean_values)
+
+    if current_total > 0:
+        result = [
+            round(
+                target_total
+                * value
+                / current_total,
+                precision,
+            )
+            for value in clean_values
+        ]
+    else:
+        equal_value = (
+            target_total / value_count
+        )
+
+        result = [
+            round(equal_value, precision)
+            for _ in clean_values
+        ]
+
+    difference = round(
+        target_total - sum(result),
+        precision,
+    )
+
+    if difference:
+        result[-1] = round(
+            result[-1] + difference,
+            precision,
+        )
+
+    return result
+
+def apply_product_event_edits(
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    if payload.selected_table_view == "product_level":
+        apply_product_level_edits(
+            tree=tree,
+            matrix=matrix,
+            payload=payload,
+            selected_indexes=selected_indexes,
+        )
+        return
+
+    if (
+        payload.selected_table_view
+        == "market_product_level"
+    ):
+        apply_market_product_level_edits(
+            tree=tree,
+            matrix=matrix,
+            payload=payload,
+            selected_indexes=selected_indexes,
+        )
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Unsupported Product Event table view: "
+            f"{payload.selected_table_view!r}."
+        ),
+    )
+
+# def resize_values_to_total(
+#     *,
+#     current_values: list[float],
+#     target_total: float,
+#     precision: int = 6,
+# ) -> list[float]:
+#     """
+#     Resize values to a target total while preserving their
+#     current proportions.
+#     """
+
+#     target_total = max(
+#         0.0,
+#         float(target_total or 0.0),
+#     )
+
+#     value_count = len(current_values)
+
+#     if value_count == 0:
+#         return []
+
+#     clean_values = [
+#         max(0.0, float(value or 0.0))
+#         for value in current_values
+#     ]
+
+#     current_total = sum(clean_values)
+
+#     if current_total > 0:
+#         result = [
+#             round(
+#                 target_total * value / current_total,
+#                 precision,
+#             )
+#             for value in clean_values
+#         ]
+#     else:
+#         equal_value = target_total / value_count
+
+#         result = [
+#             round(equal_value, precision)
+#             for _ in clean_values
+#         ]
+
+#     difference = round(
+#         target_total - sum(result),
+#         precision,
+#     )
+
+#     if difference:
+#         result[-1] = round(
+#             result[-1] + difference,
+#             precision,
+#         )
+
+#     return result
+
+def detect_market_product_edits(
+    *,
+    markets: list[str],
+    products: list[str],
+    matrix: dict[str, dict[str, list[float]]],
+    submitted_rows: dict,
+    edited_rows: set[str],
+    payload: EditSaveRequest,
+    overall_volume: float,
+    value_position: int,
+    month_index: int,
+    tolerance: float = 0.0001,
+) -> dict[str, dict[int, float]]:
+    """
+    Detect edited products under markets.
+
+    Returns
+    -------
+    {
+        "Biktarvy": {
+            0: edited_volume
+        }
+    }
+
+    The integer key is the market position.
+    """
+
+    edits_by_product: dict[
+        str,
+        dict[int, float],
+    ] = {}
+
+    for market_position, market_name in enumerate(
+        markets
+    ):
+        market_row = submitted_rows.get(
+            market_name
+        )
+
+        if market_row is None:
+            continue
+
+        submitted_children = rows_by_label(
+            market_row.children
+        )
+
+        for product_name in products:
+            product_child = submitted_children.get(
+                product_name
+            )
+
+            if product_child is None:
+                continue
+
+            submitted_volume = edited_value_to_volume(
+                value=product_child.values[
+                    value_position
+                ],
+                selected_metric=payload.selected_metric,
+                overall_volume=overall_volume,
+            )
+
+            current_volume = matrix[
+                market_name
+            ][product_name][month_index]
+
+            explicitly_edited = (
+                is_product_event_row_edited(
+                    edited_rows=edited_rows,
+                    market_name=market_name,
+                    product_name=product_name,
+                )
+            )
+
+            value_changed = (
+                abs(submitted_volume - current_volume)
+                > tolerance
+            )
+
+            if not explicitly_edited and not value_changed:
+                continue
+
+            edits_by_product.setdefault(
+                product_name,
+                {},
+            )[market_position] = submitted_volume
+
+    return edits_by_product
+
+def redistribute_within_market(
+    *,
+    current_product_values: list[float],
+    fixed_market_total: float,
+    edited_product_values: dict[int, float],
+    precision: int = 6,
+) -> list[float]:
+    """
+    Keep the market total fixed while applying product edits.
+
+    The edited product is clamped to the market total.
+    The remaining market value is distributed proportionally
+    across untouched products.
+    """
+
+    fixed_market_total = max(
+        0.0,
+        float(fixed_market_total or 0.0),
+    )
+
+    current_product_values = [
+        max(0.0, float(value or 0.0))
+        for value in current_product_values
+    ]
+
+    product_count = len(current_product_values)
+
+    if product_count == 0:
+        return []
+
+    if not edited_product_values:
+        return current_product_values.copy()
+
+    result = [0.0] * product_count
+
+    valid_edits: dict[int, float] = {}
+
+    for product_position, submitted_value in (
+        edited_product_values.items()
+    ):
+        if not 0 <= product_position < product_count:
+            raise ValueError(
+                f"Invalid product position: "
+                f"{product_position}."
+            )
+
+        valid_edits[product_position] = max(
+            0.0,
+            float(submitted_value or 0.0),
+        )
+
+    submitted_edited_total = sum(
+        valid_edits.values()
+    )
+
+    # Edited values consume or exceed the entire market.
+    if submitted_edited_total >= fixed_market_total:
+        if submitted_edited_total <= 0:
+            return result
+
+        # For one edited product this directly clamps it
+        # to the complete market total.
+        if len(valid_edits) == 1:
+            edited_position = next(
+                iter(valid_edits)
+            )
+
+            result[edited_position] = round(
+                fixed_market_total,
+                precision,
+            )
+
+            return result
+
+        # Multiple edited products: preserve their submitted
+        # proportions while fitting them into the market total.
+        scale_factor = (
+            fixed_market_total
+            / submitted_edited_total
+        )
+
+        for product_position, submitted_value in (
+            valid_edits.items()
+        ):
+            result[product_position] = round(
+                submitted_value * scale_factor,
+                precision,
+            )
+
+        difference = round(
+            fixed_market_total - sum(result),
+            precision,
+        )
+
+        if difference:
+            correction_position = list(
+                valid_edits
+            )[-1]
+
+            result[correction_position] = round(
+                result[correction_position]
+                + difference,
+                precision,
+            )
+
+        return result
+
+    # Keep edited values exactly as submitted.
+    for product_position, submitted_value in (
+        valid_edits.items()
+    ):
+        result[product_position] = round(
+            submitted_value,
+            precision,
+        )
+
+    remaining_total = max(
+        0.0,
+        fixed_market_total - sum(result),
+    )
+
+    untouched_positions = [
+        position
+        for position in range(product_count)
+        if position not in valid_edits
+    ]
+
+    if not untouched_positions:
+        correction_position = list(
+            valid_edits
+        )[-1]
+
+        result[correction_position] = round(
+            result[correction_position]
+            + remaining_total,
+            precision,
+        )
+
+        return result
+
+    current_untouched_total = sum(
+        current_product_values[position]
+        for position in untouched_positions
+    )
+
+    if current_untouched_total > 0:
+        for position in untouched_positions:
+            proportion = (
+                current_product_values[position]
+                / current_untouched_total
+            )
+
+            result[position] = round(
+                remaining_total * proportion,
+                precision,
+            )
+    else:
+        equal_value = (
+            remaining_total
+            / len(untouched_positions)
+        )
+
+        for position in untouched_positions:
+            result[position] = round(
+                equal_value,
+                precision,
+            )
+
+    # Correct rounding so the values exactly equal
+    # the fixed market total.
+    difference = round(
+        fixed_market_total - sum(result),
+        precision,
+    )
+
+    if difference:
+        correction_position = untouched_positions[-1]
+
+        result[correction_position] = round(
+            result[correction_position]
+            + difference,
+            precision,
+        )
+
+    return result
+
+def force_values_to_exact_total(
+    *,
+    values: list[float],
+    target_total: float,
+    correction_position: int | None = None,
+    precision: int = 2,
+) -> list[float]:
+    """
+    Force child values to sum exactly to target_total.
+
+    The rounding difference is added to one selected child.
+    """
+
+    if not values:
+        return []
+
+    result = [
+        round(max(0.0, float(value or 0.0)), precision)
+        for value in values
+    ]
+
+    target_total = round(
+        max(0.0, float(target_total or 0.0)),
+        precision,
+    )
+
+    if correction_position is None:
+        correction_position = len(result) - 1
+
+    if not 0 <= correction_position < len(result):
+        correction_position = len(result) - 1
+
+    difference = round(
+        target_total - sum(result),
+        precision,
+    )
+
+    result[correction_position] = round(
+        result[correction_position] + difference,
+        precision,
+    )
+
+    # Defensive second correction.
+    remaining_difference = round(
+        target_total - sum(result),
+        precision,
+    )
+
+    if remaining_difference:
+        result[correction_position] = round(
+            result[correction_position]
+            + remaining_difference,
+            precision,
+        )
+
+    return result
+
+def apply_market_product_level_edits(
+    *,
+    tree: dict,
+    matrix: dict[str, dict[str, list[float]]],
+    payload: EditSaveRequest,
+    selected_indexes: list[int],
+):
+    """
+    Apply Product Event edits for market_product_level.
+
+    Table hierarchy
+    ---------------
+    Overall
+        Non-retail
+            Biktarvy
+            Descovy
+            Truvada
+        Retail
+            Biktarvy
+            Descovy
+            Truvada
+
+    Frontend edited_rows format
+    ---------------------------
+        ["Biktarvy"]
+
+    Because the same product appears under multiple markets,
+    the edited market is identified by comparing the submitted
+    product value with the current matrix value.
+
+    Business rule
+    -------------
+    Editing a product redistributes the remaining value across
+    other products within the same market.
+
+    The submitted market parent total remains fixed.
+    """
+
+    markets = list(tree["markets"])
+    products = list(tree["products"])
+
+    overall_volumes = tree["overall"]["volume"]
+
+    submitted_rows = rows_by_label(
+        payload.edited_table_rows
+    )
+
+    edited_product_labels = set(
+        payload.edited_rows or []
+    )
+
+    comparison_tolerance = 0.011
+    calculation_precision = 6
+    validation_tolerance = 0.000001
+
+    for value_position, month_index in enumerate(
+        selected_indexes
+    ):
+        overall_volume = overall_volumes[
+            month_index
+        ]
+
+        for market_name in markets:
+            market_row = submitted_rows.get(
+                market_name
+            )
+
+            if market_row is None:
+                continue
+
+            submitted_product_rows = rows_by_label(
+                market_row.children
+            )
+
+            current_product_values = [
+                round(
+                    max(
+                        0.0,
+                        float(
+                            matrix[market_name][product_name][
+                                month_index
+                            ]
+                            or 0.0
+                        ),
+                    ),
+                    calculation_precision,
+                )
+                for product_name in products
+            ]
+
+            # ================================================
+            # Use the submitted market parent as the fixed total
+            # ================================================
+
+            if value_position < len(market_row.values):
+                submitted_market_value = (
+                    market_row.values[value_position]
+                )
+
+                fixed_market_total = edited_value_to_volume(
+                    value=submitted_market_value,
+                    selected_metric=payload.selected_metric,
+                    overall_volume=overall_volume,
+                )
+            else:
+                # Defensive fallback.
+                fixed_market_total = sum(
+                    current_product_values
+                )
+
+            fixed_market_total = round(
+                max(
+                    0.0,
+                    float(fixed_market_total or 0.0),
+                ),
+                calculation_precision,
+            )
+
+            edited_product_values: dict[int, float] = {}
+
+            # Used to select where any rounding difference
+            # should be applied.
+            edited_product_positions: set[int] = set()
+
+            for product_position, product_name in enumerate(
+                products
+            ):
+                # Only product rows listed in edited_rows
+                # can be treated as edits.
+                if (
+                    product_name
+                    not in edited_product_labels
+                ):
+                    continue
+
+                submitted_product_row = (
+                    submitted_product_rows.get(
+                        product_name
+                    )
+                )
+
+                if submitted_product_row is None:
+                    continue
+
+                if value_position >= len(
+                    submitted_product_row.values
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Missing submitted value for "
+                            f"{market_name!r} -> "
+                            f"{product_name!r} at position "
+                            f"{value_position}."
+                        ),
+                    )
+
+                submitted_product_volume = (
+                    edited_value_to_volume(
+                        value=(
+                            submitted_product_row.values[
+                                value_position
+                            ]
+                        ),
+                        selected_metric=(
+                            payload.selected_metric
+                        ),
+                        overall_volume=overall_volume,
+                    )
+                )
+
+                submitted_product_volume = round(
+                    max(
+                        0.0,
+                        float(
+                            submitted_product_volume
+                            or 0.0
+                        ),
+                    ),
+                    calculation_precision,
+                )
+
+                current_product_volume = (
+                    current_product_values[
+                        product_position
+                    ]
+                )
+
+                # The same product appears under Retail and
+                # Non-retail. Only the occurrence whose value
+                # differs is considered edited.
+                value_changed = (
+                    abs(
+                        submitted_product_volume
+                        - current_product_volume
+                    )
+                    > comparison_tolerance
+                )
+
+                if not value_changed:
+                    continue
+
+                edited_product_values[
+                    product_position
+                ] = submitted_product_volume
+
+                edited_product_positions.add(
+                    product_position
+                )
+
+            if not edited_product_values:
+                continue
+
+            redistributed_product_values = (
+                redistribute_within_market(
+                    current_product_values=(
+                        current_product_values
+                    ),
+                    fixed_market_total=(
+                        fixed_market_total
+                    ),
+                    edited_product_values=(
+                        edited_product_values
+                    ),
+                    precision=calculation_precision,
+                )
+            )
+
+            # Apply rounding correction to an untouched product
+            # whenever possible, so the explicitly edited value
+            # remains exactly as entered.
+            untouched_positions = [
+                product_position
+                for product_position in range(
+                    len(products)
+                )
+                if product_position
+                not in edited_product_positions
+            ]
+
+            if untouched_positions:
+                correction_position = (
+                    untouched_positions[-1]
+                )
+            else:
+                correction_position = (
+                    len(products) - 1
+                )
+
+            redistributed_product_values = (
+                force_values_to_exact_total(
+                    values=(
+                        redistributed_product_values
+                    ),
+                    target_total=(
+                        fixed_market_total
+                    ),
+                    correction_position=(
+                        correction_position
+                    ),
+                    precision=calculation_precision,
+                )
+            )
+
+            # ================================================
+            # Write values back into the matrix
+            # ================================================
+
+            for product_position, product_name in enumerate(
+                products
+            ):
+                matrix[market_name][product_name][
+                    month_index
+                ] = round(
+                    redistributed_product_values[
+                        product_position
+                    ],
+                    calculation_precision,
+                )
+
+            # ================================================
+            # Validate fixed market total
+            # ================================================
+
+            recalculated_market_total = round(
+                sum(
+                    matrix[market_name][product_name][
+                        month_index
+                    ]
+                    for product_name in products
+                ),
+                calculation_precision,
+            )
+
+            if (
+                abs(
+                    recalculated_market_total
+                    - fixed_market_total
+                )
+                > validation_tolerance
+            ):
+                raise ValueError(
+                    "Market total changed during product "
+                    "redistribution. "
+                    f"Market={market_name!r}, "
+                    f"month_index={month_index}, "
+                    f"expected={fixed_market_total}, "
+                    f"calculated="
+                    f"{recalculated_market_total}."
+                )
+
+
+
+def validate_fixed_product_total(
+    *,
+    matrix: dict[str, dict[str, list[float]]],
+    markets: list[str],
+    product_name: str,
+    month_index: int,
+    expected_total: float,
+    tolerance: float = 0.001,
+):
+    """
+    Confirm that product redistribution did not change
+    the product total.
+    """
+
+    recalculated_total = sum(
+        matrix[market_name][product_name][month_index]
+        for market_name in markets
+    )
+
+    if abs(
+        recalculated_total - expected_total
+    ) > tolerance:
+        raise ValueError(
+            "Product total changed during redistribution. "
+            f"Product={product_name!r}, "
+            f"month_index={month_index}, "
+            f"expected={expected_total}, "
+            f"calculated={recalculated_total}."
+        )
+
+
+
 def resolve_selected_months(
     tree: dict,
     payload: EditSaveRequest,
@@ -541,724 +2673,7 @@ def normalize_distribution(
 
     return result
 
-def apply_market_event_edits(
-    tree: dict,
-    matrix: dict[str, dict[str, list[float]]],
-    payload: EditSaveRequest,
-    selected_indexes: list[int],
-):
-    """
-    Apply edits made from Market Event.
 
-    Supported views
-    ---------------
-    market_level:
-        Overall
-        Market
-
-    product_market_level:
-        Overall
-        Product
-            Market
-
-    The canonical matrix is:
-
-        matrix[market][product][month_index] = volume
-
-    Notes
-    -----
-    - Overall is never edited.
-    - Only values that differ from the current calculated value are
-      treated as actual edits.
-    - This is important because the frontend sends the full table,
-      not only the changed cells.
-    """
-
-    markets = list(tree["markets"])
-    products = list(tree["products"])
-
-    overall_volumes = tree["overall"]["volume"]
-
-    submitted_rows = rows_by_label(
-        payload.edited_table_rows
-    )
-
-    tolerance = 0.0001
-
-    # =====================================================
-    # MARKET LEVEL
-    #
-    # Overall
-    # Retail
-    # Non-retail
-    # =====================================================
-
-    if payload.selected_table_view == "market_level":
-
-        for value_position, month_index in enumerate(
-            selected_indexes
-        ):
-            overall_volume = overall_volumes[month_index]
-
-            current_market_totals = [
-                sum(
-                    matrix[market_name][product_name][month_index]
-                    for product_name in products
-                )
-                for market_name in markets
-            ]
-
-            locked_market_totals: dict[int, float] = {}
-
-            for market_position, market_name in enumerate(
-                markets
-            ):
-                market_row = submitted_rows.get(market_name)
-
-                if market_row is None:
-                    continue
-
-                submitted_volume = edited_value_to_volume(
-                    value=market_row.values[value_position],
-                    selected_metric=payload.selected_metric,
-                    overall_volume=overall_volume,
-                )
-
-                current_volume = current_market_totals[
-                    market_position
-                ]
-
-                # The complete table is submitted.
-                # Treat the value as edited only when it changed.
-                if abs(
-                    submitted_volume - current_volume
-                ) <= tolerance:
-                    continue
-
-                locked_market_totals[
-                    market_position
-                ] = submitted_volume
-
-            normalized_market_totals = normalize_distribution(
-                current_values=current_market_totals,
-                target_total=overall_volume,
-                locked_values=locked_market_totals,
-            )
-
-            # Preserve the existing product split inside each market.
-            for market_position, market_name in enumerate(
-                markets
-            ):
-                target_market_total = (
-                    normalized_market_totals[
-                        market_position
-                    ]
-                )
-
-                current_product_values = [
-                    matrix[market_name][product_name][month_index]
-                    for product_name in products
-                ]
-
-                normalized_product_values = normalize_distribution(
-                    current_values=current_product_values,
-                    target_total=target_market_total,
-                )
-
-                for product_position, product_name in enumerate(
-                    products
-                ):
-                    matrix[market_name][product_name][
-                        month_index
-                    ] = normalized_product_values[
-                        product_position
-                    ]
-
-        return
-
-    # =====================================================
-    # PRODUCT-MARKET LEVEL
-    #
-    # Overall
-    # Product
-    #     Market
-    # =====================================================
-
-    if payload.selected_table_view == "product_market_level":
-
-        explicitly_edited_rows = set(
-            payload.edited_rows or []
-        )
-
-        for value_position, month_index in enumerate(
-            selected_indexes
-        ):
-            overall_volume = overall_volumes[month_index]
-
-            # Current total for every product across markets.
-            current_product_totals = [
-                sum(
-                    matrix[market_name][product_name][month_index]
-                    for market_name in markets
-                )
-                for product_name in products
-            ]
-
-            # Product totals that must remain fixed during normalization.
-            locked_product_totals: dict[int, float] = {}
-
-            # Edited market children that must remain fixed.
-            edited_market_values_by_product: dict[
-                int,
-                dict[int, float],
-            ] = {}
-
-            for product_position, product_name in enumerate(
-                products
-            ):
-                product_row = submitted_rows.get(product_name)
-
-                if product_row is None:
-                    continue
-
-                market_children = rows_by_label(
-                    product_row.children
-                )
-
-                locked_market_values: dict[int, float] = {}
-
-                # ============================================
-                # Detect explicitly edited market children
-                # ============================================
-
-                for market_position, market_name in enumerate(
-                    markets
-                ):
-                    child_row = market_children.get(market_name)
-
-                    if child_row is None:
-                        continue
-
-                    child_path = (
-                        f"{product_name}|{market_name}"
-                    )
-
-                    # Lock only the row actually edited by the user.
-                    if child_path not in explicitly_edited_rows:
-                        continue
-
-                    edited_child_volume = (
-                        edited_value_to_volume(
-                            value=child_row.values[
-                                value_position
-                            ],
-                            selected_metric=(
-                                payload.selected_metric
-                            ),
-                            overall_volume=overall_volume,
-                        )
-                    )
-
-                    locked_market_values[
-                        market_position
-                    ] = edited_child_volume
-
-                if locked_market_values:
-                    edited_market_values_by_product[
-                        product_position
-                    ] = locked_market_values
-
-                # ============================================
-                # Determine the new product total
-                # ============================================
-
-                product_path = product_name
-
-                if product_path in explicitly_edited_rows:
-                    # Parent itself was edited.
-                    submitted_product_total = (
-                        edited_value_to_volume(
-                            value=product_row.values[
-                                value_position
-                            ],
-                            selected_metric=(
-                                payload.selected_metric
-                            ),
-                            overall_volume=overall_volume,
-                        )
-                    )
-
-                    locked_product_totals[
-                        product_position
-                    ] = submitted_product_total
-
-                elif locked_market_values:
-                    # A child was edited, so recompute the parent from:
-                    #
-                    # edited child values
-                    # +
-                    # existing untouched child values
-
-                    recomputed_product_total = 0.0
-
-                    for market_position, market_name in enumerate(
-                        markets
-                    ):
-                        if market_position in locked_market_values:
-                            recomputed_product_total += (
-                                locked_market_values[
-                                    market_position
-                                ]
-                            )
-                        else:
-                            recomputed_product_total += matrix[
-                                market_name
-                            ][product_name][month_index]
-
-                    locked_product_totals[
-                        product_position
-                    ] = round(
-                        recomputed_product_total,
-                        6,
-                    )
-
-            # ================================================
-            # Normalize product totals to Overall
-            # ================================================
-
-            normalized_product_totals = normalize_distribution(
-                current_values=current_product_totals,
-                target_total=overall_volume,
-                locked_values=locked_product_totals,
-            )
-
-            # ================================================
-            # Normalize markets within every product
-            # ================================================
-
-            for product_position, product_name in enumerate(
-                products
-            ):
-                target_product_total = (
-                    normalized_product_totals[
-                        product_position
-                    ]
-                )
-
-                current_market_values = [
-                    matrix[market_name][product_name][month_index]
-                    for market_name in markets
-                ]
-
-                locked_market_values = (
-                    edited_market_values_by_product.get(
-                        product_position,
-                        {},
-                    )
-                )
-
-                normalized_market_values = (
-                    normalize_distribution(
-                        current_values=current_market_values,
-                        target_total=target_product_total,
-                        locked_values=locked_market_values,
-                    )
-                )
-
-                for market_position, market_name in enumerate(
-                    markets
-                ):
-                    matrix[market_name][product_name][
-                        month_index
-                    ] = normalized_market_values[
-                        market_position
-                    ]
-
-        return
-
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Unsupported Market Event table view: "
-            f"{payload.selected_table_view!r}."
-        ),
-    )
-
-def apply_product_event_edits(
-    tree: dict,
-    matrix: dict[str, dict[str, list[float]]],
-    payload: EditSaveRequest,
-    selected_indexes: list[int],
-):
-    """
-    Apply edits made from Product Event.
-
-    Supported views
-    ---------------
-    product_level:
-        Overall
-        Product
-
-    market_product_level:
-        Overall
-        Market
-            Product
-
-    Canonical matrix
-    ----------------
-        matrix[market][product][month_index] = volume
-
-    The frontend sends the complete visible table. Therefore, only
-    rows listed in payload.edited_rows, or values that differ from the
-    current calculated values, are treated as explicit edits.
-    """
-
-    markets = list(tree["markets"])
-    products = list(tree["products"])
-
-    overall_volumes = tree["overall"]["volume"]
-
-    submitted_rows = rows_by_label(
-        payload.edited_table_rows
-    )
-
-    explicitly_edited_labels = set(
-        payload.edited_rows or []
-    )
-
-    tolerance = 0.0001
-
-    # =====================================================
-    # PRODUCT LEVEL
-    #
-    # Overall
-    # Biktarvy
-    # Descovy
-    # Truvada
-    # =====================================================
-
-    if payload.selected_table_view == "product_level":
-
-        for value_position, month_index in enumerate(
-            selected_indexes
-        ):
-            overall_volume = overall_volumes[month_index]
-
-            current_product_totals = [
-                sum(
-                    matrix[market_name][product_name][month_index]
-                    for market_name in markets
-                )
-                for product_name in products
-            ]
-
-            locked_product_totals: dict[int, float] = {}
-
-            for product_position, product_name in enumerate(
-                products
-            ):
-                product_row = submitted_rows.get(product_name)
-
-                if product_row is None:
-                    continue
-
-                submitted_volume = edited_value_to_volume(
-                    value=product_row.values[value_position],
-                    selected_metric=payload.selected_metric,
-                    overall_volume=overall_volume,
-                )
-
-                current_volume = current_product_totals[
-                    product_position
-                ]
-
-                row_was_explicitly_edited = (
-                    product_name in explicitly_edited_labels
-                )
-
-                value_changed = (
-                    abs(submitted_volume - current_volume)
-                    > tolerance
-                )
-
-                if not row_was_explicitly_edited and not value_changed:
-                    continue
-
-                locked_product_totals[
-                    product_position
-                ] = submitted_volume
-
-            normalized_product_totals = normalize_distribution(
-                current_values=current_product_totals,
-                target_total=overall_volume,
-                locked_values=locked_product_totals,
-            )
-
-            # Preserve the existing market split inside each product.
-            for product_position, product_name in enumerate(
-                products
-            ):
-                target_product_total = (
-                    normalized_product_totals[
-                        product_position
-                    ]
-                )
-
-                current_market_values = [
-                    matrix[market_name][product_name][month_index]
-                    for market_name in markets
-                ]
-
-                normalized_market_values = normalize_distribution(
-                    current_values=current_market_values,
-                    target_total=target_product_total,
-                )
-
-                for market_position, market_name in enumerate(
-                    markets
-                ):
-                    matrix[market_name][product_name][
-                        month_index
-                    ] = normalized_market_values[
-                        market_position
-                    ]
-
-        return
-
-    # =====================================================
-    # MARKET-PRODUCT LEVEL
-    #
-    # Overall
-    # Non-retail
-    #     Biktarvy
-    #     Descovy
-    #     Truvada
-    # Retail
-    #     Biktarvy
-    #     Descovy
-    #     Truvada
-    # =====================================================
-
-    if payload.selected_table_view == "market_product_level":
-
-        for value_position, month_index in enumerate(
-            selected_indexes
-        ):
-            overall_volume = overall_volumes[month_index]
-
-            # -------------------------------------------------
-            # Current market totals
-            # -------------------------------------------------
-
-            current_market_totals = [
-                sum(
-                    matrix[market_name][product_name][month_index]
-                    for product_name in products
-                )
-                for market_name in markets
-            ]
-
-            locked_market_totals: dict[int, float] = {}
-
-            # Explicitly edited products inside each market.
-            #
-            # {
-            #     market_position: {
-            #         product_position: edited_volume
-            #     }
-            # }
-            edited_product_values_by_market: dict[
-                int,
-                dict[int, float],
-            ] = {}
-
-            # -------------------------------------------------
-            # Detect parent market and child product edits
-            # -------------------------------------------------
-
-            for market_position, market_name in enumerate(
-                markets
-            ):
-                market_row = submitted_rows.get(market_name)
-
-                if market_row is None:
-                    continue
-
-                current_market_total = current_market_totals[
-                    market_position
-                ]
-
-                submitted_market_total = edited_value_to_volume(
-                    value=market_row.values[value_position],
-                    selected_metric=payload.selected_metric,
-                    overall_volume=overall_volume,
-                )
-
-                market_was_explicitly_edited = (
-                    market_name in explicitly_edited_labels
-                )
-
-                parent_value_changed = (
-                    abs(
-                        submitted_market_total
-                        - current_market_total
-                    )
-                    > tolerance
-                )
-
-                submitted_children = rows_by_label(
-                    market_row.children
-                )
-
-                edited_product_values: dict[int, float] = {}
-
-                for product_position, product_name in enumerate(
-                    products
-                ):
-                    product_child = submitted_children.get(
-                        product_name
-                    )
-
-                    if product_child is None:
-                        continue
-
-                    submitted_product_volume = (
-                        edited_value_to_volume(
-                            value=product_child.values[
-                                value_position
-                            ],
-                            selected_metric=payload.selected_metric,
-                            overall_volume=overall_volume,
-                        )
-                    )
-
-                    current_product_volume = matrix[
-                        market_name
-                    ][product_name][month_index]
-
-                    product_was_explicitly_edited = (
-                        product_name in explicitly_edited_labels
-                    )
-
-                    child_value_changed = (
-                        abs(
-                            submitted_product_volume
-                            - current_product_volume
-                        )
-                        > tolerance
-                    )
-
-                    if (
-                        product_was_explicitly_edited
-                        or child_value_changed
-                    ):
-                        edited_product_values[
-                            product_position
-                        ] = submitted_product_volume
-
-                if edited_product_values:
-                    edited_product_values_by_market[
-                        market_position
-                    ] = edited_product_values
-
-                if (
-                    market_was_explicitly_edited
-                    or parent_value_changed
-                ):
-                    # Explicit parent value takes priority.
-                    locked_market_totals[
-                        market_position
-                    ] = submitted_market_total
-
-                elif edited_product_values:
-                    # Parent was untouched, but one or more products
-                    # inside the market changed. Recalculate the market
-                    # total using edited children plus untouched children.
-                    recomputed_market_total = 0.0
-
-                    for product_position, product_name in enumerate(
-                        products
-                    ):
-                        if (
-                            product_position
-                            in edited_product_values
-                        ):
-                            recomputed_market_total += (
-                                edited_product_values[
-                                    product_position
-                                ]
-                            )
-                        else:
-                            recomputed_market_total += matrix[
-                                market_name
-                            ][product_name][month_index]
-
-                    locked_market_totals[
-                        market_position
-                    ] = round(
-                        recomputed_market_total,
-                        6,
-                    )
-
-            # -------------------------------------------------
-            # Normalize markets to Overall
-            # -------------------------------------------------
-
-            normalized_market_totals = normalize_distribution(
-                current_values=current_market_totals,
-                target_total=overall_volume,
-                locked_values=locked_market_totals,
-            )
-
-            # -------------------------------------------------
-            # Normalize products inside each market
-            # -------------------------------------------------
-
-            for market_position, market_name in enumerate(
-                markets
-            ):
-                target_market_total = (
-                    normalized_market_totals[
-                        market_position
-                    ]
-                )
-
-                current_product_values = [
-                    matrix[market_name][product_name][month_index]
-                    for product_name in products
-                ]
-
-                locked_product_values = (
-                    edited_product_values_by_market.get(
-                        market_position,
-                        {},
-                    )
-                )
-
-                normalized_product_values = normalize_distribution(
-                    current_values=current_product_values,
-                    target_total=target_market_total,
-                    locked_values=locked_product_values,
-                )
-
-                for product_position, product_name in enumerate(
-                    products
-                ):
-                    matrix[market_name][product_name][
-                        month_index
-                    ] = normalized_product_values[
-                        product_position
-                    ]
-
-        return
-
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "Unsupported Product Event table view: "
-            f"{payload.selected_table_view!r}."
-        ),
-    )
 
 def apply_matrix_to_tree(
     tree: dict,
