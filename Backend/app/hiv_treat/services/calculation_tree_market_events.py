@@ -73,67 +73,101 @@ def populate_overall_volume(tree, metrics):
         + forecast["forecast_values"]
     )
 
+def normalize_dimension(value):
+    if value is None:
+        return "ALL"
+
+    normalized = str(value).strip()
+
+    if not normalized:
+        return "ALL"
+
+    return normalized
+
+
+def is_all(value):
+    return normalize_dimension(value).upper() == "ALL"
+
 def populate_market_shares(tree, metrics):
     """
-    Populate market shares.
+    Populate market-level shares.
 
-    Market-level rows are identified by:
-        product == "ALL"
-        source_of_market is None
+    Market-level row:
+        market != ALL
+        source_of_market == ALL / None
+        product == ALL
     """
 
-    for row in metrics["market_share"]:
+    rows = metrics.get("market_share", [])
 
-        # Only market-level rows
-        if row["product"] != "ALL":
+    for row in rows:
+        market = normalize_dimension(
+            row.get("market")
+        )
+
+        source = normalize_dimension(
+            row.get("source_of_market")
+        )
+
+        product = normalize_dimension(
+            row.get("product")
+        )
+
+        is_market_level = (
+            not is_all(market)
+            and is_all(source)
+            and is_all(product)
+        )
+
+        if not is_market_level:
             continue
 
-        if row["source_of_market"] is not None:
-            continue
-
-        market = row["market"]
-
-        if market == "ALL":
-            continue
-
-        forecast = row["forecast_data"]
+        forecast = row.get(
+            "forecast_data",
+            {}
+        )
 
         values = (
-            forecast["train_values"] +
-            forecast["forecast_values"]
+            forecast.get("train_values", [])
+            + forecast.get("forecast_values", [])
         )
 
         tree["markets"][market] = {
             "share": values,
             "volume": [],
-            "sources": {}
+            "sources": {},
         }
 
 def populate_market_volumes(tree):
     """
-    Calculate the market volumes from the market shares.
-
-    Formula:
-        Market Volume = Overall Volume × Market Share / 100
+    Market Volume = Overall Volume × Market Share / 100
     """
 
-    overall_volume = tree["overall"]["volume"]
+    overall_volume = (
+        tree.get("overall", {})
+        .get("volume", [])
+    )
 
     if not overall_volume:
         return
 
-    for market in tree["markets"].values():
+    for market in tree.get(
+        "markets",
+        {}
+    ).values():
+        market_share = market.get(
+            "share",
+            []
+        )
 
         market["volume"] = [
-
             round(
                 overall * share / 100,
                 2,
             )
-
             for overall, share in zip(
                 overall_volume,
-                market["share"],
+                market_share,
             )
         ]
 
@@ -141,33 +175,92 @@ def populate_source_shares(tree, metrics):
     """
     Populate sources under each market.
 
-    Source-level ALL rows provide source shares.
+    Source-level row:
+        market != ALL
+        source_of_market != ALL
+        product == ALL
 
-    When a source exists only on product rows, such as
-    Retail / Unknown / Biktarvy, create the source with
-    a default share of 100%.
+    Product rows can also cause a missing source container
+    to be created with a default 100% share.
     """
 
     month_count = len(tree["months"])
 
-    for row in metrics.get("market_share", []):
-        market = row["market"]
-        raw_source = row["source_of_market"]
-        product = row["product"]
+    rows = metrics.get("market_share", [])
 
-        if market == "ALL":
+    # First create sources from source-level rows.
+    for row in rows:
+        market = normalize_dimension(
+            row.get("market")
+        )
+
+        source = normalize_dimension(
+            row.get("source_of_market")
+        )
+
+        product = normalize_dimension(
+            row.get("product")
+        )
+
+        if is_all(market):
             continue
 
         if market not in tree["markets"]:
             continue
 
-        # Market-level row: Retail / None / ALL
-        if raw_source is None:
+        is_source_level = (
+            not is_all(source)
+            and is_all(product)
+        )
+
+        if not is_source_level:
             continue
 
-        source = raw_source or "Unknown"
+        forecast = row.get(
+            "forecast_data",
+            {}
+        )
 
-        sources = tree["markets"][market]["sources"]
+        values = (
+            forecast.get("train_values", [])
+            + forecast.get("forecast_values", [])
+        )
+
+        tree["markets"][market][
+            "sources"
+        ][source] = {
+            "share": values,
+            "volume": [],
+            "products": {},
+        }
+
+    # Then make sure product-only sources also exist.
+    for row in rows:
+        market = normalize_dimension(
+            row.get("market")
+        )
+
+        source = normalize_dimension(
+            row.get("source_of_market")
+        )
+
+        product = normalize_dimension(
+            row.get("product")
+        )
+
+        if is_all(market) or is_all(product):
+            continue
+
+        if market not in tree["markets"]:
+            continue
+
+        # A product may be stored without an explicit source.
+        if is_all(source):
+            source = "Unknown"
+
+        sources = tree["markets"][market][
+            "sources"
+        ]
 
         if source not in sources:
             sources[source] = {
@@ -176,65 +269,100 @@ def populate_source_shares(tree, metrics):
                 "products": {},
             }
 
-        # An ALL product row contains the actual source share
-        if product == "ALL":
-            forecast = row["forecast_data"]
-
-            sources[source]["share"] = (
-                forecast["train_values"]
-                + forecast["forecast_values"]
-            )
-
 def populate_source_volumes(tree):
     """
     Source Volume = Market Volume × Source Share / 100
     """
 
-    for market in tree["markets"].values():
+    for market in tree.get(
+        "markets",
+        {}
+    ).values():
+        market_volume = market.get(
+            "volume",
+            []
+        )
 
-        market_volume = market["volume"]
-
-        for source in market["sources"].values():
+        for source in market.get(
+            "sources",
+            {}
+        ).values():
+            source_share = source.get(
+                "share",
+                []
+            )
 
             source["volume"] = [
-                round(market_total * source_share / 100, 2)
-                for market_total, source_share in zip(
+                round(
+                    market_total
+                    * share
+                    / 100,
+                    2,
+                )
+                for market_total, share in zip(
                     market_volume,
-                    source["share"],
+                    source_share,
                 )
             ]
 
 def populate_product_shares(tree, metrics):
     """
     Populate product shares under each source.
+
+    Product-level row:
+        market != ALL
+        product != ALL
     """
 
-    for row in metrics.get("market_share", []):
+    rows = metrics.get("market_share", [])
 
-        if row["product"] == "ALL":
+    for row in rows:
+        market = normalize_dimension(
+            row.get("market")
+        )
+
+        source = normalize_dimension(
+            row.get("source_of_market")
+        )
+
+        product = normalize_dimension(
+            row.get("product")
+        )
+
+        if is_all(market) or is_all(product):
             continue
 
-        market = row["market"]
-        source = row["source_of_market"] or "Unknown"
-        product = row["product"]
+        if is_all(source):
+            source = "Unknown"
 
         if market not in tree["markets"]:
             continue
 
-        if source not in tree["markets"][market]["sources"]:
+        sources = tree["markets"][market][
+            "sources"
+        ]
+
+        if source not in sources:
             continue
 
-        forecast = row["forecast_data"]
-
-        values = (
-            forecast["train_values"]
-            + forecast["forecast_values"]
+        forecast = row.get(
+            "forecast_data",
+            {}
         )
 
-        tree["markets"][market]["sources"][source]["products"][product] = {
+        values = (
+            forecast.get("train_values", [])
+            + forecast.get("forecast_values", [])
+        )
+
+        product_node = {
             "share": values,
             "volume": [],
         }
+
+        sources[source][
+            "products"
+        ][product] = product_node
 
         # Store a reference at the top level as well
 
@@ -243,19 +371,38 @@ def populate_product_volumes(tree):
     Product Volume = Source Volume × Product Share / 100
     """
 
-    for market in tree["markets"].values():
+    for market in tree.get(
+        "markets",
+        {}
+    ).values():
+        for source in market.get(
+            "sources",
+            {}
+        ).values():
+            source_volume = source.get(
+                "volume",
+                []
+            )
 
-        for source in market["sources"].values():
-
-            source_volume = source["volume"]
-
-            for product in source["products"].values():
+            for product in source.get(
+                "products",
+                {}
+            ).values():
+                product_share = product.get(
+                    "share",
+                    []
+                )
 
                 product["volume"] = [
-                    round(source_total * product_share / 100, 2)
-                    for source_total, product_share in zip(
+                    round(
+                        source_total
+                        * share
+                        / 100,
+                        2,
+                    )
+                    for source_total, share in zip(
                         source_volume,
-                        product["share"],
+                        product_share,
                     )
                 ]
 

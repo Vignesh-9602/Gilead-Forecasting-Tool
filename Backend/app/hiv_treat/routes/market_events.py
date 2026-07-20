@@ -165,101 +165,813 @@ def get_market_event_filters(
 
 #apply filter
 
+from pprint import pprint
+
+from fastapi import Depends, HTTPException
+
+
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
     db=Depends(get_connection),
 ):
-
-    cursor = db.cursor(cursor_factory=RealDictCursor)
+    cursor = db.cursor(
+        cursor_factory=RealDictCursor
+    )
 
     try:
+        selected_filter = payload.selected_filter
 
-        # -----------------------------------------
-        # Load metadata
-        # -----------------------------------------
+        scenario_name = (
+            selected_filter.scenario_name
+            or ""
+        ).strip()
+
+        print("\n" + "=" * 90)
+        print("APPLY MARKET EVENT FILTERS")
+        print("=" * 90)
+
+        # =====================================================
+        # Request
+        # =====================================================
+
+        print("\n[REQUEST]")
+        print("TA NAME:", repr(payload.ta_name))
+        print("SCENARIO:", repr(scenario_name))
+        print(
+            "START DATE:",
+            repr(selected_filter.start_date),
+        )
+        print(
+            "END DATE:",
+            repr(selected_filter.end_date),
+        )
+        print(
+            "SELECTED MARKETS:",
+            selected_filter.markets,
+        )
+        print(
+            "SELECTED PRODUCTS:",
+            selected_filter.products,
+        )
+
+        # Warn about placeholder date values.
+        if str(
+            selected_filter.start_date
+        ).strip().lower() == "string":
+            print(
+                "WARNING: start_date contains the literal "
+                "value 'string'."
+            )
+
+        if str(
+            selected_filter.end_date
+        ).strip().lower() == "string":
+            print(
+                "WARNING: end_date contains the literal "
+                "value 'string'."
+            )
+
+        # =====================================================
+        # 1. Metadata
+        # =====================================================
+
+        print("\n[1] LOADING METADATA")
 
         metadata = load_metadata(
             cursor=cursor,
             ta_name=payload.ta_name,
-            scenario_name=payload.selected_filter.scenario_name,
-            start_date=payload.selected_filter.start_date,
-            end_date=payload.selected_filter.end_date,
+            scenario_name=scenario_name,
+            start_date=selected_filter.start_date,
+            end_date=selected_filter.end_date,
         )
 
-        # -----------------------------------------
-        # Load forecast outputs
-        # -----------------------------------------
+        print(
+            "METADATA TYPE:",
+            type(metadata).__name__,
+        )
+        print("METADATA:")
+        pprint(metadata)
+
+        if not isinstance(metadata, dict):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "load_metadata() must return a dictionary. "
+                    f"Received {type(metadata).__name__}."
+                ),
+            )
+
+        available_scenarios = metadata.get(
+            "available_scenarios",
+            [],
+        )
+
+        print(
+            "AVAILABLE SCENARIOS:",
+            available_scenarios,
+        )
+
+        normalized_available_scenarios = {
+            str(value).strip().lower()
+            for value in available_scenarios
+            if value is not None
+        }
+
+        if (
+            scenario_name
+            and scenario_name.lower()
+            not in normalized_available_scenarios
+        ):
+            print(
+                "WARNING: Selected scenario was not found "
+                "in available_scenarios."
+            )
+
+        # =====================================================
+        # 2. Forecast outputs
+        # =====================================================
+
+        print("\n[2] LOADING FORECAST OUTPUTS")
 
         metrics = load_forecast_outputs(
             cursor=cursor,
             ta_name=payload.ta_name,
-            scenario_name=payload.selected_filter.scenario_name,
+            scenario_name=scenario_name,
         )
 
-        # -----------------------------------------
-        # Build calculation tree
-        # -----------------------------------------
+        debug_forecast_outputs(
+            metrics=metrics,
+        )
 
-        tree = build_calculation_tree(metrics)
+        if not metrics:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No forecast output data found for "
+                    f"scenario {scenario_name!r}."
+                ),
+            )
+
+        # =====================================================
+        # 3. Build tree
+        # =====================================================
+
+        print("\n[3] BUILDING CALCULATION TREE")
+
+        # Keep metrics in its original structure.
+        # build_calculation_tree() already expects this format.
+        tree = build_calculation_tree(
+            metrics
+        )
+
+        debug_tree_summary(
+            tree=tree,
+            stage="AFTER BUILD",
+        )
+
+        # =====================================================
+        # 4. Date filtering
+        # =====================================================
+
+        print("\n[4] FILTERING TREE BY DATE")
 
         tree = filter_tree_by_date(
             tree,
-            payload.selected_filter.start_date,
-            payload.selected_filter.end_date,
+            selected_filter.start_date,
+            selected_filter.end_date,
         )
 
-        # -----------------------------------------
-        # Build Events
-        # -----------------------------------------
+        debug_tree_summary(
+            tree=tree,
+            stage="AFTER DATE FILTER",
+        )
 
-        overall_event = build_overall_event(tree)
+        # =====================================================
+        # 5. Build events
+        # =====================================================
 
-        market_event = build_market_event(tree)
+        print("\n[5] BUILDING EVENTS")
 
-        product_event = build_product_event(tree)
+        overall_event = build_overall_event(
+            tree
+        )
 
-        # -----------------------------------------
-        # Response
-        # -----------------------------------------
+        debug_event_summary(
+            event_name="overall_event",
+            event=overall_event,
+        )
 
-        print(metadata)
-        print(type(metadata))
+        market_event = build_market_event(
+            tree
+        )
 
-        return {
+        debug_event_summary(
+            event_name="market_event",
+            event=market_event,
+        )
 
+        product_event = build_product_event(
+            tree
+        )
+
+        debug_event_summary(
+            event_name="product_event",
+            event=product_event,
+        )
+
+        # =====================================================
+        # 6. Response
+        # =====================================================
+
+        response = {
             "ta_name": payload.ta_name,
 
-            "available_scenarios": metadata["available_scenarios"],
+            "available_scenarios": metadata.get(
+                "available_scenarios",
+                [],
+            ),
 
-            "available_months": metadata["available_months"],
+            "available_months": metadata.get(
+                "available_months",
+                [],
+            ),
 
-            "selected_filter": payload.selected_filter.model_dump(),
+            "selected_filter": (
+                selected_filter.model_dump()
+            ),
 
-            "metric_filters": [
-                {
-                    "label": "Market Share",
-                    "value": "market_share",
-                },
-                {
-                    "label": "Overall Market Volume",
-                    "value": "market_volume",
-                },
-            ],
+            "metric_filters": metadata.get(
+                "metric_filters",
+                [
+                    {
+                        "label": "Market Share",
+                        "value": "market_share",
+                    },
+                    {
+                        "label": "Overall Market Volume",
+                        "value": "market_volume",
+                    },
+                ],
+            ),
 
             "event_tabs": {
-
                 "overall_event": overall_event,
-
                 "market_event": market_event,
-
                 "product_event": product_event,
-
             },
         }
 
+        print("\n[6] RESPONSE SUMMARY")
+
+        for event_name, event_value in response[
+            "event_tabs"
+        ].items():
+            print(
+                event_name,
+                {
+                    "type": type(
+                        event_value
+                    ).__name__,
+                    "present": bool(
+                        event_value
+                    ),
+                    "keys": (
+                        list(event_value.keys())
+                        if isinstance(
+                            event_value,
+                            dict,
+                        )
+                        else None
+                    ),
+                },
+            )
+
+        print("=" * 90 + "\n")
+
+        return response
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("\n[APPLY FILTERS ERROR]")
+        print(
+            "ERROR TYPE:",
+            type(exc).__name__,
+        )
+        print(
+            "ERROR MESSAGE:",
+            str(exc),
+        )
+
+        raise
+
     finally:
         cursor.close()
+
+def debug_forecast_outputs(
+    *,
+    metrics,
+):
+    """
+    Safely inspect the result of load_forecast_outputs().
+
+    Supports:
+    - dictionary-based metric structures
+    - lists of row dictionaries
+    - unexpected values
+    """
+
+    print("\n[FORECAST OUTPUT SUMMARY]")
+
+    print(
+        "METRICS TYPE:",
+        type(metrics).__name__,
+    )
+
+    if metrics is None:
+        print("METRICS VALUE: None")
+        return
+
+    # =====================================================
+    # Dictionary structure
+    # =====================================================
+
+    if isinstance(metrics, dict):
+        print(
+            "TOP-LEVEL KEY COUNT:",
+            len(metrics),
+        )
+        print(
+            "TOP-LEVEL KEYS:",
+            list(metrics.keys()),
+        )
+
+        for key, value in metrics.items():
+            print("\nMETRIC KEY:", repr(key))
+            print(
+                "VALUE TYPE:",
+                type(value).__name__,
+            )
+
+            if isinstance(value, dict):
+                print(
+                    "NESTED KEYS:",
+                    list(value.keys()),
+                )
+
+                debug_nested_metric_dict(
+                    metric_name=str(key),
+                    value=value,
+                )
+
+            elif isinstance(value, list):
+                print(
+                    "LIST LENGTH:",
+                    len(value),
+                )
+
+                if value:
+                    print(
+                        "FIRST ITEM TYPE:",
+                        type(
+                            value[0]
+                        ).__name__,
+                    )
+                    print(
+                        "FIRST ITEM:"
+                    )
+                    pprint(value[0])
+
+            else:
+                print(
+                    "VALUE:",
+                    value,
+                )
+
+        return
+
+    # =====================================================
+    # List of rows
+    # =====================================================
+
+    if isinstance(metrics, list):
+        print(
+            "ROW COUNT:",
+            len(metrics),
+        )
+
+        if not metrics:
+            return
+
+        item_types = sorted({
+            type(item).__name__
+            for item in metrics
+        })
+
+        print(
+            "ITEM TYPES:",
+            item_types,
+        )
+
+        dictionary_rows = [
+            row
+            for row in metrics
+            if isinstance(row, dict)
+        ]
+
+        print(
+            "DICTIONARY ROW COUNT:",
+            len(dictionary_rows),
+        )
+
+        scenario_values = sorted({
+            str(
+                row.get("scenario_name")
+            ).strip()
+            for row in dictionary_rows
+            if row.get(
+                "scenario_name"
+            ) is not None
+        })
+
+        markets_found = sorted({
+            str(row.get("market")).strip()
+            for row in dictionary_rows
+            if row.get("market")
+        })
+
+        products_found = sorted({
+            str(row.get("product")).strip()
+            for row in dictionary_rows
+            if row.get("product")
+        })
+
+        sources_found = sorted({
+            str(
+                row.get("source_of_market")
+            ).strip()
+            for row in dictionary_rows
+            if row.get(
+                "source_of_market"
+            )
+        })
+
+        print(
+            "SCENARIOS:",
+            scenario_values,
+        )
+        print(
+            "MARKETS:",
+            markets_found,
+        )
+        print(
+            "PRODUCTS:",
+            products_found,
+        )
+        print(
+            "SOURCES:",
+            sources_found,
+        )
+
+        print("\nFIRST FIVE ROWS:")
+
+        for index, row in enumerate(
+            dictionary_rows[:5]
+        ):
+            print(
+                f"ROW {index}:"
+            )
+            pprint(row)
+
+        return
+
+    # =====================================================
+    # Unexpected structure
+    # =====================================================
+
+    print(
+        "UNEXPECTED METRICS STRUCTURE:"
+    )
+    pprint(metrics)
+
+def debug_nested_metric_dict(
+    *,
+    metric_name: str,
+    value: dict,
+):
+    """
+    Inspect common dictionary-based forecast structures.
+    """
+
+    common_fields = [
+        "months",
+        "forecast_values",
+        "actual_values",
+        "market",
+        "product",
+        "source_of_market",
+        "scenario_name",
+    ]
+
+    found_common_field = False
+
+    for field_name in common_fields:
+        if field_name not in value:
+            continue
+
+        found_common_field = True
+
+        field_value = value[field_name]
+
+        if isinstance(field_value, list):
+            print(
+                f"{field_name}:",
+                {
+                    "length": len(
+                        field_value
+                    ),
+                    "sample": (
+                        field_value[:5]
+                    ),
+                },
+            )
+        else:
+            print(
+                f"{field_name}:",
+                field_value,
+            )
+
+    if found_common_field:
+        return
+
+    # It may be nested by market, source or product.
+    print(
+        f"NESTED STRUCTURE FOR "
+        f"{metric_name!r}:"
+    )
+
+    for nested_key, nested_value in list(
+        value.items()
+    )[:10]:
+        if isinstance(nested_value, dict):
+            print(
+                repr(nested_key),
+                {
+                    "type": "dict",
+                    "keys": list(
+                        nested_value.keys()
+                    )[:10],
+                },
+            )
+
+        elif isinstance(nested_value, list):
+            print(
+                repr(nested_key),
+                {
+                    "type": "list",
+                    "length": len(
+                        nested_value
+                    ),
+                    "sample": (
+                        nested_value[:3]
+                    ),
+                },
+            )
+
+        else:
+            print(
+                repr(nested_key),
+                {
+                    "type": type(
+                        nested_value
+                    ).__name__,
+                    "value": nested_value,
+                },
+            )
+
+def debug_tree_summary(
+    *,
+    tree: dict,
+    stage: str,
+):
+    print(
+        f"\n[TREE SUMMARY: {stage}]"
+    )
+
+    if not isinstance(tree, dict):
+        print(
+            "Tree is not a dictionary:",
+            type(tree).__name__,
+        )
+        return
+
+    print(
+        "TOP-LEVEL KEYS:",
+        list(tree.keys()),
+    )
+
+    months = tree.get("months")
+
+    if months is None:
+        months = (
+            tree.get("overall", {})
+            .get("months")
+        )
+
+    print_collection_summary(
+        label="MONTHS",
+        value=months,
+    )
+
+    print_collection_summary(
+        label="MARKETS",
+        value=tree.get("markets"),
+    )
+
+    print_collection_summary(
+        label="PRODUCTS",
+        value=tree.get("products"),
+    )
+
+    overall = tree.get(
+        "overall",
+        {},
+    )
+
+    print(
+        "OVERALL TYPE:",
+        type(overall).__name__,
+    )
+
+    if isinstance(overall, dict):
+        print(
+            "OVERALL KEYS:",
+            list(overall.keys()),
+        )
+
+        print_collection_summary(
+            label="OVERALL VOLUME",
+            value=overall.get("volume"),
+        )
+
+    tree_sections = [
+        "market_distribution",
+        "source_distribution",
+        "product_distribution",
+        "calculated_market_volume",
+        "calculated_source_volume",
+        "calculated_product_volume",
+        "aggregated_product_volume",
+        "aggregated_product_share",
+    ]
+
+    for section_name in tree_sections:
+        section = tree.get(
+            section_name
+        )
+
+        print(
+            f"{section_name.upper()}:",
+            summarize_value(section),
+        )
+
+def print_collection_summary(
+    *,
+    label: str,
+    value,
+):
+    print(
+        f"{label}:",
+        summarize_value(value),
+    )
+
+
+def summarize_value(value):
+    if value is None:
+        return {
+            "type": "None",
+            "count": 0,
+        }
+
+    if isinstance(value, dict):
+        return {
+            "type": "dict",
+            "count": len(value),
+            "keys": list(
+                value.keys()
+            )[:20],
+        }
+
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "count": len(value),
+            "sample": value[:5],
+        }
+
+    if isinstance(value, tuple):
+        return {
+            "type": "tuple",
+            "count": len(value),
+            "sample": list(
+                value[:5]
+            ),
+        }
+
+    if isinstance(value, set):
+        sample = list(value)[:5]
+
+        return {
+            "type": "set",
+            "count": len(value),
+            "sample": sample,
+        }
+
+    return {
+        "type": type(
+            value
+        ).__name__,
+        "value": value,
+    }
+
+def debug_event_summary(
+    *,
+    event_name: str,
+    event,
+):
+    print(
+        f"\n[EVENT SUMMARY: {event_name}]"
+    )
+
+    if not event:
+        print("Event is empty.")
+        return
+
+    if not isinstance(event, dict):
+        print(
+            "Event is not a dictionary:",
+            type(event).__name__,
+        )
+        return
+
+    print(
+        "EVENT KEYS:",
+        list(event.keys()),
+    )
+
+    for period_name in [
+        "monthly",
+        "yearly",
+    ]:
+        period = event.get(
+            period_name
+        )
+
+        print(
+            f"{period_name.upper()}:",
+            summarize_value(period),
+        )
+
+        if not isinstance(period, dict):
+            continue
+
+        for view_name, view_value in period.items():
+            if not isinstance(
+                view_value,
+                dict,
+            ):
+                continue
+
+            chart = view_value.get(
+                "chart"
+            )
+            table = view_value.get(
+                "table"
+            )
+
+            print(
+                f"{period_name}.{view_name}:",
+                {
+                    "keys": list(
+                        view_value.keys()
+                    ),
+                    "has_chart": bool(
+                        chart
+                    ),
+                    "has_table": bool(
+                        table
+                    ),
+                    "chart": (
+                        summarize_value(chart)
+                    ),
+                    "table": (
+                        summarize_value(table)
+                    ),
+                },
+            )
 
 #edits
 @router.post("/edit_save")
