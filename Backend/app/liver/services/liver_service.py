@@ -992,6 +992,9 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         _t1a, _t1b, _t1g = 0.30, 0.20, 0.98
     tab1_ets     = EtsParams(alpha=round(_t1a, 4), beta=round(_t1b, 4), gamma=round(_t1g, 4))
     tab1_factors = factors.model_copy(update={"active_model": "ets", "ets": tab1_ets}) if force_tab1_ets else factors
+    # When Tab1 is the recalculate target (force_tab1_ets=False), Tab2-5 shares stay
+    # flat via simple MA — the user's growth model only applies to Tab1's total volume.
+    tab25_factors = factors if force_tab1_ets else factors.model_copy(update={"active_model": "moving_average"})
     tmv_map      = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
     tab1_mv_data = _build_tab_data(tmv_map, month_range, month_labels, fsi, tab1_factors)
     # chart label shows "Total Market Volume"; table hierarchy keeps scenario_name
@@ -1046,7 +1049,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             month_range=month_range,
             month_labels=month_labels,
             forecast_start_index=fsi,
-            factors=factors,
+            factors=tab25_factors,
             tmv_fc=_tmv_fc,
             selected_label=label,
             add_total=True,
@@ -1055,7 +1058,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
 
     def bflat_ms(rows, label):
         return _fmt_flat(
-            _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, factors,
+            _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, tab25_factors,
                             selected_label=label, auto_model=auto_model, add_total=True),
             month_labels, fsi,
         )
@@ -1067,14 +1070,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             month_range=month_range,
             month_labels=month_labels,
             forecast_start_index=fsi,
-            factors=factors,
+            factors=tab25_factors,
             selected_child=child_lbl,
         )
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int, chart_parent_filter=parent_lbl)
 
     def bhier_ms(rows, parent_lbl, child_lbl):
         return _fmt_hier(
-            _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, factors,
+            _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, tab25_factors,
                                          selected_parent=parent_lbl or "",
                                          selected_child=child_lbl or "",
                                          auto_model=auto_model),
@@ -1734,11 +1737,15 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         all_scenario_names = get_scenarios(cur)
         available_scenarios = ["Base"] + all_scenario_names
 
+        # Tab1 only changes when the user explicitly recalculates total_market_volume.
+        # For all other tabs the projection runs on share only — Tab1 stays ETS.
+        _force_ets = payload.selected_tab.lower() != "total_market_volume"
+
         market_analysis, tab1_ets = _build_market_analysis_both_granularities(
             cur, payload.ta_name, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, factors,
             sel_payer=market, sel_product=product,
-            force_tab1_ets=False,
+            force_tab1_ets=_force_ets,
             scenario_name=payload.scenario_name,
             auto_model=model_type,
         )
