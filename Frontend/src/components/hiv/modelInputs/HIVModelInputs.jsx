@@ -26,7 +26,7 @@ import { GlobalContext } from "../../../context/Provider";
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
 import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario } from "../../../services/apiService";
-import { useLoadingStore } from "../../../stores";
+import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
@@ -44,6 +44,7 @@ export default function HIVModelInput() {
     const [toDate, setToDate] = useState("2025-12-01");
 
     const { setLoading } = useLoadingStore();
+    const { showSnackbar } = useSnackbarStore();
 
     const [availableMonths, setAvailableMonths] = useState([]);
     const [markets, setMarkets] = useState([]);
@@ -261,6 +262,7 @@ export default function HIVModelInput() {
             }
         } catch (error) {
             console.error("Failed to fetch model input filters", error);
+            showSnackbar("Failed to fetch model input filters", "error");
 
             setAvailableMonths([]);
             setMarkets([]);
@@ -320,9 +322,11 @@ export default function HIVModelInput() {
 
             setAllScenariosData(response.data.scenarios || {});
 
-            console.log(
-                scenario.market_analysis
-            );
+            showSnackbar("Filters applied successfully", "success");
+
+            // console.log(
+            //     scenario.market_analysis
+            // );
 
             const chartData =
                 scenario?.market_analysis
@@ -386,6 +390,7 @@ export default function HIVModelInput() {
             // );
         } catch (err) {
             console.log(err);
+            showSnackbar("Failed to apply filters", "error");
         } finally {
             setLoading(false);
         }
@@ -483,9 +488,11 @@ export default function HIVModelInput() {
             );
 
             setAllScenariosData(response.data.scenarios || {});
+            showSnackbar("Scenario recalculated successfully", "success");
 
         } catch (err) {
             console.error(err);
+            showSnackbar("Failed to recalculate scenario", "error");
         } finally {
             setLoading(false);
         }
@@ -550,7 +557,7 @@ export default function HIVModelInput() {
                 market_analysis: updatedMarketAnalysis,
             };
 
-            console.log("Edit Payload", payload);
+            // console.log("Edit Payload", payload);
 
             const response = await editHIVScenario(payload);
 
@@ -577,8 +584,11 @@ export default function HIVModelInput() {
 
             setAllScenariosData(response.data.scenarios || {});
 
+            showSnackbar("Changes refreshed successfully", "success");
+
         } catch (err) {
             console.error(err);
+            showSnackbar("Failed to refresh changes", "error");
             throw err; // let handleRefresh know it failed
 
         } finally {
@@ -669,8 +679,11 @@ export default function HIVModelInput() {
 
             setAllScenariosData(response.data.scenarios || {});
 
+            showSnackbar("Scenario created successfully", "success");
+
         } catch (err) {
             console.error(err);
+            showSnackbar("Failed to create scenario", "error");
         } finally {
             setLoading(false);
         }
@@ -746,6 +759,10 @@ export default function HIVModelInput() {
             setActiveScenario(response.data.active_scenario || "");
             setMarketAnalysis(scenario.market_analysis || {});
             setAllScenariosData(response.data.scenarios || {});
+            showSnackbar("Scenario updated successfully", "success");
+        } catch (err) {
+            console.error(err);
+            showSnackbar("Failed to update scenario", "error");
         } finally {
             setLoading(false);
         }
@@ -804,14 +821,13 @@ export default function HIVModelInput() {
 
             setAllScenariosData(response.data.scenarios || {});
 
+            showSnackbar("Scenario applied successfully", "success");
+
         } catch (err) {
-
             console.error(err);
-
+            showSnackbar("Failed to apply scenario", "error");
         } finally {
-
             setLoading(false);
-
         }
     };
 
