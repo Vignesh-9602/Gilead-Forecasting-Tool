@@ -221,17 +221,30 @@ def build_redistribution_curves(
         for e in impacted_entities
     }
 
+def build_event_curve(event: EventInput, baseline_pct: float = 0.0) -> List[float]:
+    """
+    Absolute share curve for the selected entity: ramps from baseline_pct
+    up to event.peak_pct following the chosen shape. The caller applies
+    this by SETTING the entity's forecast to these values directly (not
+    adding), so it lands exactly on peak_pct and holds there flat --
+    baseline drift in the underlying forecast no longer leaks in.
+    overall_event has no baseline concept; leave baseline_pct at 0.0.
+    """
+    return _normalized_curve(baseline_pct, event.peak_pct, event.duration_months,
+                              event.curve_type, event.factor)
 
-# ======================================================
-# MAIN FUNCTION
-# ======================================================
 
-def compute_event_forecast(event: EventInput) -> EventForecastResult:
-    base_curve = build_event_curve(event)
+def compute_event_forecast(event: EventInput, baseline_pct: float = 0.0) -> EventForecastResult:
+    base_curve = build_event_curve(event, baseline_pct=baseline_pct)
     coverage_curve = build_coverage_curve(event) if event.coverage else None
     final_curve = apply_coverage(base_curve, coverage_curve) if event.coverage else base_curve
 
-    impacted_curves = build_redistribution_curves(final_curve, event.impacted_entities)
+    # Siblings lose share proportional to how much the selected entity
+    # actually MOVED from its own baseline -- a delta, not an absolute
+    # value -- so redistribution still needs final_curve - baseline_pct,
+    # even though final_curve itself is now absolute again.
+    delta_curve = [round(v - baseline_pct, 4) for v in final_curve]
+    impacted_curves = build_redistribution_curves(delta_curve, event.impacted_entities)
 
     return EventForecastResult(
         event_name=event.event_name,
@@ -240,6 +253,6 @@ def compute_event_forecast(event: EventInput) -> EventForecastResult:
         base_curve=base_curve,
         coverage_curve=coverage_curve,
         final_curve=final_curve,
-        selected_curve=final_curve,
-        impacted_curves=impacted_curves,
+        selected_curve=final_curve,   # absolute -- selected entity is SET to this
+        impacted_curves=impacted_curves,  # delta -- siblings ADD this
     )

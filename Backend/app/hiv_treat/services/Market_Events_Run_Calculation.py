@@ -439,24 +439,47 @@ def _entity_curves(result: EventForecastResult) -> Dict[str, List[float]]:
 
 
 def _apply_curve_to_series(series: dict, curve_months: List[str], curve_values: List[float],
-                            bounds: Optional[Tuple[float, float]] = None) -> Tuple[dict, bool]:
-    """Adds curve values onto the forecast portion by month label. `applied`
-    is False if the curve never lands on a forecast-side month (e.g. dates
-    entirely in history) -- callers use this to detect a silent no-op."""
+                            bounds: Optional[Tuple[float, float]] = None,
+                            mode: str = "add") -> Tuple[dict, bool]:
+    """mode="set": forecast value becomes curve_values[pos] directly (used
+    for the selected entity -- pins it exactly to the curve's own target,
+    including holding flat at the peak once the curve ends, regardless of
+    what the underlying baseline forecast does).
+    mode="add": curve_values[pos] is added onto the existing forecast
+    (used for impacted/sibling entities -- they move relative to their
+    own trend, not toward an absolute target)."""
     series = copy.deepcopy(series)
     applied = False
+    if not curve_months or not curve_values:
+        return series, applied
+
     month_index = {m: i for i, m in enumerate(series["months"])}
-    for month, value in zip(curve_months, curve_values):
-        idx = month_index.get(month)
-        if idx is None or idx < series["forecast_start_index"]:
+    start_idx = month_index.get(curve_months[0])
+    if start_idx is None:
+        return series, applied
+
+    hold_value = curve_values[-1]
+
+    for idx in range(start_idx, len(series["months"])):
+        if idx < series["forecast_start_index"]:
             continue
+        pos = idx - start_idx
+        value = curve_values[pos] if pos < len(curve_values) else hold_value
+
         fi = idx - series["forecast_start_index"]
-        if fi < len(series["forecast"]):
+        if fi >= len(series["forecast"]):
+            break
+
+        if mode == "set":
+            new_value = round(value, 2)
+        else:
             new_value = round(series["forecast"][fi] + value, 2)
-            if bounds is not None:
-                new_value = max(bounds[0], min(bounds[1], new_value))
-            series["forecast"][fi] = new_value
-            applied = True
+
+        if bounds is not None:
+            new_value = max(bounds[0], min(bounds[1], new_value))
+        series["forecast"][fi] = new_value
+        applied = True
+
     return series, applied
 
 
@@ -511,20 +534,10 @@ def _reconcile_product_event_market(
     market: str,
     touched_products: List[str],
     has_explicit_redistribution: bool,
+    selected_products: Set[str],
     all_products: List[str],
     grid_fetch_cache: GridFetchCache,
 ) -> None:
-    """product_event only: the market's products must still sum to 100%.
-    If impacted_entities were given, compute_event_forecast's weighting
-    already conserves the total across the touched products -- so any
-    leftover residual here is just rounding drift, and gets nudged back
-    onto the touched cells only. If no impacted_entities were given,
-    there's nothing offsetting the selected product's change, so the
-    residual is spread across the untouched sibling products instead
-    (the true fallback case).
-
-    `all_products` is passed in (fetched once per run by the caller)
-    instead of re-querying the DB on every reconciliation call."""
     share_cache = cache["market_share"]
     bounds = CLAMP_BOUNDS["market_share"]
 
@@ -551,7 +564,13 @@ def _reconcile_product_event_market(
         if abs(residual) <= 1e-6:
             continue
 
-        targets = touched_rows if has_explicit_redistribution else sibling_rows
+        if has_explicit_redistribution:
+            targets = [r for r in touched_rows if r["product"] not in selected_products]
+            if not targets:
+                targets = sibling_rows
+        else:
+            targets = sibling_rows
+
         weight_total = sum(r["forecast"][i] for r in targets if i < len(r["forecast"]))
         if weight_total <= 0:
             continue
@@ -741,7 +760,10 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
     across events so the balance pass runs once per cell, not once per
     event:
       - product_event: touched products must still sum to 100% within the
-        market -- see _reconcile_product_event_market.
+        market -- see _reconcile_product_event_market. The selected
+        (pinned) product in each event is tracked separately from the
+        touched set, so reconciliation never redistributes residual onto
+        a row that was just SET to an exact target.
       - market_event: only the selected product should move between
         markets; every other product's total across the affected markets
         must be preserved, not just each market's row total -- see
@@ -764,10 +786,45 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
     market_event_work: Dict[Tuple[str, str, str], Dict] = {}
 
     for event in events:
-        result = compute_event_forecast(event)
-        curves = _entity_curves(result)
         event_touched_forecast = False
-        keys_by_label = {label: _cell_key(event, label) for label in curves}
+
+        # Determine which entities this event touches, straight from the
+        # event object -- we need this BEFORE calling compute_event_forecast,
+        # since we now need the selected entity's current baseline share to
+        # anchor the curve at baseline -> peak_pct instead of 0 -> peak_pct.
+        label_names = [event.selected_entity or OVERALL_LABEL]
+        if event.impacted_entities:
+            label_names += [e.name for e in event.impacted_entities]
+        keys_by_label = {label: _cell_key(event, label) for label in label_names}
+
+        # Make sure market_share cache has these cells loaded so we can read
+        # the selected entity's current share. (The metric loop below will
+        # see these are already cached and skip re-fetching.)
+        needs_share_fetch = any(key not in cache["market_share"] for key in keys_by_label.values())
+        if needs_share_fetch:
+            baseline_rows = fetch_baseline(event, "market_share")
+            for row in baseline_rows:
+                cache["market_share"].setdefault((row["market"], row["product"]), row)
+
+        # Read the selected entity's baseline share at the event's start
+        # month. overall_event has no "reach a target share" semantics (it's
+        # a portfolio-level growth curve, per event_curve_engine's docstring),
+        # so it always anchors at 0, preserving the original additive behavior.
+        baseline_pct = 0.0
+        if event.event_scope != EventScope.OVERALL_EVENT:
+            selected_key = keys_by_label[event.selected_entity]
+            selected_row = cache["market_share"].get(selected_key)
+            if selected_row is not None:
+                start_month = event.start_date.strftime("%Y-%m-%d")
+                month_index = {m: i for i, m in enumerate(selected_row["months"])}
+                idx = month_index.get(start_month)
+                if idx is not None:
+                    combined = selected_row["history"] + selected_row["forecast"]
+                    if idx < len(combined):
+                        baseline_pct = combined[idx]
+
+        result = compute_event_forecast(event, baseline_pct=baseline_pct)
+        curves = _entity_curves(result)
 
         for metric in METRICS:
             needs_fetch = any(key not in cache[metric] for key in keys_by_label.values())
@@ -796,12 +853,14 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                     )
 
             bounds = CLAMP_BOUNDS.get(metric)
+            selected_label = event.selected_entity or OVERALL_LABEL
             for label, curve in curves.items():
                 key = keys_by_label[label]
                 if key not in cache[metric]:
                     continue
+                mode = "set" if (metric == "market_share" and label == selected_label) else "add"
                 cache[metric][key], applied = _apply_curve_to_series(
-                    cache[metric][key], result.months, curve, bounds)
+                    cache[metric][key], result.months, curve, bounds, mode=mode)
                 event_touched_forecast = event_touched_forecast or applied
 
         if not event_touched_forecast:
@@ -820,10 +879,15 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
         if event.event_scope == EventScope.PRODUCT_EVENT:
             work_key = (event.scenario_name, event.ta_name, event.context)
             entry = product_event_work.setdefault(
-                work_key, {"touched_products": set(), "has_explicit_redistribution": False})
+                work_key, {
+                    "touched_products": set(),
+                    "has_explicit_redistribution": False,
+                    "selected_products": set(),
+                })
             entry["touched_products"].update(curves.keys())
             entry["has_explicit_redistribution"] = (
                 entry["has_explicit_redistribution"] or bool(event.impacted_entities))
+            entry["selected_products"].add(event.selected_entity)
         elif event.event_scope == EventScope.MARKET_EVENT:
             work_key = (event.scenario_name, event.ta_name, event.context)
             entry = market_event_work.setdefault(work_key, {"markets": set()})
@@ -835,6 +899,7 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
             cache, scenario_name, ta_name, market,
             touched_products=list(entry["touched_products"]),
             has_explicit_redistribution=entry["has_explicit_redistribution"],
+            selected_products=entry["selected_products"],
             all_products=all_products,
             grid_fetch_cache=grid_fetch_cache,
         )
