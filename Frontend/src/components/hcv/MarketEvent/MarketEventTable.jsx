@@ -304,8 +304,9 @@ export default function HIVImpactCurveTable({
     }
   };
 
-  // Called from the "Save" button. Sends the current (already-refreshed)
-  // table rows up to the parent, which posts them to the save API.
+  // Called from the "Save" button. The rows shown here are already the
+  // refreshed/recalculated values (Save is only enabled after Refresh), so
+  // this just tells the parent to persist its current scenario state.
   const handleSaveTable = async () => {
     if (typeof onSaveTable !== "function") {
       setOriginalRows(cloneRows(editableRows));
@@ -317,7 +318,7 @@ export default function HIVImpactCurveTable({
     setIsSaving(true);
 
     try {
-      await onSaveTable(toNumericRows(editableRows));
+      await onSaveTable();
 
       setOriginalRows(cloneRows(editableRows));
       setIsRefreshed(false);

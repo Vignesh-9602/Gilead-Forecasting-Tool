@@ -724,35 +724,143 @@ export default function HIVMarketEvent() {
         applyEventTabsApiResponse(apiData, payload.selected_filter);
     };
 
-    // Called from the table's "Save" button. Persists the current table
-    // values (top-level rows -> "lot", nested rows -> "children") for the
-    // active tab/metric/date range against the /save endpoint.
-    const handleSaveLiverMarketEventTable = async (savedTableRows) => {
-        const payload = {
-            ta_name: "HCV",
-            indication: therapyArea,
-            scenario_name: scenarioName,
-            metric: denormalizeMetricValue(selectedMetric),
+    // Called from the table's "Save" button. By the time Save is clickable
+    // the user has already hit Refresh (see the button's `disabled` logic,
+    // which requires isRefreshed), and handleRefreshLiverMarketEventTable
+    // has already written the recalculated response into eventTabsData —
+    // so we persist straight from that state rather than re-deriving it
+    // from the table rows.
+    const buildSaveScenarioPayload = (nameToSave) => ({
+        ta_name: "HCV",
+        scenario_name: nameToSave,
+        selected_filter: {
+            scenario_name: nameToSave,
+            payers: selectedPayers,
+            products: selectedProducts,
             start_date: fromDate,
             end_date: toDate,
-            table: (savedTableRows || []).map((row) => ({
-                lot: row.label || "",
-                total: Array.isArray(row.values) ? row.values : [],
-                children: Array.isArray(row.children)
-                    ? row.children.map((child) => ({
-                        label: child.label || "",
-                        values: Array.isArray(child.values) ? child.values : [],
-                    }))
-                    : [],
-            })),
-        };
+        },
+        event_tabs: eventTabsData || {},
+    });
+
+    const getSaveErrorMessage = (error) =>
+        error?.response?.data?.detail ||
+        error?.message ||
+        "Failed to save scenario.";
+
+    const isBaseScenarioError = (error) =>
+        /cannot save as ['"]?base['"]?/i.test(getSaveErrorMessage(error) || "");
+
+    // Resolved/rejected once the Save-As dialog is submitted or dismissed,
+    // so the table's "Save" button can just `await` this whole flow.
+    const saveScenarioResolverRef = useRef(null);
+
+    const [saveScenarioDialog, setSaveScenarioDialog] = useState({
+        open: false,
+        name: "",
+        error: "",
+        submitting: false,
+    });
+
+    const openSaveAsDialog = () => {
+        setSaveScenarioDialog({
+            open: true,
+            name: "",
+            error: "",
+            submitting: false,
+        });
+    };
+
+    const closeSaveAsDialog = () => {
+        setSaveScenarioDialog({
+            open: false,
+            name: "",
+            error: "",
+            submitting: false,
+        });
+
+        if (saveScenarioResolverRef.current) {
+            saveScenarioResolverRef.current.reject(new Error("Save cancelled"));
+            saveScenarioResolverRef.current = null;
+        }
+    };
+
+    const handleConfirmSaveAsScenario = async () => {
+        const trimmedName = saveScenarioDialog.name.trim();
+
+        if (!trimmedName) {
+            setSaveScenarioDialog((prev) => ({
+                ...prev,
+                error: "Please enter a scenario name.",
+            }));
+            return;
+        }
+
+        if (trimmedName.toLowerCase() === "base") {
+            setSaveScenarioDialog((prev) => ({
+                ...prev,
+                error: "Cannot save as 'Base'. Please provide a different scenario name.",
+            }));
+            return;
+        }
+
+        setSaveScenarioDialog((prev) => ({ ...prev, submitting: true, error: "" }));
 
         try {
-            await saveLiverMarketEvents(payload);
+            await saveLiverMarketEvents(buildSaveScenarioPayload(trimmedName));
+
+            setScenarioName(trimmedName);
+            setAvailableScenarios((prev) =>
+                prev.includes(trimmedName) ? prev : [...prev, trimmedName],
+            );
+
+            setSaveScenarioDialog({
+                open: false,
+                name: "",
+                error: "",
+                submitting: false,
+            });
+
+            if (saveScenarioResolverRef.current) {
+                saveScenarioResolverRef.current.resolve();
+                saveScenarioResolverRef.current = null;
+            }
         } catch (error) {
-            console.error("Failed to save liver market events table", error);
-            throw error;
+            setSaveScenarioDialog((prev) => ({
+                ...prev,
+                submitting: false,
+                error: getSaveErrorMessage(error),
+            }));
         }
+    };
+
+    const handleSaveLiverMarketEventTable = async () => {
+        if (scenarioName.trim().toLowerCase() === "base") {
+            // Don't hit the API at all for "Base" — it's always rejected.
+            // Go straight to asking the user for a new scenario name.
+            return new Promise((resolve, reject) => {
+                saveScenarioResolverRef.current = { resolve, reject };
+                openSaveAsDialog();
+            });
+        }
+
+        try {
+            await saveLiverMarketEvents(buildSaveScenarioPayload(scenarioName));
+            return;
+        } catch (error) {
+            if (!isBaseScenarioError(error)) {
+                console.error("Failed to save liver market event scenario", error);
+                throw error;
+            }
+        }
+
+        // Fallback: the backend rejected the save as "Base" even though our
+        // client-side check above didn't catch it (e.g. name only matches
+        // after some other normalization) — ask the user for a new name.
+        return new Promise((resolve, reject) => {
+            saveScenarioResolverRef.current = { resolve, reject };
+            openSaveAsDialog();
+        });
     };
 
     const inputStyle = {
@@ -2948,7 +3056,102 @@ export default function HIVMarketEvent() {
                     </DialogContent>
 
                 </Dialog>
+
+                <Dialog
+                    open={saveScenarioDialog.open}
+                    onClose={closeSaveAsDialog}
+                    PaperProps={{
+                        sx: {
+                            width: "360px",
+                            maxWidth: "90vw",
+                            borderRadius: "12px",
+                        },
+                    }}
+                >
+                    <DialogTitle
+                        sx={{
+                            fontWeight: 700,
+                            fontSize: "16px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            pr: 1,
+                        }}
+                    >
+                        Save as New Scenario
+
+                        <IconButton
+                            size="small"
+                            onClick={closeSaveAsDialog}
+                        >
+                            <CloseIcon fontSize="small" />
+                        </IconButton>
+                    </DialogTitle>
+
+                    <DialogContent>
+                        <Typography
+                            sx={{
+                                fontSize: "13px",
+                                color: "#64748b",
+                                mb: 2,
+                            }}
+                        >
+                            The "Base" scenario can't be overwritten. Give this scenario a
+                            new name to save your changes.
+                        </Typography>
+
+                        <TextField
+                            autoFocus
+                            fullWidth
+                            size="small"
+                            placeholder="Scenario name"
+                            value={saveScenarioDialog.name}
+                            onChange={(e) =>
+                                setSaveScenarioDialog((prev) => ({
+                                    ...prev,
+                                    name: e.target.value,
+                                    error: "",
+                                }))
+                            }
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    handleConfirmSaveAsScenario();
+                                }
+                            }}
+                            error={Boolean(saveScenarioDialog.error)}
+                            helperText={saveScenarioDialog.error || ""}
+                            sx={{
+                                "& .MuiOutlinedInput-root": {
+                                    borderRadius: "8px",
+                                },
+                            }}
+                        />
+                    </DialogContent>
+
+                    <DialogActions sx={{ px: 3, pb: 3 }}>
+                        <Button
+                            onClick={closeSaveAsDialog}
+                            sx={{ textTransform: "none" }}
+                        >
+                            Cancel
+                        </Button>
+
+                        <Button
+                            variant="contained"
+                            disabled={saveScenarioDialog.submitting}
+                            onClick={handleConfirmSaveAsScenario}
+                            sx={{
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                backgroundColor: "#4F46E5",
+                            }}
+                        >
+                            {saveScenarioDialog.submitting ? "Saving..." : "Save"}
+                        </Button>
+                    </DialogActions>
+                </Dialog>
             </Paper>
+
 
 
         </Box>

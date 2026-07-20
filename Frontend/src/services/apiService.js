@@ -312,7 +312,7 @@ export const runLiverMarketEventsCalculation = (payload) => {
 
 
 export const saveLiverMarketEvents = (payload) => {
-  return httpClient.post("/api/liver-market-events/save", payload);
+  return httpClient.post("/api/liver-market-events/save-scenario", payload);
 };
 
 
