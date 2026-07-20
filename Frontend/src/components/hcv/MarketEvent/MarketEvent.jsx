@@ -41,6 +41,7 @@ import {
     applyLiverMarketEventsFilters,
     refreshLiverMarketEventsTable,
     runLiverMarketEventsCalculation,
+    saveLiverMarketEvents,
 } from "../../../services/apiService";
 import HIVImpactCurveChart from "./MarketEventChart";
 import HIVImpactCurveTable from "./MarketEventTable";
@@ -721,6 +722,37 @@ export default function HIVMarketEvent() {
         const apiData = response?.data || {};
 
         applyEventTabsApiResponse(apiData, payload.selected_filter);
+    };
+
+    // Called from the table's "Save" button. Persists the current table
+    // values (top-level rows -> "lot", nested rows -> "children") for the
+    // active tab/metric/date range against the /save endpoint.
+    const handleSaveLiverMarketEventTable = async (savedTableRows) => {
+        const payload = {
+            ta_name: "HCV",
+            indication: therapyArea,
+            scenario_name: scenarioName,
+            metric: denormalizeMetricValue(selectedMetric),
+            start_date: fromDate,
+            end_date: toDate,
+            table: (savedTableRows || []).map((row) => ({
+                lot: row.label || "",
+                total: Array.isArray(row.values) ? row.values : [],
+                children: Array.isArray(row.children)
+                    ? row.children.map((child) => ({
+                        label: child.label || "",
+                        values: Array.isArray(child.values) ? child.values : [],
+                    }))
+                    : [],
+            })),
+        };
+
+        try {
+            await saveLiverMarketEvents(payload);
+        } catch (error) {
+            console.error("Failed to save liver market events table", error);
+            throw error;
+        }
     };
 
     const inputStyle = {
@@ -2681,6 +2713,7 @@ export default function HIVMarketEvent() {
                         onHierarchyViewChange={handleSubViewChange}
                         subViewOptions={currentSubViewOptions}
                         onRefreshTable={handleRefreshLiverMarketEventTable}
+                        onSaveTable={handleSaveLiverMarketEventTable}
                     />
                 </AccordionDetails>
             </Accordion>
