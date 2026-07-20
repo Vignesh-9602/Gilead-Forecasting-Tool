@@ -64,6 +64,10 @@ export default function HIVOutputTable({
         const expanded =
             expandedRows[rowKey] ?? true;
 
+        const isTotalRow =
+            row.label?.toLowerCase().includes("grand total") ||
+            (hasChildren && level === 0);
+
         return (
             <React.Fragment key={rowKey}>
 
@@ -109,10 +113,7 @@ export default function HIVOutputTable({
 
                             <Typography
                                 sx={{
-                                    fontWeight:
-                                        level === 0
-                                            ? 700
-                                            : 500,
+                                    fontWeight: isTotalRow ? 700 : 500,
                                 }}
                             >
                                 {row.label}
@@ -125,7 +126,10 @@ export default function HIVOutputTable({
 
                         <TableCell
                             key={index}
-                            align="right"
+                            align="center"
+                            sx={{
+                                fontWeight: isTotalRow ? 700 : 500,
+                            }}
                         >
                             {typeof value === "number"
                                 ? value.toLocaleString()
@@ -276,6 +280,9 @@ export default function HIVOutputTable({
                 <TableContainer
                     sx={{
                         overflowX: "auto",
+                        maxHeight: 520,
+                        border: "1px solid #E2E8F0",
+                        borderRadius: "12px",
                     }}
                 >
                     <Table
@@ -285,10 +292,16 @@ export default function HIVOutputTable({
                             width: "100%",
                             tableLayout: "fixed",
                             minWidth: "max-content",
+                            borderCollapse: "collapse",
 
                             "& .MuiTableCell-root": {
-                                borderRight: "1px solid #D6DEE8",
-                                borderBottom: "1px solid #D6DEE8",
+                                borderRight: "1px solid #E2E8F0",
+                                borderBottom: "1px solid #E2E8F0",
+                                padding: "10px 8px",
+                            },
+
+                            "& .MuiTableRow-root:hover": {
+                                backgroundColor: "#F8FAFC",
                             },
                         }}
                     >
@@ -306,6 +319,7 @@ export default function HIVOutputTable({
                                     return (
                                         <TableCell
                                             key={header}
+                                            align={index === 0 ? "left" : "center"}
                                             sx={{
                                                 position: "sticky",
                                                 left: index === 0 ? 0 : undefined,
@@ -313,17 +327,16 @@ export default function HIVOutputTable({
 
                                                 backgroundColor:
                                                     index === 0
-                                                        ? "#FFFFFF"
+                                                        ? "#F8FAFC"
                                                         : index < tableData.forecast_start_index
                                                             ? "#F8FAFC"
                                                             : "#FFFFFF",
 
-                                                minWidth: index === 0 ? 180 : 95,
-                                                width: index === 0 ? 180 : 95,
+                                                minWidth: index === 0 ? 200 : 95,
+                                                width: index === 0 ? 200 : 95,
 
                                                 fontWeight: 700,
-                                                color: "#334155",
-                                                textAlign: "center",
+                                                color: "#64748B",
                                             }}
                                         >
                                             {displayHeader}
@@ -350,17 +363,17 @@ export default function HIVOutputTable({
 
                                     <TableRow
                                         key={row.label}
-                                        hover
                                     >
 
                                         <TableCell
                                             sx={{
                                                 position: "sticky",
                                                 left: 0,
-                                                background: "#fff",
+                                                backgroundColor: "#FFFFFF",
                                                 zIndex: 1,
                                                 minWidth: 280,
                                                 fontWeight: 600,
+                                                borderRight: "1px solid #E2E8F0",
                                             }}
                                         >
                                             {row.label}
@@ -370,7 +383,14 @@ export default function HIVOutputTable({
 
                                             <TableCell
                                                 key={index}
-                                                align="right"
+                                                align="center"
+                                                sx={{
+                                                    backgroundColor:
+                                                        index < tableData.forecast_start_index
+                                                            ? "#F8FAFC"
+                                                            : "#FFFFFF",
+                                                    fontWeight: 500,
+                                                }}
                                             >
                                                 {typeof value === "number"
                                                     ? value.toLocaleString()
