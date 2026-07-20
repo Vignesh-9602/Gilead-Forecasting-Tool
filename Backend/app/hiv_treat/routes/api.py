@@ -725,7 +725,7 @@ def _parent_volume_for_group(base_map, target_key, total_vals, n):
     if product == "ALL":
         return list(total_vals)
  
-    market_share_vals = _full_series(base_map, (market, None, "ALL", "market_share"), n)
+    market_share_vals = _full_series(base_map, (market, "ALL", "ALL", "market_share"), n)
     if market_share_vals is None:
         print(f"WARNING: missing base market_share for parent volume, market={market}")
         return list(total_vals)
@@ -745,29 +745,39 @@ def _parent_volume_for_group(base_map, target_key, total_vals, n):
 # =========================================================
  
 def _resolve_recalc_groups(selected_tab, selected_filter, base_map):
-    """Decides which target row(s) + siblings are in scope for the given
-    tab and selected_filter."""
     tab = (selected_tab or "total_market_volume").lower()
     sel_market = selected_filter.market
     sel_product = selected_filter.product
     groups = []
- 
+
     if tab == "total_market_volume":
         return groups
- 
-    if tab in ("market_distribution", "product_market"):
-        target_key = (sel_market, None, "ALL", "market_share")
+
+    if tab == "market_distribution":
+        target_key = (sel_market, "ALL", "ALL", "market_share")
         if target_key not in base_map:
             return groups
         siblings = [
             k for k in base_map
             if k[3] == "market_share" and k[2] == "ALL"
-            and k[1] is None and k[0] != sel_market
+            and k[1] == "ALL" and k[0] != sel_market
         ]
         groups.append((target_key, siblings))
         return groups
- 
-    if tab in ("product_distribution", "market_product"):
+
+    if tab == "product_distribution":
+        target_key = ("ALL", "ALL", sel_product, "market_share")
+        if target_key not in base_map:
+            return groups
+        siblings = [
+            k for k in base_map
+            if k[3] == "market_share" and k[0] == "ALL"
+            and k[1] == "ALL" and k[2] not in ("ALL", sel_product)
+        ]
+        groups.append((target_key, siblings))
+        return groups
+
+    if tab == "market_product":
         matching_rows = [
             k for k in base_map
             if k[3] == "market_share" and k[0] == sel_market and k[2] == sel_product
@@ -786,9 +796,32 @@ def _resolve_recalc_groups(selected_tab, selected_filter, base_map):
             ]
             groups.append((target_key, siblings))
         return groups
- 
+
+    if tab == "product_market":
+        matching_rows = [
+            k for k in base_map
+            if k[3] == "market_share" and k[2] == sel_product and k[0] != "ALL"
+        ]
+        if not matching_rows:
+            return groups
+        sel_rows = [k for k in matching_rows if k[0] == sel_market]
+        if not sel_rows:
+            return groups
+        target_key = sel_rows[0]
+        siblings = [k for k in matching_rows if k[0] != sel_market]
+        groups.append((target_key, siblings))
+        return groups
+
     return groups
- 
+
+def _canon_source(s):
+    """Collapse all 'no source subdivision' sentinels to one canonical
+    value. Only affects market-level aggregate rows (source_of_market
+    NULL or '') -- real sources like 'Kaiser' or the Retail-only
+    placeholder 'Unknown' pass through untouched."""
+    if s is None or s == "":
+        return "ALL"
+    return s
  
 def _renormalize_siblings(target_new_fv, base_map, sibling_keys):
     """Rescales siblings so the group always sums to 100% at every
@@ -883,25 +916,22 @@ def _compute_target_new_share(
     else:  # "market_share"
         try:
             if model_type == "moving_average":
-
                 new_fc = process_moving_average_forecast(
                     series_months=months,
-                    series_values=target_vol_full,
+                    series_values=base_share_full,
                     train_start_date=train_start,
                     train_end_date=train_end,
                     forecast_periods=fp,
                     window=growth.get("window", 3),
-                    metric="market_volume",
+                    metric="market_share",
                     multiplier=multiplier,
                     multiplier_horizon=multiplier_horizon
                 )
-
             else:
-
                 new_fc = process_forecast(
-                    months, target_vol_full, train_start, train_end, fp,
+                    months, base_share_full, train_start, train_end, fp,
                     model_type=model_type,
-                    metric="market_volume",
+                    metric="market_share",
                     alpha=alpha,
                     beta=beta,
                     gamma=gamma,
@@ -915,7 +945,7 @@ def _compute_target_new_share(
         except Exception as e:
             print(f"Forecast failed (share-mode) target={target_key} error={e}")
             return base_share_full[-len(fv):] if fv else []
- 
+
         return new_fc.get("forecast_values") or []
  
  
@@ -924,31 +954,14 @@ def _compute_target_new_share(
 # =========================================================
  
 def _augment_with_source_aliases(overrides, base_map):
-    """
-    Model_Input_Service.py's builders hardcode `source=None` when querying
-    product-level market_share rows for "flat" markets (e.g. `if mkt ==
-    "Retail": fetch_forecast_scenario(cur, ta, mkt, None, prod, ...)`),
-    even though the DB stores a non-null placeholder in source_of_market
-    for those rows (observed: "Unknown" for Retail's product rows). The
-    real SQL wildcards when the source param is None, so it finds these
-    rows fine -- but our exact-key override dict does not, unless we add
-    an explicit alias keyed with source=None.
- 
-    A source is "real" (hierarchical, e.g. Kaiser under Non-retail,
-    drillable from market_distribution) if it has its own
-    (market, source, 'ALL', metric) row. If not, it's a flat-market
-    placeholder and gets a source=None alias so MIS's None-based lookup
-    hits our (possibly recalculated) value instead of silently falling
-    back to the unmodified DB row.
-    """
     augmented = dict(overrides)
     for key in base_map.keys():
         market, source, product, metric = key
-        if source is None or metric != "market_share":
+        if metric != "market_share" or source == "ALL":
             continue
         if (market, source, "ALL", metric) in base_map:
             continue  # real hierarchical source (e.g. Kaiser) -- no alias needed
-        alias_key = (market, None, product, metric)
+        alias_key = (market, "ALL", product, metric)
         if key in overrides:
             augmented[alias_key] = overrides[key]
     return augmented
@@ -1009,8 +1022,9 @@ def recalculate(payload: RecalculateRequest):
  
             base_map = {}
             for market, source, product, metric_col, forecast_data in rows:
-                base_map[(market, source, product, metric_col)] = forecast_data
- 
+                key = (market, _canon_source(source), product, metric_col)
+                base_map[key] = forecast_data
+
             overrides = dict(base_map)
  
             model_type = (payload.model_type or "ets").lower()
@@ -1177,7 +1191,7 @@ def recalculate(payload: RecalculateRequest):
             orig_fetch = MIS.fetch_forecast_scenario
  
             def fetch_with_override(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in):
-                k = (market_in, source_in, product_in, metric_in)
+                k = (market_in, _canon_source(source_in), product_in, metric_in)
                 if k in overrides:
                     return overrides[k]
                 return orig_fetch(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in)
