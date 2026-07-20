@@ -429,6 +429,12 @@ export default function HIVMarketTable({
         }
     }, [viewMode]);
 
+    const handleEditClick = () => {
+        if (selectedMetric !== "market_share") return;
+
+        setEditable(true);
+    };
+
     return (
         <Paper
             sx={{
@@ -680,8 +686,12 @@ export default function HIVMarketTable({
                     <Button
                         variant="outlined"
                         sx={secondaryButtonStyle}
-                        onClick={() => setEditable(true)}
-                        disabled={editable || isYearlyView}
+                        onClick={handleEditClick}
+                        disabled={
+                            activeTab === "total_market_volume" ||
+                            selectedMetric !== "market_share" ||
+                            viewMode === "yearly"
+                        }
                     >
                         {editable ? "Editing..." : "Edit Changes"}
                     </Button>

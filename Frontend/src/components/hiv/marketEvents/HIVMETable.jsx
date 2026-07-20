@@ -213,21 +213,32 @@ export default function HIVImpactCurveTable({
 
     const renderEditableCell = (
         value,
+        row,
         rowIndex,
         valueIndex,
         childIndex = null,
         level = 0
     ) => {
 
-        const isMarketShare =
-            selectedMetric === "market_share";
+        const isMarketShare = selectedMetric === "market_share";
 
-        const isOverallEvent =
-            activeTab === "overall_event";
+        const isOverallEvent = activeTab === "overall_event";
+
+        const isOverallRow = row.label === "Overall";
 
         const canEdit =
-            editable && selectedView === "monthly" && isMarketShare && !isOverallEvent &&
-            (!isHierarchy || childIndex !== null);
+            editable &&
+            selectedView === "monthly" &&
+            isMarketShare &&
+            !(
+                !isHierarchy &&
+                isOverallRow
+            ) &&
+            (
+                !isHierarchy
+                    ? true
+                    : childIndex !== null
+            );
 
         if (!canEdit) {
             return (
@@ -248,7 +259,7 @@ export default function HIVImpactCurveTable({
                         lineHeight: "28px",
                     }}
                 >
-                    {value}
+                    {formatCellValue(value)}
                 </Typography>
             );
         }
@@ -400,6 +411,7 @@ export default function HIVImpactCurveTable({
 
                         {renderEditableCell(
                             value,
+                            row,
                             rowIndex,
                             index,
                             childIndex,
@@ -488,6 +500,27 @@ export default function HIVImpactCurveTable({
 
         }
 
+    };
+
+    const formatCellValue = (value) => {
+        if (
+            value === null ||
+            value === undefined ||
+            value === ""
+        ) {
+            return "";
+        }
+
+        // While editing, don't append %
+        if (editable) {
+            return value;
+        }
+
+        if (selectedMetric === "market_share") {
+            return `${value}%`;
+        }
+
+        return Number(value).toLocaleString();
     };
 
     return (

@@ -279,6 +279,10 @@ export default function HIVMarketEvent() {
             setToDate(
                 filter.end_date || ""
             );
+
+            // Auto populate the screen
+            await handleApplyFilter(filter);
+
         } catch (error) {
             console.error(
                 "Failed to fetch market event filters",
@@ -473,12 +477,12 @@ export default function HIVMarketEvent() {
     };
 
 
-    const handleApplyFilter = async () => {
+    const handleApplyFilter = async (selectedFilter = null) => {
 
         const payload = {
             ta_name: therapyArea,
 
-            selected_filter: {
+            selected_filter: selectedFilter || {
                 scenario_name: scenarioName,
                 start_date: fromDate,
                 end_date: toDate,
@@ -578,7 +582,7 @@ export default function HIVMarketEvent() {
                 "success"
             );
 
-            return true; // ✅ tell child API succeeded
+            return true; //tell child API succeeded
 
         } catch (error) {
 
@@ -586,7 +590,7 @@ export default function HIVMarketEvent() {
                 "Failed to update table",
                 "error"
             );
-            return false; // ✅ stay in edit mode
+            return false; // stay in edit mode
 
         } finally {
 
@@ -1324,7 +1328,7 @@ export default function HIVMarketEvent() {
 
                     <Button
                         variant="contained"
-                        onClick={handleApplyFilter}
+                        onClick={() => handleApplyFilter()}
                         sx={{
                             height: "35px",
                             borderRadius: "8px",
