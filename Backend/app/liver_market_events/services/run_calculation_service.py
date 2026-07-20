@@ -270,6 +270,17 @@ def _apply_events_to_data(
             for entity, deltas in (result.impacted_curves or {}).items()
         }
 
+        # After the event window ends, sustain the last delta permanently
+        # so values stay flat at the post-event level instead of reverting.
+        event_end_month = result.months[-1] if result.months else None
+        sustained_selected = result.selected_curve[-1] if result.selected_curve else 0.0
+        sustained_impacted = {
+            entity: (deltas[-1] if deltas else 0.0)
+            for entity, deltas in (result.impacted_curves or {}).items()
+        }
+
+        event_touched_forecast = False
+
         for i in range(forecast_start_index, len(month_tuples)):
             y, m = month_tuples[i]
             month_str = month_iso[i]
@@ -277,8 +288,21 @@ def _apply_events_to_data(
             if total_vol <= 0:
                 continue
 
+            # Resolve effective deltas: within window → curve value;
+            # after window → sustained last value; before window → 0.
+            after_window = event_end_month is not None and month_str > event_end_month
+            if after_window:
+                eff_selected = sustained_selected
+                eff_impacted = sustained_impacted
+            else:
+                eff_selected = selected_deltas.get(month_str, 0.0)
+                eff_impacted = {
+                    entity: imp_map.get(month_str, 0.0)
+                    for entity, imp_map in impacted_deltas.items()
+                }
+
             if tab == "overall_event":
-                delta_share = selected_deltas.get(month_str, 0.0)
+                delta_share = eff_selected
                 if delta_share == 0.0:
                     continue
                 scale = max(0.0, total_vol + delta_share / 100.0 * total_vol) / total_vol
@@ -286,29 +310,41 @@ def _apply_events_to_data(
                 for prod in ym:
                     for payer in ym[prod]:
                         ym[prod][payer] = max(0.0, ym[prod][payer] * scale)
+                event_touched_forecast = True
 
             elif tab == "payer_event":
                 sel_payer = event_input.selected_entity
-                delta_share = selected_deltas.get(month_str, 0.0)
+                delta_share = eff_selected
                 if delta_share != 0.0:
                     _apply_payer_delta(data, y, m, sel_payer, show_products,
                                        delta_share / 100.0 * total_vol)
-                for imp, imp_map in impacted_deltas.items():
-                    d = imp_map.get(month_str, 0.0)
+                    event_touched_forecast = True
+                for imp, d in eff_impacted.items():
                     if d != 0.0:
                         _apply_payer_delta(data, y, m, imp, show_products,
                                            d / 100.0 * total_vol)
+                        event_touched_forecast = True
 
             elif tab == "product_event":
                 sel_prod = event_input.selected_entity
-                delta_share = selected_deltas.get(month_str, 0.0)
+                delta_share = eff_selected
                 if delta_share != 0.0:
                     _apply_product_delta(data, y, m, sel_prod,
                                          delta_share / 100.0 * total_vol)
-                for imp, imp_map in impacted_deltas.items():
-                    d = imp_map.get(month_str, 0.0)
+                    event_touched_forecast = True
+                for imp, d in eff_impacted.items():
                     if d != 0.0:
                         _apply_product_delta(data, y, m, imp, d / 100.0 * total_vol)
+                        event_touched_forecast = True
+
+        if not event_touched_forecast:
+            event_name = event_row.get("event_name", "Event")
+            start_date = event_row.get("start_date", "")
+            raise ValueError(
+                f"Event '{event_name}' (start_date={start_date}) does not overlap "
+                f"the forecast window — every affected month falls in history and "
+                f"cannot be modified. Set start_date on or after the forecast start date."
+            )
 
         # Recompute total after each event so stacked events use the right baseline
         total_all = _recompute_total_all(data, month_tuples)
@@ -473,6 +509,7 @@ def run_market_events_calculation(payload) -> dict:
             "available_scenarios": scenarios,
             "available_months":    available_months,
             "selected_filter":     sf.model_dump(),
+            "selected_tab":        tab,
             "metric_filters":      METRIC_FILTERS,
             "event_tabs":          event_tabs,
         }

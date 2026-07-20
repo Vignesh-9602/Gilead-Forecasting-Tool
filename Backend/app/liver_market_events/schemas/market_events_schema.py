@@ -104,3 +104,15 @@ class RunCalculationRequest(BaseModel):
     selected_filter: SelectedFilter
     selected_tab: str       # "payer_event" | "product_event" | "overall_event"
     impact_curve_configuration: ImpactCurveConfiguration
+
+
+# ---------------------------------------------------------------------------
+# POST /save-scenario request
+# ---------------------------------------------------------------------------
+
+class SaveMarketEventsRequest(BaseModel):
+    """Request body for POST /api/liver-market-events/save-scenario."""
+    ta_name: str = "HCV"
+    scenario_name: str
+    selected_filter: SelectedFilter
+    event_tabs: dict

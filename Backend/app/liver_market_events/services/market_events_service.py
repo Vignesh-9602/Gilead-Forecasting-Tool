@@ -1,7 +1,11 @@
 import copy
 
 from app.db.connection import get_connection
-from app.liver_market_events.schemas.market_events_schema import ApplyFiltersRequest, RefreshRequest
+from app.liver_market_events.schemas.market_events_schema import (
+    ApplyFiltersRequest,
+    RefreshRequest,
+    SaveMarketEventsRequest,
+)
 from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
@@ -13,6 +17,7 @@ from app.liver_market_events.repository.market_events_repo import (
     save_filter_state,
     load_filter_state,
     load_scenario_event_tabs,
+    save_market_events_scenario,
 )
 from app.liver_market_events.helpers.date_helpers import (
     parse_year_month,
@@ -1153,6 +1158,64 @@ def _detect_edited_label(old_rows: list, new_rows: list) -> str | None:
     return None
 
 
+def _update_hierarchy_parents_from_flat(hier_rows: list, flat_rows: list) -> list:
+    """
+    Update hierarchy PARENT row values to match a flat view's new totals, then
+    scale each parent's children proportionally.
+
+    Flat items are parents (not children) in this hierarchy:
+      payer_event.payer_level (flat payers) → product_event.payer_product_level (payer parents)
+    """
+    flat_lookup = {r["label"]: r["values"] for r in flat_rows if r["label"] != "Overall"}
+
+    new_rows = []
+    for row in hier_rows:
+        if row["label"] == "Overall":
+            new_rows.append(row)
+            continue
+
+        new_parent_vals = flat_lookup.get(row["label"])
+        if new_parent_vals is None:
+            new_rows.append(row)
+            continue
+
+        old_parent_vals = row["values"]
+        children = row.get("children", [])
+        n = len(old_parent_vals)
+
+        new_children = []
+        for child in children:
+            new_child_vals = []
+            for i in range(n):
+                old_p = float(old_parent_vals[i])
+                new_p = float(new_parent_vals[i])
+                old_c = float(child["values"][i]) if i < len(child["values"]) else 0.0
+                new_child_vals.append(
+                    round(old_c / old_p * new_p, 2) if old_p > 0 else 0.0
+                )
+            new_children.append({"label": child["label"], "values": new_child_vals})
+
+        new_rows.append({
+            "label":    row["label"],
+            "values":   [round(float(v), 2) for v in new_parent_vals],
+            "children": new_children,
+        })
+
+    # Recompute Overall from updated parent rows
+    parents = [r for r in new_rows if r["label"] != "Overall"]
+    if parents:
+        n = len(parents[0]["values"])
+        new_overall = [
+            round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
+        ]
+        new_rows = [
+            {"label": "Overall", "values": new_overall} if r["label"] == "Overall" else r
+            for r in new_rows
+        ]
+
+    return new_rows
+
+
 def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str,
                         selected_view: str, selected_table_view: str,
                         edited_rows: list, edited_label: str | None) -> dict:
@@ -1222,6 +1285,49 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
             if flat_view:
                 new_flat_rows = _propagate_hierarchy_to_flat(flat_view["table"]["rows"], rows)
                 _update_view(flat_view, new_flat_rows)
+
+    # ── Cross-tab propagation ─────────────────────────────────────────────────
+    # Payer totals (payer_event.payer_level) are the PARENT rows in
+    # product_event.payer_product_level. Any payer_event edit that changes
+    # payer totals must be mirrored in product_event so both tabs stay in sync.
+    _PAYER_TO_PRODUCT_METRIC = {
+        "payer_share":  "product_share",
+        "payer_volume": "product_volume",
+    }
+    if selected_tab == "payer_event":
+        cross_metric = _PAYER_TO_PRODUCT_METRIC.get(selected_metric)
+        if cross_metric:
+            # Read the (possibly updated) payer_level rows — updated either
+            # directly (flat edit) or via hier→flat propagation above.
+            updated_payer_flat = _get_view("payer_level")
+            if updated_payer_flat:
+                payer_flat_rows = updated_payer_flat["table"]["rows"]
+
+                def _cross_view(table_key):
+                    return (
+                        tabs
+                        .get("product_event", {})
+                        .get("metrics_views", {})
+                        .get(cross_metric, {})
+                        .get(selected_view, {})
+                        .get(table_key)
+                    )
+
+                # Update payer parent rows in product_event.payer_product_level
+                prod_hier = _cross_view("payer_product_level")
+                if prod_hier:
+                    new_prod_hier_rows = _update_hierarchy_parents_from_flat(
+                        prod_hier["table"]["rows"], payer_flat_rows
+                    )
+                    _update_view(prod_hier, new_prod_hier_rows)
+
+                    # Recompute product_level flat (sum products across payers)
+                    prod_flat = _cross_view("product_level")
+                    if prod_flat:
+                        new_prod_flat_rows = _propagate_hierarchy_to_flat(
+                            prod_flat["table"]["rows"], new_prod_hier_rows
+                        )
+                        _update_view(prod_flat, new_prod_flat_rows)
 
     return tabs
 
@@ -1305,6 +1411,50 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
             "selected_filter":     sf.model_dump(),
             "metric_filters":      METRIC_FILTERS,
             "event_tabs":          event_tabs,
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Save scenario
+# ---------------------------------------------------------------------------
+
+def save_market_events(payload: SaveMarketEventsRequest) -> dict:
+    """
+    POST /save-scenario — persist the current event_tabs for a named scenario.
+    Rejects with ValueError if the scenario name is 'Base'.
+    Uses ON CONFLICT (scenario_name) DO UPDATE, so re-saving overwrites the existing record.
+    """
+    name = payload.scenario_name.strip()
+    if name.lower() == "base":
+        raise ValueError("Cannot save as 'Base'. Please provide a different scenario name.")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        sf = payload.selected_filter
+        save_market_events_scenario(
+            cur,
+            scenario_name=name,
+            ta=payload.ta_name,
+            selected_filter=sf.model_dump(),
+            event_tabs=payload.event_tabs,
+        )
+        conn.commit()
+
+        all_scenarios = get_scenarios(cur)
+        if "Base" not in all_scenarios:
+            all_scenarios = ["Base"] + all_scenarios
+        else:
+            all_scenarios.remove("Base")
+            all_scenarios = ["Base"] + all_scenarios
+
+        return {
+            "message":             "Scenario saved successfully.",
+            "scenario_name":       name,
+            "available_scenarios": all_scenarios,
         }
     finally:
         cur.close()
