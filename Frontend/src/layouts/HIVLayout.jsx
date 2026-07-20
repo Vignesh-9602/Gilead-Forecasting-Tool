@@ -6,6 +6,7 @@ import SnackbarNotification from "../components/snackBar/SnackBar";
 import HIVGlobalConfigurations from "../components/hiv/globalConfigurations/HIVGlobalConfigurations";
 import HIVModelInput from "../components/hiv/modelInputs/HIVModelInputs";
 import HIVMarketEvent from "../components/hiv/marketEvents/HIVMarketEvent";
+import HIVOutput from "../components/hiv/output/HIVOutput";
 
 const tabs = [
     "Configurations",
@@ -33,6 +34,9 @@ export default function HIVLayout() {
 
             case "Market Events":
                 return <HIVMarketEvent />;
+
+            case "Output":
+                return <HIVOutput />;
 
             default:
                 return (
