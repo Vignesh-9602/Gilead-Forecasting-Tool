@@ -1,5 +1,3 @@
-
-
 import React, { useState, useEffect, useMemo, useRef } from "react";
 
 import {
@@ -72,30 +70,58 @@ export default function HIVImpactCurveTable({
   const cloneRows = (rows = []) =>
     JSON.parse(JSON.stringify(Array.isArray(rows) ? rows : []));
 
-  const headers = Array.isArray(tableData?.headers)
+  const MONTH_ABBREVIATIONS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+
+  // Turns an ISO date string like "2020-06-01" into "Jun-20" for display.
+  // Leaves anything that doesn't look like a YYYY-MM date (e.g. the plain
+  // "2020" year headers used in yearly view) untouched.
+  const formatMonthLabel = (value) => {
+    if (typeof value !== "string") return value;
+
+    const match = value.match(/^(\d{4})-(\d{2})/);
+
+    if (!match) return value;
+
+    const [, year, month] = match;
+    const monthAbbr = MONTH_ABBREVIATIONS[Number(month) - 1] || month;
+
+    return `${monthAbbr}-${year.slice(-2)}`;
+  };
+
+  const headers = (Array.isArray(tableData?.headers)
     ? tableData.headers
-    : [];
+    : []
+  ).map(formatMonthLabel);
 
   const forecastStartIndex =
     tableData?.forecast_start_index || 0;
 
+  // The Payer Event tab's rows are rooted in PRODUCTS (ASGA/GILD/Other are
+  // the top-level rows, payers are nested underneath in the hierarchy view),
+  // and the Product Event tab's rows are rooted in PAYERS (Cash/Commercial/
+  // etc. are the top-level rows, products nested underneath) — confirmed
+  // against the actual API responses. The left-most column header must
+  // reflect that, which is the opposite of what the tab is named.
   const labelText =
     activeTab === "product_event"
-      ? "Product"
+      ? "Payer"
       : activeTab === "overall_event"
         ? "Event"
-        : "Payer";
+        : "Product";
 
   useEffect(() => {
     if (isControlled) return;
 
     if (activeTab === "product_event") {
-      setLocalHierarchyView("product_level");
+      setLocalHierarchyView("payer_level");
       return;
     }
 
     if (activeTab === "payer_event") {
-      setLocalHierarchyView("payer_level");
+      setLocalHierarchyView("product_level");
       return;
     }
 
@@ -107,8 +133,8 @@ export default function HIVImpactCurveTable({
   // don't trust it for display. We still use the API's `value` (needed to
   // correctly look up the matching sub-view data), just not its label.
   const HIERARCHY_VIEW_LABELS = {
-    payer_event:   ["Payer Level", "Product-Payer Level"],
-    product_event: ["Product Level", "Payer-Product Level"],
+    payer_event: ["Product Level", "Payer-Product Level"],
+    product_event: ["Payer Level", "Product-Payer Level"],
   };
 
   const rawHierarchyOptions =
@@ -116,13 +142,13 @@ export default function HIVImpactCurveTable({
       ? subViewOptions
       : activeTab === "product_event"
         ? [
-          { value: "product_level",       label: "Product Level" },
-          { value: "payer_product_level",  label: "Payer-Product Level" },
+          { value: "payer_level", label: "Payer Level" },
+          { value: "payer_product_level", label: "Product-Payer Level" },
         ]
         : activeTab === "payer_event"
           ? [
-            { value: "payer_level",         label: "Payer Level" },
-            { value: "product_payer_level",  label: "Product-Payer Level" },
+            { value: "product_level", label: "Product Level" },
+            { value: "product_payer_level", label: "Payer-Product Level" },
           ]
           : [];
 
