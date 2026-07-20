@@ -34,8 +34,29 @@ export default function HIVImpactCurveChart({
 
     } = chartData || {};
 
+    const MONTH_ABBREVIATIONS = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    // Turns an ISO date string like "2020-06-01" into "Jun-20" for display.
+    // Leaves anything that doesn't look like a YYYY-MM date (e.g. the plain
+    // "2020" year headers used in yearly view) untouched.
+    const formatMonthLabel = (value) => {
+        if (typeof value !== "string") return value;
+
+        const match = value.match(/^(\d{4})-(\d{2})/);
+
+        if (!match) return value;
+
+        const [, year, month] = match;
+        const monthAbbr = MONTH_ABBREVIATIONS[Number(month) - 1] || month;
+
+        return `${monthAbbr}-${year.slice(-2)}`;
+    };
+
     const labels =
-        months || years || [];
+        (months || years || []).map(formatMonthLabel);
 
     const historyX =
         labels.slice(
@@ -196,6 +217,7 @@ export default function HIVImpactCurveChart({
                             },
 
                             xaxis: {
+                                type: "category",
                                 tickangle: -45,
                                 showgrid: true,
                                 gridcolor: "#F1F5F9",
