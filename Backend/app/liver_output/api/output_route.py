@@ -28,9 +28,10 @@ def output_apply_filters(payload: ApplyFiltersRequest):
     Called when the user clicks Apply Filter.
 
     Saves the filter selection, then returns output_tabs (all 5 tabs x both
-    metrics x both views) for the selected scenarios. Only 'Base'/'BASE' can
-    be computed today — any other scenario_name currently returns a 400 until
-    a save mechanism exists for multi-payer/multi-product scenario snapshots.
+    metrics x both views) for the selected scenarios. 'Base'/'BASE' is computed
+    fresh from transaction_data; any other scenario_name is loaded from a saved
+    scenario in raw_liver.liver_scenarios and reshaped to match. Returns 400 if
+    a requested scenario_name doesn't exist or wasn't saved in the expected shape.
     """
     try:
         return apply_output_filters(payload)
