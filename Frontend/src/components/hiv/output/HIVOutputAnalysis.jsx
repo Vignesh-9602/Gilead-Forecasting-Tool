@@ -1,8 +1,8 @@
 
 import React, { useState } from "react";
 import { Box, Paper, Typography } from "@mui/material";
-// import AnalysisChart from "./AnalysisChart";
 import HIVOutputChart from "./HIVOutputChart";
+import HIVOutputTable from "./HIVOutputTable";
 
 const TABS = [
     { label: "Total Market Volume", value: "total_market_volume" },
@@ -23,7 +23,7 @@ const DEFAULT_METRIC_BY_TAB = {
 export default function HIVOutputAnalysis({ outputAnalysis, selectedMarket, selectedProduct }) {
     const [activeTab, setActiveTab] = useState("total_market_volume");
     const [selectedMetric, setSelectedMetric] = useState("market_volume");
-    const [viewMode] = useState("monthly");
+    const [viewMode, setViewMode] = useState("monthly");
 
     const currentData = outputAnalysis?.[activeTab]?.[selectedMetric]?.[viewMode];
     const hasData = !!currentData?.chart?.series?.length;
@@ -50,6 +50,24 @@ export default function HIVOutputAnalysis({ outputAnalysis, selectedMarket, sele
                         activeTab={activeTab}
                         selectedMarket={selectedMarket}
                         selectedProduct={selectedProduct}
+                    />
+
+                    <HIVOutputTable
+                        tableData={currentData.table}
+                        viewMode={viewMode}
+                        setViewMode={setViewMode}
+                        selectedMetric={selectedMetric}
+                        setSelectedMetric={setSelectedMetric}
+                        metricOptions={[
+                            {
+                                label: "Market Volume",
+                                value: "market_volume",
+                            },
+                            {
+                                label: "Market Share",
+                                value: "market_share",
+                            },
+                        ]}
                     />
                 </Box>
                 :

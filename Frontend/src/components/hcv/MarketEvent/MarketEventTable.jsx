@@ -32,6 +32,7 @@ export default function HIVImpactCurveTable({
   onHierarchyViewChange,
   subViewOptions,
   onRefreshTable,
+  onSaveTable,
 }) {
   const [editable, setEditable] = useState(false);
 
@@ -44,6 +45,8 @@ export default function HIVImpactCurveTable({
   const [isRefreshed, setIsRefreshed] = useState(false);
 
   const [savingTable, setSavingTable] = useState(false);
+
+  const [isSaving, setIsSaving] = useState(false);
 
   const [lastEditedLabel, setLastEditedLabel] = useState("");
 
@@ -133,8 +136,8 @@ export default function HIVImpactCurveTable({
   // don't trust it for display. We still use the API's `value` (needed to
   // correctly look up the matching sub-view data), just not its label.
   const HIERARCHY_VIEW_LABELS = {
-    payer_event: ["Product Level", "Payer-Product Level"],
-    product_event: ["Payer Level", "Product-Payer Level"],
+    payer_event: ["Payer Level", "Product-Payer Level"],
+    product_event: ["Product Level", "Payer-Product Level"],
   };
 
   const rawHierarchyOptions =
@@ -147,8 +150,8 @@ export default function HIVImpactCurveTable({
         ]
         : activeTab === "payer_event"
           ? [
-            { value: "product_level", label: "Product Level" },
-            { value: "product_payer_level", label: "Payer-Product Level" },
+            { value: "product_level", label: "Payer Level" },
+            { value: "product_payer_level", label: "Product-Payer Level" },
           ]
           : [];
 
@@ -298,6 +301,32 @@ export default function HIVImpactCurveTable({
       console.error("Failed to refresh liver market event table", error);
     } finally {
       setSavingTable(false);
+    }
+  };
+
+  // Called from the "Save" button. The rows shown here are already the
+  // refreshed/recalculated values (Save is only enabled after Refresh), so
+  // this just tells the parent to persist its current scenario state.
+  const handleSaveTable = async () => {
+    if (typeof onSaveTable !== "function") {
+      setOriginalRows(cloneRows(editableRows));
+      setIsRefreshed(false);
+      setEditable(false);
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      await onSaveTable();
+
+      setOriginalRows(cloneRows(editableRows));
+      setIsRefreshed(false);
+      setEditable(false);
+    } catch (error) {
+      console.error("Failed to save liver market event table", error);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -657,22 +686,17 @@ export default function HIVImpactCurveTable({
             disabled={
               !editable ||
               selectedMetric === "market_volume" ||
-              !isRefreshed
+              !isRefreshed ||
+              isSaving
             }
-            onClick={() => {
-              console.log(editableRows);
-              setOriginalRows(cloneRows(editableRows));
-
-              setIsRefreshed(false);
-              setEditable(false);
-            }}
+            onClick={handleSaveTable}
             sx={{
               height: "35px",
               borderRadius: "10px",
               textTransform: "none",
             }}
           >
-            Save
+            {isSaving ? "Saving..." : "Save"}
           </Button>
 
           <Button

@@ -4,11 +4,13 @@ from app.liver_market_events.schemas.market_events_schema import (
     ApplyFiltersRequest,
     RefreshRequest,
     RunCalculationRequest,
+    SaveMarketEventsRequest,
 )
 from app.liver_market_events.services.market_events_service import (
     get_market_events_filters,
     apply_market_events_filters,
     refresh_market_events,
+    save_market_events,
 )
 from app.liver_market_events.services.run_calculation_service import (
     run_market_events_calculation,
@@ -83,6 +85,22 @@ def market_events_run_calculation(payload: RunCalculationRequest):
     """
     try:
         return run_market_events_calculation(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/save-scenario")
+def market_events_save_scenario(payload: SaveMarketEventsRequest):
+    """
+    Called when the user clicks Save Scenario.
+
+    Persists the current event_tabs under the given scenario_name.
+    Returns 400 if scenario_name is 'Base' (Base cannot be overwritten).
+    """
+    try:
+        return save_market_events(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
