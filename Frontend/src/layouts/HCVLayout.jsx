@@ -5,6 +5,7 @@ import SnackbarNotification from "../components/snackBar/SnackBar";
 import PBCGlobalConfigurations from "../components/hcv/GlobalConfiguration/GlobalConfigurations";
 import PBCModelInput from "../components/hcv/ModelInput/ModelInput";
 import MarketEvent from "../components/hcv/MarketEvent/MarketEvent";
+import Output from "../components/hcv/Output/Output";
 
 const tabs = [
     "Configurations",
@@ -29,7 +30,10 @@ export default function HCVLayout() {
 
             case "Model Inputs":
                 return <PBCModelInput />;
-
+            case "Output":
+                return <Output />;
+            case "Market Events":
+                return <MarketEvent />;
             default:
                 return <MarketEvent />;
         }
