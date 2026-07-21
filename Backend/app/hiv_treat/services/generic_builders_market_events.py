@@ -1,5 +1,34 @@
 from app.hiv_treat.services.response_builder_market_events import *
 
+from copy import deepcopy
+
+
+def exclude_overall_from_chart(table):
+    """
+    Return a copy of the table without total rows.
+
+    The original table is not modified, so Overall remains
+    visible in the UI table.
+    """
+
+    chart_table = deepcopy(table)
+
+    excluded_labels = {
+        "overall",
+        "grand total",
+        "total",
+    }
+
+    chart_table["rows"] = [
+        row
+        for row in chart_table.get("rows", [])
+        if str(
+            row.get("label", "")
+        ).strip().lower() not in excluded_labels
+    ]
+
+    return chart_table
+
 def build_overall_event(tree):
     """
     Build Overall Event from the calculation tree.
@@ -376,7 +405,8 @@ def build_product_event(tree):
 
                     "product_level": {
                         "chart": build_monthly_chart(
-                            product_level_share_monthly
+                            exclude_overall_from_chart(
+                            product_level_share_monthly)
                         ),
                         "table": product_level_share_monthly,
                     },
@@ -395,7 +425,8 @@ def build_product_event(tree):
 
                     "product_level": {
                         "chart": build_yearly_chart(
-                            market_level_share_yearly
+                            exclude_overall_from_chart(
+                            market_level_share_yearly)
                         ),
                         "table": market_level_share_yearly,
                     },
@@ -676,7 +707,9 @@ def build_market_event(tree):
 
                     "market_level": {
                         "chart": build_monthly_chart(
-                            market_level_share_monthly
+                            exclude_overall_from_chart(
+                                market_level_share_monthly
+                            )
                         ),
                         "table": market_level_share_monthly,
                     },
@@ -695,7 +728,9 @@ def build_market_event(tree):
 
                     "market_level": {
                         "chart": build_yearly_chart(
-                            product_level_share_yearly
+                            exclude_overall_from_chart(
+                                product_level_share_yearly
+                            )
                         ),
                         "table": product_level_share_yearly,
                     },
@@ -716,7 +751,9 @@ def build_market_event(tree):
 
                     "market_level": {
                         "chart": build_monthly_chart(
-                            market_level_volume_monthly
+                            exclude_overall_from_chart(
+                                market_level_volume_monthly
+                            )
                         ),
                         "table": market_level_volume_monthly,
                     },
@@ -735,7 +772,9 @@ def build_market_event(tree):
 
                     "market_level": {
                         "chart": build_yearly_chart(
-                            product_level_volume_yearly
+                            exclude_overall_from_chart(
+                                product_level_volume_yearly
+                            )
                         ),
                         "table": product_level_volume_yearly,
                     },
