@@ -6,10 +6,10 @@ import HIVOutputTable from "./HIVOutputTable";
 
 const TABS = [
     { label: "Total Market Volume", value: "total_market_volume" },
-    { label: "Market Distribution (%)", value: "market_distribution" },
+    { label: "Channel Distribution (%)", value: "market_distribution" },
     { label: "Product Distribution (%)", value: "product_distribution" },
-    { label: "Market-Product", value: "market_product" },
-    { label: "Product-Market", value: "product_market" },
+    { label: "Channel-Product", value: "market_product" },
+    { label: "Product-Channel", value: "product_market" },
 ];
 
 const DEFAULT_METRIC_BY_TAB = {

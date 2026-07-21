@@ -14,6 +14,7 @@ import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import HIVOutputAnalysis from "./HIVOutputAnalysis";
 import { mockOutputData } from "./OutputMock";
+import { getHIVOutputFilters } from "../../../services/apiService";
 
 /**
  * HIVOutput.jsx
@@ -43,118 +44,67 @@ export default function HIVOutput() {
 
     const [outputAnalysis, setOutputAnalysis] = useState(null);
 
-    const outputFilterMock = {
-        ta_name: "HIV Treatment",
-
-        available_scenarios: [
-            "BASE",
-            "Test Scenario",
-            "Scenario 2",
-        ],
-
-        markets: [
-            "Retail",
-            "Non-retail",
-        ],
-
-        products: [
-            "Truvada",
-            "Descovy",
-            "Biktarvy",
-        ],
-
-        available_months: [
-            "2024-06-01",
-            "2024-07-01",
-            "2024-08-01",
-            "2024-09-01",
-            "2024-10-01",
-            "2024-11-01",
-            "2024-12-01",
-            "2025-01-01",
-            "2025-02-01",
-            "2025-03-01",
-            "2025-04-01",
-            "2025-05-01",
-            "2025-06-01",
-            "2025-07-01",
-            "2025-08-01",
-            "2025-09-01",
-            "2025-10-01",
-            "2025-11-01",
-            "2025-12-01",
-            "2026-01-01",
-            "2026-02-01",
-            "2026-03-01",
-            "2026-04-01",
-            "2026-05-01",
-            "2026-06-01",
-            "2026-07-01",
-            "2026-08-01",
-            "2026-09-01",
-            "2026-10-01",
-            "2026-11-01",
-            "2026-12-01",
-        ],
-
-        selected_filter: {
-            scenario_names: ["BASE"],
-            markets: ["Retail"],
-            products: ["Truvada"],
-            start_date: "2024-06-01",
-            end_date: "2026-12-01",
-        },
-    };
-
     useEffect(() => {
         if (therapyArea) {
             fetchFilters();
         }
     }, [therapyArea]);
 
-    const fetchFilters = () => {
+    const fetchFilters = async () => {
 
-        const response = outputFilterMock;
+        try {
 
-        setAvailableScenarios(
-            response.available_scenarios || []
-        );
+            const { data } = await getHIVOutputFilters(
+                therapyArea
+            );
 
-        setAvailableMonths(
-            response.available_months || []
-        );
+            setAvailableScenarios(
+                data.available_scenarios || []
+            );
 
-        setAvailableMarkets(
-            response.markets || []
-        );
+            setAvailableMonths(
+                data.available_months || []
+            );
 
-        setAvailableProducts(
-            response.products || []
-        );
+            setAvailableMarkets(
+                data.markets || []
+            );
 
-        const filter =
-            response.selected_filter || {};
+            setAvailableProducts(
+                data.products || []
+            );
 
-        setSelectedScenarios(
-            filter.scenario_names || []
-        );
+            const filter =
+                data.selected_filter || {};
 
-        setSelectedMarkets(
-            filter.markets || []
-        );
+            setSelectedScenarios(
+                filter.scenario_names || []
+            );
 
-        setSelectedProducts(
-            filter.products || []
-        );
+            setSelectedMarkets(
+                filter.markets || []
+            );
 
-        setFromDate(
-            filter.start_date || ""
-        );
+            setSelectedProducts(
+                filter.products || []
+            );
 
-        setToDate(
-            filter.end_date || ""
-        );
+            setFromDate(
+                filter.start_date || ""
+            );
 
+            setToDate(
+                filter.end_date || ""
+            );
+
+        } catch (error) {
+
+            console.error(
+                "Failed to load output filters",
+                error
+            );
+
+        }
     };
 
     const handleApplyFilter = () => {
@@ -355,7 +305,7 @@ export default function HIVOutput() {
                     </Box>
 
                     {renderMultiSelect(
-                        "MARKET",
+                        "CHANNEL",
                         availableMarkets,
                         selectedMarkets,
                         setSelectedMarkets

@@ -18,7 +18,7 @@ const TABS = [
         value: "total_market_volume",
     },
     {
-        label: "Market Distribution (%)",
+        label: "Channel Distribution (%)",
         value: "market_distribution",
     },
     {
@@ -26,11 +26,11 @@ const TABS = [
         value: "product_distribution",
     },
     {
-        label: "Market-Product",
+        label: "Channel-Product",
         value: "market_product",
     },
     {
-        label: "Product-Market",
+        label: "Product-Channel",
         value: "product_market",
     },
 ];
@@ -82,6 +82,28 @@ export default function HIVMarketAnalysis({
     const hasData =
         !!currentData?.chart?.series?.length &&
         !!currentData?.table?.rows?.length;
+
+    const chartData =
+        activeTab === "total_market_volume"
+            ? (() => {
+                const scenarios = Object.values(allScenariosData || {});
+
+                if (!scenarios.length) {
+                    return currentData?.chart;
+                }
+
+                const firstChart =
+                    scenarios[0]?.market_analysis?.total_market_volume?.[selectedMetric]?.[viewMode]?.chart;
+
+                return {
+                    ...firstChart,
+                    series: scenarios.flatMap(
+                        (scenario) =>
+                            scenario?.market_analysis?.total_market_volume?.[selectedMetric]?.[viewMode]?.chart?.series || []
+                    ),
+                };
+            })()
+            : currentData?.chart;
 
     return (
         <Paper
@@ -215,8 +237,9 @@ export default function HIVMarketAnalysis({
                             p: 3,
                         }}
                     >
+
                         <HIVMarketChart
-                            chartData={currentData?.chart}
+                            chartData={chartData}
                             activeTab={activeTab}
                             selectedMarket={selectedMarket}
                             selectedProduct={selectedProduct}

@@ -71,10 +71,22 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
 
         switch (activeTab) {
 
-            case "total_market_volume":
-                color = ACTIVE_COLOR;
+            case "total_market_volume": {
+                const colors = [
+                    "#2563EB",
+                    "#16A34A",
+                    "#DC2626",
+                    "#9333EA",
+                    "#EA580C",
+                    "#0891B2",
+                    "#D97706",
+                    "#4F46E5",
+                ];
+
+                color = colors[index % colors.length];
                 width = 3;
                 break;
+            }
 
             case "market_distribution": {
                 const isSelected =
