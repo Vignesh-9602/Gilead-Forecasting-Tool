@@ -155,12 +155,19 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
 
     peak_pct = float(event_row.get("peak_percent", 0.0))
     duration = max(1, int(event_row.get("months", 12)))
-    factor = float(event_row.get("factor", 1.0))
+    raw_factor = event_row.get("factor")
 
     try:
         curve_type = CurveType(event_row.get("curve_type", "Linear"))
     except ValueError:
         curve_type = CurveType.LINEAR
+
+    # SCurve with factor=1 is mathematically indistinguishable from Linear.
+    # Default to k=5 (visible sigmoid) when no meaningful factor is provided.
+    if curve_type == CurveType.SCURVE and (raw_factor is None or float(raw_factor) == 1.0):
+        factor = 5.0
+    else:
+        factor = float(raw_factor if raw_factor is not None else 1.0)
 
     if tab == "payer_event":
         payers_list = event_row.get("payers") or []
@@ -346,8 +353,28 @@ def _apply_events_to_data(
                 f"cannot be modified. Set start_date on or after the forecast start date."
             )
 
-        # Recompute total after each event so stacked events use the right baseline
-        total_all = _recompute_total_all(data, month_tuples)
+        if tab == "overall_event":
+            # Total market volume changes — recompute for next stacked event
+            total_all = _recompute_total_all(data, month_tuples)
+        else:
+            # payer_event / product_event: total market must stay constant.
+            # Renormalize each forecast month so per-entity volumes sum back to
+            # the original total (handles cases where no impacted entities are
+            # configured, which would otherwise inflate the market total).
+            for i in range(forecast_start_index, len(month_tuples)):
+                y, m = month_tuples[i]
+                orig_total = total_all[i]
+                if orig_total <= 0:
+                    continue
+                ym = data.get((y, m), {})
+                current_total = sum(
+                    v for pd in ym.values() for v in pd.values() if v > 0
+                )
+                if current_total > 0 and abs(current_total - orig_total) > 1e-6:
+                    scale = orig_total / current_total
+                    for prod in ym:
+                        for payer in ym[prod]:
+                            ym[prod][payer] = max(0.0, ym[prod][payer] * scale)
 
     return total_all
 
@@ -451,22 +478,22 @@ def run_market_events_calculation(payload) -> dict:
             mod_total = base_total_all
 
         # ── Build metrics_views for every tab ─────────────────────────────
+        # All tabs use mod_data/mod_total so switching tabs shows the same
+        # post-event state (e.g. overall_event volume increase is visible
+        # in payer and product tabs without re-running).
         def _metrics(t: str) -> dict:
-            d = mod_data if t == tab else base_data
-            tot = mod_total if t == tab else base_total_all
-
             if t == "payer_event":
                 return _build_payer_event_metrics(
-                    d, month_tuples, chart_headers, forecast_start_index,
-                    tot, show_products, show_payers,
+                    mod_data, month_tuples, chart_headers, forecast_start_index,
+                    mod_total, show_products, show_payers,
                 )
             if t == "product_event":
                 return _build_product_event_metrics(
-                    d, month_tuples, chart_headers, forecast_start_index,
-                    tot, show_products, show_payers,
+                    mod_data, month_tuples, chart_headers, forecast_start_index,
+                    mod_total, show_products, show_payers,
                 )
             return _build_overall_event_metrics(
-                month_tuples, chart_headers, forecast_start_index, tot,
+                month_tuples, chart_headers, forecast_start_index, mod_total,
             )
 
         saved_tabs = {

@@ -18,6 +18,8 @@ from app.liver_market_events.repository.market_events_repo import (
     load_filter_state,
     load_scenario_event_tabs,
     save_market_events_scenario,
+    load_market_analysis,
+    save_market_analysis,
 )
 from app.liver_market_events.helpers.date_helpers import (
     parse_year_month,
@@ -36,6 +38,7 @@ from app.liver_market_events.helpers.data_helpers import (
     build_hierarchy_table,
     aggregate_monthly_to_yearly,
 )
+from app.services.forecast_service import estimate_parameters, forecast_ets
 
 DEFAULT_FORECAST_MONTHS = 12
 CURVE_TYPES = ["Linear", "Exponential", "Logarithmic", "SCurve"]
@@ -54,7 +57,19 @@ PRODUCT_EVENT_VIEW_OPTIONS = [
     {"label": "Payer-Product Level", "value": "payer_product_level"},
 ]
 
-# Frontend always sends "payer_share"/"payer_volume" (via denormalizeMetricValue).
+# Liver API uses market_* naming; market events uses payer_* naming — they are the same data.
+# Normalize incoming metric values so both names are accepted without breaking either screen.
+_METRIC_ALIASES: dict[str, str] = {
+    "market_share":        "payer_share",
+    "market_volume":       "payer_volume",
+    "market_distribution": "payer_share",
+}
+
+def _normalize_metric(metric: str) -> str:
+    """Translate liver-API metric names to market-events internal names."""
+    return _METRIC_ALIASES.get(metric, metric)
+
+
 # payer_event stores payer_share/payer_volume — no mapping needed.
 # product_event stores product_share/product_volume — needs translation.
 _METRIC_KEY_MAP = {
@@ -62,6 +77,7 @@ _METRIC_KEY_MAP = {
 }
 
 def _resolve_metric_key(tab: str, metric: str) -> str:
+    metric = _normalize_metric(metric)
     return _METRIC_KEY_MAP.get(tab, {}).get(metric, metric)
 
 
@@ -221,7 +237,9 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
         if sf.scenario_name.upper() == "BASE":
             saved_event_tabs = _compute_base_event_tabs(cur, ta, sf.model_dump(), forecast_start_date)
         else:
-            saved_event_tabs = load_scenario_event_tabs(cur, sf.scenario_name)
+            saved_event_tabs = _load_saved_event_tabs(
+                cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
+            )
 
         payer_event_config = {
             "products":            products,
@@ -313,21 +331,33 @@ def _compute_base_event_tabs(cur, ta: str, selected_filter: dict, forecast_start
     show_products = sorted({p  for ym in data.values() for p  in ym})
     show_payers   = sorted({py for ym in data.values() for pd in ym.values() for py in pd})
 
-    # Total volume for ALL months (history + forecast); fall back to flat forecast when no data
-    total_raw = [get_volume(data, y, m) for y, m in month_tuples]
+    # ETS forecast helper — used for both total and each individual series
+    n_fcast = len(month_tuples) - forecast_start_index
+
+    def _ets_forecast(history: list, n: int) -> list:
+        hist_vals = [v for v in history if v > 0]
+        if n > 0 and len(hist_vals) >= 4:
+            alpha, beta, gamma = estimate_parameters(hist_vals)
+            return [round(float(v), 2) for v in forecast_ets(hist_vals, n, alpha, beta, gamma, "market_volume")]
+        fv = flat_forecast(history)
+        return [fv] * n
+
+    # Total volume for ALL months (history + forecast) — ETS matches liver Tab-1 TMV
+    total_raw  = [get_volume(data, y, m) for y, m in month_tuples]
     total_hist = total_raw[:forecast_start_index]
-    total_fcast_val = flat_forecast(total_hist)
-    total_all = total_hist + [v if v > 0 else total_fcast_val for v in total_raw[forecast_start_index:]]
+    total_all  = total_hist + _ets_forecast(total_hist, n_fcast)
 
     return {
         "payer_event": {
             "metrics_views": _build_payer_event_metrics(
-                data, month_tuples, chart_headers, forecast_start_index, total_all, show_products, show_payers
+                data, month_tuples, chart_headers, forecast_start_index, total_all,
+                show_products, show_payers, forecast_fn=_ets_forecast,
             )
         },
         "product_event": {
             "metrics_views": _build_product_event_metrics(
-                data, month_tuples, chart_headers, forecast_start_index, total_all, show_products, show_payers
+                data, month_tuples, chart_headers, forecast_start_index, total_all,
+                show_products, show_payers, forecast_fn=_ets_forecast,
             )
         },
         "overall_event": {
@@ -408,7 +438,7 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
 
 
 def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
-                                total_all, show_products, show_payers) -> dict:
+                                total_all, show_products, show_payers, forecast_fn=None) -> dict:
     """
     Payer event — two view levels per metric/period:
       payer_level         : Overall + flat payer rows, read-only
@@ -424,7 +454,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
     for payer in show_payers:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, payer=payer
+            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         payer_vol_m[payer]   = (hist, fcast, all_vals)
@@ -436,7 +466,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
     for product in show_products:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, product=product
+            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         prod_vol_m[product]   = (hist, fcast, all_vals)
@@ -449,7 +479,8 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
     for product in show_products:
         for payer in show_payers:
             h, f, av = build_values_for_series(
-                data, month_tuples, forecast_start_index, product=product, payer=payer
+                data, month_tuples, forecast_start_index, product=product, payer=payer,
+                forecast_fn=forecast_fn,
             )
             sh_all = [compute_share(av[i], total_all[i]) for i in range(len(av))]
             pp_vol_m[(product, payer)]   = (h, f, av)
@@ -601,7 +632,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
 
 def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
-                                   total_all, show_products, show_payers) -> dict:
+                                   total_all, show_products, show_payers, forecast_fn=None) -> dict:
     """
     Product event — two view levels per metric/period:
       product_level       : Overall + flat product rows, read-only
@@ -617,7 +648,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     for product in show_products:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, product=product
+            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         prod_vol_m[product]   = (hist, fcast, all_vals)
@@ -629,7 +660,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     for payer in show_payers:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, payer=payer
+            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         payer_vol_m[payer]   = (hist, fcast, all_vals)
@@ -642,7 +673,8 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
     for payer in show_payers:
         for product in show_products:
             h, f, av = build_values_for_series(
-                data, month_tuples, forecast_start_index, product=product, payer=payer
+                data, month_tuples, forecast_start_index, product=product, payer=payer,
+                forecast_fn=forecast_fn,
             )
             sh_all = [compute_share(av[i], total_all[i]) for i in range(len(av))]
             pp_vol_m[(payer, product)]   = (h, f, av)
@@ -921,20 +953,18 @@ def _redistribute_hierarchy(rows: list, edited_label: str) -> list:
             new_rows.append(row)
             continue
 
-        n           = len(edited_child["values"])
-        parent_vals = row["values"]       # parent total — the hard cap
+        n = len(edited_child["values"])
 
-        # Cap edited child at parent total so siblings always get a non-negative remainder
-        capped_vals = [
-            min(float(edited_child["values"][i]), float(parent_vals[i])) for i in range(n)
-        ]
-        capped_child = {**edited_child, "values": [round(v, 2) for v in capped_vals]}
+        # Accept the user's value as-is — no cap at the parent total.
+        # If the new child exceeds the current parent, siblings absorb 0 and the
+        # parent total grows to accommodate (it is recomputed as sum of children).
+        new_child_vals = [round(float(v), 2) for v in edited_child["values"]]
 
         new_siblings = []
         for sib in siblings:
             new_vals = []
             for i in range(n):
-                remaining   = max(0.0, float(parent_vals[i]) - capped_vals[i])
+                remaining   = max(0.0, float(row["values"][i]) - new_child_vals[i])
                 old_sib_sum = sum(float(s["values"][i]) for s in siblings)
                 old_val     = float(sib["values"][i])
                 if old_sib_sum > 0:
@@ -946,13 +976,20 @@ def _redistribute_hierarchy(rows: list, edited_label: str) -> list:
         # Preserve original children order
         sib_map = {s["label"]: s for s in new_siblings}
         new_children = [
-            capped_child if c["label"] == child_lbl else sib_map.get(c["label"], c)
+            {"label": child_lbl, "values": new_child_vals} if c["label"] == child_lbl
+            else sib_map.get(c["label"], c)
             for c in children
+        ]
+
+        # Recompute parent as sum of its (updated) children
+        new_parent_vals = [
+            round(sum(float(c["values"][i]) for c in new_children), 2)
+            for i in range(n)
         ]
 
         new_rows.append({
             "label":    parent_lbl,
-            "values":   row["values"],    # parent total unchanged
+            "values":   new_parent_vals,
             "children": new_children,
         })
 
@@ -1362,9 +1399,12 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
         if sf.scenario_name.upper() == "BASE":
             saved_event_tabs = _compute_base_event_tabs(cur, ta, sf.model_dump(), forecast_start_date)
         else:
-            saved_event_tabs = load_scenario_event_tabs(cur, sf.scenario_name)
+            saved_event_tabs = _load_saved_event_tabs(
+                cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
+            )
 
-        internal_metric = _resolve_metric_key(payload.selected_tab, payload.selected_metric)
+        normalized_metric = _normalize_metric(payload.selected_metric)
+        internal_metric = _resolve_metric_key(payload.selected_tab, normalized_metric)
         saved_event_tabs = _apply_table_edits(
             saved_event_tabs,
             payload.selected_tab,
@@ -1418,14 +1458,366 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Volume snapshot — compact save format
+# ---------------------------------------------------------------------------
+
+def _extract_volume_snapshot(event_tabs: dict) -> dict:
+    """
+    Pull volume-only data out of a full event_tabs response.
+
+    Shares are NOT stored — they are recomputed from volumes at load time
+    so they always stay consistent with the model input module.
+
+    Returned structure:
+        {
+          "months": ["2024-01-01", ...],
+          "forecast_start_index": <int>,
+          "total_all": [<float>, ...],          # from overall_event (may include event growth)
+          "series": {
+              "<product>": {"<payer>": [<float>, ...], ...},
+              ...
+          }
+        }
+    """
+    def _vol_key(mv: dict) -> str:
+        """Return whichever volume metric key the frontend used."""
+        for k in ("payer_volume", "market_volume"):
+            if k in mv:
+                return k
+        return "payer_volume"
+
+    # Total market volume lives in overall_event (may reflect overall_event curve)
+    overall_mv = event_tabs.get("overall_event", {}).get("metrics_views", {})
+    overall_table = (
+        overall_mv
+        .get(_vol_key(overall_mv), {})
+        .get("monthly", {})
+        .get("overall_level", {})
+        .get("table", {})
+    )
+    months = overall_table.get("headers", [])
+    forecast_start_index = overall_table.get("forecast_start_index", 0)
+    total_all: list = []
+    for row in overall_table.get("rows", []):
+        if row.get("label") in ("Overall Payer", "Overall"):
+            total_all = [float(v) for v in row.get("values", [])]
+            break
+
+    # Per-(product, payer) volumes from payer_event hierarchy
+    payer_mv = event_tabs.get("payer_event", {}).get("metrics_views", {})
+    payer_vol_table = (
+        payer_mv
+        .get(_vol_key(payer_mv), {})
+        .get("monthly", {})
+        .get("product_payer_level", {})
+        .get("table", {})
+    )
+    if not months:
+        months = payer_vol_table.get("headers", [])
+        forecast_start_index = payer_vol_table.get("forecast_start_index", 0)
+
+    series: dict = {}
+    for row in payer_vol_table.get("rows", []):
+        lbl = row.get("label", "")
+        if lbl == "Overall":
+            if not total_all:
+                total_all = [float(v) for v in row.get("values", [])]
+            continue
+        series[lbl] = {
+            child["label"]: [float(v) for v in child.get("values", [])]
+            for child in row.get("children", [])
+        }
+
+    return {
+        "months":               months,
+        "forecast_start_index": forecast_start_index,
+        "total_all":            total_all,
+        "series":               series,
+    }
+
+
+def extract_snapshot_from_market_analysis(market_analysis: dict) -> dict | None:
+    """
+    Build a compact volume snapshot from a saved market_analysis dict.
+
+    market_analysis structure (after _build_market_analysis_both_granularities):
+        {tab: {metric: {monthly: {chart: {months, fsi, series}, table: {rows}}, yearly: ...}}}
+
+    months and forecast_start_index live on chart, NOT on table.
+
+    Returns None if the market_analysis doesn't have enough data to build a snapshot.
+    """
+    tmv_monthly = (market_analysis
+                   .get("total_market_volume", {})
+                   .get("payer_volume", {})
+                   .get("monthly", {}))
+    tmv_chart = tmv_monthly.get("chart", {})
+    months = tmv_chart.get("months", [])
+    fsi    = tmv_chart.get("forecast_start_index", 0)
+    if not months:
+        return None
+
+    total_all: list = []
+    for row in tmv_monthly.get("table", {}).get("rows", []):
+        total_all = [float(v) for v in row.get("values", [])]
+        break  # only one row in total_market_volume
+
+    pp_table = (market_analysis
+                .get("product_payer", {})
+                .get("payer_volume", {})
+                .get("monthly", {})
+                .get("table", {}))
+    series: dict = {}
+    for row in pp_table.get("rows", []):
+        product = row.get("label", "")
+        if not product or product.lower() in ("total", "overall"):
+            continue
+        series[product] = {
+            child["label"]: [float(v) for v in child.get("values", [])]
+            for child in row.get("children", [])
+            if child.get("label")
+        }
+
+    return {
+        "months":               months,
+        "forecast_start_index": fsi,
+        "total_all":            total_all,
+        "series":               series,
+    }
+
+
+def _reconstruct_event_tabs_from_snapshot(snapshot: dict) -> dict:
+    """
+    Rebuild a full event_tabs from a compact volume snapshot.
+
+    Shares are computed fresh from volume / total_volume * 100, so they
+    are always consistent with whatever denominator the model input module uses.
+    """
+    months               = snapshot["months"]
+    forecast_start_index = snapshot["forecast_start_index"]
+    total_all            = [float(v) for v in snapshot["total_all"]]
+    saved_series         = snapshot.get("series", {})
+
+    month_tuples = [(int(m[:4]), int(m[5:7])) for m in months]
+
+    # Reconstruct data: {(year, month): {product: {payer: volume}}}
+    data: dict = {}
+    for i, (y, mo) in enumerate(month_tuples):
+        data[(y, mo)] = {}
+        for product, payer_map in saved_series.items():
+            data[(y, mo)][product] = {
+                payer: float(vals[i]) if i < len(vals) else 0.0
+                for payer, vals in payer_map.items()
+            }
+
+    show_products = sorted(saved_series.keys())
+    show_payers   = sorted({p for pm in saved_series.values() for p in pm})
+
+    return {
+        "payer_event": {
+            "metrics_views": _build_payer_event_metrics(
+                data, month_tuples, months, forecast_start_index,
+                total_all, show_products, show_payers,
+            )
+        },
+        "product_event": {
+            "metrics_views": _build_product_event_metrics(
+                data, month_tuples, months, forecast_start_index,
+                total_all, show_products, show_payers,
+            )
+        },
+        "overall_event": {
+            "metrics_views": _build_overall_event_metrics(
+                month_tuples, months, forecast_start_index, total_all
+            )
+        },
+    }
+
+
+def _update_market_analysis_volumes(market_analysis: dict, snapshot: dict) -> dict:
+    """
+    Patch payer_volume rows in a saved liver market_analysis from a compact
+    market events volume snapshot.
+
+    Structure of market_analysis (nested granularity):
+        {tab: {metric: {monthly: {chart, table}, yearly: {chart, table}}}}
+
+    Tabs updated:
+        total_market_volume  ← snapshot.total_all
+        payer_distribution   ← per-payer volumes  (sum across products)
+        product_distribution ← per-product volumes (sum across payers)
+        product_payer        ← hierarchy: product → payer children
+        payer_product        ← hierarchy: payer   → product children (transposed)
+
+    Shares are NOT touched — liver's _recompute_all_market_shares_nested
+    recomputes them from volumes on the next load.
+    """
+    months    = snapshot["months"]
+    total_all = [float(v) for v in snapshot["total_all"]]
+    series    = snapshot.get("series", {})  # {product: {payer: [monthly values]}}
+    n         = len(months)
+
+    # Derive flat volumes
+    product_vols: dict = {}
+    payer_vols: dict   = {}
+    for product, payer_map in series.items():
+        prod_total = [0.0] * n
+        for payer, vals in payer_map.items():
+            payer_vols.setdefault(payer, [0.0] * n)
+            for i, v in enumerate(vals[:n]):
+                prod_total[i]           += float(v)
+                payer_vols[payer][i]    += float(v)
+        product_vols[product] = prod_total
+
+    # Year aggregation helper
+    month_years = [int(m[:4]) for m in months]
+    year_order  = list(dict.fromkeys(month_years))
+
+    def _to_yearly(vals: list) -> list:
+        by_year = {y: 0.0 for y in year_order}
+        for i, v in enumerate(vals[:n]):
+            by_year[month_years[i]] += float(v)
+        return [round(by_year[y], 2) for y in year_order]
+
+    def _patch_chart(chart: dict, rows: list, fsi: int) -> None:
+        row_map = {r["label"]: r["values"] for r in rows
+                   if r.get("label", "").lower() not in ("total", "overall")}
+        for s in chart.get("series", []):
+            vals = row_map.get(s.get("label", ""), [])
+            if vals:
+                s["history"]  = vals[:fsi]
+                s["forecast"] = vals[fsi:]
+
+    def _update_flat_gran(gran_data: dict, vol_map: dict, is_yearly: bool) -> None:
+        tbl  = gran_data.get("table", {})
+        rows = tbl.get("rows", [])
+        fsi  = tbl.get("forecast_start_index",
+                        gran_data.get("chart", {}).get("forecast_start_index", 0))
+        non_total = [r for r in rows
+                     if r.get("label", "").lower() not in ("total", "overall")]
+        for row in rows:
+            lbl = row.get("label", "")
+            if lbl.lower() in ("total", "overall"):
+                k = len(year_order) if is_yearly else n
+                row["values"] = [
+                    round(sum(float(r["values"][i]) if i < len(r.get("values", [])) else 0.0
+                              for r in non_total), 2)
+                    for i in range(k)
+                ]
+            elif lbl in vol_map:
+                row["values"] = (_to_yearly(vol_map[lbl]) if is_yearly
+                                 else [round(float(v), 2) for v in vol_map[lbl]])
+        _patch_chart(gran_data.get("chart", {}), rows, fsi)
+
+    def _update_hier_gran(gran_data: dict, parent_child_map: dict, is_yearly: bool) -> None:
+        tbl  = gran_data.get("table", {})
+        rows = tbl.get("rows", [])
+        fsi  = tbl.get("forecast_start_index",
+                        gran_data.get("chart", {}).get("forecast_start_index", 0))
+        for row in rows:
+            parent = row.get("label", "")
+            if parent.lower() in ("total", "overall"):
+                continue
+            pmap     = parent_child_map.get(parent, {})
+            children = row.get("children", [])
+            for child in children:
+                clbl = child.get("label", "")
+                if clbl in pmap:
+                    child["values"] = (_to_yearly(pmap[clbl]) if is_yearly
+                                       else [round(float(v), 2) for v in pmap[clbl]])
+            if children:
+                k = len(children[0].get("values", []))
+                row["values"] = [
+                    round(sum(float(c["values"][i]) if i < len(c.get("values", [])) else 0.0
+                              for c in children), 2)
+                    for i in range(k)
+                ]
+        _patch_chart(gran_data.get("chart", {}), rows, fsi)
+
+    # Transposed map: payer → {product → monthly values}
+    payer_product_map: dict = {}
+    for product, payer_map in series.items():
+        for payer, vals in payer_map.items():
+            payer_product_map.setdefault(payer, {})[product] = vals
+
+    import copy
+    ma = copy.deepcopy(market_analysis)
+
+    # Flat tabs
+    for tab_key, vol_map in (
+        ("payer_distribution",   payer_vols),
+        ("product_distribution", product_vols),
+    ):
+        pv = ma.get(tab_key, {}).get("payer_volume", {})
+        _update_flat_gran(pv.get("monthly", {}), vol_map, is_yearly=False)
+        _update_flat_gran(pv.get("yearly",  {}), vol_map, is_yearly=True)
+
+    # Hierarchy tabs
+    for tab_key, parent_map in (
+        ("product_payer", series),            # product → {payer → vals}
+        ("payer_product", payer_product_map), # payer   → {product → vals}
+    ):
+        pv = ma.get(tab_key, {}).get("payer_volume", {})
+        _update_hier_gran(pv.get("monthly", {}), parent_map, is_yearly=False)
+        _update_hier_gran(pv.get("yearly",  {}), parent_map, is_yearly=True)
+
+    # Total market volume
+    tmv_pv = ma.get("total_market_volume", {}).get("payer_volume", {})
+    for gran, is_yearly in (("monthly", False), ("yearly", True)):
+        gran_data = tmv_pv.get(gran, {})
+        vals = _to_yearly(total_all) if is_yearly else [round(float(v), 2) for v in total_all]
+        tbl  = gran_data.get("table", {})
+        fsi  = tbl.get("forecast_start_index",
+                        gran_data.get("chart", {}).get("forecast_start_index", 0))
+        for row in tbl.get("rows", []):
+            row["values"] = vals
+        ch = gran_data.get("chart", {})
+        for s in ch.get("series", []):
+            s["history"]  = vals[:fsi]
+            s["forecast"] = vals[fsi:]
+
+    return ma
+
+
+def _load_saved_event_tabs(cur, scenario_name: str, ta: str,
+                            selected_filter: dict, forecast_start_date: str) -> dict:
+    """
+    Load event_tabs for a non-BASE scenario.
+
+    Priority:
+    1. Compact market_events snapshot (saved via market events save)
+    2. Compact snapshot derived from market_analysis (saved via model input save)
+    3. Legacy full event_tabs format (pre-compact; replaced on next save)
+    4. BASE fallback (scenario exists but has no chart data at all)
+    """
+    raw = load_scenario_event_tabs(cur, scenario_name)
+
+    if raw is not None:
+        if "series" in raw:
+            return _reconstruct_event_tabs_from_snapshot(raw)
+        # Legacy full format
+        return raw
+
+    # No market_events snapshot — try deriving one from market_analysis
+    ma = load_market_analysis(cur, scenario_name)
+    if ma:
+        snapshot = extract_snapshot_from_market_analysis(ma)
+        if snapshot:
+            return _reconstruct_event_tabs_from_snapshot(snapshot)
+
+    # Nothing saved at all — fall back to BASE
+    return _compute_base_event_tabs(cur, ta, selected_filter, forecast_start_date)
+
+
+# ---------------------------------------------------------------------------
 # Save scenario
 # ---------------------------------------------------------------------------
 
 def save_market_events(payload: SaveMarketEventsRequest) -> dict:
     """
-    POST /save-scenario — persist the current event_tabs for a named scenario.
-    Rejects with ValueError if the scenario name is 'Base'.
-    Uses ON CONFLICT (scenario_name) DO UPDATE, so re-saving overwrites the existing record.
+    POST /save-scenario — persist the current event_tabs into an existing scenario row.
+    Rejects with ValueError if the scenario name is 'Base' or does not exist
+    (scenarios can only be created in the liver / model-input module).
     """
     name = payload.scenario_name.strip()
     if name.lower() == "base":
@@ -1434,15 +1826,44 @@ def save_market_events(payload: SaveMarketEventsRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        sf = payload.selected_filter
-        save_market_events_scenario(
-            cur,
-            scenario_name=name,
-            ta=payload.ta_name,
-            selected_filter=sf.model_dump(),
-            event_tabs=payload.event_tabs,
-        )
+        volume_snapshot = _extract_volume_snapshot(payload.event_tabs)
+
+        if not volume_snapshot.get("months"):
+            oe    = payload.event_tabs.get("overall_event", {})
+            mv    = oe.get("metrics_views", {})
+            pv    = mv.get("payer_volume", {})
+            mo    = pv.get("monthly", {})
+            ol    = mo.get("overall_level", {})
+            tbl   = ol.get("table", {})
+            raise ValueError(
+                f"event_tabs volume extraction failed. "
+                f"overall_event keys={list(oe.keys())} | "
+                f"metrics_views keys={list(mv.keys())} | "
+                f"payer_volume keys={list(pv.keys())} | "
+                f"monthly keys={list(mo.keys())} | "
+                f"overall_level keys={list(ol.keys())} | "
+                f"table keys={list(tbl.keys())}"
+            )
+
+        rows_updated = save_market_events_scenario(cur, name, volume_snapshot)
+        if rows_updated == 0:
+            raise ValueError(
+                f"Scenario '{name}' does not exist. "
+                "Scenarios can only be created in the model input module."
+            )
+        # Commit snapshot immediately — market_analysis sync must never roll this back.
         conn.commit()
+
+        # Best-effort: sync volumes into market_analysis in a separate transaction.
+        try:
+            existing_ma = load_market_analysis(cur, name)
+            if existing_ma:
+                updated_ma = _update_market_analysis_volumes(existing_ma, volume_snapshot)
+                save_market_analysis(cur, name, updated_ma)
+                conn.commit()
+        except Exception as _sync_err:
+            conn.rollback()
+            print(f"[market_events] market_analysis sync skipped: {_sync_err}")
 
         all_scenarios = get_scenarios(cur)
         if "Base" not in all_scenarios:
