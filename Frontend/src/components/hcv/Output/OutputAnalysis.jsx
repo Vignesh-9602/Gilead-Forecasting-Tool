@@ -12,7 +12,7 @@ import OutputChart from "./OutputChart";
 import OutputTable from "./OutputTable";
 
 const TABS = [
-    { label: "Total Payer Volume", value: "total_payer_volume" },
+    { label: "Total Market Volume", value: "total_payer_volume" },
     { label: "Payer Distribution (%)", value: "payer_distribution" },
     { label: "Product Distribution (%)", value: "product_distribution" },
     { label: "Payer-Product", value: "payer_product" },
