@@ -2,8 +2,15 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from psycopg2.extras import RealDictCursor
+from copy import deepcopy
+from datetime import date, datetime
 from app.hiv_treat.routes.output_models import *
 from app.hiv_treat.routes.market_events import generate_months
+from app.hiv_treat.services.market_event_helpers import *
+from app.hiv_treat.services.calculation_tree_market_events import *
+from app.hiv_treat.services.generic_builders_market_events import *
+from app.hiv_treat.services.edit_helpers import *
+from app.hiv_treat.services.output_helpers import *
 
 
 router = APIRouter()
@@ -226,3 +233,183 @@ def get_output_screen_filters(
 
     finally:
         cursor.close()
+
+#apply filters
+
+@router.post("/output-screen/apply-filters")
+def apply_output_screen_filters(
+    payload: ApplyOutputScreenFiltersRequest,
+):
+    connection = None
+    cursor = None
+
+    try:
+        connection = get_connection()
+        cursor = connection.cursor()
+
+        ta_name = payload.ta_name.strip()
+
+        if not ta_name:
+            raise HTTPException(
+                status_code=400,
+                detail="ta_name is required.",
+            )
+
+        selected_filter = payload.selected_filter
+
+        start_date = selected_filter.start_date
+        end_date = selected_filter.end_date
+
+        if start_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "start_date cannot be greater "
+                    "than end_date."
+                ),
+            )
+
+        selected_markets = normalize_dimension_filter(
+            selected_filter.markets
+        )
+
+        selected_products = normalize_dimension_filter(
+            selected_filter.products
+        )
+
+        available_scenarios = get_scenarios(
+            cursor,
+            ta_name,
+        )
+
+        if not available_scenarios:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No scenarios found for TA "
+                    f"{ta_name!r}."
+                ),
+            )
+
+        selected_scenarios = resolve_selected_scenarios(
+            requested_scenarios=(
+                selected_filter.scenario_names
+            ),
+            available_scenarios=(
+                available_scenarios
+            ),
+        )
+
+        # =================================================
+        # Build and merge output tabs
+        # =================================================
+
+        output_tabs = {}
+
+        for scenario in selected_scenarios:
+            market_analysis = build_scenario_market_analysis(
+                cursor,
+                ta_name,
+                scenario,
+                start_date,
+                end_date,
+                selected_markets,
+                selected_products,
+            )
+
+            merge_total_market_volume(
+                output_tabs=output_tabs,
+                market_analysis=market_analysis,
+                scenario_name=scenario,
+            )
+
+            merge_market_distribution(
+                output_tabs=output_tabs,
+                market_analysis=market_analysis,
+                scenario_name=scenario,
+            )
+
+            merge_product_distribution(
+                output_tabs=output_tabs,
+                market_analysis=market_analysis,
+                scenario_name=scenario,
+            )
+
+            merge_market_product(
+                output_tabs=output_tabs,
+                market_analysis=market_analysis,
+                scenario_name=scenario,
+            )
+
+            merge_product_market(
+                output_tabs,
+                market_analysis,
+                scenario,
+            )
+
+        return {
+            "ta_name": ta_name,
+
+            "selected_filter": {
+                "scenario_names": selected_scenarios,
+                "start_date": start_date,
+                "end_date": end_date,
+                "markets": selected_markets,
+                "products": selected_products,
+            },
+
+            "selected_metric":
+                payload.selected_metric,
+
+            "selected_view":
+                payload.selected_view,
+
+            "available_scenarios":
+                available_scenarios,
+
+            "metric_filters": [
+                {
+                    "label": "Market Volume",
+                    "value": "market_volume",
+                },
+                {
+                    "label": "Market Share",
+                    "value": "market_share",
+                },
+            ],
+
+            "view_options": [
+                {
+                    "label": "Monthly",
+                    "value": "monthly",
+                },
+                {
+                    "label": "Yearly",
+                    "value": "yearly",
+                },
+            ],
+
+            "output_tabs": output_tabs,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print(
+            "[OUTPUT SCREEN APPLY FILTERS ERROR]",
+            type(exc).__name__,
+            str(exc),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+        if connection is not None:
+            connection.close()

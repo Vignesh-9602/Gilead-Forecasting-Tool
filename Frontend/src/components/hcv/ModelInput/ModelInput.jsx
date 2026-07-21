@@ -955,6 +955,7 @@ export default function PBCModelInput() {
     scenario_name:currentlyAppliedScenario || scenarioSelector || "Base",
     model_type: modelSelection,
     factors: buildFullFactors(),
+    selected_tab: TAB_KEY_MAP[activeTab] || activeTab,
   });
 
   const getFirstOption = (opts) => {
