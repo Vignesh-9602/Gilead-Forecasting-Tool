@@ -3,6 +3,8 @@
 # No DB calls here — these take already-fetched data and transform it.
 # ---------------------------------------------------------------------------
 
+from app.services.forecast_service import estimate_parameters, forecast_ets
+
 
 def organize_raw_data(raw_rows: list) -> dict:
     """
@@ -51,14 +53,34 @@ def monthly_values(data: dict, month_tuples: list, forecast_start_index: int,
     """
     Raw (unrounded) volume for every month in month_tuples, in order.
 
-    History months use real data as-is. Forecast months fall back to a flat
-    continuation (avg of the last 3 history values) whenever the real value
-    is missing/zero, matching the liver-market-events convention.
+    History months use real data as-is. Forecast months use real data when
+    present (e.g. a reshaped saved scenario already has real forecast values
+    baked in); any forecast month with no real value (0) is filled by an ETS
+    forecast fit to this series' own history — matching how the Liver Model
+    Input screen computes its Base forecast (app.services.forecast_service,
+    same estimate_parameters/forecast_ets used there) — falling back to a
+    flat continuation (avg of the last 3 history values) when there isn't
+    enough history (fewer than 4 non-zero points) to fit ETS.
     """
     raw = [get_volume(data, y, m, product, payer) for y, m in month_tuples]
-    history = raw[:forecast_start_index]
-    fallback = flat_forecast(history)
-    forecast = [v if v > 0 else fallback for v in raw[forecast_start_index:]]
+    history      = raw[:forecast_start_index]
+    forecast_raw = raw[forecast_start_index:]
+    n_forecast   = len(forecast_raw)
+
+    if n_forecast == 0:
+        return history
+
+    hist_vals = [v for v in history if v > 0]
+    if len(hist_vals) >= 4:
+        alpha, beta, gamma = estimate_parameters(hist_vals)
+        fallback_series = [
+            round(float(v), 2) for v in forecast_ets(hist_vals, n_forecast, alpha, beta, gamma, "market_volume")
+        ]
+    else:
+        flat = flat_forecast(history)
+        fallback_series = [flat] * n_forecast
+
+    forecast = [v if v > 0 else fallback_series[i] for i, v in enumerate(forecast_raw)]
     return history + forecast
 
 
