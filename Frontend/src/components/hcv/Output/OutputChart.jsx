@@ -92,7 +92,7 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
 
         switch (activeTab) {
 
-            case "total_payer_volume":
+            case "total_market_volume":
                 color = ACTIVE_COLOR;
                 width = 3;
                 break;
@@ -120,20 +120,15 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
                 break;
             }
 
-            case "payer_product": {
-                const isSelected =
-                    item.payer?.toLowerCase() === selectedPayer?.toLowerCase() &&
-                    item.product?.toLowerCase() === selectedProduct?.toLowerCase();
-
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
-
+            case "payer_product":
             case "product_payer": {
+                // These tabs' chart series only carry a plain label like
+                // "Commercial (BASE)" — no separate payer/product fields —
+                // so match against either the selected payer or product.
+                const baseLabel = item.label?.split(" (")[0];
                 const isSelected =
-                    item.payer?.toLowerCase() === selectedPayer?.toLowerCase() &&
-                    item.product?.toLowerCase() === selectedProduct?.toLowerCase();
+                    baseLabel?.toLowerCase() === selectedPayer?.toLowerCase() ||
+                    baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
 
                 color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
                 width = isSelected ? 3 : 2;

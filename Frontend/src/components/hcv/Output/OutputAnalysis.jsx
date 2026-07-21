@@ -12,7 +12,7 @@ import OutputChart from "./OutputChart";
 import OutputTable from "./OutputTable";
 
 const TABS = [
-    { label: "Total Market Volume", value: "total_payer_volume" },
+    { label: "Total Payer Volume", value: "total_market_volume" },
     { label: "Payer Distribution (%)", value: "payer_distribution" },
     { label: "Product Distribution (%)", value: "product_distribution" },
     { label: "Payer-Product", value: "payer_product" },
@@ -20,7 +20,7 @@ const TABS = [
 ];
 
 const DEFAULT_METRIC_BY_TAB = {
-    total_payer_volume: "payer_volume",
+    total_market_volume: "payer_volume",
     payer_distribution: "payer_share",
     product_distribution: "payer_share",
     payer_product: "payer_volume",
@@ -47,7 +47,7 @@ const transformTableRows = (rows = [], parentKey = "row") =>
     });
 
 export default function OutputAnalysis({ outputAnalysis, selectedPayer, selectedProduct }) {
-    const [activeTab, setActiveTab] = useState("total_payer_volume");
+    const [activeTab, setActiveTab] = useState("total_market_volume");
     const [selectedMetric, setSelectedMetric] = useState("payer_volume");
     const [viewMode, setViewMode] = useState("monthly");
 
