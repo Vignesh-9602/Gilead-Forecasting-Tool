@@ -6,6 +6,7 @@ from app.liver_output.repository.output_repo import (
     get_distinct_months,
     get_all_configs_for_ta,
     get_volume_by_product_payer,
+    get_scenario_chart_data,
     load_filter_state,
     save_filter_state,
 )
@@ -177,25 +178,72 @@ def _is_base(scenario_name: str) -> bool:
     return scenario_name.strip().upper() == "BASE"
 
 
+def _cube_from_saved_scenario(chart_data: dict, scenario_name: str, payers: list, products: list) -> dict:
+    """
+    Reshape a saved scenario's chart_data into the same {(year, month): {product: {payer:
+    volume}}} cube shape used for Base, by pulling raw cell volumes out of its
+    market_analysis.payer_product hierarchy tab (rows = payers, each row's children =
+    products, each child's values = one volume per month).
+
+    Only raw volume numbers are extracted — never chart_data's own pre-computed
+    percentages, since this module's share convention (% of grand total at every
+    level) differs from the Liver Model Input screen's (% of parent).
+
+    Scenarios saved by the older Liver Model Input flow key this data as
+    "market_volume"; newer saves (from an updated Save Scenario flow) key it as
+    "payer_volume". Both are accepted.
+    """
+    try:
+        payer_product = chart_data["market_analysis"]["payer_product"]
+        volume_data = payer_product.get("payer_volume") or payer_product["market_volume"]
+        monthly = volume_data["monthly"]
+        months = monthly["chart"]["months"]
+        payer_rows = monthly["table"]["rows"]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"Scenario '{scenario_name}' does not have the expected saved data shape "
+            f"(market_analysis.payer_product) and cannot be used for comparison."
+        )
+
+    month_tuples = [(int(m[:4]), int(m[5:7])) for m in months]
+    wanted_payers = set(payers)
+    wanted_products = set(products)
+
+    raw_rows = []
+    for payer_row in payer_rows:
+        payer = payer_row.get("label")
+        if payer not in wanted_payers:
+            continue
+        for child in payer_row.get("children", []):
+            product = child.get("label")
+            if product not in wanted_products:
+                continue
+            for (y, m), v in zip(month_tuples, child.get("values", [])):
+                raw_rows.append((y, m, product, payer, v))
+
+    return organize_raw_data(raw_rows)
+
+
 def _scenario_cube(cur, ta: str, scenario_name: str, from_year: int, from_month: int,
                     to_year: int, to_month: int, payers: list, products: list) -> dict:
     """
     Returns an {(year, month): {product: {payer: volume}}} cube for one scenario.
 
-    Only 'Base'/'BASE' can be computed today — non-Base scenarios need a real
-    multi-payer/multi-product save mechanism that doesn't exist yet (the
-    existing raw_liver.liver_scenarios rows are single-payer/single-product
-    snapshots from the Liver Model Input screen and can't supply this shape).
+    'Base'/'BASE' is always computed fresh from transaction_data. Any other name
+    is looked up in raw_liver.liver_scenarios (shared with the Liver Model Input
+    and Market Events screens) and its saved chart_data is reshaped into this
+    same cube format.
     """
-    if not _is_base(scenario_name):
-        raise ValueError(
-            f"Scenario '{scenario_name}' is not yet available for comparison — "
-            f"only 'Base' can be computed on the Output screen currently."
+    if _is_base(scenario_name):
+        raw_rows = get_volume_by_product_payer(
+            cur, ta, from_year, from_month, to_year, to_month, payers=payers, products=products
         )
-    raw_rows = get_volume_by_product_payer(
-        cur, ta, from_year, from_month, to_year, to_month, payers=payers, products=products
-    )
-    return organize_raw_data(raw_rows)
+        return organize_raw_data(raw_rows)
+
+    chart_data = get_scenario_chart_data(cur, scenario_name)
+    if chart_data is None:
+        raise ValueError(f"Scenario '{scenario_name}' was not found.")
+    return _cube_from_saved_scenario(chart_data, scenario_name, payers, products)
 
 
 def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_index: int,
@@ -240,7 +288,7 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
                              forecast_start_index: int, year_labels: list, yearly_fsi: int,
                              entities: list = None, agg_key: str = None) -> dict:
     """
-    Build one flat tab: total_payer_volume when entities is empty/None (one row/series
+    Build one flat tab: total_market_volume when entities is empty/None (one row/series
     per scenario, the grand total), otherwise payer_distribution / product_distribution
     (a "Grand Total" row plus one row per entity, per scenario). agg_key selects
     "by_payer" or "by_product" from each scenario's aggregates.
@@ -342,9 +390,11 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
         result[metric] = {}
         for view in ("monthly", "yearly"):
             is_monthly    = view == "monthly"
+            header_key    = "months" if is_monthly else "years"
             header_labels = month_keys if is_monthly else year_labels
             fsi           = forecast_start_index if is_monthly else yearly_fsi
 
+            chart_series = []
             rows = []
             for scenario in scenario_names:
                 total_vol, parent_vols, cell_vols = per_scenario[scenario]
@@ -363,9 +413,16 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
                         child_rows.append(build_hierarchy_row(child, _metric_vals(cell_view), target_metric))
 
                     parent_view = parent_vols[parent] if is_monthly else _yearly(parent_vols[parent])
+                    parent_metric_vals = _metric_vals(parent_view)
                     parent_rows.append(
-                        build_hierarchy_row(parent, _metric_vals(parent_view), target_metric, children=child_rows)
+                        build_hierarchy_row(parent, parent_metric_vals, target_metric, children=child_rows)
                     )
+                    # One chart line per parent per scenario — the same grain as the
+                    # sibling flat tab's chart (payer_product ~ payer_distribution,
+                    # product_payer ~ product_distribution). The table above already
+                    # carries the child-level drill-down; plotting all parent x child x
+                    # scenario combinations here would be unreadable.
+                    chart_series.append((f"{parent} ({scenario})", parent_metric_vals))
 
                 rows.append(
                     build_hierarchy_row(
@@ -375,7 +432,7 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
                 )
 
             result[metric][view] = {
-                "chart": {},
+                "chart": build_chart(header_key, header_labels, fsi, chart_series),
                 "table": build_hierarchy_table(["Metric"] + header_labels, rows),
             }
 
@@ -429,7 +486,7 @@ def apply_output_filters(payload) -> dict:
         common_args = (month_tuples, month_keys, forecast_start_index, year_labels, yearly_fsi)
 
         output_tabs = {
-            "total_payer_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
+            "total_market_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
             "payer_distribution": _build_distribution_tab(
                 aggregates, scenario_names, *common_args, entities=payers, agg_key="by_payer"
             ),
