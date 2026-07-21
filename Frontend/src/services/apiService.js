@@ -310,6 +310,17 @@ export const runLiverMarketEventsCalculation = (payload) => {
 };
 
 
+
+export const saveLiverMarketEvents = (payload) => {
+  return httpClient.post("/api/liver-market-events/save-scenario", payload);
+};
+
+
+
+
+
+
+
 //HIC API's
 export const getHIVConfigurationByTherapyArea = (taName) => {
   return httpClient.get(`/api/hiv_treat/configurations/${taName}`);
