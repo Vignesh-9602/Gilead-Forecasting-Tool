@@ -315,7 +315,17 @@ export const saveLiverMarketEvents = (payload) => {
   return httpClient.post("/api/liver-market-events/save-scenario", payload);
 };
 
+// GET — Output screen filters for a therapy area (e.g. ta=HCV)
+export const getLiverOutputFilters = (ta) => {
+  return httpClient.get(`/api/liver-output/filters`, {
+    params: { ta },
+  });
+};
 
+// POST — apply Output screen filters and get chart/table data back
+export const applyLiverOutputFilters = (payload) => {
+  return httpClient.post(`/api/liver-output/apply-filters`, payload);
+};
 
 
 
