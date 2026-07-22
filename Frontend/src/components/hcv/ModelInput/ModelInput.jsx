@@ -675,7 +675,8 @@ export default function PBCModelInput() {
           if (!metricObj) return; // no data at all — skip this scenario
           // Support both old shape (metricObj.table) and new shape (metricObj.monthly.table)
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
-          const firstRow = rawRows[0];
+          // Find the row matching this scenario by label/hierarchy; fall back to first row.
+          const firstRow = rawRows.find(r => (r.label || r.hierarchy) === scenarioName) || rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
           const vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
@@ -702,7 +703,7 @@ export default function PBCModelInput() {
               : null;
             if (!metricObj) return;
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
-            const firstYearlyRow = yearlyRows[0];
+            const firstYearlyRow = yearlyRows.find(r => (r.label || r.hierarchy) === scenarioName) || yearlyRows[0];
             if (!firstYearlyRow) return;
             const yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
@@ -1015,7 +1016,7 @@ export default function PBCModelInput() {
   const buildLiverRecalculatePayload = () => ({
     ta_name: therapyArea || "HCV",
     selected_filter: {
-      market: payerFilter || getFirstOption(payerOptions),
+      payer: payerFilter || getFirstOption(payerOptions),
       product: productFilter || getFirstOption(productOptions),
       start_date: resolveFromDate(),
       end_date: toDate || "",
@@ -1056,7 +1057,7 @@ export default function PBCModelInput() {
   // Build payload for the refresh-table API based on current (edited) table state.
   // Expected shape:
   // {
-  //   ta_name, selected_filter: { market, product, start_date, end_date },
+  //   ta_name, selected_filter: { payer, product, start_date, end_date },
   //   scenario_name, selected_tab, selected_metric, edited_hierarchy,
   //   factors, market_analysis
   // }
@@ -1211,7 +1212,7 @@ export default function PBCModelInput() {
     return {
       ta_name: therapyArea || "HCV",
       selected_filter: {
-        market: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
         product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
         start_date: startDate,
         end_date: endDate,
@@ -1917,7 +1918,7 @@ export default function PBCModelInput() {
           ta_name: therapyArea || "HCV",
           scenario_name: scenarioNameFromDialog,
           selected_filter: {
-            market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            payer: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
             product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
             start_date: resolveFromDate(),
             end_date: toDate || "",

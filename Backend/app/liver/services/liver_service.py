@@ -58,6 +58,33 @@ from app.liver.repository.liver_repo import (
 
 
 # ---------------------------------------------------------------------------
+# Key normalisation — convert pre-rename DB keys to current names
+# ---------------------------------------------------------------------------
+
+_TAB_KEY_MAP    = {"market_distribution": "payer_distribution"}
+_METRIC_KEY_MAP = {"market_volume": "payer_volume", "market_share": "payer_share"}
+
+def _normalize_ma_keys(ma: dict) -> dict:
+    """
+    Rename legacy market_analysis keys produced before the payer-rename:
+      tab    : market_distribution → payer_distribution
+      metric : market_volume → payer_volume, market_share → payer_share
+    Safe to call on already-normalised data (identity for new keys).
+    """
+    result = {}
+    for tab_key, tab_data in ma.items():
+        new_tab = _TAB_KEY_MAP.get(tab_key, tab_key)
+        if not isinstance(tab_data, dict):
+            result[new_tab] = tab_data
+            continue
+        result[new_tab] = {
+            _METRIC_KEY_MAP.get(mk, mk): mv
+            for mk, mv in tab_data.items()
+        }
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Date helpers
 # ---------------------------------------------------------------------------
 
@@ -1542,6 +1569,9 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
         if saved_market_analysis:
+            # Normalise legacy keys (scenarios saved before the payer-rename use
+            # market_volume/market_share; convert them to payer_volume/payer_share).
+            saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
             # Use the exact data that was saved (includes any edited table values)
             # Recalculate market_share from market_volume to ensure consistency on load
             market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
@@ -1586,39 +1616,25 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
         if active_scenario == "Base":
-            base_tmv = market_analysis.get("total_market_volume", {})
+            base_full_ma = market_analysis
         else:
             base_factors = _estimate_default_factors(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, granularity,
             )
-            _base_ma, _ = _build_market_analysis_both_granularities(
+            base_full_ma, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, base_factors,
                 scenario_name="Base",
             )
-            base_tmv = _base_ma.get("total_market_volume", {})
-
-        def _tmv_table_only(tmv: dict) -> dict:
-            """Keep only the table rows from TMV (both granularities), drop chart data."""
-            result = {}
-            for metric in ("payer_volume", "payer_share"):
-                if metric not in tmv:
-                    continue
-                result[metric] = {}
-                for gran in ("monthly", "yearly"):
-                    if gran in tmv[metric] and "table" in tmv[metric][gran]:
-                        result[metric][gran] = {"table": tmv[metric][gran]["table"]}
-            return result
 
         def _inactive_stub(sc_name):
             if sc_name == "Base":
-                tmv = base_tmv
-            else:
-                # Load directly from stored chart_data — never rebuild from factors
-                cd  = all_saved_cd.get(sc_name, {})
-                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-            return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
+                return {"market_analysis": base_full_ma}
+            # Load directly from stored chart_data — never rebuild from factors
+            cd     = all_saved_cd.get(sc_name, {})
+            raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            return {"market_analysis": raw_ma}
 
         scenarios = {
             sc: (
@@ -1783,37 +1799,24 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         all_saved_cd_rc = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
         if active_scenario == "Base":
-            base_tmv_rc = market_analysis.get("total_market_volume", {})
+            base_full_ma_rc = market_analysis
         else:
             _base_f = _estimate_default_factors(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, granularity,
             )
-            _base_ma_rc, _ = _build_market_analysis_both_granularities(
+            base_full_ma_rc, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, _base_f,
                 scenario_name="Base",
             )
-            base_tmv_rc = _base_ma_rc.get("total_market_volume", {})
-
-        def _tmv_table_only_rc(tmv: dict) -> dict:
-            result = {}
-            for metric in ("payer_volume", "payer_share"):
-                if metric not in tmv:
-                    continue
-                result[metric] = {}
-                for gran in ("monthly", "yearly"):
-                    if gran in tmv[metric] and "table" in tmv[metric][gran]:
-                        result[metric][gran] = {"table": tmv[metric][gran]["table"]}
-            return result
 
         def _inactive_stub_rc(sc_name):
             if sc_name == "Base":
-                tmv = base_tmv_rc
-            else:
-                cd  = all_saved_cd_rc.get(sc_name, {})
-                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-            return {"market_analysis": {"total_market_volume": _tmv_table_only_rc(tmv)}}
+                return {"market_analysis": base_full_ma_rc}
+            cd     = all_saved_cd_rc.get(sc_name, {})
+            raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            return {"market_analysis": raw_ma}
 
         scenarios = {
             sc: (
@@ -2049,30 +2052,12 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             train_end_year, train_end_month, forecast_periods, base_factors,
             scenario_name="Base",
         )
-        base_tmv = _base_ma.get("total_market_volume", {})
-
-        def _tmv_stub(tmv: dict) -> dict:
-            return {
-                "market_analysis": {
-                    "total_market_volume": {
-                        "payer_volume": {
-                            "monthly": tmv.get("payer_volume", {}).get("monthly", {}),
-                            "yearly":  tmv.get("payer_volume", {}).get("yearly",  {}),
-                        },
-                        "payer_share": {
-                            "monthly": tmv.get("payer_share", {}).get("monthly", {}),
-                            "yearly":  tmv.get("payer_share", {}).get("yearly",  {}),
-                        },
-                    }
-                }
-            }
-
         def _inactive_stub(sc_name):
             if sc_name == "Base":
-                return _tmv_stub(base_tmv)
-            cd  = saved.get(sc_name, {})
-            tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-            return _tmv_stub(tmv)
+                return {"market_analysis": _base_ma}
+            cd     = saved.get(sc_name, {})
+            raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            return {"market_analysis": raw_ma}
 
         scenarios = {}
         for sc in available_scenarios:
@@ -2111,7 +2096,7 @@ def update_liver_scenario(payload: LiverSaveScenarioRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market_analysis: dict) -> dict:
-    """Shared response builder: active scenario gets full data, others get TMV stub."""
+    """Shared response builder: active scenario gets full data, others get full market_analysis from DB."""
     all_names = get_scenarios(cur)
     if "Base" in all_names:
         all_names.remove("Base")
@@ -2136,34 +2121,16 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
         train_end_year, train_end_month, forecast_periods, base_factors,
         scenario_name="Base",
     )
-    base_tmv = _base_ma.get("total_market_volume", {})
-
-    def _tmv_stub(tmv):
-        return {
-            "market_analysis": {
-                "total_market_volume": {
-                    "payer_volume": {
-                        "monthly": tmv.get("payer_volume", {}).get("monthly", {}),
-                        "yearly":  tmv.get("payer_volume", {}).get("yearly",  {}),
-                    },
-                    "payer_share": {
-                        "monthly": tmv.get("payer_share", {}).get("monthly", {}),
-                        "yearly":  tmv.get("payer_share", {}).get("yearly",  {}),
-                    },
-                }
-            }
-        }
-
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
             scenarios[sc] = {"factors": factors, "market_analysis": market_analysis}
         elif sc == "Base":
-            scenarios[sc] = _tmv_stub(base_tmv)
+            scenarios[sc] = {"market_analysis": _base_ma}
         else:
-            cd  = saved.get(sc, {})
-            tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-            scenarios[sc] = _tmv_stub(tmv)
+            cd     = saved.get(sc, {})
+            raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            scenarios[sc] = {"market_analysis": raw_ma}
 
     return {
         "message": "Scenario saved successfully",
@@ -2277,43 +2244,25 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             train_end_year, train_end_month, forecast_periods, base_factors,
             scenario_name="Base",
         )
-        base_tmv = _base_ma.get("total_market_volume", {})
-
         if is_base:
             active_ma      = _base_ma
             active_factors = base_factors.model_dump()
         elif name in saved:
-            active_ma      = saved[name]["chart_data"].get("market_analysis", {})
+            active_ma      = _normalize_ma_keys(saved[name]["chart_data"].get("market_analysis", {}))
             active_factors = saved[name]["factors"]
         else:
             raise ValueError(f"Scenario '{name}' not found.")
-
-        def _tmv_stub(tmv):
-            return {
-                "market_analysis": {
-                    "total_market_volume": {
-                        "payer_volume": {
-                            "monthly": tmv.get("payer_volume", {}).get("monthly", {}),
-                            "yearly":  tmv.get("payer_volume", {}).get("yearly",  {}),
-                        },
-                        "payer_share": {
-                            "monthly": tmv.get("payer_share", {}).get("monthly", {}),
-                            "yearly":  tmv.get("payer_share", {}).get("yearly",  {}),
-                        },
-                    }
-                }
-            }
 
         scenarios = {}
         for sc in available_scenarios:
             if sc == name or (is_base and sc == "Base"):
                 scenarios[sc] = {"factors": active_factors, "market_analysis": active_ma}
             elif sc == "Base":
-                scenarios[sc] = _tmv_stub(base_tmv)
+                scenarios[sc] = {"market_analysis": _base_ma}
             else:
-                cd  = saved.get(sc, {}).get("chart_data", {})
-                tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-                scenarios[sc] = _tmv_stub(tmv)
+                cd     = saved.get(sc, {}).get("chart_data", {})
+                raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+                scenarios[sc] = {"market_analysis": raw_ma}
 
         return {
             "ta_name": ta,
@@ -2430,7 +2379,7 @@ def refresh_liver(payload):
             )
             row = cur.fetchone()
             if row and row[0] and "market_analysis" in row[0]:
-                full_ma = row[0]["market_analysis"]
+                full_ma = _normalize_ma_keys(row[0]["market_analysis"])
             else:
                 # Scenario not found or no chart_data — recompute with default factors
                 sc_f = _estimate_default_factors(
@@ -2447,7 +2396,8 @@ def refresh_liver(payload):
         # Merge payload's edited tab on top of the full market_analysis so the
         # user's changes override the DB values for the selected tab only.
         ma = copy.deepcopy(full_ma)
-        payload_ma = payload.market_analysis or {}
+        # Normalise old-key data from the frontend (liverRawData may carry pre-rename keys)
+        payload_ma = _normalize_ma_keys(payload.market_analysis or {})
         for tab_key, tab_data in payload_ma.items():
             if not tab_data:
                 continue
@@ -3048,17 +2998,6 @@ def refresh_liver(payload):
     ma = _recompute_all_market_shares_nested(ma)
 
     # ── Build response ────────────────────────────────────────────────────────
-    def _tmv_table_only(tmv_dict):
-        result = {}
-        for mk in ("payer_volume", "payer_share"):
-            if mk not in tmv_dict:
-                continue
-            result[mk] = {}
-            for g in ("monthly", "yearly"):
-                if g in tmv_dict[mk] and "table" in tmv_dict[mk][g]:
-                    result[mk][g] = {"table": tmv_dict[mk][g]["table"]}
-        return result
-
     def _inactive_stub(sc_name):
         if sc_name == "Base":
             # Base was already computed above — reuse full_ma if active is not Base,
@@ -3077,16 +3016,32 @@ def refresh_liver(payload):
                         sel_payer=flt.payer or None, sel_product=flt.product or None,
                         scenario_name="Base",
                     )
-                    tmv = base_ma2.get("total_market_volume", {})
                 finally:
                     cur2.close()
                     conn2.close()
+                return {"market_analysis": base_ma2}
             else:
-                tmv = full_ma.get("total_market_volume", {})
+                return {"market_analysis": full_ma}
         else:
-            cd  = all_saved_cd.get(sc_name, {})
-            tmv = cd.get("market_analysis", {}).get("total_market_volume", {})
-        return {"market_analysis": {"total_market_volume": _tmv_table_only(tmv)}}
+            cd      = all_saved_cd.get(sc_name, {})
+            raw_ma  = _normalize_ma_keys(cd.get("market_analysis", {}))
+            return {"market_analysis": raw_ma}
+
+    # Strip extra scenario rows from the active scenario's TMV table.
+    # The frontend sends all scenario rows in the payload; we only want the
+    # active scenario's row so normalizeLiverResponse correctly reads it.
+    for gran in ("monthly", "yearly"):
+        tmv_gran = (ma.get("total_market_volume", {})
+                      .get("payer_volume", {})
+                      .get(gran, {}))
+        if "table" in tmv_gran:
+            all_rows = tmv_gran["table"].get("rows", [])
+            active_row = next(
+                (r for r in all_rows if r.get("label") == active or r.get("hierarchy") == active),
+                None
+            )
+            if active_row:
+                tmv_gran["table"]["rows"] = [active_row]
 
     scenarios = {}
     for sc in available_scenarios:
@@ -3101,5 +3056,11 @@ def refresh_liver(payload):
     return {
         "available_scenarios": available_scenarios,
         "active_scenario":     active,
+        "selected_filter": {
+            "start_date": flt.start_date,
+            "end_date":   flt.end_date,
+            "payer":      flt.payer,
+            "product":    flt.product,
+        },
         "scenarios":           scenarios,
     }

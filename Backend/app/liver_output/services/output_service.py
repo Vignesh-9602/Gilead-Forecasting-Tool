@@ -18,7 +18,8 @@ from app.liver_output.helpers.date_helpers import (
 )
 from app.liver_output.helpers.data_helpers import (
     organize_raw_data,
-    monthly_values,
+    get_volume,
+    forecast_fill,
     compute_share,
     to_month_key,
     aggregate_monthly_to_yearly,
@@ -249,29 +250,64 @@ def _scenario_cube(cur, ta: str, scenario_name: str, from_year: int, from_month:
 def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_index: int,
                                 payers: list, products: list) -> dict:
     """
-    Compute monthly volume for every (product, payer) cell — each with its own
-    independent flat-forecast fallback, rounded to int immediately — then derive
-    every coarser aggregate (per-product, per-payer, grand total) by SUMMING those
-    already-rounded cells, never via an independent fallback or a fresh rounding
-    of its own.
+    Compute the grand total and every (product, payer) cell for one scenario, all
+    consistent with each other AND with the Liver Model Input / Market Events
+    screens' Base numbers.
 
-    Rounding at the cell level first (not the parent/total level) is what makes
-    this consistent: round(sum(unrounded cells)) is not always equal to
-    sum(round(each unrounded cell)) — e.g. four cells of 1.4 sum to 5.6 (rounds to
-    6), but each cell individually rounds to 1 (sum of 4). Since cells are the
-    finest grain actually displayed (hierarchy leaves), rounding them first and
-    summing integers from there guarantees every parent/grand-total exactly
-    matches the sum of its children, at every level, in every view.
+    The grand total is forecast top-down: ETS fit directly to the total's own
+    history (via forecast_fill), exactly like Model Input's Tab 1 (Total Market
+    Volume) and Market Events' Overall Payer Volume both do. Fitting ETS
+    independently per cell and summing up (the previous approach here) does NOT
+    reproduce that number — ETS is not linear, so sum(ETS(part)) != ETS(sum(parts)).
+
+    Each cell's forecast is then allocated as its historical share of the grand
+    total (real per-cell forecast values — e.g. from a reshaped saved scenario —
+    are kept as-is instead), and rescaled so cells sum exactly back to the SAME
+    top-down total for every forecast month, before rounding once at the cell
+    level. Every coarser aggregate (per-product, per-payer) is then derived by
+    summing those already-rounded cells, which is what keeps every parent and
+    the grand total exactly consistent with their children in every tab.
     """
-    n = len(month_tuples)
-    cells = {
-        (product, payer): [
-            round(v)
-            for v in monthly_values(cube, month_tuples, forecast_start_index, product=product, payer=payer)
-        ]
-        for product in products
-        for payer in payers
-    }
+    n          = len(month_tuples)
+    n_forecast = n - forecast_start_index
+
+    total_raw     = [get_volume(cube, y, m) for y, m in month_tuples]
+    total_history = total_raw[:forecast_start_index]
+    total_forecast = forecast_fill(total_history, total_raw[forecast_start_index:])
+    total = [round(v) for v in total_history] + [round(v) for v in total_forecast]
+
+    raw_cells = {}
+    for product in products:
+        for payer in payers:
+            raw = [get_volume(cube, y, m, product, payer) for y, m in month_tuples]
+            history = raw[:forecast_start_index]
+            if n_forecast == 0:
+                raw_cells[(product, payer)] = history
+                continue
+
+            fcast_real = raw[forecast_start_index:]
+            shares = [
+                history[i] / total_history[i] for i in range(len(history)) if total_history[i] > 0
+            ]
+            avg_share = sum(shares) / len(shares) if shares else 0.0
+            allocated = [avg_share * total_forecast[i] for i in range(n_forecast)]
+            forecast = [v if v > 0 else allocated[i] for i, v in enumerate(fcast_real)]
+            raw_cells[(product, payer)] = history + forecast
+
+    # Rescale each forecast month's (unrounded) cells to sum exactly to that
+    # month's top-down total, then round once — same cell-first-rounding trick
+    # as before, now anchored to the authoritative top-down total instead of
+    # an independently-rounded sum.
+    for i in range(n_forecast):
+        idx = forecast_start_index + i
+        month_sum = sum(vals[idx] for vals in raw_cells.values())
+        if month_sum > 0:
+            scale = total_forecast[i] / month_sum
+            for vals in raw_cells.values():
+                vals[idx] *= scale
+
+    cells = {key: [round(v) for v in vals] for key, vals in raw_cells.items()}
+
     by_product = {
         product: [sum(cells[(product, payer)][i] for payer in payers) for i in range(n)]
         for product in products
@@ -280,7 +316,6 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
         payer: [sum(cells[(product, payer)][i] for product in products) for i in range(n)]
         for payer in payers
     }
-    total = [sum(by_product[product][i] for product in products) for i in range(n)]
     return {"cells": cells, "by_product": by_product, "by_payer": by_payer, "total": total}
 
 
