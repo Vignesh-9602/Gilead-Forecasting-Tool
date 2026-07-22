@@ -51,20 +51,25 @@ def flat_forecast(history_values: list, window: int = 3) -> float:
 
 
 def build_values_for_series(data: dict, month_tuples: list, forecast_start_index: int,
-                             product: str = None, payer: str = None) -> tuple:
+                             product: str = None, payer: str = None,
+                             forecast_fn=None) -> tuple:
     """
     Build (history, forecast, all_values) for a single chart/table series.
 
     - History: actual values from data for months before forecast_start_index
-    - Forecast: if transaction_data has values for forecast months (from a model run),
-                use them; otherwise fall back to flat continuation (avg of last 3 history values)
+    - Forecast: if forecast_fn is provided, call it as forecast_fn(history, n_fcast).
+                Otherwise fall back to flat continuation (avg of last 3 history values).
 
     Returns (history_list, forecast_list, full_list)
     """
     all_raw = [get_volume(data, y, m, product, payer) for y, m in month_tuples]
     history  = all_raw[:forecast_start_index]
-    flat_val = flat_forecast(history)
-    forecast = [v if v > 0 else flat_val for v in all_raw[forecast_start_index:]]
+    n_fcast  = len(month_tuples) - forecast_start_index
+    if forecast_fn is not None:
+        forecast = forecast_fn(history, n_fcast)
+    else:
+        flat_val = flat_forecast(history)
+        forecast = [v if v > 0 else flat_val for v in all_raw[forecast_start_index:]]
     return history, forecast, history + forecast
 
 

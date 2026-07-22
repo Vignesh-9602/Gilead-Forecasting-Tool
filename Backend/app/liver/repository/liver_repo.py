@@ -138,9 +138,9 @@ def get_total_market_volume(cur, ta: str, from_year: int, from_month: int,
 
 def get_product_distribution(cur, ta: str, from_year: int, from_month: int,
                               to_year: int, to_month: int,
-                              product: str = None, metric: str = "market_volume") -> list:
+                              product: str = None, metric: str = "payer_volume") -> list:
     """Returns [(year, month, product, volume, distribution_pct), ...]"""
-    value_col = "distribution_pct" if metric == "market_share" else "volume"
+    value_col = "distribution_pct" if metric == "payer_share" else "volume"
 
     base_query = """
         SELECT year, month, product, volume, distribution_pct
@@ -173,7 +173,7 @@ def get_product_distribution(cur, ta: str, from_year: int, from_month: int,
 
     rows = cur.fetchall()
     # Return (year, month, product, selected_value)
-    col_idx = 4 if metric == "market_share" else 3
+    col_idx = 4 if metric == "payer_share" else 3
     return [(r[0], r[1], r[2], float(r[col_idx])) for r in rows]
 
 
@@ -183,7 +183,7 @@ def get_product_distribution(cur, ta: str, from_year: int, from_month: int,
 
 def get_payer_distribution(cur, ta: str, from_year: int, from_month: int,
                             to_year: int, to_month: int,
-                            payer=None, metric: str = "market_volume") -> list:
+                            payer=None, metric: str = "payer_volume") -> list:
     """Returns [(year, month, payer, value), ...]"""
     base_query = """
         SELECT year, month, payer, volume, distribution_pct
@@ -215,7 +215,7 @@ def get_payer_distribution(cur, ta: str, from_year: int, from_month: int,
         )
 
     rows = cur.fetchall()
-    col_idx = 4 if metric == "market_share" else 3
+    col_idx = 4 if metric == "payer_share" else 3
     return [(r[0], r[1], r[2], float(r[col_idx])) for r in rows]
 
 
@@ -226,7 +226,7 @@ def get_payer_distribution(cur, ta: str, from_year: int, from_month: int,
 
 def get_payer_wise_product(cur, ta: str, from_year: int, from_month: int,
                             to_year: int, to_month: int,
-                            payer=None, metric: str = "market_volume") -> list:
+                            payer=None, metric: str = "payer_volume") -> list:
     """Returns [(year, month, payer, product, value), ...]"""
     base_query = """
         SELECT year, month, payer, product, volume, pct_within_payer
@@ -258,7 +258,7 @@ def get_payer_wise_product(cur, ta: str, from_year: int, from_month: int,
         )
 
     rows = cur.fetchall()
-    col_idx = 5 if metric == "market_share" else 4
+    col_idx = 5 if metric == "payer_share" else 4
     return [(r[0], r[1], r[2], r[3], float(r[col_idx])) for r in rows]
 
 
@@ -269,7 +269,7 @@ def get_payer_wise_product(cur, ta: str, from_year: int, from_month: int,
 
 def get_product_wise_payer(cur, ta: str, from_year: int, from_month: int,
                             to_year: int, to_month: int,
-                            product: str = None, metric: str = "market_volume") -> list:
+                            product: str = None, metric: str = "payer_volume") -> list:
     """Returns [(year, month, product, payer, value), ...]"""
     base_query = """
         SELECT year, month, product, payer, volume, pct_within_product
@@ -301,7 +301,7 @@ def get_product_wise_payer(cur, ta: str, from_year: int, from_month: int,
         )
 
     rows = cur.fetchall()
-    col_idx = 5 if metric == "market_share" else 4
+    col_idx = 5 if metric == "payer_share" else 4
     return [(r[0], r[1], r[2], r[3], float(r[col_idx])) for r in rows]
 
 
@@ -331,7 +331,7 @@ def get_total_market_volume_yearly(cur, ta: str, from_year: int, to_year: int,
 
 
 def get_product_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
-                                     product: str = None, metric: str = "market_volume") -> list:
+                                     product: str = None, metric: str = "payer_volume") -> list:
     """Returns [(year, 0, product, value), ...]"""
     base_query = """
         SELECT year, product, volume, distribution_pct
@@ -354,12 +354,12 @@ def get_product_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
     else:
         cur.execute(base_query.format(product_filter=""), (ta, from_year, to_year))
 
-    col_idx = 3 if metric == "market_share" else 2
+    col_idx = 3 if metric == "payer_share" else 2
     return [(r[0], 0, r[1], float(r[col_idx])) for r in cur.fetchall()]
 
 
 def get_payer_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
-                                   payer=None, metric: str = "market_volume") -> list:
+                                   payer=None, metric: str = "payer_volume") -> list:
     """Returns [(year, 0, payer, value), ...]"""
     base_query = """
         SELECT year, payer, volume, distribution_pct
@@ -382,12 +382,12 @@ def get_payer_distribution_yearly(cur, ta: str, from_year: int, to_year: int,
     else:
         cur.execute(base_query.format(payer_filter=""), (ta, from_year, to_year))
 
-    col_idx = 3 if metric == "market_share" else 2
+    col_idx = 3 if metric == "payer_share" else 2
     return [(r[0], 0, r[1], float(r[col_idx])) for r in cur.fetchall()]
 
 
 def get_payer_wise_product_yearly(cur, ta: str, from_year: int, to_year: int,
-                                   payer=None, metric: str = "market_volume") -> list:
+                                   payer=None, metric: str = "payer_volume") -> list:
     """Returns [(year, 0, payer, product, value), ...]"""
     base_query = """
         SELECT year, payer, product, volume, pct_within_payer
@@ -410,12 +410,12 @@ def get_payer_wise_product_yearly(cur, ta: str, from_year: int, to_year: int,
     else:
         cur.execute(base_query.format(payer_filter=""), (ta, from_year, to_year))
 
-    col_idx = 4 if metric == "market_share" else 3
+    col_idx = 4 if metric == "payer_share" else 3
     return [(r[0], 0, r[1], r[2], float(r[col_idx])) for r in cur.fetchall()]
 
 
 def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
-                                   product: str = None, metric: str = "market_volume") -> list:
+                                   product: str = None, metric: str = "payer_volume") -> list:
     """Returns [(year, 0, product, payer, value), ...]"""
     base_query = """
         SELECT year, product, payer, volume, pct_within_product
@@ -438,7 +438,7 @@ def get_product_wise_payer_yearly(cur, ta: str, from_year: int, to_year: int,
     else:
         cur.execute(base_query.format(product_filter=""), (ta, from_year, to_year))
 
-    col_idx = 4 if metric == "market_share" else 3
+    col_idx = 4 if metric == "payer_share" else 3
     return [(r[0], 0, r[1], r[2], float(r[col_idx])) for r in cur.fetchall()]
 
 
@@ -476,12 +476,16 @@ def save_scenario(cur, scenario_name: str, ta: str, payer: str, product: str,
             metric     = EXCLUDED.metric,
             from_date  = EXCLUDED.from_date,
             to_date    = EXCLUDED.to_date,
-            chart_data = EXCLUDED.chart_data,
+            chart_data = jsonb_set(
+                COALESCE(liver_scenarios.chart_data, '{}'),
+                '{market_analysis}',
+                EXCLUDED.chart_data->'market_analysis'
+            ),
             factors    = EXCLUDED.factors,
             created_at = CURRENT_TIMESTAMP
     """, (
         scenario_name, ta, payer, product,
-        "market_volume",
+        "payer_volume",
         from_date, to_date,
         json.dumps(chart_data),
         json.dumps(factors),
