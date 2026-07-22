@@ -302,7 +302,7 @@ def fetch_baseline(event: EventInput, metric: str):
             event.ta_name,
             metric,
             label_field="product",
-            market=event.context,
+            market=event.contexts,
             products=products,
             source_of_market=None,
         )
@@ -329,7 +329,7 @@ def fetch_baseline(event: EventInput, metric: str):
             metric,
             label_field="market",
             market=markets,
-            products=[event.context, "ALL"],
+            products=list(event.contexts) + ["ALL"],
             source_of_market=None,
         )
 
@@ -483,18 +483,45 @@ def _apply_curve_to_series(series: dict, curve_months: List[str], curve_values: 
     return series, applied
 
 
-def _cell_key(event: EventInput, label: str) -> Tuple[str, str]:
-    """Maps a touched entity's label to its real (market, product) identity
-    under this event's context. A label alone (a product name for
-    product_event, a market name for market_event) is not a unique cache
-    identity -- e.g. "Truvada" exists under every market, and "Retail"
-    exists under every product. Two events that touch a same-named entity
-    under different contexts must land in different cache cells, or one
-    silently overwrites the other."""
+def _apply_growth_pct_to_series(series: dict, curve_months: List[str], curve_values: List[float]
+                                 ) -> Tuple[dict, bool]:
+    """Used for overall_event's market_volume: curve_values are a percentage
+    growth curve (0 -> peak_pct, coverage-gated), applied MULTIPLICATIVELY
+    onto the existing baseline forecast -- peak_pct is a %, not raw volume
+    units, so adding it directly (like _apply_curve_to_series's "add" mode)
+    is a unit mismatch and has almost no visible effect at real volume scale."""
+    series = copy.deepcopy(series)
+    applied = False
+    if not curve_months or not curve_values:
+        return series, applied
+
+    month_index = {m: i for i, m in enumerate(series["months"])}
+    start_idx = month_index.get(curve_months[0])
+    if start_idx is None:
+        return series, applied
+
+    hold_value = curve_values[-1]
+    for idx in range(start_idx, len(series["months"])):
+        if idx < series["forecast_start_index"]:
+            continue
+        pos = idx - start_idx
+        pct = curve_values[pos] if pos < len(curve_values) else hold_value
+
+        fi = idx - series["forecast_start_index"]
+        if fi >= len(series["forecast"]):
+            break
+
+        series["forecast"][fi] = round(series["forecast"][fi] * (1 + pct / 100.0), 2)
+        applied = True
+
+    return series, applied
+
+
+def _cell_key(event: EventInput, label: str, context: str) -> Tuple[str, str]:
     if event.event_scope == EventScope.PRODUCT_EVENT:
-        return (event.context, label)
+        return (context, label)
     if event.event_scope == EventScope.MARKET_EVENT:
-        return (label, event.context)
+        return (label, context)
     return ("ALL", "ALL")
 
 
@@ -786,112 +813,82 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
     market_event_work: Dict[Tuple[str, str, str], Dict] = {}
 
     for event in events:
-        event_touched_forecast = False
+        contexts = event.contexts if event.event_scope != EventScope.OVERALL_EVENT else [None]
 
-        # Determine which entities this event touches, straight from the
-        # event object -- we need this BEFORE calling compute_event_forecast,
-        # since we now need the selected entity's current baseline share to
-        # anchor the curve at baseline -> peak_pct instead of 0 -> peak_pct.
-        label_names = [event.selected_entity or OVERALL_LABEL]
-        if event.impacted_entities:
-            label_names += [e.name for e in event.impacted_entities]
-        keys_by_label = {label: _cell_key(event, label) for label in label_names}
+        for context in contexts:
+            event_touched_forecast = False
 
-        # Make sure market_share cache has these cells loaded so we can read
-        # the selected entity's current share. (The metric loop below will
-        # see these are already cached and skip re-fetching.)
-        needs_share_fetch = any(key not in cache["market_share"] for key in keys_by_label.values())
-        if needs_share_fetch:
-            baseline_rows = fetch_baseline(event, "market_share")
-            for row in baseline_rows:
-                cache["market_share"].setdefault((row["market"], row["product"]), row)
+            label_names = [event.selected_entity or OVERALL_LABEL]
+            if event.impacted_entities:
+                label_names += [e.name for e in event.impacted_entities]
+            keys_by_label = {label: _cell_key(event, label, context) for label in label_names}
 
-        # Read the selected entity's baseline share at the event's start
-        # month. overall_event has no "reach a target share" semantics (it's
-        # a portfolio-level growth curve, per event_curve_engine's docstring),
-        # so it always anchors at 0, preserving the original additive behavior.
-        baseline_pct = 0.0
-        if event.event_scope != EventScope.OVERALL_EVENT:
-            selected_key = keys_by_label[event.selected_entity]
-            selected_row = cache["market_share"].get(selected_key)
-            if selected_row is not None:
-                start_month = event.start_date.strftime("%Y-%m-%d")
-                month_index = {m: i for i, m in enumerate(selected_row["months"])}
-                idx = month_index.get(start_month)
-                if idx is not None:
-                    combined = selected_row["history"] + selected_row["forecast"]
-                    if idx < len(combined):
-                        baseline_pct = combined[idx]
-
-        result = compute_event_forecast(event, baseline_pct=baseline_pct)
-        curves = _entity_curves(result)
-
-        for metric in METRICS:
-            needs_fetch = any(key not in cache[metric] for key in keys_by_label.values())
-            if needs_fetch:
-                baseline_rows = fetch_baseline(event, metric)
-
-                if (
-                    metric == "market_share"
-                    and event.event_scope == EventScope.MARKET_EVENT
-                ):
-                    print("\n========== MARKET_SHARE BASELINE ==========")
-
-                    for row in baseline_rows:
-                        print(
-                            f"Market={row['market']}, "
-                            f"Product={row['product']}"
-                        )
-                        print("History :", row["history"])
-                        print("Forecast:", row["forecast"])
-                        print()
-
+            needs_share_fetch = any(key not in cache["market_share"] for key in keys_by_label.values())
+            if needs_share_fetch:
+                baseline_rows = fetch_baseline(event, "market_share")  # pulls ALL contexts at once
                 for row in baseline_rows:
-                    cache[metric].setdefault(
-                        (row["market"], row["product"]),
-                        row,
-                    )
+                    cache["market_share"].setdefault((row["market"], row["product"]), row)
 
-            bounds = CLAMP_BOUNDS.get(metric)
-            selected_label = event.selected_entity or OVERALL_LABEL
-            for label, curve in curves.items():
-                key = keys_by_label[label]
-                if key not in cache[metric]:
-                    continue
-                mode = "set" if (metric == "market_share" and label == selected_label) else "add"
-                cache[metric][key], applied = _apply_curve_to_series(
-                    cache[metric][key], result.months, curve, bounds, mode=mode)
-                event_touched_forecast = event_touched_forecast or applied
+            baseline_pct = 0.0
+            if event.event_scope != EventScope.OVERALL_EVENT:
+                selected_key = keys_by_label[event.selected_entity]
+                selected_row = cache["market_share"].get(selected_key)
+                if selected_row is not None:
+                    start_month = event.start_date.strftime("%Y-%m-%d")
+                    month_index = {m: i for i, m in enumerate(selected_row["months"])}
+                    idx = month_index.get(start_month)
+                    if idx is not None:
+                        combined = selected_row["history"] + selected_row["forecast"]
+                        if idx < len(combined):
+                            baseline_pct = combined[idx]
 
-        if not event_touched_forecast:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Event '{event.event_name}' (start_date={event.start_date}, "
-                    f"duration_months={event.duration_months}) does not overlap "
-                    f"the forecast window for any entity it targets -- every "
-                    f"affected month falls in history and cannot be edited. "
-                    f"Check that start_date is on or after this scenario's "
-                    f"forecast_start_date."
-                ),
-            )
+            result = compute_event_forecast(event, baseline_pct=baseline_pct)
+            curves = _entity_curves(result)
 
-        if event.event_scope == EventScope.PRODUCT_EVENT:
-            work_key = (event.scenario_name, event.ta_name, event.context)
-            entry = product_event_work.setdefault(
-                work_key, {
-                    "touched_products": set(),
-                    "has_explicit_redistribution": False,
-                    "selected_products": set(),
-                })
-            entry["touched_products"].update(curves.keys())
-            entry["has_explicit_redistribution"] = (
-                entry["has_explicit_redistribution"] or bool(event.impacted_entities))
-            entry["selected_products"].add(event.selected_entity)
-        elif event.event_scope == EventScope.MARKET_EVENT:
-            work_key = (event.scenario_name, event.ta_name, event.context)
-            entry = market_event_work.setdefault(work_key, {"markets": set()})
-            entry["markets"].update(curves.keys())
+            for metric in METRICS:
+                needs_fetch = any(key not in cache[metric] for key in keys_by_label.values())
+                if needs_fetch:
+                    baseline_rows = fetch_baseline(event, metric)
+                    for row in baseline_rows:
+                        cache[metric].setdefault((row["market"], row["product"]), row)
+
+                bounds = CLAMP_BOUNDS.get(metric)
+                selected_label = event.selected_entity or OVERALL_LABEL
+                for label, curve in curves.items():
+                    key = keys_by_label[label]
+                    if key not in cache[metric]:
+                        continue
+                    if event.event_scope == EventScope.OVERALL_EVENT and metric == "market_share":
+                        # Portfolio share of itself is always 100% by definition --
+                        # there's no larger whole to move against. Overall events
+                        # shape volume growth instead; this synthesized flat row
+                        # is never curve-applied.
+                        continue
+                    if event.event_scope == EventScope.OVERALL_EVENT and metric == "market_volume":
+                        cache[metric][key], applied = _apply_growth_pct_to_series(
+                            cache[metric][key], result.months, curve)
+                    else:
+                        mode = "set" if (metric == "market_share" and label == selected_label) else "add"
+                        cache[metric][key], applied = _apply_curve_to_series(
+                            cache[metric][key], result.months, curve, bounds, mode=mode)
+                    event_touched_forecast = event_touched_forecast or applied
+
+            if not event_touched_forecast:
+                raise HTTPException(422, detail=(
+                    f"Event '{event.event_name}' (context={context}, start_date={event.start_date}, "
+                    f"duration_months={event.duration_months}) does not overlap the forecast window."))
+
+            if event.event_scope == EventScope.PRODUCT_EVENT:
+                work_key = (event.scenario_name, event.ta_name, context)
+                entry = product_event_work.setdefault(work_key, {
+                    "touched_products": set(), "has_explicit_redistribution": False, "selected_products": set()})
+                entry["touched_products"].update(curves.keys())
+                entry["has_explicit_redistribution"] |= bool(event.impacted_entities)
+                entry["selected_products"].add(event.selected_entity)
+            elif event.event_scope == EventScope.MARKET_EVENT:
+                work_key = (event.scenario_name, event.ta_name, context)
+                entry = market_event_work.setdefault(work_key, {"markets": set()})
+                entry["markets"].update(curves.keys())
 
     # Reconcile once every event's curve has landed in the cache.
     for (scenario_name, ta_name, market), entry in product_event_work.items():
@@ -1636,6 +1633,22 @@ def _yearly_parent_child_view(
 
     return parent_yearly, hierarchy_rows
 
+def _resolve_coverage(row: dict) -> Optional[CoverageInput]:
+    """Coverage is inferred purely from whether the FE included the coverage
+    fields on the row -- there's no separate enable_coverage flag sent by
+    the FE. Both peak fields must be present (not None) for coverage to
+    apply. Single source of truth -- used both to build the EventInput's
+    coverage and to report back enable_coverage in the response row, so
+    the two can never disagree."""
+    if row.get("coverage_peak_percent") is None or row.get("coverage_peak_months") is None:
+        return None
+    return CoverageInput(
+        curve_type=row.get("coverage_curve_type", row["curve_type"]),
+        factor=row.get("coverage_factor", row.get("factor", 1.0)),
+        peak_pct=row["coverage_peak_percent"],
+        peak_months=row["coverage_peak_months"],
+    )
+
 def _yearly_overall_row(years: List[str], metric: str,
                          overall_volume_series: Optional[dict] = None) -> Optional[dict]:
     """Overall row for a yearly table -- the yearly counterpart of the
@@ -1662,22 +1675,9 @@ def _yearly_overall_row(years: List[str], metric: str,
 def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent_field: str, child_field: str,
                                   agg: str, overall_series: Optional[dict] = None,
                                   volume_grid: Optional[List[dict]] = None,
-                                  overall_volume_series: Optional[dict] = None) -> dict:
-    """Flat/hierarchy dual view (view_options + selected_view envelope) for
-    one metric within a hierarchy tab (product_event / market_event). Both
-    market_share and market_volume go through this, matching the FE's
-    Market/Product level switcher contract:
-      - hierarchy_key groups by the tab's parent entity, nesting the child
-        entity underneath (e.g. market_event nests markets under each
-        product) -- table only, the chart never carries child granularity.
-      - flat_key groups by the tab's OWN entity (child_field), summed
-        across the other dimension (e.g. market_event's flat "Market
-        Level" view sums each market's value across every product). This
-        is a genuinely different grouping from the hierarchy view's
-        top-level rows, not a re-labeling of them -- see _monthly_flat_view.
-    market_share derives its values as a share of volume (volume_grid /
-    overall_volume_series are required for it); market_volume aggregates
-    directly off `grid`."""
+                                  overall_volume_series: Optional[dict] = None,
+                                  touched_cells: Optional[Set[Tuple[str, str]]] = None) -> dict:
+    
     levels = TAB_VIEW_LEVELS[tab]
     view_options = [
         {"label": levels["flat_label"], "value": levels["flat_key"]},
@@ -1738,6 +1738,15 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         volume_grid,
         overall_volume_series,   # <-- add this
     )
+
+    # Once an event is configured for this tab, the hierarchy chart shows
+    # only the (market, product) cells the user actually touched -- not
+    # the full parent-summed rollup. The table (hierarchy_rows, computed
+    # above) keeps showing the full nested rollup regardless; only the
+    # chart series change here.
+    if touched_cells:
+        monthly_parent_chart = _touched_entities_chart(grid, touched_cells, parent_field, child_field)
+
     if metric == "market_share":
         monthly_child_chart, flat_rows = _monthly_flat_view(
             volume_grid,
@@ -1760,7 +1769,7 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     }
     monthly_hierarchy_table = {
         "type": "hierarchy",
-        "headers": monthly_parent_chart["months"],
+        "headers": monthly_parent_chart["months"] if monthly_parent_chart["months"] else grid[0]["months"],
         "forecast_start_index": fsi,
         "editable": True,
         "rows": overall_rows + hierarchy_rows,
@@ -1798,6 +1807,31 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         child_series = _group_series_by_field(grid, child_field)
         child_yearly = _to_yearly_chart(child_series, agg)
 
+    # Same touched-values swap as monthly, but built off the already-
+    # scaffolded per-cell yearly helpers (_yearly_cell_shares /
+    # _yearly_cell_totals) instead of _touched_entities_chart, since
+    # yearly needs the year-bucketing logic those helpers already
+    # implement. cell_rows carry both "parent" and "child" keys, so we
+    # filter on the (parent, child) pair -- same identity used by
+    # _touched_entities_chart for monthly -- to keep each product only
+    # paired with the markets it was actually configured against, not
+    # every market it happens to share a name with.
+    if touched_cells:
+        if metric == "market_share":
+            cell_rows = _yearly_cell_shares(volume_grid, parent_field, child_field, overall_volume_series)
+        else:
+            cell_rows = _yearly_cell_totals(grid, parent_field, child_field, agg)
+
+        parent_yearly = {
+            "years": parent_yearly["years"],
+            "forecast_start_index": parent_yearly["forecast_start_index"],
+            "series": [
+                {"label": f"{c['parent']} - {c['child']}", "history": c["history"], "forecast": c["forecast"]}
+                for c in cell_rows
+                if (c["parent"], c["child"]) in touched_cells
+            ],
+        }
+
     yearly_overall = _yearly_overall_row(child_yearly["years"], metric, overall_volume_series)
     yearly_overall_rows = [yearly_overall] if yearly_overall else []
 
@@ -1830,14 +1864,54 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     }
 
 
+def _touched_entities_for_tab(tab: str, rows: List[dict]) -> Set[Tuple[str, str]]:
+
+    touched: Set[Tuple[str, str]] = set()
+    for row in rows:
+        if tab == "market_event":
+            touched_markets = {row["markets"][0]} | set(row.get("impacted_markets", []))
+            for product in (row.get("products") or []):
+                for market in touched_markets:
+                    touched.add((product, market))
+        elif tab == "product_event":
+            touched_products = {row["products"][0]} | set(row.get("impacted_products", []))
+            for market in (row.get("markets") or []):
+                for product in touched_products:
+                    touched.add((market, product))
+    return touched
+
+
+def _touched_entities_chart(grid: List[dict], touched_pairs: Set[Tuple[str, str]],
+                             parent_field: str, child_field: str) -> dict:
+
+    if not grid or not touched_pairs:
+        return {"months": [], "forecast_start_index": 0, "series": []}
+    months = grid[0]["months"]
+    fsi = grid[0]["forecast_start_index"]
+    series = [
+        {"label": f"{cell[parent_field]} - {cell[child_field]}",
+         "history": cell["history"], "forecast": cell["forecast"]}
+        for cell in grid
+        if (cell[parent_field], cell[child_field]) in touched_pairs
+    ]
+    return {"months": months, "forecast_start_index": fsi, "series": series}
+
+
 def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities: Dict[str, List[str]],
                             cache: Optional[CacheType] = None,
-                            date_range: Tuple[Optional[str], Optional[str]] = (None, None)
+                            date_range: Tuple[Optional[str], Optional[str]] = (None, None),
+                            touched_cells: Optional[Set[Tuple[str, str]]] = None
                             ) -> Tuple[Dict, Optional[str]]:
     """Shared by build_metrics_views (active tab, overlays cache onto grid)
     and build_latest_metrics_views (other tabs, plain fresh DB read).
     `entities` is the full product/market universe, not selected_filter --
-    filter only clips the display range, applied last."""
+    filter only clips the display range, applied last.
+
+    touched_cells is the set of touched (parent, child) entity pairs --
+    see _touched_entities_for_tab. Only ever passed for the tab actually
+    being edited this run (build_metrics_views); build_latest_metrics_views
+    always calls this with touched_cells=None, so the other two tabs keep
+    the old parent-summed chart."""
     parent_field, child_field = TAB_HIERARCHY[tab]
     markets = entities.get("markets", [])
     products = entities.get("products", [])
@@ -1913,11 +1987,12 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
     metrics_views = {
         "market_share": build_hierarchical_dual_view(
             tab, "market_share", share_grid, parent_field, child_field, YEARLY_AGG["market_share"],
-            overall_series=overall_share, volume_grid=volume_grid, overall_volume_series=overall_volume_series),
+            overall_series=overall_share, volume_grid=volume_grid,
+            overall_volume_series=overall_volume_series, touched_cells=touched_cells),
         "market_volume": build_hierarchical_dual_view(
             tab, "market_volume", volume_grid, parent_field, child_field, YEARLY_AGG["market_volume"],
             overall_series=overall_volume_series, volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series),
+            overall_volume_series=overall_volume_series, touched_cells=touched_cells),
     }
     forecast_start_date = _forecast_start_date_from(
         {"market_share": share_grid, "market_volume": overall_volume_rows})
@@ -2024,11 +2099,16 @@ def _forecast_start_date_from(series_by_metric: Dict[str, List[dict]]) -> Option
 
 
 def build_metrics_views(tab: str, scenario_name: str, ta_name: str, entities: dict,
-                         events: List[EventInput],
+                         events: List[EventInput], rows: List[dict],
                          date_range: Tuple[Optional[str], Optional[str]] = (None, None)
                          ) -> Tuple[Dict, Optional[str], CacheType]:
     """Builds metrics_views for the actively-edited tab, plus returns the raw
-    cache so the caller can persist without recomputing."""
+    cache so the caller can persist without recomputing.
+
+    `rows` is the raw event-config rows for this tab this run (used only
+    to derive touched_cells for the hierarchy chart -- see
+    _touched_entities_for_tab). Not needed for overall_event (no hierarchy
+    chart to scope)."""
     cache = apply_events_to_baseline(events, entities)
 
     if tab not in TAB_HIERARCHY:
@@ -2043,8 +2123,9 @@ def build_metrics_views(tab: str, scenario_name: str, ta_name: str, entities: di
         }
         return metrics_views, _forecast_start_date_from(series_by_metric), cache
 
+    touched_cells = _touched_entities_for_tab(tab, rows)
     metrics_views, forecast_start_date = _build_hierarchy_views(
-        tab, scenario_name, ta_name, entities, cache=cache, date_range=date_range
+        tab, scenario_name, ta_name, entities, cache=cache, date_range=date_range, touched_cells=touched_cells
     )
     return metrics_views, forecast_start_date, cache
 
@@ -2053,7 +2134,9 @@ def build_latest_metrics_views(tab: str, scenario_name: str, ta_name: str, entit
                                 date_range: Tuple[Optional[str], Optional[str]] = (None, None)
                                 ) -> Tuple[Dict, Optional[str]]:
     """Same shape as build_metrics_views but for a tab not being edited this
-    run -- fresh DB read, reflects the latest persisted values."""
+    run -- fresh DB read, reflects the latest persisted values. touched_cells
+    is never passed here (defaults to None in _build_hierarchy_views), so
+    non-active tabs always keep the full parent-summed hierarchy chart."""
     start_date, end_date = date_range
     if tab not in TAB_HIERARCHY:
         series_by_metric = {
@@ -2134,14 +2217,7 @@ def _resolve_weights(row: dict, impacted_names: List[str]) -> List[float]:
 
 
 def row_to_event(row: dict, tab: str, scenario_name: str, ta_name: str) -> EventInput:
-    coverage = None
-    if row.get("coverage_peak_percent") is not None and row.get("coverage_peak_months") is not None:
-        coverage = CoverageInput(
-            curve_type=row.get("coverage_curve_type", row["curve_type"]),
-            factor=row.get("coverage_factor", row.get("factor", 1.0)),
-            peak_pct=row["coverage_peak_percent"],
-            peak_months=row["coverage_peak_months"],
-        )
+    coverage = _resolve_coverage(row)
 
     common = dict(
         event_name=row["event_name"],
@@ -2161,12 +2237,12 @@ def row_to_event(row: dict, tab: str, scenario_name: str, ta_name: str) -> Event
         return EventInput(**common)
 
     if tab == "market_event":
-        selected_entity = row["markets"][0]
-        context = row["products"][0]
+        selected_entity = row["markets"][0]     # still single-select
+        contexts = row["products"]              # now multi-select
         impacted_field = "impacted_markets"
     else:  # product_event
-        selected_entity = row["products"][0]
-        context = row["markets"][0]
+        selected_entity = row["products"][0]    # still single-select
+        contexts = row["markets"]               # now multi-select
         impacted_field = "impacted_products"
 
     impacted_names = [n for n in row.get(impacted_field, []) if n != selected_entity]
@@ -2175,7 +2251,7 @@ def row_to_event(row: dict, tab: str, scenario_name: str, ta_name: str) -> Event
 
     return EventInput(
         **common,
-        context=context,
+        contexts=contexts,
         selected_entity=selected_entity,
         impacted_entities=impacted_entities,
     )
@@ -2321,9 +2397,17 @@ def run_calculation(payload: dict) -> dict:
     selected_filter = payload["selected_filter"]
     scenario_name = selected_filter["scenario_name"]
     raw_rows = payload["impact_curve_configuration"]["rows"]
+    print("DEBUG raw_rows:", raw_rows) 
 
     # Assign a stable event_id to every row missing one, for FE keying.
-    rows = [{**row, "event_id": row.get("event_id", idx + 1)} for idx, row in enumerate(raw_rows)]
+    rows = [
+        {
+            **row,
+            "event_id": row.get("event_id", idx + 1),
+            "enable_coverage": _resolve_coverage(row) is not None,
+        }
+        for idx, row in enumerate(raw_rows)
+    ]
 
     # Full universe, reused for every tab's dropdown config + view scoping.
     entities = fetch_available_entities(scenario_name, ta_name)
@@ -2335,7 +2419,7 @@ def run_calculation(payload: dict) -> dict:
 
     events = [row_to_event(row, tab, scenario_name, ta_name) for row in rows]
     active_metrics_views, forecast_start_date, cache = build_metrics_views(
-        tab, scenario_name, ta_name, entities, events, date_range=date_range
+        tab, scenario_name, ta_name, entities, events, rows, date_range=date_range
     )
 
     # Persist before building the other two tabs so their fresh DB reads pick up this run's changes.
