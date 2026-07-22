@@ -246,6 +246,7 @@ class LiverRecalculateFactors(BaseModel):
 class LiverApplyFiltersResponse(BaseModel):
     ta_name: str
     selected_filter: LiverSelectedFilter
+    available_months: List[str] = []
     available_scenarios: List[str]
     active_scenario: str
     scenarios: Dict[str, Any]       # keyed by scenario name; active has factors + market_analysis

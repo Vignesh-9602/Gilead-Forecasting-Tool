@@ -1451,9 +1451,10 @@ export default function PBCModelInput() {
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
           initializeCompareScenarios(data);
-          // The chart's month list doubles as the set of selectable dates
-          // for the FROM/TO DATE dropdowns — no separate endpoint needed.
-          if (normalized?.months?.length) setAvailableDates(normalized.months);
+          // Prefer the backend's full available_months (DB start → forecast end)
+          // over the chart's month list, which only covers the model range.
+          if (data?.available_months?.length) setAvailableDates(data.available_months);
+          else if (normalized?.months?.length) setAvailableDates(normalized.months);
           setEditable(false);
         } catch (err) {
           console.warn("Failed to apply HCV filters on load", err);

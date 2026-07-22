@@ -247,6 +247,28 @@ def _scenario_cube(cur, ta: str, scenario_name: str, from_year: int, from_month:
     return _cube_from_saved_scenario(chart_data, scenario_name, payers, products)
 
 
+def _round_preserving_sum(values: list, target: int) -> list:
+    """
+    Round each value to an int such that the results sum to exactly `target`
+    (largest-remainder / Hamilton apportionment method), instead of rounding
+    each one independently — which can drift ±1 from the target once summed
+    (e.g. four 1.4s independently round to 1 each, summing to 4, not 6).
+    """
+    floors = [int(v) for v in values]
+    remainder = target - sum(floors)
+    result = list(floors)
+    n = len(values)
+    if remainder > 0:
+        order = sorted(range(n), key=lambda i: values[i] - floors[i], reverse=True)
+        for i in range(min(remainder, n)):
+            result[order[i]] += 1
+    elif remainder < 0:
+        order = sorted(range(n), key=lambda i: values[i] - floors[i])
+        for i in range(min(-remainder, n)):
+            result[order[i]] -= 1
+    return result
+
+
 def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_index: int,
                                 payers: list, products: list) -> dict:
     """
@@ -274,7 +296,6 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
     total_raw     = [get_volume(cube, y, m) for y, m in month_tuples]
     total_history = total_raw[:forecast_start_index]
     total_forecast = forecast_fill(total_history, total_raw[forecast_start_index:])
-    total = [round(v) for v in total_history] + [round(v) for v in total_forecast]
 
     raw_cells = {}
     for product in products:
@@ -295,18 +316,21 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
             raw_cells[(product, payer)] = history + forecast
 
     # Rescale each forecast month's (unrounded) cells to sum exactly to that
-    # month's top-down total, then round once — same cell-first-rounding trick
-    # as before, now anchored to the authoritative top-down total instead of
-    # an independently-rounded sum.
+    # month's top-down total, then round every cell for that month TOGETHER
+    # via largest-remainder rounding, so they sum to exactly round(total) —
+    # not just close to it (see _round_preserving_sum).
+    cell_keys = list(raw_cells.keys())
+    cells = {key: [round(v) for v in raw_cells[key][:forecast_start_index]] for key in cell_keys}
     for i in range(n_forecast):
         idx = forecast_start_index + i
-        month_sum = sum(vals[idx] for vals in raw_cells.values())
+        month_sum = sum(raw_cells[key][idx] for key in cell_keys)
+        month_values = [raw_cells[key][idx] for key in cell_keys]
         if month_sum > 0:
             scale = total_forecast[i] / month_sum
-            for vals in raw_cells.values():
-                vals[idx] *= scale
-
-    cells = {key: [round(v) for v in vals] for key, vals in raw_cells.items()}
+            month_values = [v * scale for v in month_values]
+        rounded = _round_preserving_sum(month_values, round(total_forecast[i]))
+        for key, v in zip(cell_keys, rounded):
+            cells[key].append(v)
 
     by_product = {
         product: [sum(cells[(product, payer)][i] for payer in payers) for i in range(n)]
@@ -316,6 +340,17 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
         payer: [sum(cells[(product, payer)][i] for product in products) for i in range(n)]
         for payer in payers
     }
+
+    # History: derive from summing rounded cells (bottom-up, exact — it's real
+    # data, so there's no ETS-methodology mismatch to worry about here, only
+    # rounding, and this is what keeps history consistent with the other tabs).
+    # Forecast: the independently top-down-computed number (matches Model Input
+    # / Market Events); cells were already rescaled above to sum to it almost
+    # exactly (± a possible 1-unit rounding artifact, same as any independently
+    # rounded percentage/total — negligible next to the values involved).
+    total_history_from_cells = [sum(by_product[product][i] for product in products) for i in range(forecast_start_index)]
+    total = total_history_from_cells + [round(v) for v in total_forecast]
+
     return {"cells": cells, "by_product": by_product, "by_payer": by_payer, "total": total}
 
 
@@ -474,6 +509,20 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
     return result
 
 
+def _slice_aggregates(aggregates: dict, offset: int) -> dict:
+    """
+    Trim every series in one scenario's aggregates down to the display window,
+    dropping the first `offset` months that were only fetched to give ETS
+    enough history to train on (see apply_output_filters).
+    """
+    return {
+        "cells":      {k: v[offset:] for k, v in aggregates["cells"].items()},
+        "by_product": {k: v[offset:] for k, v in aggregates["by_product"].items()},
+        "by_payer":   {k: v[offset:] for k, v in aggregates["by_payer"].items()},
+        "total":      aggregates["total"][offset:],
+    }
+
+
 def apply_output_filters(payload) -> dict:
     """
     Called when the user clicks Apply Filter.
@@ -511,12 +560,32 @@ def apply_output_filters(payload) -> dict:
             month_tuples, [0.0] * len(month_tuples), forecast_start_index
         )
 
+        # ETS must be trained on the FULL configured training window, not just
+        # whatever range the user happens to be viewing — otherwise a narrower
+        # display range would refit ETS on less history and disagree with Model
+        # Input / Market Events, which always train on the full config window
+        # regardless of display range. Fetch that wider window here purely for
+        # fitting, then slice back down to the display range after aggregating.
+        wide_min_start, _ = _get_date_range_from_configs(configs)
+        if wide_min_start and wide_min_start < start_date:
+            train_from_year, train_from_month = parse_year_month(wide_min_start)
+        else:
+            train_from_year, train_from_month = from_year, from_month
+
+        wide_month_iso    = generate_month_range(train_from_year, train_from_month, to_year, to_month)
+        wide_month_tuples = [(int(m[:4]), int(m[5:7])) for m in wide_month_iso]
+        display_offset          = len(wide_month_tuples) - len(month_tuples)
+        wide_forecast_start_index = forecast_start_index + display_offset
+
         aggregates = {}
         for scenario in scenario_names:
-            cube = _scenario_cube(cur, ta, scenario, from_year, from_month, to_year, to_month, payers, products)
-            aggregates[scenario] = _build_scenario_aggregates(
-                cube, month_tuples, forecast_start_index, payers, products
+            cube = _scenario_cube(
+                cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, payers, products
             )
+            wide_aggregates = _build_scenario_aggregates(
+                cube, wide_month_tuples, wide_forecast_start_index, payers, products
+            )
+            aggregates[scenario] = _slice_aggregates(wide_aggregates, display_offset)
 
         common_args = (month_tuples, month_keys, forecast_start_index, year_labels, yearly_fsi)
 

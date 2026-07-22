@@ -94,7 +94,7 @@ export default function GlobalConfiguration() {
         setTrainStartDate(config.train_start_date || "");
         setTrainEndDate(config.train_end_date || "");
         setModelGranularity(config.model_granularity?.toLowerCase() || "");
-        setPayer(config.payer || []);
+        setPayer((config.payer || []).map((p) => p.toLowerCase()));
         setProduct(config.brand || []);
 
         // forecast_periods — backend converts integer → date string before returning
@@ -297,7 +297,7 @@ export default function GlobalConfiguration() {
                 value={payer}
                 onChange={(e) => {
                   const value = e.target.value;
-                  const opts = ["commercial", "medicare", "medicaid"];
+                  const opts = ["commercial", "medicare", "medicaid", "cash"];
                   if (value.includes("SELECT_ALL")) {
                     if (payer.length === opts.length) setPayer([]);
                     else setPayer(opts);
@@ -316,15 +316,17 @@ export default function GlobalConfiguration() {
                             ? "Commercial"
                             : v === "medicare"
                               ? "Medicare"
-                              : "Medicaid",
+                              : v === "medicaid"
+                                ? "Medicaid"
+                                : "Cash",
                         )
                         .join(", ")
                 }
               >
                 <MenuItem value="SELECT_ALL">
                   <Checkbox
-                    checked={payer.length === 3 && payer.length > 0}
-                    indeterminate={payer.length > 0 && payer.length < 3}
+                    checked={payer.length === 4 && payer.length > 0}
+                    indeterminate={payer.length > 0 && payer.length < 4}
                   />
                   <ListItemText primary="Select All" />
                 </MenuItem>
@@ -332,6 +334,7 @@ export default function GlobalConfiguration() {
                 <MenuItem value="commercial"> <Checkbox checked={payer.includes("commercial")} /> <ListItemText primary="Commercial" /> </MenuItem>
                 <MenuItem value="medicare"> <Checkbox checked={payer.includes("medicare")} /> <ListItemText primary="Medicare" /> </MenuItem>
                 <MenuItem value="medicaid"> <Checkbox checked={payer.includes("medicaid")} /> <ListItemText primary="Medicaid" /> </MenuItem>
+                <MenuItem value="cash"> <Checkbox checked={payer.includes("cash")} /> <ListItemText primary="Cash" /> </MenuItem>
               </Select>
               <FormHelperText>{errors.payer}</FormHelperText>
             </FormControl>
