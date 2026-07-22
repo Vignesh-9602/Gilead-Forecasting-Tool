@@ -49,7 +49,9 @@ export default function HIVMarketTable({
     onSaveScenario,
     onApplyScenario,
     allScenariosData,
-    onUpdateScenario
+    onUpdateScenario,
+    compareScenario,
+    setCompareScenario,
 }) {
     if (!tableData?.rows?.length) {
         return null;
@@ -59,8 +61,8 @@ export default function HIVMarketTable({
     //     setSelectedRow("");
     // }, [tableData]);
 
-    const [compareScenario, setCompareScenario] =
-        useState([]);
+    // const [compareScenario, setCompareScenario] =
+    //     useState([]);
 
 
     const isTmvTab = activeTab === "total_market_volume";
@@ -103,13 +105,9 @@ export default function HIVMarketTable({
     }, [activeScenario]);
 
 
-    useEffect(() => {
-        setCompareScenario(availableScenarios);
-    }, [availableScenarios]);
-
-
-
-
+    // useEffect(() => {
+    //     setCompareScenario(availableScenarios);
+    // }, [availableScenarios]);
 
     // const [selectedMetric, setSelectedMetric] =
     //     useState("market_volume");

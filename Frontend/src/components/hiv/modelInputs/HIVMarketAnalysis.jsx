@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 import {
     Box,
@@ -69,6 +69,12 @@ export default function HIVMarketAnalysis({
 
     const [viewMode, setViewMode] = useState("monthly");
 
+    const [compareScenario, setCompareScenario] = useState([]);
+
+    useEffect(() => {
+        setCompareScenario(availableScenarios);
+    }, [availableScenarios]);
+
     // const currentData =
     //     mockData[activeTab]?.[selectedMetric];
 
@@ -86,7 +92,9 @@ export default function HIVMarketAnalysis({
     const chartData =
         activeTab === "total_market_volume"
             ? (() => {
-                const scenarios = Object.values(allScenariosData || {});
+                const scenarios = compareScenario
+                    .map(name => allScenariosData?.[name])
+                    .filter(Boolean);
 
                 if (!scenarios.length) {
                     return currentData?.chart;
@@ -279,6 +287,8 @@ export default function HIVMarketAnalysis({
                             onApplyScenario={onApplyScenario}
                             allScenariosData={allScenariosData}
                             onUpdateScenario={onUpdateScenario}
+                            compareScenario={compareScenario}
+                            setCompareScenario={setCompareScenario}
                         />
                     </Box>
                 </>

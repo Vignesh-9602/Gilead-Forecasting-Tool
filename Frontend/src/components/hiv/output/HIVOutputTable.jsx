@@ -71,7 +71,7 @@ export default function HIVOutputTable({
         return (
             <React.Fragment key={rowKey}>
 
-                <TableRow hover>
+                <TableRow >
 
                     <TableCell
                         sx={{
@@ -300,9 +300,9 @@ export default function HIVOutputTable({
                                 padding: "10px 8px",
                             },
 
-                            "& .MuiTableRow-root:hover": {
-                                backgroundColor: "#F8FAFC",
-                            },
+                            // "& .MuiTableRow-root:hover": {
+                            //     backgroundColor: "#F8FAFC",
+                            // },
                         }}
                     >
 

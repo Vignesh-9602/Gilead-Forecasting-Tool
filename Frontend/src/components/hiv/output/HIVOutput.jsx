@@ -14,7 +14,8 @@ import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import HIVOutputAnalysis from "./HIVOutputAnalysis";
 import { mockOutputData } from "./OutputMock";
-import { getHIVOutputFilters } from "../../../services/apiService";
+import { getHIVOutputFilters, applyHIVOutputFilters } from "../../../services/apiService";
+import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 /**
  * HIVOutput.jsx
@@ -44,6 +45,15 @@ export default function HIVOutput() {
 
     const [outputAnalysis, setOutputAnalysis] = useState(null);
 
+    const { showSnackbar } = useSnackbarStore();
+    const { setLoading } = useLoadingStore();
+
+    // const [selectedMetric, setSelectedMetric] =
+    //     useState("market_volume");
+
+    // const [selectedView, setSelectedView] =
+    //     useState("monthly");
+
     useEffect(() => {
         if (therapyArea) {
             fetchFilters();
@@ -53,6 +63,8 @@ export default function HIVOutput() {
     const fetchFilters = async () => {
 
         try {
+
+            setLoading(true);
 
             const { data } = await getHIVOutputFilters(
                 therapyArea
@@ -97,33 +109,67 @@ export default function HIVOutput() {
                 filter.end_date || ""
             );
 
+            const payload = {
+                ta_name: therapyArea,
+                selected_filter: {
+                    scenario_names: filter.scenario_names || [],
+                    start_date: filter.start_date || "",
+                    end_date: filter.end_date || "",
+                    markets: filter.markets || [],
+                    products: filter.products || [],
+                },
+            };
+
+            const response = await applyHIVOutputFilters(payload);
+
+            setOutputAnalysis(response.data.output_tabs || null);
+
         } catch (error) {
 
             console.error(
                 "Failed to load output filters",
                 error
             );
+            showSnackbar(
+                "Failed to fetch market event filters",
+                "error"
+            );
 
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleApplyFilter = () => {
-        const payload = {
-            ta_name: therapyArea,
-            selected_filter: {
-                scenario_names: selectedScenarios,
-                start_date: fromDate,
-                end_date: toDate,
-                markets: selectedMarkets,
-                products: selectedProducts,
-            },
-        };
+    const handleApplyFilter = async () => {
+        try {
+            setLoading(true);
+            const payload = {
+                ta_name: therapyArea,
+                selected_filter: {
+                    scenario_names: selectedScenarios,
+                    start_date: fromDate,
+                    end_date: toDate,
+                    markets: selectedMarkets,
+                    products: selectedProducts,
+                },
+            };
 
-        console.log(payload);
+            const { data } = await applyHIVOutputFilters(payload);
 
-        setOutputAnalysis(
-            mockOutputData.output_tabs
-        );
+            setOutputAnalysis(data.output_tabs || null);
+            showSnackbar(
+                "Filters applied successfully",
+                "success"
+            );
+        } catch (error) {
+            console.error("Failed to apply output filters", error);
+            showSnackbar(
+                "Failed to apply output filters",
+                "error"
+            );
+        } finally {
+            setLoading(false);
+        }
     };
 
     const inputStyle = {

@@ -409,6 +409,12 @@ export const getHIVOutputFilters = (taName) =>
     },
   });
 
+export const applyHIVOutputFilters = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/output-screen/apply-filters",
+    payload
+  );
+
 
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
