@@ -48,40 +48,42 @@ def flat_forecast(history_values: list, window: int = 3) -> float:
     return round(sum(recent) / len(recent), 2) if recent else 0.0
 
 
-def monthly_values(data: dict, month_tuples: list, forecast_start_index: int,
-                    product: str = None, payer: str = None) -> list:
+def forecast_fill(history: list, real_forecast: list) -> list:
     """
-    Raw (unrounded) volume for every month in month_tuples, in order.
+    Fill in a forecast series given its history and whatever real values are
+    already present for the forecast months (0 = missing).
 
-    History months use real data as-is. Forecast months use real data when
-    present (e.g. a reshaped saved scenario already has real forecast values
-    baked in); any forecast month with no real value (0) is filled by an ETS
-    forecast fit to this series' own history — matching how the Liver Model
-    Input screen computes its Base forecast (app.services.forecast_service,
-    same estimate_parameters/forecast_ets used there) — falling back to a
-    flat continuation (avg of the last 3 history values) when there isn't
-    enough history (fewer than 4 non-zero points) to fit ETS.
+    Real (non-zero) values are kept as-is — e.g. a reshaped saved scenario
+    already has real forecast values baked in. Any missing month is filled by
+    an ETS forecast fit to `history` — matching how the Liver Model Input
+    screen computes its Base forecast (same estimate_parameters/forecast_ets
+    from app.services.forecast_service) — falling back to a flat continuation
+    (avg of the last 3 history values) when there's fewer than 4 non-zero
+    history points to fit ETS on.
     """
-    raw = [get_volume(data, y, m, product, payer) for y, m in month_tuples]
-    history      = raw[:forecast_start_index]
-    forecast_raw = raw[forecast_start_index:]
-    n_forecast   = len(forecast_raw)
-
+    n_forecast = len(real_forecast)
     if n_forecast == 0:
-        return history
+        return []
 
     hist_vals = [v for v in history if v > 0]
     if len(hist_vals) >= 4:
         alpha, beta, gamma = estimate_parameters(hist_vals)
-        fallback_series = [
+        fallback = [
             round(float(v), 2) for v in forecast_ets(hist_vals, n_forecast, alpha, beta, gamma, "market_volume")
         ]
     else:
         flat = flat_forecast(history)
-        fallback_series = [flat] * n_forecast
+        fallback = [flat] * n_forecast
 
-    forecast = [v if v > 0 else fallback_series[i] for i, v in enumerate(forecast_raw)]
-    return history + forecast
+    return [v if v > 0 else fallback[i] for i, v in enumerate(real_forecast)]
+
+
+def monthly_values(data: dict, month_tuples: list, forecast_start_index: int,
+                    product: str = None, payer: str = None) -> list:
+    """Raw (unrounded) volume for every month in month_tuples, in order (see forecast_fill)."""
+    raw = [get_volume(data, y, m, product, payer) for y, m in month_tuples]
+    history = raw[:forecast_start_index]
+    return history + forecast_fill(history, raw[forecast_start_index:])
 
 
 def compute_share(volume: float, total_volume: float) -> float:
