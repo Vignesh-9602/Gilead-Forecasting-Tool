@@ -118,22 +118,66 @@ const ForecastChart = ({
       });
   });
 
+  const isTotalMarket = activeTab === "total_market";
+  const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
+  const currentPayer = (payerFilter || "").toLowerCase();
+
+  // Finds the series within a given scenario's series list that matches
+  // whatever product/payer is currently focused via the page filters —
+  // the same matching rules used below to highlight a trace.
+  const findFocusSeries = (seriesList) =>
+    seriesList.find((s) => {
+      const lbl = (s.label || "").toLowerCase();
+      if (activeTab === "prod_dist") return currentBrand && lbl === currentBrand;
+      if (activeTab === "payer_dist") return currentPayer && lbl === currentPayer;
+      if (activeTab === "payer_prod" || activeTab === "prod_payer")
+        return currentPayer && currentBrand && lbl.includes(currentPayer) && lbl.includes(currentBrand);
+      return false;
+    });
+
+  // On non-total_market tabs, Compare Scenarios re-slices the chart to
+  // show the currently focused product/payer's line across every selected
+  // scenario (colored per scenario), instead of every product/payer for
+  // just the active scenario. Requires a product/payer to be focused —
+  // without one there's no single line to compare across scenarios.
+  const crossScenarioSeries = (() => {
+    if (isTotalMarket) return null;
+    if (!userHasCustomizedCompare || !selectedCompareScenarios.length) return null;
+    if (!chartData.scenarioSeries) return null;
+    if (!currentBrand && !currentPayer) return null;
+
+    const scenarioNames = [
+      ...(appliedScenario && !selectedCompareScenarios.includes(appliedScenario)
+        ? [appliedScenario]
+        : []),
+      ...selectedCompareScenarios,
+    ];
+
+    const result = [];
+    scenarioNames.forEach((scenarioName) => {
+      const list = chartData.scenarioSeries[scenarioName];
+      if (!list) return;
+      const match = findFocusSeries(list);
+      if (match) result.push({ ...match, label: scenarioName });
+    });
+    return result.length ? result : null;
+  })();
+
+  const isCrossScenarioCompare = !isTotalMarket && !!crossScenarioSeries;
+
   // On the Total Market Volume tab, series are one-per-scenario. Mirror the
   // table's filtering: before the user touches the Compare Scenarios
   // checkboxes, show every scenario; afterwards, respect the selection
   // (always keeping the currently applied scenario visible).
-  const filteredSeries =
-    activeTab === "total_market" &&
-    userHasCustomizedCompare &&
-    selectedCompareScenarios.length
+  const filteredSeries = isTotalMarket
+    ? (userHasCustomizedCompare && selectedCompareScenarios.length
       ? series.filter(
         (s) =>
           (s.label || "") === appliedScenario ||
           selectedCompareScenarios.includes(s.label || ""),
       )
-      : series;
-
-  const isTotalMarket = activeTab === "total_market";
+      : series)
+    : (crossScenarioSeries || series);
 
   // On total_market, history is identical across every scenario, so drawing
   // one historical line per scenario just stacks duplicates on top of each
@@ -159,12 +203,13 @@ const ForecastChart = ({
     : null;
 
   const traces = filteredSeries.flatMap((s, idx) => {
-    const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
-    const currentPayer = (payerFilter || "").toLowerCase();
     const seriesLabel = (s.label || "").toLowerCase();
 
     let isSelectedTrace = false;
-    if (activeTab === "prod_dist" && currentBrand) {
+    if (isCrossScenarioCompare) {
+      // In compare mode, each trace IS a scenario — highlight the applied one.
+      isSelectedTrace = (s.label || "") === appliedScenario;
+    } else if (activeTab === "prod_dist" && currentBrand) {
       isSelectedTrace = seriesLabel === currentBrand;
     } else if (activeTab === "payer_dist" && currentPayer) {
       isSelectedTrace = seriesLabel === currentPayer;
@@ -225,7 +270,15 @@ const ForecastChart = ({
       ];
     }
 
-    const color = isSelectedTrace ? "#f59e0b" : "#e2e8f0";
+    // Cross-scenario compare (non-total_market): each trace is a scenario,
+    // colored from the palette — history can differ per scenario on these
+    // tabs (unlike total_market), so both segments share one color per line.
+    // Default (no compare active): original amber-selected / grey-unselected.
+    const color = isSelectedTrace
+      ? "#f59e0b"
+      : isCrossScenarioCompare
+        ? CHART_COLORS[idx % CHART_COLORS.length]
+        : "#e2e8f0";
     const trainX = allMonths.slice(0, fsi);
     const trainY = Array.isArray(s.train_values)
       ? s.train_values.slice(0, fsi)
@@ -387,6 +440,10 @@ export default function PBCModelInput() {
   const activeTabLabel =
     TABS.find((t) => t.value === activeTab)?.label || "Total Market Volume";
   const showScenarioControls = activeTab === "total_market";
+  // Compare Scenarios (chart-only comparison) is useful on every tab now
+  // that the API sends per-scenario chart data for all of them — gated
+  // only on there being more than one scenario to compare, not the tab.
+  const showCompareScenarios = compareScenarioOptions.length > 1;
   const showMetricFilter = activeTab !== "total_market";
   const trajectoryMonthOptions =
     chartData?.months?.slice(chartData?.forecast_start_index) || [];
@@ -649,6 +706,37 @@ export default function PBCModelInput() {
       const yearlyTable = rawYearlyTable ? parseTableObj(rawYearlyTable, yearlyChart?.months || [], isTabPercent) : null;
 
       tabs[tabKey] = { chart, table, yearlyChart, yearlyTable };
+
+      // Per-scenario series map for this tab — powers Compare Scenarios on
+      // the chart for every tab. Each entry is the full series list (e.g.
+      // one entry per product/payer) as it appears in that scenario's own
+      // chart data, so the chart can show the same product/payer line
+      // across multiple scenarios instead of only the active one.
+      if (data.scenarios) {
+        const scenarioSeries = {};
+        Object.keys(data.scenarios).forEach((scenarioName) => {
+          const scenarioTabObj =
+            data.scenarios[scenarioName]?.market_analysis?.[tabKey];
+          if (!scenarioTabObj) return;
+          const scenarioSelectedMetric = selectMetricForTab(tabKey, scenarioTabObj);
+          const scenarioIsPercent =
+            scenarioSelectedMetric === scenarioTabObj.payer_share;
+          const scenarioRawChart = getMonthlyChart(scenarioSelectedMetric);
+          if (!scenarioRawChart) return;
+          const scenarioParsed = parseChartObj(
+            scenarioRawChart,
+            months,
+            fsi,
+            scenarioIsPercent,
+          );
+          if (scenarioParsed.series?.length) {
+            scenarioSeries[scenarioName] = scenarioParsed.series;
+          }
+        });
+        if (Object.keys(scenarioSeries).length) {
+          tabs[tabKey].scenarioSeries = scenarioSeries;
+        }
+      }
     });
 
     // ── Multi-scenario table rows for Total Market Volume ──────────────────
@@ -675,8 +763,7 @@ export default function PBCModelInput() {
           if (!metricObj) return; // no data at all — skip this scenario
           // Support both old shape (metricObj.table) and new shape (metricObj.monthly.table)
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
-          // Find the row matching this scenario by label/hierarchy; fall back to first row.
-          const firstRow = rawRows.find(r => (r.label || r.hierarchy) === scenarioName) || rawRows[0];
+          const firstRow = rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
           const vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
@@ -703,7 +790,7 @@ export default function PBCModelInput() {
               : null;
             if (!metricObj) return;
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
-            const firstYearlyRow = yearlyRows.find(r => (r.label || r.hierarchy) === scenarioName) || yearlyRows[0];
+            const firstYearlyRow = yearlyRows[0];
             if (!firstYearlyRow) return;
             const yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
@@ -956,7 +1043,10 @@ export default function PBCModelInput() {
       }
     });
 
-    return { chart: { months, forecast_start_index: fsi, series }, table };
+    return {
+      chart: { months, forecast_start_index: fsi, series, scenarioSeries: tab.scenarioSeries || null },
+      table,
+    };
   };
 
   // ── Payload builders ──────────────────────────────────────────────────────
@@ -1016,7 +1106,7 @@ export default function PBCModelInput() {
   const buildLiverRecalculatePayload = () => ({
     ta_name: therapyArea || "HCV",
     selected_filter: {
-      payer: payerFilter || getFirstOption(payerOptions),
+      market: payerFilter || getFirstOption(payerOptions),
       product: productFilter || getFirstOption(productOptions),
       start_date: resolveFromDate(),
       end_date: toDate || "",
@@ -1057,7 +1147,7 @@ export default function PBCModelInput() {
   // Build payload for the refresh-table API based on current (edited) table state.
   // Expected shape:
   // {
-  //   ta_name, selected_filter: { payer, product, start_date, end_date },
+  //   ta_name, selected_filter: { market, product, start_date, end_date },
   //   scenario_name, selected_tab, selected_metric, edited_hierarchy,
   //   factors, market_analysis
   // }
@@ -1212,7 +1302,7 @@ export default function PBCModelInput() {
     return {
       ta_name: therapyArea || "HCV",
       selected_filter: {
-        payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        market: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
         product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
         start_date: startDate,
         end_date: endDate,
@@ -1918,7 +2008,7 @@ export default function PBCModelInput() {
           ta_name: therapyArea || "HCV",
           scenario_name: scenarioNameFromDialog,
           selected_filter: {
-            payer: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
             product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
             start_date: resolveFromDate(),
             end_date: toDate || "",
@@ -3707,8 +3797,10 @@ export default function PBCModelInput() {
                   </Button>
                 )}
 
-                {/* Compare Scenarios — total_market only */}
-                {showScenarioControls && (
+                {/* Compare Scenarios — available on every tab; on non-total_market
+                    tabs it re-slices the chart to the currently focused
+                    product/payer across the selected scenarios. */}
+                {showCompareScenarios && (
                   <Box sx={{ position: "relative" }}>
                     <Box
                       onClick={(e) => {
