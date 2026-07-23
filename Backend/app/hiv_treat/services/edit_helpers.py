@@ -2676,77 +2676,157 @@ def normalize_distribution(
 
 
 def apply_matrix_to_tree(
-    tree: dict,
-    matrix: dict[str, dict[str, list[float]]],
-    selected_indexes: list[int],
+    tree,
+    matrix,
+    selected_indexes,
 ):
     """
-    Distribute each market-product total across existing sources.
+    Push the normalized market-product matrix back into
+    the existing source-product nodes.
 
-    The existing source proportions are preserved.
+    The matrix is at:
+
+        market -> product -> monthly values
+
+    The database/tree is at:
+
+        market -> source -> product -> monthly values
+
+    Therefore, each market-product value must be distributed
+    across the existing source rows.
+
+    Existing source proportions are preserved.
     """
 
-    product_names = list(tree["products"])
+    for market_name, market_node in tree["markets"].items():
 
-    for market_name, market in tree[
-        "markets"
-    ].items():
+        sources = market_node.get("sources", {})
 
-        source_nodes = list(
-            market.get("sources", {}).values()
-        )
+        for product_name in tree["products"]:
 
-        for product_name in product_names:
+            matrix_values = (
+                matrix
+                .get(market_name, {})
+                .get(product_name)
+            )
+
+            if matrix_values is None:
+                continue
+
+            # Find only real source-product nodes that already exist.
+            source_product_nodes = []
+
+            for source_name, source_node in sources.items():
+
+                product_node = (
+                    source_node
+                    .get("products", {})
+                    .get(product_name)
+                )
+
+                if product_node is None:
+                    continue
+
+                source_product_nodes.append(
+                    (
+                        source_name,
+                        product_node,
+                    )
+                )
+
+            if not source_product_nodes:
+                raise ValueError(
+                    "No existing source-product rows were found "
+                    f"for market '{market_name}' and product "
+                    f"'{product_name}'."
+                )
 
             for month_index in selected_indexes:
 
-                target_volume = matrix[
-                    market_name
-                ][product_name][month_index]
-
-                available_product_nodes = []
-
-                for source in source_nodes:
-
-                    product_node = source.get(
-                        "products",
-                        {},
-                    ).get(product_name)
-
-                    if product_node is not None:
-                        available_product_nodes.append(
-                            product_node
-                        )
-
-                if target_volume > 0 and not available_product_nodes:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "No source-product forecast row exists for "
-                            f"{market_name}/{product_name}."
-                        ),
-                    )
-
-                if not available_product_nodes:
-                    continue
-
-                current_source_volumes = [
-                    product_node["volume"][month_index]
-                    for product_node in available_product_nodes
-                ]
-
-                allocated_volumes = normalize_distribution(
-                    current_values=current_source_volumes,
-                    target_total=target_volume,
+                new_market_product_volume = float(
+                    matrix_values[month_index]
                 )
 
-                for product_node, allocated_volume in zip(
-                    available_product_nodes,
-                    allocated_volumes,
+                # Existing source volumes for this product/month.
+                existing_source_values = []
+
+                for source_name, product_node in (
+                    source_product_nodes
                 ):
-                    product_node["volume"][
-                        month_index
-                    ] = allocated_volume
+                    volume_values = product_node.get(
+                        "volume",
+                        [],
+                    )
+
+                    existing_value = (
+                        float(volume_values[month_index])
+                        if month_index < len(volume_values)
+                        else 0.0
+                    )
+
+                    existing_source_values.append(
+                        (
+                            source_name,
+                            product_node,
+                            existing_value,
+                        )
+                    )
+
+                existing_total = sum(
+                    value
+                    for _, _, value
+                    in existing_source_values
+                )
+
+                allocated_total = 0.0
+
+                for position, (
+                    source_name,
+                    product_node,
+                    existing_value,
+                ) in enumerate(existing_source_values):
+
+                    volume_values = product_node.setdefault(
+                        "volume",
+                        [0.0] * len(tree["months"]),
+                    )
+
+                    # Assign rounding difference to the final source.
+                    if position == len(existing_source_values) - 1:
+                        allocated_value = round(
+                            new_market_product_volume
+                            - allocated_total,
+                            6,
+                        )
+
+                    elif existing_total > 0:
+                        source_ratio = (
+                            existing_value / existing_total
+                        )
+
+                        allocated_value = round(
+                            new_market_product_volume
+                            * source_ratio,
+                            6,
+                        )
+
+                    else:
+                        # When all source values are zero, split evenly.
+                        source_count = len(
+                            existing_source_values
+                        )
+
+                        allocated_value = round(
+                            new_market_product_volume
+                            / source_count,
+                            6,
+                        )
+
+                    volume_values[month_index] = (
+                        allocated_value
+                    )
+
+                    allocated_total += allocated_value
 
 def calculate_percentage(
     numerator: float,
@@ -3055,54 +3135,635 @@ def save_tree_to_forecast_outputs(
     scenario_name: str,
 ):
     """
-    Save recalculated forecast values.
+    Save recalculated values back to existing forecast_outputs rows.
 
-    Database data stored:
-        market-level market shares
-        source-level market shares
-        product shares within each source
-        overall market volume
+    Supported market_share hierarchy:
+
+        Overall product:
+            Overall / ALL / product
+
+        Market total:
+            market / ALL / ALL
+
+        Market product:
+            market / ALL / product
+
+        Source total:
+            market / source / ALL
+
+        Source product:
+            market / source / product
+
+    Notes:
+        - NULL, blank and "ALL" are treated as aggregate source markers.
+        - "Unknown" remains a valid real source.
+        - Existing database hierarchy values are preserved exactly.
+        - Only rows already present in forecast_outputs are updated.
     """
 
-    original_share_rows = {
-        (
-            row["market"],
-            row["source_of_market"],
-            row["product"],
-        ): row["forecast_data"]
-        for row in original_metrics.get(
-            "market_share",
-            [],
-        )
-    }
+    original_share_rows = original_metrics.get(
+        "market_share",
+        [],
+    )
 
     if not original_share_rows:
         raise ValueError(
             "No original market-share rows were found."
         )
 
-    default_share_template = next(
-        iter(original_share_rows.values())
-    )
-
     # =====================================================
-    # Market share hierarchy
+    # Helpers
     # =====================================================
 
-    for market_name, market in tree[
-        "markets"
-    ].items():
+    def normalize_label(value):
+        if value is None:
+            return ""
 
-        # Market-level row:
-        # market / NULL / ALL
-        market_template = original_share_rows.get(
-            (
-                market_name,
-                None,
-                "ALL",
-            ),
-            default_share_template,
+        return str(value).strip().casefold()
+
+    def is_blank_source(value):
+        return (
+            value is None
+            or not str(value).strip()
         )
+
+    def is_all_source(value):
+        return normalize_label(value) == "all"
+
+    def is_aggregate_source(value):
+        return (
+            is_blank_source(value)
+            or is_all_source(value)
+        )
+
+    def is_all_product(value):
+        return normalize_label(value) == "all"
+
+    def is_overall_market(value):
+        return normalize_label(value) == "overall"
+
+    def find_actual_key(mapping, requested_key):
+        requested_normalized = normalize_label(
+            requested_key
+        )
+
+        for actual_key in mapping:
+            if (
+                normalize_label(actual_key)
+                == requested_normalized
+            ):
+                return actual_key
+
+        return None
+
+    def get_market_node(market_name):
+        markets = tree.get(
+            "markets",
+            {},
+        )
+
+        actual_market_name = find_actual_key(
+            markets,
+            market_name,
+        )
+
+        if actual_market_name is None:
+            return None
+
+        return markets[actual_market_name]
+
+    def get_source_node(
+        market_node,
+        source_name,
+    ):
+        sources = market_node.get(
+            "sources",
+            {},
+        )
+
+        actual_source_name = find_actual_key(
+            sources,
+            source_name,
+        )
+
+        if actual_source_name is None:
+            return None
+
+        return sources[actual_source_name]
+
+    def get_product_node(
+        source_node,
+        product_name,
+    ):
+        products = source_node.get(
+            "products",
+            {},
+        )
+
+        actual_product_name = find_actual_key(
+            products,
+            product_name,
+        )
+
+        if actual_product_name is None:
+            return None
+
+        return products[actual_product_name]
+
+    def get_market_product_volume(
+        market_node,
+        product_name,
+    ):
+        """
+        Sum a product's volume across every real source
+        inside one market.
+        """
+
+        market_volume = list(
+            market_node.get(
+                "volume",
+                [],
+            )
+        )
+
+        month_count = len(market_volume)
+
+        aggregated_product_volume = [
+            0.0
+        ] * month_count
+
+        product_found = False
+
+        for source_node in market_node.get(
+            "sources",
+            {},
+        ).values():
+
+            product_node = get_product_node(
+                source_node=source_node,
+                product_name=product_name,
+            )
+
+            if product_node is None:
+                continue
+
+            product_found = True
+
+            product_volume = list(
+                product_node.get(
+                    "volume",
+                    [],
+                )
+            )
+
+            for index in range(month_count):
+                if index >= len(product_volume):
+                    continue
+
+                aggregated_product_volume[index] += float(
+                    product_volume[index] or 0
+                )
+
+        if not product_found:
+            return None
+
+        return aggregated_product_volume
+
+    def get_market_product_share(
+        market_node,
+        product_name,
+    ):
+        """
+        Calculate product share inside a market.
+
+        product share =
+            product volume across market sources
+            ------------------------------------ * 100
+                       market volume
+        """
+
+        market_volume = list(
+            market_node.get(
+                "volume",
+                [],
+            )
+        )
+
+        product_volume = get_market_product_volume(
+            market_node=market_node,
+            product_name=product_name,
+        )
+
+        if product_volume is None:
+            return None
+
+        market_product_share = []
+
+        for index, current_market_volume in enumerate(
+            market_volume
+        ):
+            current_market_volume = float(
+                current_market_volume or 0
+            )
+
+            current_product_volume = (
+                float(product_volume[index] or 0)
+                if index < len(product_volume)
+                else 0.0
+            )
+
+            if current_market_volume == 0:
+                market_product_share.append(0.0)
+            else:
+                market_product_share.append(
+                    (
+                        current_product_volume
+                        / current_market_volume
+                    )
+                    * 100
+                )
+
+        return market_product_share
+
+    def get_overall_product_share(product_name):
+        """
+        Calculate product share across all markets.
+
+        overall product share =
+            product volume across all markets
+            --------------------------------- * 100
+                     overall volume
+        """
+
+        overall_volume = list(
+            tree.get(
+                "overall",
+                {},
+            ).get(
+                "volume",
+                [],
+            )
+        )
+
+        month_count = len(overall_volume)
+
+        overall_product_volume = [
+            0.0
+        ] * month_count
+
+        product_found = False
+
+        for market_node in tree.get(
+            "markets",
+            {},
+        ).values():
+
+            market_product_volume = (
+                get_market_product_volume(
+                    market_node=market_node,
+                    product_name=product_name,
+                )
+            )
+
+            if market_product_volume is None:
+                continue
+
+            product_found = True
+
+            for index in range(month_count):
+                if index >= len(market_product_volume):
+                    continue
+
+                overall_product_volume[index] += float(
+                    market_product_volume[index] or 0
+                )
+
+        if not product_found:
+            return None
+
+        overall_product_share = []
+
+        for index, current_overall_volume in enumerate(
+            overall_volume
+        ):
+            current_overall_volume = float(
+                current_overall_volume or 0
+            )
+
+            current_product_volume = float(
+                overall_product_volume[index] or 0
+            )
+
+            if current_overall_volume == 0:
+                overall_product_share.append(0.0)
+            else:
+                overall_product_share.append(
+                    (
+                        current_product_volume
+                        / current_overall_volume
+                    )
+                    * 100
+                )
+
+        return overall_product_share
+
+    def get_available_market_products(
+        market_node,
+    ):
+        product_names = set()
+
+        for source_node in market_node.get(
+            "sources",
+            {},
+        ).values():
+            product_names.update(
+                source_node.get(
+                    "products",
+                    {},
+                ).keys()
+            )
+
+        return sorted(product_names)
+
+    def get_available_overall_products():
+        product_names = set()
+
+        for market_node in tree.get(
+            "markets",
+            {},
+        ).values():
+            product_names.update(
+                get_available_market_products(
+                    market_node
+                )
+            )
+
+        return sorted(product_names)
+
+    # =====================================================
+    # Save all existing market-share rows
+    # =====================================================
+
+    for original_row in original_share_rows:
+
+        market_name = original_row.get(
+            "market"
+        )
+
+        database_source = original_row.get(
+            "source_of_market"
+        )
+
+        product_name = original_row.get(
+            "product"
+        )
+
+        original_forecast_data = original_row.get(
+            "forecast_data"
+        )
+
+        # =================================================
+        # Case 0: Overall rows
+        #
+        # Overall / ALL / Biktarvy
+        # Overall / ALL / Descovy
+        # Overall / ALL / Truvada
+        # =================================================
+
+        if is_overall_market(market_name):
+
+            if not is_aggregate_source(
+                database_source
+            ):
+                raise ValueError(
+                    "An Overall market-share row contains "
+                    "a non-aggregate source: "
+                    f"{market_name}/"
+                    f"{database_source}/"
+                    f"{product_name}."
+                )
+
+            # Support Overall / ALL / ALL if it is ever added.
+            if is_all_product(product_name):
+                overall_values = [
+                    100.0
+                ] * len(
+                    tree.get(
+                        "overall",
+                        {},
+                    ).get(
+                        "volume",
+                        [],
+                    )
+                )
+
+            else:
+                overall_values = (
+                    get_overall_product_share(
+                        product_name
+                    )
+                )
+
+                if overall_values is None:
+                    raise ValueError(
+                        "The Overall product could not be "
+                        "resolved in the calculation tree: "
+                        f"{market_name}/"
+                        f"{database_source}/"
+                        f"{product_name}. "
+                        f"Available products: "
+                        f"{get_available_overall_products()}."
+                    )
+
+            upsert_forecast_output(
+                cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                metric="market_share",
+                market=market_name,
+                source_of_market=database_source,
+                product=product_name,
+                forecast_data=build_updated_forecast_data(
+                    original_forecast_data=(
+                        original_forecast_data
+                    ),
+                    full_values=overall_values,
+                ),
+            )
+
+            continue
+
+        # =================================================
+        # Resolve a real market
+        # =================================================
+
+        market_node = get_market_node(
+            market_name
+        )
+
+        if market_node is None:
+            raise ValueError(
+                "Market from forecast_outputs does not exist "
+                "in the calculation tree: "
+                f"{market_name}. "
+                f"Available markets: "
+                f"{list(tree.get('markets', {}).keys())}."
+            )
+
+        # =================================================
+        # Case 1: Market total
+        #
+        # Non-retail / ALL / ALL
+        # Retail     / ALL / ALL
+        # =================================================
+
+        if (
+            is_aggregate_source(database_source)
+            and is_all_product(product_name)
+        ):
+            upsert_forecast_output(
+                cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                metric="market_share",
+                market=market_name,
+                source_of_market=database_source,
+                product=product_name,
+                forecast_data=build_updated_forecast_data(
+                    original_forecast_data=(
+                        original_forecast_data
+                    ),
+                    full_values=market_node["share"],
+                ),
+            )
+
+            continue
+
+        # =================================================
+        # Case 2: Market product
+        #
+        # Non-retail / ALL / Biktarvy
+        # Retail     / ALL / Descovy
+        # =================================================
+
+        if is_aggregate_source(database_source):
+
+            market_product_share = (
+                get_market_product_share(
+                    market_node=market_node,
+                    product_name=product_name,
+                )
+            )
+
+            if market_product_share is None:
+                raise ValueError(
+                    "The market-product row could not be "
+                    "resolved in the calculation tree: "
+                    f"{market_name}/"
+                    f"{database_source}/"
+                    f"{product_name}. "
+                    f"Available products: "
+                    f"{get_available_market_products(market_node)}."
+                )
+
+            upsert_forecast_output(
+                cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                metric="market_share",
+                market=market_name,
+                source_of_market=database_source,
+                product=product_name,
+                forecast_data=build_updated_forecast_data(
+                    original_forecast_data=(
+                        original_forecast_data
+                    ),
+                    full_values=market_product_share,
+                ),
+            )
+
+            continue
+
+        # =================================================
+        # Resolve a real source
+        # =================================================
+
+        source_node = get_source_node(
+            market_node=market_node,
+            source_name=database_source,
+        )
+
+        if source_node is None:
+            available_sources = list(
+                market_node.get(
+                    "sources",
+                    {},
+                ).keys()
+            )
+
+            raise ValueError(
+                "The original forecast-output source could "
+                "not be resolved in the calculation tree: "
+                f"{market_name}/{database_source}. "
+                f"Available sources: "
+                f"{available_sources}."
+            )
+
+        # =================================================
+        # Case 3: Source total
+        #
+        # Non-retail / ADAP    / ALL
+        # Non-retail / Federal / ALL
+        # =================================================
+
+        if is_all_product(product_name):
+            upsert_forecast_output(
+                cursor,
+                ta_name=ta_name,
+                scenario_name=scenario_name,
+                metric="market_share",
+                market=market_name,
+                source_of_market=database_source,
+                product=product_name,
+                forecast_data=build_updated_forecast_data(
+                    original_forecast_data=(
+                        original_forecast_data
+                    ),
+                    full_values=source_node["share"],
+                ),
+            )
+
+            continue
+
+        # =================================================
+        # Case 4: Source product
+        #
+        # Retained for compatibility if these rows are
+        # introduced later.
+        # =================================================
+
+        product_node = get_product_node(
+            source_node=source_node,
+            product_name=product_name,
+        )
+
+        if product_node is None:
+            available_products = list(
+                source_node.get(
+                    "products",
+                    {},
+                ).keys()
+            )
+
+            raise ValueError(
+                "The original forecast-output product could "
+                "not be resolved in the calculation tree: "
+                f"{market_name}/"
+                f"{database_source}/"
+                f"{product_name}. "
+                f"Available products: "
+                f"{available_products}."
+            )
 
         upsert_forecast_output(
             cursor,
@@ -3110,80 +3771,15 @@ def save_tree_to_forecast_outputs(
             scenario_name=scenario_name,
             metric="market_share",
             market=market_name,
-            source_of_market=None,
-            product="ALL",
+            source_of_market=database_source,
+            product=product_name,
             forecast_data=build_updated_forecast_data(
-                original_forecast_data=market_template,
-                full_values=market["share"],
+                original_forecast_data=(
+                    original_forecast_data
+                ),
+                full_values=product_node["share"],
             ),
         )
-
-        # Source and product rows
-        for source_name, source in market.get(
-            "sources",
-            {},
-        ).items():
-
-            source_template, database_source = (
-                find_original_share_row(
-                    original_rows=original_share_rows,
-                    market_name=market_name,
-                    source_name=source_name,
-                    product_name="ALL",
-                )
-            )
-
-            # Do not automatically create an ALL source row when the
-            # original data model has no such source-level row.
-            if source_template is not None:
-
-                upsert_forecast_output(
-                    cursor,
-                    ta_name=ta_name,
-                    scenario_name=scenario_name,
-                    metric="market_share",
-                    market=market_name,
-                    source_of_market=database_source,
-                    product="ALL",
-                    forecast_data=build_updated_forecast_data(
-                        original_forecast_data=source_template,
-                        full_values=source["share"],
-                    ),
-                )
-
-            for product_name, product in source.get(
-                "products",
-                {},
-            ).items():
-
-                product_template, product_database_source = (
-                    find_original_share_row(
-                        original_rows=original_share_rows,
-                        market_name=market_name,
-                        source_name=source_name,
-                        product_name=product_name,
-                    )
-                )
-
-                if product_template is None:
-                    raise ValueError(
-                        "No original forecast-output row exists for "
-                        f"{market_name}/{source_name}/{product_name}."
-                    )
-
-                upsert_forecast_output(
-                    cursor,
-                    ta_name=ta_name,
-                    scenario_name=scenario_name,
-                    metric="market_share",
-                    market=market_name,
-                    source_of_market=product_database_source,
-                    product=product_name,
-                    forecast_data=build_updated_forecast_data(
-                        original_forecast_data=product_template,
-                        full_values=product["share"],
-                    ),
-                )
 
     # =====================================================
     # Overall market volume
@@ -3206,18 +3802,23 @@ def save_tree_to_forecast_outputs(
         ta_name=ta_name,
         scenario_name=scenario_name,
         metric="market_volume",
-        market=original_volume_row["market"],
-        source_of_market=original_volume_row[
+        market=original_volume_row.get(
+            "market"
+        ),
+        source_of_market=original_volume_row.get(
             "source_of_market"
-        ],
-        product=original_volume_row["product"],
+        ),
+        product=original_volume_row.get(
+            "product"
+        ),
         forecast_data=build_updated_forecast_data(
-            original_forecast_data=original_volume_row[
-                "forecast_data"
-            ],
+            original_forecast_data=(
+                original_volume_row["forecast_data"]
+            ),
             full_values=tree["overall"]["volume"],
         ),
     )
+
 
 def build_apply_filters_response(
     cursor,

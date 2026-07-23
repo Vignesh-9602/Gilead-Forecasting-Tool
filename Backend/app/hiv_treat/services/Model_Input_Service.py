@@ -424,8 +424,13 @@ def wrap_monthly_yearly_share(monthly_chart, monthly_table,
 def build_factors(cur, ta, scenario):
     is_base = scenario.upper() == "BASE"
 
+    # ======================================================
+    # Fetch market-volume factors
+    # ======================================================
+
     if is_base:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
@@ -433,9 +438,12 @@ def build_factors(cur, ta, scenario):
               AND market = 'ALL'
               AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
             LIMIT 1
-        """, (ta,))
+            """,
+            (ta,),
+        )
     else:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
@@ -443,103 +451,182 @@ def build_factors(cur, ta, scenario):
               AND market = 'ALL'
               AND scenario_name = %s
             LIMIT 1
-        """, (ta, scenario))
+            """,
+            (ta, scenario),
+        )
 
     row = cur.fetchone()
-    if not row:
+
+    if not row or not isinstance(row[0], dict):
         return {}
 
-    data      = row[0]
-    print("================================")
-    print("Forecast Factors:")
-    print(data.get("factors"))
-    print("================================")
-    factors = data.get("factors", {})
-    months    = data.get("months", [])
-    split_idx = data.get("forecast_start_index", 0)
-    trajectory_start = months[split_idx] if split_idx < len(months) else None
+    data = row[0]
 
-    f   = data.get("factors", {})
+    volume_factors = data.get("factors") or {}
+
+    if not isinstance(volume_factors, dict):
+        volume_factors = {}
+
+    months = data.get("months") or []
+    split_idx = data.get("forecast_start_index") or 0
+
+    trajectory_start = (
+        months[split_idx]
+        if isinstance(split_idx, int)
+        and 0 <= split_idx < len(months)
+        else None
+    )
+
     ets = {
-        "alpha": f.get("alpha"),
-        "beta":  f.get("beta"),
-        "gamma": f.get("gamma")
+        "alpha": volume_factors.get("alpha"),
+        "beta": volume_factors.get("beta"),
+        "gamma": volume_factors.get("gamma"),
     }
 
+    # ======================================================
+    # Fetch market-share factors
+    # ======================================================
 
     if is_base:
-        cur.execute("""
+        cur.execute(
+            """
             SELECT forecast_data->'factors'
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_share'
               AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
             LIMIT 1
-        """, (ta,))
+            """,
+            (ta,),
+        )
     else:
-        cur.execute("""
-            SELECT forecast_data->'factors' as factors
+        cur.execute(
+            """
+            SELECT forecast_data->'factors'
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_share'
               AND scenario_name = %s
             LIMIT 1
-        """, (ta, scenario))
+            """,
+            (ta, scenario),
+        )
 
-    
     row = cur.fetchone()
 
     factors_data = row[0] if row else {}
-    m_data = row[0] if row else {}
+
+    # A database row may exist while the JSON value is null.
+    if not isinstance(factors_data, dict):
+        factors_data = {}
+
+    print("================================")
+    print("Market-volume factors:", volume_factors)
+    print("Market-share factors:", factors_data)
+    print("================================")
+
+    # Support either:
+    # {"window": 3}
+    #
+    # or:
+    # {"moving_average": {"window": 3}}
+    moving_average_cfg = factors_data.get("moving_average")
+
+    if not isinstance(moving_average_cfg, dict):
+        moving_average_cfg = factors_data
+
     moving_average = {
-        "window": m_data.get("window")
+        "window": moving_average_cfg.get("window"),
     }
 
-    # Default duration = forecast months count
-    default_duration = max(0, len(months) - split_idx)
+    default_duration = max(
+        0,
+        len(months) - split_idx,
+    )
 
-    linear_cfg = factors_data.get("linear", {})
-    scurve_cfg = factors_data.get("s_curve", {})
-    exp_cfg = factors_data.get("exponential", {})
-    log_cfg = factors_data.get("logarithmic", {})
+    linear_cfg = factors_data.get("linear") or {}
+    scurve_cfg = factors_data.get("s_curve") or {}
+    exp_cfg = factors_data.get("exponential") or {}
+    log_cfg = factors_data.get("logarithmic") or {}
+
+    if not isinstance(linear_cfg, dict):
+        linear_cfg = {}
+
+    if not isinstance(scurve_cfg, dict):
+        scurve_cfg = {}
+
+    if not isinstance(exp_cfg, dict):
+        exp_cfg = {}
+
+    if not isinstance(log_cfg, dict):
+        log_cfg = {}
 
     linear = {
-        "duration": linear_cfg.get("duration", default_duration),
-        "total_growth": linear_cfg.get("total_growth"),
+        "duration": linear_cfg.get(
+            "duration",
+            default_duration,
+        ),
+        "total_growth": linear_cfg.get(
+            "total_growth"
+        ),
         "trajectory_start": linear_cfg.get(
             "trajectory_start",
-            trajectory_start
-        )
+            trajectory_start,
+        ),
     }
 
     scurve = {
-        "k_value": scurve_cfg.get("k_value", 1),
-        "duration": scurve_cfg.get("duration", default_duration),
-        "total_growth": scurve_cfg.get("total_growth"),
+        "k_value": scurve_cfg.get(
+            "k_value",
+            1,
+        ),
+        "duration": scurve_cfg.get(
+            "duration",
+            default_duration,
+        ),
+        "total_growth": scurve_cfg.get(
+            "total_growth"
+        ),
         "trajectory_start": scurve_cfg.get(
             "trajectory_start",
-            trajectory_start
-        )
+            trajectory_start,
+        ),
     }
 
     exponential = {
-        "k_value": exp_cfg.get("k_value", 1),
-        "duration": exp_cfg.get("duration", default_duration),
-        "total_growth": exp_cfg.get("total_growth"),
+        "k_value": exp_cfg.get(
+            "k_value",
+            1,
+        ),
+        "duration": exp_cfg.get(
+            "duration",
+            default_duration,
+        ),
+        "total_growth": exp_cfg.get(
+            "total_growth"
+        ),
         "trajectory_start": exp_cfg.get(
             "trajectory_start",
-            trajectory_start
-        )
+            trajectory_start,
+        ),
     }
 
     logarithmic = {
-        "k_value": log_cfg.get("k_value", 1),
-        "duration": log_cfg.get("duration", default_duration),
-        "total_growth": log_cfg.get("total_growth"),
+        "k_value": log_cfg.get(
+            "k_value",
+            1,
+        ),
+        "duration": log_cfg.get(
+            "duration",
+            default_duration,
+        ),
+        "total_growth": log_cfg.get(
+            "total_growth"
+        ),
         "trajectory_start": log_cfg.get(
             "trajectory_start",
-            trajectory_start
-        )
+            trajectory_start,
+        ),
     }
 
     return {
@@ -547,11 +634,20 @@ def build_factors(cur, ta, scenario):
         "moving_average": moving_average,
         "linear": linear,
         "scurve": scurve,
-        "multiplier": factors_data.get("multiplier", 1),
+        "multiplier": factors_data.get(
+            "multiplier",
+            1,
+        ),
         "exponential": exponential,
         "logarithmic": logarithmic,
-        "active_model": "ets",
-        "multiplier_horizon": "Forecast"
+        "active_model": factors_data.get(
+            "active_model",
+            "ets",
+        ),
+        "multiplier_horizon": factors_data.get(
+            "multiplier_horizon",
+            "Forecast",
+        ),
     }
 
 
@@ -1266,12 +1362,76 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 # ================= MAIN FUNCTION ==========================
 # =========================================================
 
-def build_apply_scenario_response(cur, payload, config):
+# def build_apply_scenario_response(cur, payload, config):
 
-    ta    = payload.ta_name
-    flt   = payload.selected_filter
+#     ta    = payload.ta_name
+#     flt   = payload.selected_filter
+#     start = flt.start_date
+#     end   = flt.end_date
+
+#     available_scenarios = get_scenarios(cur, ta)
+#     active_scenario     = available_scenarios[0]
+
+#     scenarios_block = {}
+
+#     for scenario in available_scenarios:
+
+#         if scenario == active_scenario:
+
+#             market_analysis = build_scenario_market_analysis(
+#                 cur, ta, scenario, start, end, flt.market, flt.product
+#             )
+
+#             scenario_block = {
+#                 "factors": build_factors(cur, ta, scenario),
+#                 "market_analysis": market_analysis
+#             }
+
+#         else:
+
+#             total_data = fetch_forecast_scenario(
+#                 cur,
+#                 ta,
+#                 "ALL",
+#                 "ALL",
+#                 "ALL",
+#                 "market_volume",
+#                 scenario
+#             )
+
+#             total = build_series(total_data, start, end)
+
+#             scenario_block = {
+#                 "market_analysis": {
+#                     "total_market_volume": build_total_market_volume(
+#                         total["values"],
+#                         total["months"],
+#                         total["split_idx"],
+#                         scenario
+#                     )
+#                 }
+#             }
+
+#         scenarios_block[scenario] = scenario_block
+
+#     return {
+#         "ta_name": ta,
+#         "selected_filter": {
+#             "start_date": start,
+#             "end_date":   end,
+#             "market":     flt.market,
+#             "product":    flt.product
+#         },
+#         "available_scenarios": available_scenarios,
+#         "active_scenario":     active_scenario,
+#         "scenarios":           scenarios_block
+#     }
+
+def build_apply_scenario_response(cur, payload, config):
+    ta = payload.ta_name
+    flt = payload.selected_filter
     start = flt.start_date
-    end   = flt.end_date
+    end = flt.end_date
 
     available_scenarios = get_scenarios(cur, ta)
     active_scenario     = available_scenarios[0]
@@ -1280,53 +1440,30 @@ def build_apply_scenario_response(cur, payload, config):
 
     for scenario in available_scenarios:
 
-        if scenario == active_scenario:
+        market_analysis = build_scenario_market_analysis(
+            cur,
+            ta,
+            scenario,
+            start,
+            end,
+            flt.market,
+            flt.product
+        )
 
-            market_analysis = build_scenario_market_analysis(
-                cur, ta, scenario, start, end, flt.market, flt.product
-            )
-
-            scenario_block = {
-                "factors": build_factors(cur, ta, scenario),
-                "market_analysis": market_analysis
-            }
-
-        else:
-
-            total_data = fetch_forecast_scenario(
-                cur,
-                ta,
-                "ALL",
-                "ALL",
-                "ALL",
-                "market_volume",
-                scenario
-            )
-
-            total = build_series(total_data, start, end)
-
-            scenario_block = {
-                "market_analysis": {
-                    "total_market_volume": build_total_market_volume(
-                        total["values"],
-                        total["months"],
-                        total["split_idx"],
-                        scenario
-                    )
-                }
-            }
-
-        scenarios_block[scenario] = scenario_block
+        scenarios_block[scenario] = {
+            "factors": build_factors(cur, ta, scenario),
+            "market_analysis": market_analysis
+        }
 
     return {
         "ta_name": ta,
         "selected_filter": {
             "start_date": start,
-            "end_date":   end,
-            "market":     flt.market,
-            "product":    flt.product
+            "end_date": end,
+            "market": flt.market,
+            "product": flt.product
         },
         "available_scenarios": available_scenarios,
-        "active_scenario":     active_scenario,
-        "scenarios":           scenarios_block
+        "active_scenario": active_scenario,  # or remove this field if not needed
+        "scenarios": scenarios_block
     }
