@@ -422,16 +422,20 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
         ),
         "payer_volume": _wrap(
             build_chart("months", chart_headers, forecast_start_index, [
-                {"label": "Overall Payer", "history": total_all[:n_hist], "forecast": total_all[n_hist:]}
+                {"label": "Overall Payer",
+                 "history":  [int(round(v)) for v in total_all[:n_hist]],
+                 "forecast": [int(round(v)) for v in total_all[n_hist:]]}
             ]),
             build_flat_table(chart_headers, forecast_start_index, [
-                {"label": "Overall Payer", "values": [round(v, 2) for v in total_all]}
+                {"label": "Overall Payer", "values": [int(round(v)) for v in total_all]}
             ]),
             build_chart("years", year_labels, y_fsi, [
-                {"label": "Overall Payer", "history": y_vol_hist, "forecast": y_vol_fcast}
+                {"label": "Overall Payer",
+                 "history":  [int(round(v)) for v in y_vol_hist],
+                 "forecast": [int(round(v)) for v in y_vol_fcast]}
             ]),
             build_flat_table(year_labels, y_fsi, [
-                {"label": "Overall Payer", "values": y_vol_hist + y_vol_fcast}
+                {"label": "Overall Payer", "values": [int(round(v)) for v in (y_vol_hist + y_vol_fcast)]}
             ]),
         ),
     }
@@ -578,7 +582,10 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         vp    = prod_vol_y  if is_yearly else prod_vol_m
         pp    = pp_vol_y    if is_yearly else pp_vol_m
 
-        overall_vals = (y_tot_hist + y_tot_fcast) if is_yearly else [round(v, 2) for v in total_all]
+        def _vi(vals):
+            return [int(round(v)) for v in vals]
+
+        overall_vals = _vi(y_tot_hist + y_tot_fcast) if is_yearly else _vi(total_all)
 
         def _payer_vals(payer):
             yv_h, yv_f = vpy[payer][:2]
@@ -588,23 +595,23 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
             yv_h, yv_f = vp[product][:2]
             return yv_h + yv_f
 
-        pl_series = [{"label": py, "history": list(vpy[py][0]), "forecast": list(vpy[py][1])} for py in show_payers]
-        pl_rows = [{"label": "Overall", "values": list(overall_vals)}] + [
-            {"label": py, "values": [round(v, 2) for v in _payer_vals(py)]} for py in show_payers
+        pl_series = [{"label": py, "history": _vi(vpy[py][0]), "forecast": _vi(vpy[py][1])} for py in show_payers]
+        pl_rows = [{"label": "Overall", "values": overall_vals}] + [
+            {"label": py, "values": _vi(_payer_vals(py))} for py in show_payers
         ]
 
-        ppl_series = [{"label": py, "history": list(vpy[py][0]), "forecast": list(vpy[py][1])} for py in show_payers]
-        ppl_rows = [{"label": "Overall", "values": list(overall_vals)}]
+        ppl_series = [{"label": py, "history": _vi(vpy[py][0]), "forecast": _vi(vpy[py][1])} for py in show_payers]
+        ppl_rows = [{"label": "Overall", "values": overall_vals}]
         for product in show_products:
             children = []
             for payer in show_payers:
                 if is_yearly:
                     pyv_h, pyv_f = pp[(product, payer)]
-                    children.append({"label": payer, "values": [round(v, 2) for v in (pyv_h + pyv_f)]})
+                    children.append({"label": payer, "values": _vi(pyv_h + pyv_f)})
                 else:
                     _, _, av = pp[(product, payer)]
-                    children.append({"label": payer, "values": [round(v, 2) for v in av]})
-            ppl_rows.append({"label": product, "values": [round(v, 2) for v in _prod_vals(product)], "children": children})
+                    children.append({"label": payer, "values": _vi(av)})
+            ppl_rows.append({"label": product, "values": _vi(_prod_vals(product)), "children": children})
 
         return {
             "view_options":  PAYER_EVENT_VIEW_OPTIONS,
@@ -772,7 +779,10 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         vpy   = payer_vol_y  if is_yearly else payer_vol_m
         pp    = pp_vol_y     if is_yearly else pp_vol_m
 
-        overall_vals = (y_tot_hist + y_tot_fcast) if is_yearly else [round(v, 2) for v in total_all]
+        def _vi(vals):
+            return [int(round(v)) for v in vals]
+
+        overall_vals = _vi(y_tot_hist + y_tot_fcast) if is_yearly else _vi(total_all)
 
         def _prod_vals(product):
             yv_h, yv_f = vp[product][:2]
@@ -782,23 +792,23 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
             yv_h, yv_f = vpy[payer][:2]
             return yv_h + yv_f
 
-        pl_series = [{"label": p, "history": list(vp[p][0]), "forecast": list(vp[p][1])} for p in show_products]
-        pl_rows = [{"label": "Overall", "values": list(overall_vals)}] + [
-            {"label": p, "values": [round(v, 2) for v in _prod_vals(p)]} for p in show_products
+        pl_series = [{"label": p, "history": _vi(vp[p][0]), "forecast": _vi(vp[p][1])} for p in show_products]
+        pl_rows = [{"label": "Overall", "values": overall_vals}] + [
+            {"label": p, "values": _vi(_prod_vals(p))} for p in show_products
         ]
 
-        ppl_series = [{"label": p, "history": list(vp[p][0]), "forecast": list(vp[p][1])} for p in show_products]
-        ppl_rows = [{"label": "Overall", "values": list(overall_vals)}]
+        ppl_series = [{"label": p, "history": _vi(vp[p][0]), "forecast": _vi(vp[p][1])} for p in show_products]
+        ppl_rows = [{"label": "Overall", "values": overall_vals}]
         for payer in show_payers:
             children = []
             for product in show_products:
                 if is_yearly:
                     pyv_h, pyv_f = pp[(payer, product)]
-                    children.append({"label": product, "values": [round(v, 2) for v in (pyv_h + pyv_f)]})
+                    children.append({"label": product, "values": _vi(pyv_h + pyv_f)})
                 else:
                     _, _, av = pp[(payer, product)]
-                    children.append({"label": product, "values": [round(v, 2) for v in av]})
-            ppl_rows.append({"label": payer, "values": [round(v, 2) for v in _payer_vals(payer)], "children": children})
+                    children.append({"label": product, "values": _vi(av)})
+            ppl_rows.append({"label": payer, "values": _vi(_payer_vals(payer)), "children": children})
 
         return {
             "view_options":  PRODUCT_EVENT_VIEW_OPTIONS,
@@ -899,11 +909,14 @@ def _redistribute_flat(rows: list, edited_label: str, is_share: bool) -> list:
                 new_vals.append(round(remaining / max(1, len(others)), 2))
         new_others.append({"label": other["label"], "values": new_vals})
 
-    # Recompute Overall as the fresh sum
+    # Recompute Overall as the fresh sum (shares must total exactly 100)
     all_non_overall = [capped_edited] + new_others
-    new_overall = [
-        round(sum(float(r["values"][i]) for r in all_non_overall), 2) for i in range(n)
-    ]
+    if is_share:
+        new_overall = [100.0] * n
+    else:
+        new_overall = [
+            round(sum(float(r["values"][i]) for r in all_non_overall), 2) for i in range(n)
+        ]
 
     # Rebuild preserving original row order
     sib_map = {o["label"]: o for o in new_others}
@@ -918,7 +931,7 @@ def _redistribute_flat(rows: list, edited_label: str, is_share: bool) -> list:
     return result
 
 
-def _redistribute_hierarchy(rows: list, edited_label: str) -> list:
+def _redistribute_hierarchy(rows: list, edited_label: str, is_share: bool = False) -> list:
     """
     Hierarchy table: edited_label must be "ParentLabel - ChildLabel".
 
@@ -993,13 +1006,16 @@ def _redistribute_hierarchy(rows: list, edited_label: str) -> list:
             "children": new_children,
         })
 
-    # Recompute Overall from updated parent rows
+    # Recompute Overall from updated parent rows (shares must total exactly 100)
     parents = [r for r in new_rows if r["label"] != "Overall"]
     if parents:
         n = len(parents[0]["values"])
-        new_overall = [
-            round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
-        ]
+        if is_share:
+            new_overall = [100.0] * n
+        else:
+            new_overall = [
+                round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
+            ]
         new_rows = [
             {"label": "Overall", "values": new_overall} if r["label"] == "Overall" else r
             for r in new_rows
@@ -1021,7 +1037,7 @@ _HIER_TO_FLAT = {
 }
 
 
-def _propagate_flat_to_hierarchy(hier_rows: list, flat_rows: list) -> list:
+def _propagate_flat_to_hierarchy(hier_rows: list, flat_rows: list, is_share: bool = False) -> list:
     """
     Cross-dimension propagation: flat items are hierarchy CHILDREN, not parents.
 
@@ -1085,13 +1101,16 @@ def _propagate_flat_to_hierarchy(hier_rows: list, flat_rows: list) -> list:
         ]
         new_rows.append({"label": row["label"], "values": new_parent_vals, "children": new_children})
 
-    # Recompute Overall from updated parent rows
+    # Recompute Overall from updated parent rows (shares must total exactly 100)
     parents = [r for r in new_rows if r["label"] != "Overall"]
     if parents:
         n = len(parents[0]["values"])
-        new_overall = [
-            round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
-        ]
+        if is_share:
+            new_overall = [100.0] * n
+        else:
+            new_overall = [
+                round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
+            ]
         new_rows = [
             {"label": "Overall", "values": new_overall} if r["label"] == "Overall" else r
             for r in new_rows
@@ -1100,7 +1119,7 @@ def _propagate_flat_to_hierarchy(hier_rows: list, flat_rows: list) -> list:
     return new_rows
 
 
-def _propagate_hierarchy_to_flat(flat_rows: list, hier_rows: list) -> list:
+def _propagate_hierarchy_to_flat(flat_rows: list, hier_rows: list, is_share: bool = False) -> list:
     """
     After a hierarchy edit, recalculate the flat view by summing each child
     label across all parents.
@@ -1131,11 +1150,14 @@ def _propagate_hierarchy_to_flat(flat_rows: list, hier_rows: list) -> list:
         else:
             new_rows.append(row)
 
-    # Recompute Overall from updated flat rows
+    # Recompute Overall from updated flat rows (shares must total exactly 100)
     non_overall = [r for r in new_rows if r["label"] != "Overall"]
     if non_overall:
         n = len(non_overall[0]["values"])
-        new_overall = [round(sum(float(r["values"][i]) for r in non_overall), 2) for i in range(n)]
+        if is_share:
+            new_overall = [100.0] * n
+        else:
+            new_overall = [round(sum(float(r["values"][i]) for r in non_overall), 2) for i in range(n)]
         new_rows = [
             {"label": "Overall", "values": new_overall} if r["label"] == "Overall" else r
             for r in new_rows
@@ -1195,7 +1217,8 @@ def _detect_edited_label(old_rows: list, new_rows: list) -> str | None:
     return None
 
 
-def _update_hierarchy_parents_from_flat(hier_rows: list, flat_rows: list) -> list:
+def _update_hierarchy_parents_from_flat(hier_rows: list, flat_rows: list,
+                                         is_share: bool = False) -> list:
     """
     Update hierarchy PARENT row values to match a flat view's new totals, then
     scale each parent's children proportionally.
@@ -1238,19 +1261,76 @@ def _update_hierarchy_parents_from_flat(hier_rows: list, flat_rows: list) -> lis
             "children": new_children,
         })
 
-    # Recompute Overall from updated parent rows
+    # Recompute Overall from updated parent rows (shares must total exactly 100)
     parents = [r for r in new_rows if r["label"] != "Overall"]
     if parents:
         n = len(parents[0]["values"])
-        new_overall = [
-            round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
-        ]
+        if is_share:
+            new_overall = [100.0] * n
+        else:
+            new_overall = [
+                round(sum(float(r["values"][i]) for r in parents), 2) for i in range(n)
+            ]
         new_rows = [
             {"label": "Overall", "values": new_overall} if r["label"] == "Overall" else r
             for r in new_rows
         ]
 
     return new_rows
+
+
+def _recompute_volume_from_shares(tabs: dict, tab: str, share_key: str,
+                                   vol_key: str, period: str) -> None:
+    """
+    After a share edit, sync the companion volume metric in-place:
+        volume[i] = share[i] / 100 * total_volume[i]
+
+    total_volume comes from the "Overall*" row already stored in the volume metric.
+    Handles both flat and hierarchical view levels.
+    """
+    mv           = tabs.get(tab, {}).get("metrics_views", {})
+    share_period = mv.get(share_key, {}).get(period, {})
+    vol_period   = mv.get(vol_key,   {}).get(period, {})
+    if not share_period or not vol_period:
+        return
+
+    # Find total volume from the first "Overall*" row in any vol view level
+    total_vals = None
+    for lk, ld in vol_period.items():
+        if lk in ("view_options", "selected_view"):
+            continue
+        for row in ld.get("table", {}).get("rows", []):
+            if row.get("label", "").lower().startswith("overall"):
+                total_vals = [float(v) for v in row["values"]]
+                break
+        if total_vals is not None:
+            break
+    if not total_vals:
+        return
+
+    def _apply_ratio(share_rows: list) -> list:
+        out = []
+        for row in share_rows:
+            # Overall share is 100 → vol = total (preserves unchanged total)
+            new_vals = [int(round(float(s) / 100.0 * t))
+                        for s, t in zip(row["values"], total_vals)]
+            new_row = {"label": row["label"], "values": new_vals}
+            if row.get("children"):
+                new_row["children"] = _apply_ratio(row["children"])
+            out.append(new_row)
+        return out
+
+    for level_key in share_period:
+        if level_key in ("view_options", "selected_view"):
+            continue
+        share_sub = share_period[level_key]
+        vol_sub   = vol_period.get(level_key)
+        if not vol_sub:
+            continue
+        share_rows = share_sub.get("table", {}).get("rows", [])
+        if not share_rows:
+            continue
+        _update_view(vol_sub, _apply_ratio(share_rows))
 
 
 def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str,
@@ -1293,10 +1373,10 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
         edited_label = _detect_edited_label(old_rows, rows)
 
     # Redistribute siblings to maintain totals
+    is_share = selected_metric.endswith("_share")
     if edited_label:
-        is_share = selected_metric.endswith("_share")
         if " - " in edited_label:
-            rows = _redistribute_hierarchy(rows, edited_label)
+            rows = _redistribute_hierarchy(rows, edited_label, is_share)
         else:
             rows = _redistribute_flat(rows, edited_label, is_share)
 
@@ -1311,7 +1391,7 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
         if companion_key:
             companion = _get_view(companion_key)
             if companion:
-                hier_rows = _propagate_flat_to_hierarchy(companion["table"]["rows"], rows)
+                hier_rows = _propagate_flat_to_hierarchy(companion["table"]["rows"], rows, is_share)
                 _update_view(companion, hier_rows)
 
     # Hierarchy edit → propagate child totals back up into companion flat view
@@ -1320,7 +1400,7 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
         if flat_key:
             flat_view = _get_view(flat_key)
             if flat_view:
-                new_flat_rows = _propagate_hierarchy_to_flat(flat_view["table"]["rows"], rows)
+                new_flat_rows = _propagate_hierarchy_to_flat(flat_view["table"]["rows"], rows, is_share)
                 _update_view(flat_view, new_flat_rows)
 
     # ── Cross-tab propagation ─────────────────────────────────────────────────
@@ -1334,6 +1414,7 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
     if selected_tab == "payer_event":
         cross_metric = _PAYER_TO_PRODUCT_METRIC.get(selected_metric)
         if cross_metric:
+            cross_is_share = cross_metric.endswith("_share")
             # Read the (possibly updated) payer_level rows — updated either
             # directly (flat edit) or via hier→flat propagation above.
             updated_payer_flat = _get_view("payer_level")
@@ -1354,7 +1435,7 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
                 prod_hier = _cross_view("payer_product_level")
                 if prod_hier:
                     new_prod_hier_rows = _update_hierarchy_parents_from_flat(
-                        prod_hier["table"]["rows"], payer_flat_rows
+                        prod_hier["table"]["rows"], payer_flat_rows, cross_is_share
                     )
                     _update_view(prod_hier, new_prod_hier_rows)
 
@@ -1362,9 +1443,28 @@ def _apply_table_edits(saved_tabs: dict, selected_tab: str, selected_metric: str
                     prod_flat = _cross_view("product_level")
                     if prod_flat:
                         new_prod_flat_rows = _propagate_hierarchy_to_flat(
-                            prod_flat["table"]["rows"], new_prod_hier_rows
+                            prod_flat["table"]["rows"], new_prod_hier_rows, cross_is_share
                         )
                         _update_view(prod_flat, new_prod_flat_rows)
+
+    # ── Cross-metric: share edit → recompute companion volume ─────────────────
+    # volume[i] = share[i] / 100 * total_volume[i]
+    if selected_metric.endswith("_share"):
+        _share_to_vol = {
+            "payer_share":   "payer_volume",
+            "product_share": "product_volume",
+        }
+        companion_vol = _share_to_vol.get(selected_metric)
+        if companion_vol:
+            _recompute_volume_from_shares(
+                tabs, selected_tab, selected_metric, companion_vol, selected_view
+            )
+        # When payer_event share was edited, the cross-tab already updated
+        # product_event.product_share — recompute its volume too.
+        if selected_tab == "payer_event" and selected_metric == "payer_share":
+            _recompute_volume_from_shares(
+                tabs, "product_event", "product_share", "product_volume", selected_view
+            )
 
     return tabs
 

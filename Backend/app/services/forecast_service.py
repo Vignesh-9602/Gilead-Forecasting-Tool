@@ -109,9 +109,11 @@ def compute_initial_seasonality(values, period):
 # ======================================================
 def forecast_ets(values, forecast_periods, alpha, beta, gamma, metric):
     n = len(values)
+    if n == 0:
+        return [0.0] * forecast_periods
 
     level = values[0]
-    trend = sum(values[i] - values[i - 1] for i in range(1, n)) / (n - 1)
+    trend = (sum(values[i] - values[i - 1] for i in range(1, n)) / (n - 1)) if n > 1 else 0.0
 
     seasonal_period = 12
     seasonals = compute_initial_seasonality(values, seasonal_period)
