@@ -105,17 +105,34 @@ export default function HIVMarketEvent() {
         useState([]);
 
 
+    // useEffect(() => {
+
+    //     if (!currentConfig) return;
+
+    //     const rows = currentConfig.rows || [];
+
+    //     setEventRows(
+    //         rows.length
+    //             ? rows
+    //             : [createEmptyRow(currentConfig)]
+    //     );
+
+    // }, [activeTab, eventTabsData]);
+
     useEffect(() => {
 
         if (!currentConfig) return;
 
         const rows = currentConfig.rows || [];
 
-        setEventRows(
-            rows.length
-                ? rows
-                : [createEmptyRow(currentConfig)]
-        );
+        const normalizedRows = rows.length
+            ? rows.map((row) => ({
+                ...createEmptyRow(currentConfig),
+                ...row,
+            }))
+            : [createEmptyRow(currentConfig)];
+
+        setEventRows(normalizedRows);
 
     }, [activeTab, eventTabsData]);
 
@@ -631,7 +648,7 @@ export default function HIVMarketEvent() {
             value: "overall_event",
         },
         {
-            label: "Market Event",
+            label: "Channel Event",
             value: "market_event",
         },
         {
@@ -881,10 +898,10 @@ export default function HIVMarketEvent() {
         ]
         : isMarketEvent
             ? [
-                "Market Event",
+                "Channel Event",
                 "Products",
-                "Markets",
-                "Impacted Markets",
+                "Channel",
+                "Impacted Channel",
                 "Start Date",
                 "Peak %",
                 "Months",
@@ -899,7 +916,7 @@ export default function HIVMarketEvent() {
             ]
             : [
                 "Product Event",
-                "Markets",
+                "Channel",
                 "Products",
                 "Impacted Products",
                 "Start Date",
@@ -1043,6 +1060,19 @@ export default function HIVMarketEvent() {
                                             "MMM YY"
                                         )
                                     }
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
                                 >
 
                                     {availableMonths.map((month) => (
@@ -1095,6 +1125,19 @@ export default function HIVMarketEvent() {
                                             "MMM YY"
                                         )
                                     }
+                                    MenuProps={{
+                                        PaperProps: {
+                                            sx: {
+                                                maxHeight: 300,
+                                                width: 130,
+                                                "& .MuiMenuItem-root": {
+                                                    minHeight: 32,
+                                                    fontSize: "15px",
+                                                    py: 0.5,
+                                                },
+                                            },
+                                        },
+                                    }}
                                 >
 
                                     {availableMonths
@@ -1132,7 +1175,7 @@ export default function HIVMarketEvent() {
                     <Box>
 
                         <Typography sx={labelStyle}>
-                            MARKET FILTER
+                            CHANNEL FILTER
                         </Typography>
 
                         <FormControl sx={inputStyle}>
@@ -2897,7 +2940,7 @@ export default function HIVMarketEvent() {
                         }}
                     >
                         {isMarketEvent
-                            ? "Impacted Markets (%)"
+                            ? "Impacted Channel (%)"
                             : "Impacted Products (%)"}
 
                         <IconButton

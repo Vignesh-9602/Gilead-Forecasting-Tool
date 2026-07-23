@@ -14,6 +14,8 @@ import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import HIVOutputAnalysis from "./HIVOutputAnalysis";
 import { mockOutputData } from "./OutputMock";
+import { getHIVOutputFilters, applyHIVOutputFilters } from "../../../services/apiService";
+import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 /**
  * HIVOutput.jsx
@@ -43,68 +45,14 @@ export default function HIVOutput() {
 
     const [outputAnalysis, setOutputAnalysis] = useState(null);
 
-    const outputFilterMock = {
-        ta_name: "HIV Treatment",
+    const { showSnackbar } = useSnackbarStore();
+    const { setLoading } = useLoadingStore();
 
-        available_scenarios: [
-            "BASE",
-            "Test Scenario",
-            "Scenario 2",
-        ],
+    // const [selectedMetric, setSelectedMetric] =
+    //     useState("market_volume");
 
-        markets: [
-            "Retail",
-            "Non-retail",
-        ],
-
-        products: [
-            "Truvada",
-            "Descovy",
-            "Biktarvy",
-        ],
-
-        available_months: [
-            "2024-06-01",
-            "2024-07-01",
-            "2024-08-01",
-            "2024-09-01",
-            "2024-10-01",
-            "2024-11-01",
-            "2024-12-01",
-            "2025-01-01",
-            "2025-02-01",
-            "2025-03-01",
-            "2025-04-01",
-            "2025-05-01",
-            "2025-06-01",
-            "2025-07-01",
-            "2025-08-01",
-            "2025-09-01",
-            "2025-10-01",
-            "2025-11-01",
-            "2025-12-01",
-            "2026-01-01",
-            "2026-02-01",
-            "2026-03-01",
-            "2026-04-01",
-            "2026-05-01",
-            "2026-06-01",
-            "2026-07-01",
-            "2026-08-01",
-            "2026-09-01",
-            "2026-10-01",
-            "2026-11-01",
-            "2026-12-01",
-        ],
-
-        selected_filter: {
-            scenario_names: ["BASE"],
-            markets: ["Retail"],
-            products: ["Truvada"],
-            start_date: "2024-06-01",
-            end_date: "2026-12-01",
-        },
-    };
+    // const [selectedView, setSelectedView] =
+    //     useState("monthly");
 
     useEffect(() => {
         if (therapyArea) {
@@ -112,68 +60,116 @@ export default function HIVOutput() {
         }
     }, [therapyArea]);
 
-    const fetchFilters = () => {
+    const fetchFilters = async () => {
 
-        const response = outputFilterMock;
+        try {
 
-        setAvailableScenarios(
-            response.available_scenarios || []
-        );
+            setLoading(true);
 
-        setAvailableMonths(
-            response.available_months || []
-        );
+            const { data } = await getHIVOutputFilters(
+                therapyArea
+            );
 
-        setAvailableMarkets(
-            response.markets || []
-        );
+            setAvailableScenarios(
+                data.available_scenarios || []
+            );
 
-        setAvailableProducts(
-            response.products || []
-        );
+            setAvailableMonths(
+                data.available_months || []
+            );
 
-        const filter =
-            response.selected_filter || {};
+            setAvailableMarkets(
+                data.markets || []
+            );
 
-        setSelectedScenarios(
-            filter.scenario_names || []
-        );
+            setAvailableProducts(
+                data.products || []
+            );
 
-        setSelectedMarkets(
-            filter.markets || []
-        );
+            const filter =
+                data.selected_filter || {};
 
-        setSelectedProducts(
-            filter.products || []
-        );
+            setSelectedScenarios(
+                filter.scenario_names || []
+            );
 
-        setFromDate(
-            filter.start_date || ""
-        );
+            setSelectedMarkets(
+                filter.markets || []
+            );
 
-        setToDate(
-            filter.end_date || ""
-        );
+            setSelectedProducts(
+                filter.products || []
+            );
 
+            setFromDate(
+                filter.start_date || ""
+            );
+
+            setToDate(
+                filter.end_date || ""
+            );
+
+            const payload = {
+                ta_name: therapyArea,
+                selected_filter: {
+                    scenario_names: filter.scenario_names || [],
+                    start_date: filter.start_date || "",
+                    end_date: filter.end_date || "",
+                    markets: filter.markets || [],
+                    products: filter.products || [],
+                },
+            };
+
+            const response = await applyHIVOutputFilters(payload);
+
+            setOutputAnalysis(response.data.output_tabs || null);
+
+        } catch (error) {
+
+            console.error(
+                "Failed to load output filters",
+                error
+            );
+            showSnackbar(
+                "Failed to fetch market event filters",
+                "error"
+            );
+
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const handleApplyFilter = () => {
-        const payload = {
-            ta_name: therapyArea,
-            selected_filter: {
-                scenario_names: selectedScenarios,
-                start_date: fromDate,
-                end_date: toDate,
-                markets: selectedMarkets,
-                products: selectedProducts,
-            },
-        };
+    const handleApplyFilter = async () => {
+        try {
+            setLoading(true);
+            const payload = {
+                ta_name: therapyArea,
+                selected_filter: {
+                    scenario_names: selectedScenarios,
+                    start_date: fromDate,
+                    end_date: toDate,
+                    markets: selectedMarkets,
+                    products: selectedProducts,
+                },
+            };
 
-        console.log(payload);
+            const { data } = await applyHIVOutputFilters(payload);
 
-        setOutputAnalysis(
-            mockOutputData.output_tabs
-        );
+            setOutputAnalysis(data.output_tabs || null);
+            showSnackbar(
+                "Filters applied successfully",
+                "success"
+            );
+        } catch (error) {
+            console.error("Failed to apply output filters", error);
+            showSnackbar(
+                "Failed to apply output filters",
+                "error"
+            );
+        } finally {
+            setLoading(false);
+        }
     };
 
     const inputStyle = {
@@ -315,6 +311,19 @@ export default function HIVOutput() {
                                 renderValue={(v) =>
                                     v ? dayjs(v).format("MMM YY") : ""
                                 }
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                            "& .MuiMenuItem-root": {
+                                                minHeight: 32,
+                                                fontSize: "15px",
+                                                py: 0.5,
+                                            },
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths.map((month) => (
                                     <MenuItem key={month} value={month}>
@@ -337,6 +346,19 @@ export default function HIVOutput() {
                                 renderValue={(v) =>
                                     v ? dayjs(v).format("MMM YY") : ""
                                 }
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                            "& .MuiMenuItem-root": {
+                                                minHeight: 32,
+                                                fontSize: "15px",
+                                                py: 0.5,
+                                            },
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths
                                     .filter(
@@ -355,7 +377,7 @@ export default function HIVOutput() {
                     </Box>
 
                     {renderMultiSelect(
-                        "MARKET",
+                        "CHANNEL",
                         availableMarkets,
                         selectedMarkets,
                         setSelectedMarkets

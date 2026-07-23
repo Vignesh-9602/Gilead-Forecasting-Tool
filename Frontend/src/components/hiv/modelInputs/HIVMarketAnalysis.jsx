@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 import {
     Box,
@@ -18,7 +18,7 @@ const TABS = [
         value: "total_market_volume",
     },
     {
-        label: "Market Distribution (%)",
+        label: "Channel Distribution (%)",
         value: "market_distribution",
     },
     {
@@ -26,11 +26,11 @@ const TABS = [
         value: "product_distribution",
     },
     {
-        label: "Market-Product",
+        label: "Channel-Product",
         value: "market_product",
     },
     {
-        label: "Product-Market",
+        label: "Product-Channel",
         value: "product_market",
     },
 ];
@@ -69,6 +69,12 @@ export default function HIVMarketAnalysis({
 
     const [viewMode, setViewMode] = useState("monthly");
 
+    const [compareScenario, setCompareScenario] = useState([]);
+
+    useEffect(() => {
+        setCompareScenario(availableScenarios);
+    }, [availableScenarios]);
+
     // const currentData =
     //     mockData[activeTab]?.[selectedMetric];
 
@@ -82,6 +88,63 @@ export default function HIVMarketAnalysis({
     const hasData =
         !!currentData?.chart?.series?.length &&
         !!currentData?.table?.rows?.length;
+
+    const chartData = React.useMemo(() => {
+
+        const scenarios = compareScenario
+            .map(name => ({
+                name,
+                data: allScenariosData?.[name],
+            }))
+            .filter(item => item.data);
+
+        if (!scenarios.length) {
+            return currentData?.chart;
+        }
+
+        const firstChart =
+            scenarios[0]
+                ?.data
+                ?.market_analysis
+                ?.[activeTab]
+                ?.[selectedMetric]
+                ?.[viewMode]
+                ?.chart;
+
+        return {
+
+            ...firstChart,
+
+            series: scenarios.flatMap(({ name, data }) => {
+
+                return (
+                    data
+                        ?.market_analysis
+                        ?.[activeTab]
+                        ?.[selectedMetric]
+                        ?.[viewMode]
+                        ?.chart
+                        ?.series || []
+                ).map(item => ({
+
+                    ...item,
+
+                    scenario: name,
+
+                }));
+
+            }),
+
+        };
+
+    }, [
+        compareScenario,
+        allScenariosData,
+        activeTab,
+        selectedMetric,
+        viewMode,
+        currentData,
+    ]);
 
     return (
         <Paper
@@ -215,8 +278,9 @@ export default function HIVMarketAnalysis({
                             p: 3,
                         }}
                     >
+
                         <HIVMarketChart
-                            chartData={currentData?.chart}
+                            chartData={chartData}
                             activeTab={activeTab}
                             selectedMarket={selectedMarket}
                             selectedProduct={selectedProduct}
@@ -256,6 +320,8 @@ export default function HIVMarketAnalysis({
                             onApplyScenario={onApplyScenario}
                             allScenariosData={allScenariosData}
                             onUpdateScenario={onUpdateScenario}
+                            compareScenario={compareScenario}
+                            setCompareScenario={setCompareScenario}
                         />
                     </Box>
                 </>

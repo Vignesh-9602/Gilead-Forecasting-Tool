@@ -1107,7 +1107,7 @@ export default function HIVModelInput() {
                                     color: "#64748b",
                                 }}
                             >
-                                MARKET FILTER
+                                CHANNEL FILTER
                             </Typography>
 
                             <FormControl sx={inputStyle}>

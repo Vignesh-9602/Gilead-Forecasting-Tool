@@ -412,6 +412,19 @@ export const editHIVImpactCurveTable = (payload) =>
     payload
   );
 
+export const getHIVOutputFilters = (taName) =>
+  httpClient.get("/api/hiv_treat/get_output_screen_filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+
+export const applyHIVOutputFilters = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/output-screen/apply-filters",
+    payload
+  );
+
 
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;
@@ -465,4 +478,3 @@ export const editHIVImpactCurveTable = (payload) =>
 // export const getRecentQuestions = (limit = 4) => {
 //   return httpClient.get(`/api/conversations/recent_questions?limit=${limit}`);
 // };
- 
