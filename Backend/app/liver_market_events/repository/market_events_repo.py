@@ -27,6 +27,17 @@ def get_scenarios(cur) -> list:
     return [row[0] for row in cur.fetchall()]
 
 
+def get_market_events_scenarios(cur) -> list:
+    """Return scenario names that were saved as market events (metric='market_events')."""
+    cur.execute("""
+        SELECT scenario_name
+        FROM raw_liver.liver_scenarios
+        WHERE metric = 'market_events'
+        ORDER BY created_at DESC
+    """)
+    return [row[0] for row in cur.fetchall()]
+
+
 # ---------------------------------------------------------------------------
 # Filter state — persist and restore the user's last selected filter per TA
 #
@@ -187,13 +198,10 @@ def get_distinct_months(cur, ta: str) -> list:
 # so ON CONFLICT (scenario_name) is safe to use.
 # ---------------------------------------------------------------------------
 
-def load_scenario_event_tabs(cur, scenario_name: str) -> dict | None:
-    """
-    Load the pre-stored event_tabs (chart_data) for a given scenario name.
-    Returns None if the scenario hasn't been saved yet.
-    """
+def load_market_analysis(cur, scenario_name: str) -> dict | None:
+    """Load chart_data['market_analysis'] for an existing liver scenario."""
     cur.execute("""
-        SELECT chart_data
+        SELECT chart_data->'market_analysis'
         FROM raw_liver.liver_scenarios
         WHERE LOWER(TRIM(scenario_name)) = LOWER(TRIM(%s))
     """, (scenario_name,))
@@ -201,34 +209,51 @@ def load_scenario_event_tabs(cur, scenario_name: str) -> dict | None:
     return row[0] if row else None
 
 
-def save_market_events_scenario(cur, scenario_name: str, ta: str,
-                                 selected_filter: dict, event_tabs: dict) -> None:
+def save_market_analysis(cur, scenario_name: str, market_analysis: dict) -> int:
+    """Update chart_data['market_analysis'] in-place for an existing liver scenario."""
+    cur.execute("""
+        UPDATE raw_liver.liver_scenarios
+        SET chart_data = jsonb_set(
+            COALESCE(chart_data, '{}'),
+            '{market_analysis}',
+            %s::jsonb
+        )
+        WHERE LOWER(TRIM(scenario_name)) = LOWER(TRIM(%s))
+    """, (json.dumps(market_analysis), scenario_name))
+    return cur.rowcount
+
+
+def load_scenario_event_tabs(cur, scenario_name: str) -> dict | None:
     """
-    Save (or overwrite) a market events scenario into liver_scenarios.
-    event_tabs holds the full metrics_views data for all three tabs.
+    Load the market events data stored under chart_data['market_events'] for a scenario.
+    Returns None if the scenario doesn't exist or has no market events data saved yet.
     """
     cur.execute("""
-        INSERT INTO raw_liver.liver_scenarios
-            (scenario_name, ta, payer, product, metric, from_date, to_date, chart_data, factors)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
-        ON CONFLICT (scenario_name) DO UPDATE SET
-            ta         = EXCLUDED.ta,
-            payer      = EXCLUDED.payer,
-            product    = EXCLUDED.product,
-            metric     = EXCLUDED.metric,
-            from_date  = EXCLUDED.from_date,
-            to_date    = EXCLUDED.to_date,
-            chart_data = EXCLUDED.chart_data,
-            factors    = EXCLUDED.factors,
-            created_at = CURRENT_TIMESTAMP
-    """, (
-        scenario_name,
-        ta,
-        json.dumps(selected_filter.get("payers", [])),
-        json.dumps(selected_filter.get("products", [])),
-        "market_events",
-        selected_filter.get("start_date", ""),
-        selected_filter.get("end_date", ""),
-        json.dumps(event_tabs),
-        json.dumps({}),   # impact curve rows stored separately when needed
-    ))
+        SELECT chart_data->'market_events'
+        FROM raw_liver.liver_scenarios
+        WHERE LOWER(TRIM(scenario_name)) = LOWER(TRIM(%s))
+    """, (scenario_name,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_market_events_scenario(cur, scenario_name: str, event_tabs: dict) -> int:
+    """
+    Persist market events data into the existing liver scenario row by writing
+    event_tabs into chart_data['market_events'] via jsonb_set.
+
+    Does NOT insert a new row — the scenario must already exist in liver_scenarios
+    (created by the model input / liver module).
+
+    Returns the number of rows updated (0 means the scenario was not found).
+    """
+    cur.execute("""
+        UPDATE raw_liver.liver_scenarios
+        SET chart_data = jsonb_set(
+            COALESCE(chart_data, '{}'),
+            '{market_events}',
+            %s::jsonb
+        )
+        WHERE LOWER(TRIM(scenario_name)) = LOWER(TRIM(%s))
+    """, (json.dumps(event_tabs), scenario_name))
+    return cur.rowcount

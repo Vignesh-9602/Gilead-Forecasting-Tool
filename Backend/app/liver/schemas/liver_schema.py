@@ -1,5 +1,5 @@
 from pydantic import BaseModel, model_validator
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ class LiverConfigResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class LiverSelectedFilter(BaseModel):
-    market: Optional[str] = None
+    payer: Optional[str] = None
     product: Optional[str] = None
     start_date: str
     end_date: str
@@ -51,7 +51,7 @@ class LiverSelectedFilter(BaseModel):
 
 class LiverFiltersResponse(BaseModel):
     ta_name: str
-    markets: List[str]
+    payers: List[str]
     products: List[str]
     available_months: List[str]
     selected_filter: LiverSelectedFilter
@@ -66,7 +66,7 @@ class LiverApplyFiltersRequest(BaseModel):
     ta: str = "HCV"
     payer: List[str] = []
     brand: List[str] = []
-    metric: str = "market_volume"       # "market_volume" | "market_share"
+    metric: str = "payer_volume"       # "payer_volume" | "payer_share"
     from_date: str                      # "2020-04-01" — start of view window
     to_date: Optional[str] = None       # "2027-12-01" — end of view; falls back to config forecast end
     scenario: str = "Base"
@@ -246,6 +246,7 @@ class LiverRecalculateFactors(BaseModel):
 class LiverApplyFiltersResponse(BaseModel):
     ta_name: str
     selected_filter: LiverSelectedFilter
+    available_months: List[str] = []
     available_scenarios: List[str]
     active_scenario: str
     scenarios: Dict[str, Any]       # keyed by scenario name; active has factors + market_analysis
@@ -290,8 +291,8 @@ class LiverRefreshRequest(BaseModel):
     ta_name: str = "HCV"
     selected_filter: LiverSelectedFilter
     scenario_name: str = "Base"
-    selected_tab: str                        # e.g. "total_market_volume", "market_distribution"
-    selected_metric: str = "market_volume"   # "market_volume" | "market_share"
+    selected_tab: str                        # e.g. "total_market_volume", "payer_distribution"
+    selected_metric: str = "payer_volume"   # "payer_volume" | "payer_share"
     edited_hierarchy: Optional[str] = None   # row label that was edited (for redistribution)
     factors: Optional[Dict[str, Any]] = None # pass-through; returned as-is for active scenario
     market_analysis: Dict[str, Any] = {}

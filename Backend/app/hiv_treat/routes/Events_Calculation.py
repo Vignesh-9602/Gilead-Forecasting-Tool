@@ -80,7 +80,7 @@ class EventInput(BaseModel):
     # product_event: context = market, selected_entity = product
     # market_event:  context = product, selected_entity = market
     # overall_event: both left unset
-    context: Optional[str] = None
+    contexts: Optional[List[str]] = None
     selected_entity: Optional[str] = None
 
     # Shared curve fields
@@ -96,13 +96,13 @@ class EventInput(BaseModel):
     @model_validator(mode="after")
     def _validate_scope_fields(self) -> "EventInput":
         if self.event_scope == EventScope.OVERALL_EVENT:
-            if self.context is not None or self.selected_entity is not None:
-                raise ValueError("overall_event takes no context/selected_entity.")
+            if self.contexts is not None or self.selected_entity is not None:
+                raise ValueError("overall_event takes no contexts/selected_entity.")
             if self.impacted_entities is not None:
                 raise ValueError("overall_event has no redistribution.")
         else:
-            if not self.context:
-                raise ValueError(f"context is required for a {self.event_scope.value}.")
+            if not self.contexts:
+                raise ValueError(f"contexts is required for a {self.event_scope.value}.")
             if not self.selected_entity:
                 raise ValueError(f"selected_entity is required for a {self.event_scope.value}.")
         return self
@@ -221,17 +221,36 @@ def build_redistribution_curves(
         for e in impacted_entities
     }
 
+def build_event_curve(event: EventInput, baseline_pct: float = 0.0) -> List[float]:
+    """
+    Absolute share curve for the selected entity: ramps from baseline_pct
+    up to event.peak_pct following the chosen shape. The caller applies
+    this by SETTING the entity's forecast to these values directly (not
+    adding), so it lands exactly on peak_pct and holds there flat --
+    baseline drift in the underlying forecast no longer leaks in.
+    overall_event has no baseline concept; leave baseline_pct at 0.0.
+    """
+    return _normalized_curve(baseline_pct, event.peak_pct, event.duration_months,
+                              event.curve_type, event.factor)
 
-# ======================================================
-# MAIN FUNCTION
-# ======================================================
 
-def compute_event_forecast(event: EventInput) -> EventForecastResult:
-    base_curve = build_event_curve(event)
+def compute_event_forecast(event: EventInput, baseline_pct: float = 0.0) -> EventForecastResult:
+    base_curve = build_event_curve(event, baseline_pct=baseline_pct)
     coverage_curve = build_coverage_curve(event) if event.coverage else None
-    final_curve = apply_coverage(base_curve, coverage_curve) if event.coverage else base_curve
 
-    impacted_curves = build_redistribution_curves(final_curve, event.impacted_entities)
+    # Only the event's incremental effect (delta from baseline) should be
+    # gated by coverage -- not the entity's existing baseline share.
+    delta_curve = [round(v - baseline_pct, 4) for v in base_curve]
+
+    if coverage_curve:
+        adjusted_delta = [round(d * (c / 100.0), 4) for d, c in zip(delta_curve, coverage_curve)]
+    else:
+        adjusted_delta = delta_curve
+
+    final_curve = [round(baseline_pct + d, 4) for d in adjusted_delta]
+
+    # impacted/sibling entities still redistribute off the same delta
+    impacted_curves = build_redistribution_curves(adjusted_delta, event.impacted_entities)
 
     return EventForecastResult(
         event_name=event.event_name,

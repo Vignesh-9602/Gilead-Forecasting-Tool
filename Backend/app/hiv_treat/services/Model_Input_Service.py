@@ -839,7 +839,23 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
             )
         }
     }
+def fetch_forecast_scenario_with_fallback(cur, ta, market, source, product, metric, scenario):
+    """
+    Try the requested scenario first. If no row exists for that exact
+    scenario, fall back to BASE.
 
+    This matters because non-BASE scenarios generally only override
+    market-level and source-level shares, not every source x product
+    combination -- those still need to come from BASE's mix.
+    """
+    data = fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario)
+    if data is not None:
+        return data
+
+    if scenario.upper() != "BASE":
+        return fetch_forecast_scenario(cur, ta, market, source, product, metric, "BASE")
+
+    return None
 
 def build_product_distribution(cur, ta, scenario, markets, total_vals, months, split_idx, start, end):
     """
@@ -878,17 +894,19 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             else:
                 sources = get_sources(cur, ta, mkt)
                 for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
                     if not src_d:
                         continue
                     src_series = build_series(src_d, start, end)
-                    src_vol    = build_volume_from_share(mkt_vol, src_series["values"])  # raw
+                    src_vol    = build_volume_from_share(mkt_vol, src_series["values"])
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
                     if not prod_d:
                         continue
                     prod_series = build_series(prod_d, start, end)
-                    prod_vol    = build_volume_from_share(src_vol, prod_series["values"])  # raw
+                    prod_vol    = build_volume_from_share(src_vol, prod_series["values"])
 
                     for i in range(min(len(prod_vol), n)):
                         prod_vol_map[prod][i] += prod_vol[i]
@@ -1014,12 +1032,14 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                 sources        = get_sources(cur, ta, mkt)
 
                 for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
                     if not src_d:
                         continue
                     src_series = build_series(src_d, start, end)
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
                     if not prod_d:
                         continue
                     prod_series = build_series(prod_d, start, end)
@@ -1191,16 +1211,18 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
                 mkt_series  = build_series(mkt_d, start, end)
                 min_len_mkt = min(len(total_vals), len(mkt_series["values"]))
                 mkt_vol     = build_volume_from_share(
-                    total_vals[:min_len_mkt], mkt_series["values"][:min_len_mkt])  # raw
+                    total_vals[:min_len_mkt], mkt_series["values"][:min_len_mkt])
 
                 sources = get_sources(cur, ta, mkt)
                 for src in sources:
-                    src_d = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
                     if not src_d:
                         continue
                     src_series = build_series(src_d, start, end)
 
-                    prod_d = fetch_forecast_scenario(cur, ta, mkt, src, prod, "market_share", scenario)
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
                     if not prod_d:
                         continue
                     prod_series = build_series(prod_d, start, end)
@@ -1362,6 +1384,71 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 # =========================================================
 # ================= MAIN FUNCTION ==========================
 # =========================================================
+
+# def build_apply_scenario_response(cur, payload, config):
+
+#     ta    = payload.ta_name
+#     flt   = payload.selected_filter
+#     start = flt.start_date
+#     end   = flt.end_date
+
+#     available_scenarios = get_scenarios(cur, ta)
+#     active_scenario     = available_scenarios[0]
+
+#     scenarios_block = {}
+
+#     for scenario in available_scenarios:
+
+#         if scenario == active_scenario:
+
+#             market_analysis = build_scenario_market_analysis(
+#                 cur, ta, scenario, start, end, flt.market, flt.product
+#             )
+
+#             scenario_block = {
+#                 "factors": build_factors(cur, ta, scenario),
+#                 "market_analysis": market_analysis
+#             }
+
+#         else:
+
+#             total_data = fetch_forecast_scenario(
+#                 cur,
+#                 ta,
+#                 "ALL",
+#                 "ALL",
+#                 "ALL",
+#                 "market_volume",
+#                 scenario
+#             )
+
+#             total = build_series(total_data, start, end)
+
+#             scenario_block = {
+#                 "market_analysis": {
+#                     "total_market_volume": build_total_market_volume(
+#                         total["values"],
+#                         total["months"],
+#                         total["split_idx"],
+#                         scenario
+#                     )
+#                 }
+#             }
+
+#         scenarios_block[scenario] = scenario_block
+
+#     return {
+#         "ta_name": ta,
+#         "selected_filter": {
+#             "start_date": start,
+#             "end_date":   end,
+#             "market":     flt.market,
+#             "product":    flt.product
+#         },
+#         "available_scenarios": available_scenarios,
+#         "active_scenario":     active_scenario,
+#         "scenarios":           scenarios_block
+#     }
 
 def build_apply_scenario_response(cur, payload, config):
     ta = payload.ta_name

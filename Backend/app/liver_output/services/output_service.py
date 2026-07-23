@@ -6,6 +6,7 @@ from app.liver_output.repository.output_repo import (
     get_distinct_months,
     get_all_configs_for_ta,
     get_volume_by_product_payer,
+    get_scenario_chart_data,
     load_filter_state,
     save_filter_state,
 )
@@ -17,7 +18,8 @@ from app.liver_output.helpers.date_helpers import (
 )
 from app.liver_output.helpers.data_helpers import (
     organize_raw_data,
-    monthly_values,
+    get_volume,
+    forecast_fill,
     compute_share,
     to_month_key,
     aggregate_monthly_to_yearly,
@@ -177,53 +179,159 @@ def _is_base(scenario_name: str) -> bool:
     return scenario_name.strip().upper() == "BASE"
 
 
+def _cube_from_saved_scenario(chart_data: dict, scenario_name: str, payers: list, products: list) -> dict:
+    """
+    Reshape a saved scenario's chart_data into the same {(year, month): {product: {payer:
+    volume}}} cube shape used for Base, by pulling raw cell volumes out of its
+    market_analysis.payer_product hierarchy tab (rows = payers, each row's children =
+    products, each child's values = one volume per month).
+
+    Only raw volume numbers are extracted — never chart_data's own pre-computed
+    percentages, since this module's share convention (% of grand total at every
+    level) differs from the Liver Model Input screen's (% of parent).
+
+    Scenarios saved by the older Liver Model Input flow key this data as
+    "market_volume"; newer saves (from an updated Save Scenario flow) key it as
+    "payer_volume". Both are accepted.
+    """
+    try:
+        payer_product = chart_data["market_analysis"]["payer_product"]
+        volume_data = payer_product.get("payer_volume") or payer_product["market_volume"]
+        monthly = volume_data["monthly"]
+        months = monthly["chart"]["months"]
+        payer_rows = monthly["table"]["rows"]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"Scenario '{scenario_name}' does not have the expected saved data shape "
+            f"(market_analysis.payer_product) and cannot be used for comparison."
+        )
+
+    month_tuples = [(int(m[:4]), int(m[5:7])) for m in months]
+    wanted_payers = set(payers)
+    wanted_products = set(products)
+
+    raw_rows = []
+    for payer_row in payer_rows:
+        payer = payer_row.get("label")
+        if payer not in wanted_payers:
+            continue
+        for child in payer_row.get("children", []):
+            product = child.get("label")
+            if product not in wanted_products:
+                continue
+            for (y, m), v in zip(month_tuples, child.get("values", [])):
+                raw_rows.append((y, m, product, payer, v))
+
+    return organize_raw_data(raw_rows)
+
+
 def _scenario_cube(cur, ta: str, scenario_name: str, from_year: int, from_month: int,
                     to_year: int, to_month: int, payers: list, products: list) -> dict:
     """
     Returns an {(year, month): {product: {payer: volume}}} cube for one scenario.
 
-    Only 'Base'/'BASE' can be computed today — non-Base scenarios need a real
-    multi-payer/multi-product save mechanism that doesn't exist yet (the
-    existing raw_liver.liver_scenarios rows are single-payer/single-product
-    snapshots from the Liver Model Input screen and can't supply this shape).
+    'Base'/'BASE' is always computed fresh from transaction_data. Any other name
+    is looked up in raw_liver.liver_scenarios (shared with the Liver Model Input
+    and Market Events screens) and its saved chart_data is reshaped into this
+    same cube format.
     """
-    if not _is_base(scenario_name):
-        raise ValueError(
-            f"Scenario '{scenario_name}' is not yet available for comparison — "
-            f"only 'Base' can be computed on the Output screen currently."
+    if _is_base(scenario_name):
+        raw_rows = get_volume_by_product_payer(
+            cur, ta, from_year, from_month, to_year, to_month, payers=payers, products=products
         )
-    raw_rows = get_volume_by_product_payer(
-        cur, ta, from_year, from_month, to_year, to_month, payers=payers, products=products
-    )
-    return organize_raw_data(raw_rows)
+        return organize_raw_data(raw_rows)
+
+    chart_data = get_scenario_chart_data(cur, scenario_name)
+    if chart_data is None:
+        raise ValueError(f"Scenario '{scenario_name}' was not found.")
+    return _cube_from_saved_scenario(chart_data, scenario_name, payers, products)
+
+
+def _round_preserving_sum(values: list, target: int) -> list:
+    """
+    Round each value to an int such that the results sum to exactly `target`
+    (largest-remainder / Hamilton apportionment method), instead of rounding
+    each one independently — which can drift ±1 from the target once summed
+    (e.g. four 1.4s independently round to 1 each, summing to 4, not 6).
+    """
+    floors = [int(v) for v in values]
+    remainder = target - sum(floors)
+    result = list(floors)
+    n = len(values)
+    if remainder > 0:
+        order = sorted(range(n), key=lambda i: values[i] - floors[i], reverse=True)
+        for i in range(min(remainder, n)):
+            result[order[i]] += 1
+    elif remainder < 0:
+        order = sorted(range(n), key=lambda i: values[i] - floors[i])
+        for i in range(min(-remainder, n)):
+            result[order[i]] -= 1
+    return result
 
 
 def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_index: int,
                                 payers: list, products: list) -> dict:
     """
-    Compute monthly volume for every (product, payer) cell — each with its own
-    independent flat-forecast fallback, rounded to int immediately — then derive
-    every coarser aggregate (per-product, per-payer, grand total) by SUMMING those
-    already-rounded cells, never via an independent fallback or a fresh rounding
-    of its own.
+    Compute the grand total and every (product, payer) cell for one scenario, all
+    consistent with each other AND with the Liver Model Input / Market Events
+    screens' Base numbers.
 
-    Rounding at the cell level first (not the parent/total level) is what makes
-    this consistent: round(sum(unrounded cells)) is not always equal to
-    sum(round(each unrounded cell)) — e.g. four cells of 1.4 sum to 5.6 (rounds to
-    6), but each cell individually rounds to 1 (sum of 4). Since cells are the
-    finest grain actually displayed (hierarchy leaves), rounding them first and
-    summing integers from there guarantees every parent/grand-total exactly
-    matches the sum of its children, at every level, in every view.
+    The grand total is forecast top-down: ETS fit directly to the total's own
+    history (via forecast_fill), exactly like Model Input's Tab 1 (Total Market
+    Volume) and Market Events' Overall Payer Volume both do. Fitting ETS
+    independently per cell and summing up (the previous approach here) does NOT
+    reproduce that number — ETS is not linear, so sum(ETS(part)) != ETS(sum(parts)).
+
+    Each cell's forecast is then allocated as its historical share of the grand
+    total (real per-cell forecast values — e.g. from a reshaped saved scenario —
+    are kept as-is instead), and rescaled so cells sum exactly back to the SAME
+    top-down total for every forecast month, before rounding once at the cell
+    level. Every coarser aggregate (per-product, per-payer) is then derived by
+    summing those already-rounded cells, which is what keeps every parent and
+    the grand total exactly consistent with their children in every tab.
     """
-    n = len(month_tuples)
-    cells = {
-        (product, payer): [
-            round(v)
-            for v in monthly_values(cube, month_tuples, forecast_start_index, product=product, payer=payer)
-        ]
-        for product in products
-        for payer in payers
-    }
+    n          = len(month_tuples)
+    n_forecast = n - forecast_start_index
+
+    total_raw     = [get_volume(cube, y, m) for y, m in month_tuples]
+    total_history = total_raw[:forecast_start_index]
+    total_forecast = forecast_fill(total_history, total_raw[forecast_start_index:])
+
+    raw_cells = {}
+    for product in products:
+        for payer in payers:
+            raw = [get_volume(cube, y, m, product, payer) for y, m in month_tuples]
+            history = raw[:forecast_start_index]
+            if n_forecast == 0:
+                raw_cells[(product, payer)] = history
+                continue
+
+            fcast_real = raw[forecast_start_index:]
+            shares = [
+                history[i] / total_history[i] for i in range(len(history)) if total_history[i] > 0
+            ]
+            avg_share = sum(shares) / len(shares) if shares else 0.0
+            allocated = [avg_share * total_forecast[i] for i in range(n_forecast)]
+            forecast = [v if v > 0 else allocated[i] for i, v in enumerate(fcast_real)]
+            raw_cells[(product, payer)] = history + forecast
+
+    # Rescale each forecast month's (unrounded) cells to sum exactly to that
+    # month's top-down total, then round every cell for that month TOGETHER
+    # via largest-remainder rounding, so they sum to exactly round(total) —
+    # not just close to it (see _round_preserving_sum).
+    cell_keys = list(raw_cells.keys())
+    cells = {key: [round(v) for v in raw_cells[key][:forecast_start_index]] for key in cell_keys}
+    for i in range(n_forecast):
+        idx = forecast_start_index + i
+        month_sum = sum(raw_cells[key][idx] for key in cell_keys)
+        month_values = [raw_cells[key][idx] for key in cell_keys]
+        if month_sum > 0:
+            scale = total_forecast[i] / month_sum
+            month_values = [v * scale for v in month_values]
+        rounded = _round_preserving_sum(month_values, round(total_forecast[i]))
+        for key, v in zip(cell_keys, rounded):
+            cells[key].append(v)
+
     by_product = {
         product: [sum(cells[(product, payer)][i] for payer in payers) for i in range(n)]
         for product in products
@@ -232,7 +340,17 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
         payer: [sum(cells[(product, payer)][i] for product in products) for i in range(n)]
         for payer in payers
     }
-    total = [sum(by_product[product][i] for product in products) for i in range(n)]
+
+    # History: derive from summing rounded cells (bottom-up, exact — it's real
+    # data, so there's no ETS-methodology mismatch to worry about here, only
+    # rounding, and this is what keeps history consistent with the other tabs).
+    # Forecast: the independently top-down-computed number (matches Model Input
+    # / Market Events); cells were already rescaled above to sum to it almost
+    # exactly (± a possible 1-unit rounding artifact, same as any independently
+    # rounded percentage/total — negligible next to the values involved).
+    total_history_from_cells = [sum(by_product[product][i] for product in products) for i in range(forecast_start_index)]
+    total = total_history_from_cells + [round(v) for v in total_forecast]
+
     return {"cells": cells, "by_product": by_product, "by_payer": by_payer, "total": total}
 
 
@@ -240,7 +358,7 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
                              forecast_start_index: int, year_labels: list, yearly_fsi: int,
                              entities: list = None, agg_key: str = None) -> dict:
     """
-    Build one flat tab: total_payer_volume when entities is empty/None (one row/series
+    Build one flat tab: total_market_volume when entities is empty/None (one row/series
     per scenario, the grand total), otherwise payer_distribution / product_distribution
     (a "Grand Total" row plus one row per entity, per scenario). agg_key selects
     "by_payer" or "by_product" from each scenario's aggregates.
@@ -307,13 +425,24 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
 
 def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: list, month_keys: list,
                           forecast_start_index: int, year_labels: list, yearly_fsi: int,
-                          parents: list, children: list, parent_agg_key: str, cell_key) -> dict:
+                          parents: list, children: list, parent_agg_key: str, cell_key,
+                          chart_parents: set) -> dict:
     """
     Build one 3-level hierarchical tab: Grand Total (per scenario) -> parent entity -> child
     entity (leaf). Percentages at every level are computed against that scenario's grand
     total, not the immediate parent's total — matching the target contract (this differs
     from the existing Liver Model Input screen's payer_product/product_payer tabs, which
     use % of parent).
+
+    The TABLE always covers every entity in `parents`/`children` (the full master
+    payer/product list, via `aggregates` built over that same full list) — it is
+    NOT limited to the user's selected filter. The CHART emits a line for every
+    child under a parent that's in the selected filter — e.g. tab4 (payer_product)
+    shows every product for each selected payer, tab5 (product_payer) shows every
+    payer for each selected product — matching Model Input's _fmt_hier, which
+    filters its chart by parent only (chart_parent_filter), never by child.
+    (chart_parents/chart_children), so it doesn't try to plot every master
+    combination.
 
     parent_agg_key: "by_product" or "by_payer" — which aggregate holds the parent rows.
     cell_key(parent, child): maps to the (product, payer) tuple used to key aggregates["cells"].
@@ -342,9 +471,11 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
         result[metric] = {}
         for view in ("monthly", "yearly"):
             is_monthly    = view == "monthly"
+            header_key    = "months" if is_monthly else "years"
             header_labels = month_keys if is_monthly else year_labels
             fsi           = forecast_start_index if is_monthly else yearly_fsi
 
+            chart_series = []
             rows = []
             for scenario in scenario_names:
                 total_vol, parent_vols, cell_vols = per_scenario[scenario]
@@ -360,11 +491,18 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
                     child_rows = []
                     for child in children:
                         cell_view = cell_vols[(parent, child)] if is_monthly else _yearly(cell_vols[(parent, child)])
-                        child_rows.append(build_hierarchy_row(child, _metric_vals(cell_view), target_metric))
+                        cell_metric_vals = _metric_vals(cell_view)
+                        child_rows.append(build_hierarchy_row(child, cell_metric_vals, target_metric))
+                        # One chart line per (parent, child) cell per scenario, for every
+                        # child under a SELECTED parent — e.g. all products for a selected
+                        # payer. The table above covers every master entity regardless.
+                        if parent in chart_parents:
+                            chart_series.append((f"{parent} - {child} ({scenario})", cell_metric_vals))
 
                     parent_view = parent_vols[parent] if is_monthly else _yearly(parent_vols[parent])
+                    parent_metric_vals = _metric_vals(parent_view)
                     parent_rows.append(
-                        build_hierarchy_row(parent, _metric_vals(parent_view), target_metric, children=child_rows)
+                        build_hierarchy_row(parent, parent_metric_vals, target_metric, children=child_rows)
                     )
 
                 rows.append(
@@ -375,11 +513,25 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
                 )
 
             result[metric][view] = {
-                "chart": {},
+                "chart": build_chart(header_key, header_labels, fsi, chart_series),
                 "table": build_hierarchy_table(["Metric"] + header_labels, rows),
             }
 
     return result
+
+
+def _slice_aggregates(aggregates: dict, offset: int) -> dict:
+    """
+    Trim every series in one scenario's aggregates down to the display window,
+    dropping the first `offset` months that were only fetched to give ETS
+    enough history to train on (see apply_output_filters).
+    """
+    return {
+        "cells":      {k: v[offset:] for k, v in aggregates["cells"].items()},
+        "by_product": {k: v[offset:] for k, v in aggregates["by_product"].items()},
+        "by_payer":   {k: v[offset:] for k, v in aggregates["by_payer"].items()},
+        "total":      aggregates["total"][offset:],
+    }
 
 
 def apply_output_filters(payload) -> dict:
@@ -419,32 +571,66 @@ def apply_output_filters(payload) -> dict:
             month_tuples, [0.0] * len(month_tuples), forecast_start_index
         )
 
+        # ETS must be trained on the FULL configured training window, not just
+        # whatever range the user happens to be viewing — otherwise a narrower
+        # display range would refit ETS on less history and disagree with Model
+        # Input / Market Events, which always train on the full config window
+        # regardless of display range. Fetch that wider window here purely for
+        # fitting, then slice back down to the display range after aggregating.
+        wide_min_start, _ = _get_date_range_from_configs(configs)
+        if wide_min_start and wide_min_start < start_date:
+            train_from_year, train_from_month = parse_year_month(wide_min_start)
+        else:
+            train_from_year, train_from_month = from_year, from_month
+
+        wide_month_iso    = generate_month_range(train_from_year, train_from_month, to_year, to_month)
+        wide_month_tuples = [(int(m[:4]), int(m[5:7])) for m in wide_month_iso]
+        display_offset          = len(wide_month_tuples) - len(month_tuples)
+        wide_forecast_start_index = forecast_start_index + display_offset
+
+        # Every tab is computed over the FULL master payer/product list, not the
+        # selected filter — matching Model Input, where Tab 1's TMV query passes
+        # no payer filter at all, and Tabs 2/3's flat chart+table (_fmt_flat) and
+        # Tabs 4/5's hierarchy TABLE (_fmt_hier) always include every entity
+        # regardless of any selection. The selected filter only narrows Tabs 4/5's
+        # CHART (_fmt_hier's chart_parent_filter/chart_child_filter) — never any
+        # table, and never Tabs 1-3 at all.
+        all_payers   = get_payers(cur)
+        all_products = get_products(cur)
+
         aggregates = {}
         for scenario in scenario_names:
-            cube = _scenario_cube(cur, ta, scenario, from_year, from_month, to_year, to_month, payers, products)
-            aggregates[scenario] = _build_scenario_aggregates(
-                cube, month_tuples, forecast_start_index, payers, products
+            cube = _scenario_cube(
+                cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, all_payers, all_products
             )
+            wide_aggregates = _build_scenario_aggregates(
+                cube, wide_month_tuples, wide_forecast_start_index, all_payers, all_products
+            )
+            aggregates[scenario] = _slice_aggregates(wide_aggregates, display_offset)
 
         common_args = (month_tuples, month_keys, forecast_start_index, year_labels, yearly_fsi)
+        selected_payers   = set(payers)
+        selected_products = set(products)
 
         output_tabs = {
-            "total_payer_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
+            "total_market_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
             "payer_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=payers, agg_key="by_payer"
+                aggregates, scenario_names, *common_args, entities=all_payers, agg_key="by_payer"
             ),
             "product_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=products, agg_key="by_product"
+                aggregates, scenario_names, *common_args, entities=all_products, agg_key="by_product"
             ),
             "product_payer": _build_hierarchy_tab(
                 aggregates, scenario_names, *common_args,
-                parents=products, children=payers, parent_agg_key="by_product",
+                parents=all_products, children=all_payers, parent_agg_key="by_product",
                 cell_key=lambda p, c: (p, c),
+                chart_parents=selected_products,
             ),
             "payer_product": _build_hierarchy_tab(
                 aggregates, scenario_names, *common_args,
-                parents=payers, children=products, parent_agg_key="by_payer",
+                parents=all_payers, children=all_products, parent_agg_key="by_payer",
                 cell_key=lambda p, c: (c, p),
+                chart_parents=selected_payers,
             ),
         }
 

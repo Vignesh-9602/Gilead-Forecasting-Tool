@@ -53,7 +53,7 @@ const TABS = [
 const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
-  payer_dist: "market_distribution",
+  payer_dist: "payer_distribution",
   payer_prod: "payer_product",
   prod_payer: "product_payer",
 };
@@ -393,6 +393,13 @@ export default function PBCModelInput() {
     setTableData(selected?.table || []);
   };
 
+  // The API nests each tab's data under "payer_volume" / "payer_share"
+  // (previously "market_volume" / "market_share"). The UI's internal
+  // `metric` state still uses the old "market_volume"/"market_share"
+  // values (for labels/units), so translate before indexing into
+  // anything that came from or is going back to the backend.
+  const toApiMetricKey = (m) => (m === "market_share" ? "payer_share" : "payer_volume");
+
   // ── HCV tab mapper ────────────────────────────────────────────────────────
   function normalizeLiverResponse(data, currentMetric) {
     if (!data) return { months: [], forecast_start_index: 0, tabs: {} };
@@ -417,7 +424,7 @@ export default function PBCModelInput() {
     // the chart is never left empty after a save-scenario response.
     const hasChart = (scenarioData) => {
       const tmv = scenarioData?.market_analysis?.total_market_volume;
-      const mv = tmv?.market_volume || tmv?.market_share || Object.values(tmv || {})[0];
+      const mv = tmv?.payer_volume || tmv?.payer_share || Object.values(tmv || {})[0];
       // Support both old shape (mv.chart) and new shape (mv.monthly.chart)
       return !!(mv?.monthly?.chart?.months?.length || mv?.chart?.months?.length);
     };
@@ -462,8 +469,8 @@ export default function PBCModelInput() {
       : (effectiveMa.total_market_volume || effectiveMa[Object.keys(effectiveMa)[0]]);
     const firstMetric =
       firstTab &&
-      (firstTab.market_volume ||
-        firstTab.market_share ||
+      (firstTab.payer_volume ||
+        firstTab.payer_share ||
         Object.values(firstTab)[0]);
 
     // Support both old shape (metric.chart) and new shape (metric.monthly.chart)
@@ -478,33 +485,34 @@ export default function PBCModelInput() {
       (firstMetric && getMonthlyChart(firstMetric)?.forecast_start_index) || 0;
 
     const selectMetricForTab = (tabKey, tabObj) => {
-      // Force "market_volume" if the context tab is total_market_volume
+      // Force "payer_volume" if the context tab is total_market_volume
       if (tabKey === "total_market_volume") {
-        return tabObj.market_volume || Object.values(tabObj)[0];
+        return tabObj.payer_volume || Object.values(tabObj)[0];
       }
 
-      if (currentMetric && tabObj[currentMetric]) {
-        return tabObj[currentMetric];
+      const apiMetricKey = currentMetric ? toApiMetricKey(currentMetric) : null;
+      if (apiMetricKey && tabObj[apiMetricKey]) {
+        return tabObj[apiMetricKey];
       }
       const isVolumeTab =
         tabKey === "payer_product" || tabKey === "product_payer";
       const isDefaultShareTab =
-        tabKey === "product_distribution" || tabKey === "market_distribution";
+        tabKey === "product_distribution" || tabKey === "payer_distribution";
 
       if (isVolumeTab)
         return (
-          tabObj.market_volume ||
-          tabObj.market_share ||
+          tabObj.payer_volume ||
+          tabObj.payer_share ||
           Object.values(tabObj)[0]
         );
       if (isDefaultShareTab)
         return (
-          tabObj.market_share ||
-          tabObj.market_volume ||
+          tabObj.payer_share ||
+          tabObj.payer_volume ||
           Object.values(tabObj)[0]
         );
       return (
-        tabObj.market_volume || tabObj.market_share || Object.values(tabObj)[0]
+        tabObj.payer_volume || tabObj.payer_share || Object.values(tabObj)[0]
       );
     };
 
@@ -553,7 +561,7 @@ export default function PBCModelInput() {
       // Chart source: prefer chartMa (scenario with full chart data)
       const chartTabObj = (chartMa || {})[tabKey] || {};
       const chartSelectedMetric = selectMetricForTab(tabKey, chartTabObj);
-      const isTabPercent = chartSelectedMetric === chartTabObj.market_share;
+      const isTabPercent = chartSelectedMetric === chartTabObj.payer_share;
 
       // Table source: prefer active scenario (ma), fall back to chartMa
       const tableTabObj = (ma || {})[tabKey] || chartTabObj;
@@ -594,12 +602,13 @@ export default function PBCModelInput() {
           const scenarioData = data.scenarios[scenarioName];
           const tmv = scenarioData?.market_analysis?.total_market_volume;
           const metricObj = tmv
-            ? (tmv.market_volume || tmv.market_share || Object.values(tmv)[0])
+            ? (tmv.payer_volume || tmv.payer_share || Object.values(tmv)[0])
             : null;
           if (!metricObj) return; // no data at all — skip this scenario
           // Support both old shape (metricObj.table) and new shape (metricObj.monthly.table)
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
-          const firstRow = rawRows[0];
+          // Find the row matching this scenario by label/hierarchy; fall back to first row.
+          const firstRow = rawRows.find(r => (r.label || r.hierarchy) === scenarioName) || rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
           const vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
@@ -622,11 +631,11 @@ export default function PBCModelInput() {
             const scenarioData = data.scenarios[scenarioName];
             const tmv = scenarioData?.market_analysis?.total_market_volume;
             const metricObj = tmv
-              ? (tmv.market_volume || tmv.market_share || Object.values(tmv)[0])
+              ? (tmv.payer_volume || tmv.payer_share || Object.values(tmv)[0])
               : null;
             if (!metricObj) return;
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
-            const firstYearlyRow = yearlyRows[0];
+            const firstYearlyRow = yearlyRows.find(r => (r.label || r.hierarchy) === scenarioName) || yearlyRows[0];
             if (!firstYearlyRow) return;
             const yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
@@ -792,8 +801,8 @@ export default function PBCModelInput() {
     if (isAllZeroSeries(series)) {
       const ck = [
         "product_distribution",
-        "product_wise_payer",
-        "payer_wise_product",
+        "payer_product",
+        "product_payer",
         "payer_distribution",
       ];
       let candidate = null;
@@ -947,7 +956,7 @@ export default function PBCModelInput() {
   const buildLiverRecalculatePayload = () => ({
     ta_name: therapyArea || "HCV",
     selected_filter: {
-      market: payerFilter || getFirstOption(payerOptions),
+      payer: payerFilter || getFirstOption(payerOptions),
       product: productFilter || getFirstOption(productOptions),
       start_date: resolveFromDate(),
       end_date: toDate || "",
@@ -955,6 +964,7 @@ export default function PBCModelInput() {
     scenario_name:currentlyAppliedScenario || scenarioSelector || "Base",
     model_type: modelSelection,
     factors: buildFullFactors(),
+    selected_tab: TAB_KEY_MAP[activeTab] || activeTab,
   });
 
   const getFirstOption = (opts) => {
@@ -987,7 +997,7 @@ export default function PBCModelInput() {
   // Build payload for the refresh-table API based on current (edited) table state.
   // Expected shape:
   // {
-  //   ta_name, selected_filter: { market, product, start_date, end_date },
+  //   ta_name, selected_filter: { payer, product, start_date, end_date },
   //   scenario_name, selected_tab, selected_metric, edited_hierarchy,
   //   factors, market_analysis
   // }
@@ -1024,10 +1034,10 @@ export default function PBCModelInput() {
     //   We rebuild the hierarchy by looking up the original raw table structure
     //   and patching each row's values from tableData's monthly_data.
     //
-    // For flat tabs (total_market_volume, product_distribution, market_distribution):
+    // For flat tabs (total_market_volume, product_distribution, payer_distribution):
     //   rows are flat — we emit them as-is from tableData.
     const months = chartData?.months || [];
-    const activeMetric = metric || "market_volume";
+    const activeMetric = toApiMetricKey(metric);
 
     // Helper: extract values array from a row's monthly_data in month order
     const rowToValues = (row) =>
@@ -1142,7 +1152,7 @@ export default function PBCModelInput() {
     return {
       ta_name: therapyArea || "HCV",
       selected_filter: {
-        market: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
         product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
         start_date: startDate,
         end_date: endDate,
@@ -1333,8 +1343,8 @@ export default function PBCModelInput() {
 
         const norm = {
           payers:
-            filtersData?.markets?.length
-              ? filtersData.markets
+            filtersData?.payers?.length
+              ? filtersData.payers
               : cfg?.payer && cfg.payer.length
                 ? cfg.payer
                 : fallbackPayers,
@@ -1357,7 +1367,7 @@ export default function PBCModelInput() {
         // whatever the filters endpoint resolved as its own default.
         if (!localPayer)
           localPayer =
-            sfInitial.market ||
+            sfInitial.payer ||
             (norm.payers?.length ? getFirstOption(norm.payers) : "");
         if (!localProduct)
           localProduct =
@@ -1441,9 +1451,10 @@ export default function PBCModelInput() {
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
           initializeCompareScenarios(data);
-          // The chart's month list doubles as the set of selectable dates
-          // for the FROM/TO DATE dropdowns — no separate endpoint needed.
-          if (normalized?.months?.length) setAvailableDates(normalized.months);
+          // Prefer the backend's full available_months (DB start → forecast end)
+          // over the chart's month list, which only covers the model range.
+          if (data?.available_months?.length) setAvailableDates(data.available_months);
+          else if (normalized?.months?.length) setAvailableDates(normalized.months);
           setEditable(false);
         } catch (err) {
           console.warn("Failed to apply HCV filters on load", err);
@@ -1569,8 +1580,8 @@ export default function PBCModelInput() {
         setAvailableDates(resData.available_months);
       }
       // Keep the Payer/Product dropdown lists in sync too.
-      if (Array.isArray(resData?.markets) && resData.markets.length) {
-        setPayerOptions(resData.markets);
+      if (Array.isArray(resData?.payers) && resData.payers.length) {
+        setPayerOptions(resData.payers);
       }
       if (Array.isArray(resData?.products) && resData.products.length) {
         setProductOptions(resData.products);
@@ -1582,7 +1593,7 @@ export default function PBCModelInput() {
 
       // Sync payer/product to whatever the backend resolved (in case it
       // snapped to a valid combination), falling back to what was picked.
-      setPayerFilter(sf.market || payerVal || "");
+      setPayerFilter(sf.payer || payerVal || "");
       setProductFilter(sf.product || productVal || "");
 
       // NOTE: chart/table and factors are intentionally NOT updated here.
@@ -1848,7 +1859,7 @@ export default function PBCModelInput() {
           ta_name: therapyArea || "HCV",
           scenario_name: scenarioNameFromDialog,
           selected_filter: {
-            market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            payer: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
             product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
             start_date: resolveFromDate(),
             end_date: toDate || "",
@@ -1996,7 +2007,7 @@ export default function PBCModelInput() {
       selected_filter: {
         start_date: backendSf.start_date || resolveFromDate(),
         end_date: backendSf.end_date || toDate || "",
-        payer: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
         product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
       },
       scenario_name: activeScenario,
@@ -2192,7 +2203,7 @@ export default function PBCModelInput() {
         selected_filter: {
           start_date: backendSf.start_date || resolveFromDate(),
           end_date: backendSf.end_date || toDate || "",
-          payer: backendSf.market || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+          payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
           product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
         },
         scenario_name: chosenScenario,
