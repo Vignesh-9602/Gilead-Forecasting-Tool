@@ -258,14 +258,46 @@ def _apply_events_to_data(
 ) -> list:
     """
     Apply each event row's curve to `data` (forecast months only).
-    Curves represent percentage-point share changes; these are converted to
-    volume deltas using the per-month total volume and applied proportionally.
+    For payer/product events peak_percent is an absolute target share: the
+    entity ramps from its last-history share to exactly peak_percent over
+    duration_months, then holds flat. The curve engine receives the delta
+    (target − baseline) so it produces the right magnitude.
+    For overall_event peak_percent remains a multiplicative growth delta.
     Modifies `data` in-place. Returns the updated `total_all` list.
     """
     month_iso = [f"{y:04d}-{m:02d}-01" for y, m in month_tuples]
 
     for event_row in event_rows:
-        event_input = _build_event_input(event_row, tab)
+        # For payer/product events peak_percent is an absolute target share,
+        # not a delta. Convert to delta = target - baseline before passing to
+        # the curve engine (which ramps from 0 → peak_pct over the window).
+        adjusted_row = dict(event_row)
+        if tab != "overall_event":
+            last_hist_idx = forecast_start_index - 1
+            baseline_share = 0.0
+            if last_hist_idx >= 0:
+                last_y, last_m = month_tuples[last_hist_idx]
+                last_total = total_all[last_hist_idx]
+                if last_total > 0:
+                    if tab == "payer_event":
+                        entity = (event_row.get("payers") or [None])[0]
+                        if entity:
+                            entity_vol = sum(
+                                data.get((last_y, last_m), {}).get(prod, {}).get(entity, 0.0)
+                                for prod in show_products
+                            )
+                            baseline_share = entity_vol / last_total * 100.0
+                    elif tab == "product_event":
+                        entity = (event_row.get("products") or [None])[0]
+                        if entity:
+                            entity_vol = sum(
+                                data.get((last_y, last_m), {}).get(entity, {}).values()
+                            )
+                            baseline_share = entity_vol / last_total * 100.0
+            target_share = float(event_row.get("peak_percent", 0.0))
+            adjusted_row["peak_percent"] = target_share - baseline_share
+
+        event_input = _build_event_input(adjusted_row, tab)
         if event_input is None:
             continue
 

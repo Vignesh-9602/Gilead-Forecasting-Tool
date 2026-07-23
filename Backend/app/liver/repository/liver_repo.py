@@ -477,7 +477,7 @@ def save_scenario(cur, scenario_name: str, ta: str, payer: str, product: str,
             from_date  = EXCLUDED.from_date,
             to_date    = EXCLUDED.to_date,
             chart_data = jsonb_set(
-                COALESCE(liver_scenarios.chart_data, '{}'),
+                COALESCE(liver_scenarios.chart_data, '{}') - 'market_events',
                 '{market_analysis}',
                 EXCLUDED.chart_data->'market_analysis'
             ),

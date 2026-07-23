@@ -1653,7 +1653,6 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
     ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     ma_monthly = _recompute_all_market_shares(ma_monthly)
     ma_yearly  = _recompute_all_market_shares(ma_yearly)
-    ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     return _merge_granularities(ma_monthly, ma_yearly)
 
 
