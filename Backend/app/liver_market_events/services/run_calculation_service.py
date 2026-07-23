@@ -119,20 +119,23 @@ def _apply_payer_delta(data: dict, y: int, m: int,
 
 
 def _apply_product_delta(data: dict, y: int, m: int,
-                         product: str, delta_vol: float) -> None:
+                         product: str, delta_vol: float, show_payers: list | None = None) -> None:
     """
-    Scale all (product, payer) cells for `product` so the product's total volume
-    changes by `delta_vol`. Proportional scaling preserves the payer mix.
+    Scale (product, payer) cells for `product` so the product's total volume
+    (summed over `show_payers`, or every payer under it if not given) changes
+    by `delta_vol`. Proportional scaling preserves the payer mix within that set.
     """
     ym = data.get((y, m), {})
     prod_data = ym.get(product, {})
-    current = sum(prod_data.values())
+    payers = show_payers if show_payers is not None else list(prod_data.keys())
+    current = sum(prod_data.get(payer, 0.0) for payer in payers)
     target = max(0.0, current + delta_vol)
     if current <= 0:
         return
     scale = target / current
-    for payer in prod_data:
-        prod_data[payer] *= scale
+    for payer in payers:
+        if payer in prod_data:
+            prod_data[payer] *= scale
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +149,15 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
 
     The curve math in compute_event_forecast is independent of HCV/HIV context;
     we use EventScope.PRODUCT_EVENT as a valid non-overall scope so validation
-    passes, with a dummy `context` string that the curve engine never reads.
+    passes. EventInput's real field is `contexts` (plural, list) — passing the
+    old singular `context=` kwarg was silently dropped by pydantic, leaving
+    `contexts` at its default None, which made the model's own validator
+    reject EVERY payer_event/product_event row (caught below, returning None,
+    so run-calculation silently no-op'd for both tabs). `contexts` itself is
+    never read by compute_event_forecast; the actual context-scoping (which
+    products a payer_event row applies within, or which payers a product_event
+    row applies within) is handled by the caller directly from `event_row`,
+    not through this field.
     """
     try:
         start_dt = date_type.fromisoformat(str(event_row.get("start_date", ""))[:10])
@@ -235,7 +246,7 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
             factor=factor,
             coverage=coverage,
             impacted_entities=impacted_entities,
-            context="context" if scope != EventScope.OVERALL_EVENT else None,
+            contexts=["context"] if scope != EventScope.OVERALL_EVENT else None,
             selected_entity=selected,
         )
     except Exception:
@@ -257,24 +268,49 @@ def _apply_events_to_data(
     show_payers: list,
 ) -> list:
     """
-    Apply each event row's curve to `data` (forecast months only).
-    For payer/product events peak_percent is an absolute target share: the
-    entity ramps from its last-history share to exactly peak_percent over
-    duration_months, then holds flat. The curve engine receives the delta
-    (target − baseline) so it produces the right magnitude.
-    For overall_event peak_percent remains a multiplicative growth delta.
+    Apply each event row's curve to `data` (forecast months only), the same
+    way the HIV team's engine is driven: baseline_pct is passed straight into
+    compute_event_forecast() so the selected entity's curve is an ABSOLUTE
+    share target (baseline -> peak_percent, held flat after), and the
+    selected entity is PINNED to that target each month (mode="set") rather
+    than having a fixed delta added onto whatever happens to already be in
+    `data` for that month. Impacted/sibling entities still move by the
+    curve's redistribution delta (mode="add"), same as HIV.
+
+    Pinning (recomputing target_vol - current_vol fresh every month) instead
+    of adding a delta computed once against the last-history baseline means
+    the result lands exactly on peak_percent regardless of any drift between
+    the pre-filled forecast and the true history baseline.
+
+    For overall_event, peak_percent remains a multiplicative growth delta
+    (baseline_pct stays 0.0), unchanged from before.
+
     Modifies `data` in-place. Returns the updated `total_all` list.
     """
     month_iso = [f"{y:04d}-{m:02d}-01" for y, m in month_tuples]
 
     for event_row in event_rows:
-        # For payer/product events peak_percent is an absolute target share,
-        # not a delta. Convert to delta = target - baseline before passing to
-        # the curve engine (which ramps from 0 → peak_pct over the window).
-        adjusted_row = dict(event_row)
+        # Context scoping: a payer_event row's "products" field (and a
+        # product_event row's "payers" field) is a genuine sub-selection —
+        # which product(s)/payer(s) this event's share change applies within —
+        # sent by the frontend on every row (sanitizeRunCalculationRow always
+        # populates both `products` and `payers`). Default to the full universe
+        # when the row didn't narrow it down, so behavior is unchanged for
+        # rows that don't use this.
+        ctx_products = show_products
+        ctx_payers = show_payers
+        if tab == "payer_event":
+            row_products = event_row.get("products") or []
+            if row_products:
+                ctx_products = [p for p in show_products if p in row_products] or show_products
+        elif tab == "product_event":
+            row_payers = event_row.get("payers") or []
+            if row_payers:
+                ctx_payers = [p for p in show_payers if p in row_payers] or show_payers
+
+        baseline_share = 0.0
         if tab != "overall_event":
             last_hist_idx = forecast_start_index - 1
-            baseline_share = 0.0
             if last_hist_idx >= 0:
                 last_y, last_m = month_tuples[last_hist_idx]
                 last_total = total_all[last_hist_idx]
@@ -284,35 +320,37 @@ def _apply_events_to_data(
                         if entity:
                             entity_vol = sum(
                                 data.get((last_y, last_m), {}).get(prod, {}).get(entity, 0.0)
-                                for prod in show_products
+                                for prod in ctx_products
                             )
                             baseline_share = entity_vol / last_total * 100.0
                     elif tab == "product_event":
                         entity = (event_row.get("products") or [None])[0]
                         if entity:
                             entity_vol = sum(
-                                data.get((last_y, last_m), {}).get(entity, {}).values()
+                                data.get((last_y, last_m), {}).get(entity, {}).get(py, 0.0)
+                                for py in ctx_payers
                             )
                             baseline_share = entity_vol / last_total * 100.0
-            target_share = float(event_row.get("peak_percent", 0.0))
-            adjusted_row["peak_percent"] = target_share - baseline_share
 
-        event_input = _build_event_input(adjusted_row, tab)
+        event_input = _build_event_input(event_row, tab)
         if event_input is None:
             continue
 
-        result = compute_event_forecast(event_input)
+        result = compute_event_forecast(event_input, baseline_pct=baseline_share)
 
-        selected_deltas = dict(zip(result.months, result.selected_curve))
+        # Selected entity: ABSOLUTE target share per month (baseline -> peak_percent
+        # for payer/product events; a pure growth delta for overall_event, since
+        # baseline_share is 0.0 there).
+        selected_curve = dict(zip(result.months, result.selected_curve))
+        # Impacted/sibling entities: SHARE deltas to add (unchanged semantics).
         impacted_deltas = {
             entity: dict(zip(result.months, deltas))
             for entity, deltas in (result.impacted_curves or {}).items()
         }
 
-        # After the event window ends, sustain the last delta permanently
-        # so values stay flat at the post-event level instead of reverting.
+        event_start_month = result.months[0] if result.months else None
         event_end_month = result.months[-1] if result.months else None
-        sustained_selected = result.selected_curve[-1] if result.selected_curve else 0.0
+        sustained_selected = result.selected_curve[-1] if result.selected_curve else baseline_share
         sustained_impacted = {
             entity: (deltas[-1] if deltas else 0.0)
             for entity, deltas in (result.impacted_curves or {}).items()
@@ -327,21 +365,13 @@ def _apply_events_to_data(
             if total_vol <= 0:
                 continue
 
-            # Resolve effective deltas: within window → curve value;
-            # after window → sustained last value; before window → 0.
+            before_window = event_start_month is not None and month_str < event_start_month
             after_window = event_end_month is not None and month_str > event_end_month
-            if after_window:
-                eff_selected = sustained_selected
-                eff_impacted = sustained_impacted
-            else:
-                eff_selected = selected_deltas.get(month_str, 0.0)
-                eff_impacted = {
-                    entity: imp_map.get(month_str, 0.0)
-                    for entity, imp_map in impacted_deltas.items()
-                }
 
             if tab == "overall_event":
-                delta_share = eff_selected
+                if before_window:
+                    continue
+                delta_share = sustained_selected if after_window else selected_curve.get(month_str, sustained_selected)
                 if delta_share == 0.0:
                     continue
                 scale = max(0.0, total_vol + delta_share / 100.0 * total_vol) / total_vol
@@ -350,30 +380,71 @@ def _apply_events_to_data(
                     for payer in ym[prod]:
                         ym[prod][payer] = max(0.0, ym[prod][payer] * scale)
                 event_touched_forecast = True
+                continue
 
-            elif tab == "payer_event":
+            # payer_event / product_event: pin the selected entity to the curve's
+            # absolute target share this month; before the event's own window,
+            # leave it untouched (None sentinel = no-op).
+            if before_window:
+                target_share = None
+                eff_impacted = {}
+            elif after_window:
+                target_share = sustained_selected
+                eff_impacted = sustained_impacted
+            else:
+                target_share = selected_curve.get(month_str, sustained_selected)
+                eff_impacted = {
+                    entity: imp_map.get(month_str, 0.0)
+                    for entity, imp_map in impacted_deltas.items()
+                }
+
+            if tab == "payer_event":
                 sel_payer = event_input.selected_entity
-                delta_share = eff_selected
-                if delta_share != 0.0:
-                    _apply_payer_delta(data, y, m, sel_payer, show_products,
-                                       delta_share / 100.0 * total_vol)
+                if target_share is not None:
+                    current_vol = sum(
+                        data.get((y, m), {}).get(prod, {}).get(sel_payer, 0.0)
+                        for prod in ctx_products
+                    )
+                    target_vol = max(0.0, target_share / 100.0 * total_vol)
+                    delta_vol = target_vol - current_vol
+                    if abs(delta_vol) > 1e-9:
+                        _apply_payer_delta(data, y, m, sel_payer, ctx_products, delta_vol)
                     event_touched_forecast = True
                 for imp, d in eff_impacted.items():
                     if d != 0.0:
+                        # Unlike the selected entity (pinned to an exact target
+                        # WITHIN the row's product context), impacted/sibling
+                        # payers absorb their compensating share loss across
+                        # their FULL product mix (show_products), not just
+                        # ctx_products. The delta volume is a percentage of the
+                        # GRAND total (matching HIV's share-add semantics), so
+                        # restricting it to a narrow context slice would often
+                        # exceed that slice's own volume and clamp at zero,
+                        # under-delivering the redistribution and leaving the
+                        # selected entity's target diluted by the renormalization
+                        # pass below.
                         _apply_payer_delta(data, y, m, imp, show_products,
                                            d / 100.0 * total_vol)
                         event_touched_forecast = True
 
             elif tab == "product_event":
                 sel_prod = event_input.selected_entity
-                delta_share = eff_selected
-                if delta_share != 0.0:
-                    _apply_product_delta(data, y, m, sel_prod,
-                                         delta_share / 100.0 * total_vol)
+                if target_share is not None:
+                    current_vol = sum(
+                        data.get((y, m), {}).get(sel_prod, {}).get(py, 0.0) for py in ctx_payers
+                    )
+                    target_vol = max(0.0, target_share / 100.0 * total_vol)
+                    delta_vol = target_vol - current_vol
+                    if abs(delta_vol) > 1e-9:
+                        _apply_product_delta(data, y, m, sel_prod, delta_vol, show_payers=ctx_payers)
                     event_touched_forecast = True
                 for imp, d in eff_impacted.items():
                     if d != 0.0:
-                        _apply_product_delta(data, y, m, imp, d / 100.0 * total_vol)
+                        # See the payer_event branch above: impacted products
+                        # absorb their share loss across their FULL payer mix,
+                        # not just ctx_payers, so a grand-total-scale delta
+                        # doesn't clamp against a too-narrow volume slice.
+                        _apply_product_delta(data, y, m, imp, d / 100.0 * total_vol, show_payers=show_payers)
                         event_touched_forecast = True
 
         if not event_touched_forecast:
@@ -409,6 +480,51 @@ def _apply_events_to_data(
                             ym[prod][payer] = max(0.0, ym[prod][payer] * scale)
 
     return total_all
+
+
+# ---------------------------------------------------------------------------
+# Touched-entity chart scoping
+# ---------------------------------------------------------------------------
+
+def _compute_touched_entities(event_rows: list, tab: str):
+    """
+    Mirror HIV's _touched_entities_for_tab (Market_Events_Run_Calculation.py):
+    after running an event, the active tab's HIERARCHY chart (product_payer_level
+    / payer_product_level -- the only views run-calculation actually scopes; the
+    flat payer_level/product_level rollups are never calculation targets, see
+    _build_product_event_metrics) should show only the (product, payer) combos
+    the event actually touched -- the selected entity plus any impacted/
+    redistribution entities, crossed with the row's own context selection --
+    NOT the raw selected_filter products/payers.
+
+    Returns touched_pairs:
+      payer_event:   keyed (product, payer).
+      product_event: keyed (payer, product).
+      overall_event / unrecognized tab: None -- no hierarchy chart to restrict.
+    """
+    if tab == "payer_event":
+        pairs = set()
+        for row in event_rows:
+            payers_list = row.get("payers") or []
+            if not payers_list:
+                continue
+            touched_payers = {payers_list[0]} | set(row.get("impacted_payers") or [])
+            for product in (row.get("products") or []):
+                for payer in touched_payers:
+                    pairs.add((product, payer))
+        return pairs
+    if tab == "product_event":
+        pairs = set()
+        for row in event_rows:
+            products_list = row.get("products") or []
+            if not products_list:
+                continue
+            touched_prod = {products_list[0]} | set(row.get("impacted_products") or [])
+            for payer in (row.get("payers") or []):
+                for product in touched_prod:
+                    pairs.add((payer, product))
+        return pairs
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -514,15 +630,26 @@ def run_market_events_calculation(payload) -> dict:
         # post-event state (e.g. overall_event volume increase is visible
         # in payer and product tabs without re-running).
         def _metrics(t: str) -> dict:
+            # Only the tab actually being edited this run gets its hierarchy
+            # chart scoped to what the event rows touched; the other two tabs
+            # keep the plain selected_filter-based scoping (no rows exist for
+            # them this run anyway).
+            touched_pairs = (
+                _compute_touched_entities(event_rows, t) if (t == tab and event_rows) else None
+            )
             if t == "payer_event":
                 return _build_payer_event_metrics(
                     mod_data, month_tuples, chart_headers, forecast_start_index,
                     mod_total, show_products, show_payers,
+                    filter_products=sf.products, filter_payers=sf.payers,
+                    touched_pairs=touched_pairs,
                 )
             if t == "product_event":
                 return _build_product_event_metrics(
                     mod_data, month_tuples, chart_headers, forecast_start_index,
                     mod_total, show_products, show_payers,
+                    filter_products=sf.products, filter_payers=sf.payers,
+                    touched_pairs=touched_pairs,
                 )
             return _build_overall_event_metrics(
                 month_tuples, chart_headers, forecast_start_index, mod_total,

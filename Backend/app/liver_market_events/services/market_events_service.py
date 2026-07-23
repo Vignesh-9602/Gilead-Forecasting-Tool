@@ -448,7 +448,8 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
 
 def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
                                 total_all, show_products, show_payers, forecast_fn=None,
-                                filter_products=None, filter_payers=None) -> dict:
+                                filter_products=None, filter_payers=None,
+                                touched_pairs=None) -> dict:
     """
     Payer event — two view levels per metric/period:
       payer_level         : Overall + flat payer rows, read-only
@@ -457,15 +458,30 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
     Shows how payers are distributed; hierarchy drills into each product's payer breakdown.
 
     Tables always include every product/payer (full context for editing). The
-    product_payer_level CHART, however, is scoped to the user's selected_filter:
-    one series per (product, payer) leaf combo, restricted to the selected
-    products crossed with the selected payers.
+    product_payer_level CHART, however, is scoped down to one series per
+    (product, payer) leaf combo:
+      - if `touched_pairs` is given (run-calculation, active tab), restricted
+        to exactly the pairs actually touched by the event rows (selected +
+        impacted payers, crossed with the row's product context) — mirrors
+        HIV's _touched_entities_chart, so the chart reflects what the event
+        actually moved rather than the raw filter selection.
+      - otherwise, restricted to the selected_filter's products × payers
+        (plain apply-filters behavior).
     """
     n_hist = forecast_start_index
     _prod_filter_set = {str(p).strip().lower() for p in (filter_products or []) if p}
     _payer_filter_set = {str(p).strip().lower() for p in (filter_payers or []) if p}
     chart_products = [p for p in show_products if not _prod_filter_set or p.strip().lower() in _prod_filter_set]
     chart_payers   = [p for p in show_payers   if not _payer_filter_set or p.strip().lower() in _payer_filter_set]
+    if touched_pairs is not None:
+        _valid_products = set(show_products)
+        _valid_payers = set(show_payers)
+        chart_pairs = sorted(
+            (p, py) for (p, py) in touched_pairs
+            if p in _valid_products and py in _valid_payers
+        )
+    else:
+        chart_pairs = [(p, py) for p in chart_products for py in chart_payers]
 
     # ── Per-payer monthly volumes and shares ──────────────────────────────────
     payer_vol_m   = {}   # payer → (hist, fcast, all_vals)
@@ -569,22 +585,21 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         # (product, payer) leaf combo, scoped to selected products × selected payers
         # (table stays full below).
         ppl_series = []
-        for product in chart_products:
-            for payer in chart_payers:
-                if is_yearly:
-                    ys_h, ys_f = pp[(product, payer)]
-                    ppl_series.append({
-                        "label": f"{product} - {payer}",
-                        "history": [round(v, 2) for v in ys_h],
-                        "forecast": [round(v, 2) for v in ys_f],
-                    })
-                else:
-                    sh_all = pp[(product, payer)]
-                    ppl_series.append({
-                        "label": f"{product} - {payer}",
-                        "history": [round(v, 2) for v in sh_all[:fsi]],
-                        "forecast": [round(v, 2) for v in sh_all[fsi:]],
-                    })
+        for product, payer in chart_pairs:
+            if is_yearly:
+                ys_h, ys_f = pp[(product, payer)]
+                ppl_series.append({
+                    "label": f"{product} - {payer}",
+                    "history": [round(v, 2) for v in ys_h],
+                    "forecast": [round(v, 2) for v in ys_f],
+                })
+            else:
+                sh_all = pp[(product, payer)]
+                ppl_series.append({
+                    "label": f"{product} - {payer}",
+                    "history": [round(v, 2) for v in sh_all[:fsi]],
+                    "forecast": [round(v, 2) for v in sh_all[fsi:]],
+                })
         ppl_rows = [{"label": "Overall", "values": [100.0] * n_pts}]
         for product in show_products:
             children = []
@@ -634,17 +649,16 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         ]
 
         ppl_series = []
-        for product in chart_products:
-            for payer in chart_payers:
-                if is_yearly:
-                    pyv_h, pyv_f = pp[(product, payer)]
-                else:
-                    pyv_h, pyv_f, _ = pp[(product, payer)]
-                ppl_series.append({
-                    "label": f"{product} - {payer}",
-                    "history": _vi(pyv_h),
-                    "forecast": _vi(pyv_f),
-                })
+        for product, payer in chart_pairs:
+            if is_yearly:
+                pyv_h, pyv_f = pp[(product, payer)]
+            else:
+                pyv_h, pyv_f, _ = pp[(product, payer)]
+            ppl_series.append({
+                "label": f"{product} - {payer}",
+                "history": _vi(pyv_h),
+                "forecast": _vi(pyv_f),
+            })
         ppl_rows = [{"label": "Overall", "values": overall_vals}]
         for product in show_products:
             children = []
@@ -684,7 +698,8 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
 def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
                                    total_all, show_products, show_payers, forecast_fn=None,
-                                   filter_products=None, filter_payers=None) -> dict:
+                                   filter_products=None, filter_payers=None,
+                                   touched_pairs=None) -> dict:
     """
     Product event — two view levels per metric/period:
       product_level       : Overall + flat product rows, read-only
@@ -692,16 +707,32 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     Shows how products are distributed; hierarchy drills into each payer's product breakdown.
 
-    Tables always include every product/payer. The product_level CHART (this tab's
-    own axis) is scoped to selected_filter products. The payer_product_level CHART
-    shows one series per (payer, product) leaf combo, restricted to the selected
-    payers crossed with the selected products.
+    Tables always include every product/payer. Chart scoping:
+      - product_level (flat, own-axis) is a plain rollup of the leaf grid and is
+        only ever scoped by selected_filter products — run-calculation never
+        narrows it further, since it isn't itself a calculation target (mirrors
+        payer_level in the payer_event tab, which stays unfiltered always).
+      - payer_product_level (hierarchy) is what run-calculation actually scopes:
+        plain apply-filters (touched_pairs None) restricts it to selected payers
+        × selected products; run-calculation on the active tab (touched_pairs
+        given) restricts it to what the event rows actually touched (selected +
+        impacted products, crossed with the row's payer context) — mirrors
+        HIV's _touched_entities_chart rather than the raw filter selection.
     """
     n_hist = forecast_start_index
     _prod_filter_set  = {str(p).strip().lower() for p in (filter_products or []) if p}
     _payer_filter_set = {str(p).strip().lower() for p in (filter_payers or []) if p}
     chart_products = [p for p in show_products if not _prod_filter_set or p.strip().lower() in _prod_filter_set]
     chart_payers   = [p for p in show_payers   if not _payer_filter_set or p.strip().lower() in _payer_filter_set]
+    if touched_pairs is not None:
+        _valid_payers = set(show_payers)
+        _valid_products = set(show_products)
+        chart_pairs = sorted(
+            (py, p) for (py, p) in touched_pairs
+            if py in _valid_payers and p in _valid_products
+        )
+    else:
+        chart_pairs = [(py, p) for py in chart_payers for p in chart_products]
 
     # ── Per-product monthly volumes and shares ────────────────────────────────
     prod_vol_m   = {}   # product → (hist, fcast, all_vals)
@@ -805,22 +836,21 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         # (payer, product) leaf combo, scoped to selected payers × selected products
         # (table stays full below).
         ppl_series = []
-        for payer in chart_payers:
-            for product in chart_products:
-                if is_yearly:
-                    ys_h, ys_f = pp[(payer, product)]
-                    ppl_series.append({
-                        "label": f"{payer} - {product}",
-                        "history": [round(v, 2) for v in ys_h],
-                        "forecast": [round(v, 2) for v in ys_f],
-                    })
-                else:
-                    sh_all = pp[(payer, product)]
-                    ppl_series.append({
-                        "label": f"{payer} - {product}",
-                        "history": [round(v, 2) for v in sh_all[:fsi]],
-                        "forecast": [round(v, 2) for v in sh_all[fsi:]],
-                    })
+        for payer, product in chart_pairs:
+            if is_yearly:
+                ys_h, ys_f = pp[(payer, product)]
+                ppl_series.append({
+                    "label": f"{payer} - {product}",
+                    "history": [round(v, 2) for v in ys_h],
+                    "forecast": [round(v, 2) for v in ys_f],
+                })
+            else:
+                sh_all = pp[(payer, product)]
+                ppl_series.append({
+                    "label": f"{payer} - {product}",
+                    "history": [round(v, 2) for v in sh_all[:fsi]],
+                    "forecast": [round(v, 2) for v in sh_all[fsi:]],
+                })
         ppl_rows = [{"label": "Overall", "values": [100.0] * n_pts}]
         for payer in show_payers:
             children = []
@@ -870,17 +900,16 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         ]
 
         ppl_series = []
-        for payer in chart_payers:
-            for product in chart_products:
-                if is_yearly:
-                    pyv_h, pyv_f = pp[(payer, product)]
-                else:
-                    pyv_h, pyv_f, _ = pp[(payer, product)]
-                ppl_series.append({
-                    "label": f"{payer} - {product}",
-                    "history": _vi(pyv_h),
-                    "forecast": _vi(pyv_f),
-                })
+        for payer, product in chart_pairs:
+            if is_yearly:
+                pyv_h, pyv_f = pp[(payer, product)]
+            else:
+                pyv_h, pyv_f, _ = pp[(payer, product)]
+            ppl_series.append({
+                "label": f"{payer} - {product}",
+                "history": _vi(pyv_h),
+                "forecast": _vi(pyv_f),
+            })
         ppl_rows = [{"label": "Overall", "values": overall_vals}]
         for payer in show_payers:
             children = []
