@@ -165,10 +165,10 @@ const ForecastChart = ({
 
   const isCrossScenarioCompare = !isTotalMarket && !!crossScenarioSeries;
 
-  // On the Total Market Volume tab, series are one-per-scenario. Mirror the
-  // table's filtering: before the user touches the Compare Scenarios
-  // checkboxes, show every scenario; afterwards, respect the selection
-  // (always keeping the currently applied scenario visible).
+  // Mirrors the table's own filtering exactly (see groupedTableHierarchy
+  // filter below) so the two are never inconsistent: before the user
+  // touches the Compare Scenarios checkboxes, show every scenario (they
+  // all start checked); once touched, respect the selection.
   const filteredSeries = isTotalMarket
     ? (userHasCustomizedCompare && selectedCompareScenarios.length
       ? series.filter(
@@ -1141,7 +1141,7 @@ export default function PBCModelInput() {
     metric: metric || "market_volume",
     from_date: resolveFromDate(),
     to_date: toDate || "",
-    scenario: scenarioSelector || "Base",
+    scenario: currentlyAppliedScenario || scenarioSelector || "Base",
   });
 
   // Build payload for the refresh-table API based on current (edited) table state.
@@ -1315,7 +1315,9 @@ export default function PBCModelInput() {
       scenario_name: sourceScenario,
       selected_tab: backendTabKey,
       selected_metric: activeMetric,
-      edited_hierarchy: hierarchyKey || "",
+      edited_hierarchy: Array.isArray(hierarchyKey)
+        ? hierarchyKey.join(", ")
+        : (hierarchyKey || ""),
       factors: activeFactors,
       market_analysis: mergedMarketAnalysis,
     };
@@ -2074,6 +2076,12 @@ export default function PBCModelInput() {
             ? prev
             : [...prev, scenarioNameFromDialog];
         });
+
+        // Match handleConfirmSave: a successful save always exits edit mode.
+        setEditedHierarchies({});
+        setIsRefreshed(false);
+        setTableEditing(false);
+        setEditable(false);
         return;
       }
       await saveScenario({
@@ -2202,13 +2210,16 @@ export default function PBCModelInput() {
     try {
       setSavingTable(true);
       setLoading(true);
-      let lastRawData = null;
-      for (const hierarchyKey of editedKeys) {
-        const payload = buildRefreshTablePayload(hierarchyKey);
-        console.log("[RefreshTable] calling refreshLiverTable with payload:", JSON.stringify(payload, null, 2));
-        const response = await refreshLiverTable(payload);
-        lastRawData = response?.data || {};
-      }
+      // Previously this looped once per edited row, firing N near-identical
+      // requests (each call already carries every current edit baked into
+      // tableData) and keeping only the last response. That both wasted
+      // calls and risked the backend treating each call as "only this one
+      // row changed," reverting earlier edits made in the same session.
+      // Send everything in a single call instead.
+      const payload = buildRefreshTablePayload(editedKeys);
+      console.log("[RefreshTable] calling refreshLiverTable with payload:", JSON.stringify(payload, null, 2));
+      const response = await refreshLiverTable(payload);
+      const lastRawData = response?.data || {};
       if (lastRawData) {
         // mapRefreshTableResponse handles both the new full-scenarios shape
         // and the legacy flat shape. For the full-scenarios shape it also
@@ -2595,7 +2606,6 @@ export default function PBCModelInput() {
           borderRadius: "16px",
           border: "1px solid #D8DEE8",
           boxShadow: "none",
-          overflow: "hidden",
         }}
       >
         {/* ── TOP FILTER BAR ── */}
@@ -3495,7 +3505,6 @@ export default function PBCModelInput() {
               borderRadius: "12px",
               border: "1px solid #D8DEE8",
               boxShadow: "none",
-              overflow: "hidden",
             }}
           >
             {/* Table controls row */}
@@ -3840,6 +3849,8 @@ export default function PBCModelInput() {
                           zIndex: 200,
                           p: 1,
                           minWidth: 200,
+                          maxHeight: 260,
+                          overflowY: "auto",
                         }}
                       >
                         {compareScenarioOptions.map((s) => (
@@ -3887,6 +3898,7 @@ export default function PBCModelInput() {
                 backgroundColor: "white",
                 maxHeight: 500,
                 overflow: "auto",
+                borderRadius: "0 0 12px 12px",
               }}
             >
               <Box
