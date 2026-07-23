@@ -1653,7 +1653,6 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
     ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     ma_monthly = _recompute_all_market_shares(ma_monthly)
     ma_yearly  = _recompute_all_market_shares(ma_yearly)
-    ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
     return _merge_granularities(ma_monthly, ma_yearly)
 
 
@@ -1800,13 +1799,12 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         all_scenario_names = get_scenarios(cur)
         available_scenarios = ["Base"] + all_scenario_names
 
-        saved_market_analysis = None
-        saved_factors_raw     = None
+        saved_factors_raw = None
 
-        # Load factors (and saved market_analysis) for the active scenario
+        # Load factors for the active scenario from DB (non-Base only).
         if active_scenario != "Base":
             cur.execute(
-                "SELECT factors, chart_data FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
+                "SELECT factors FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
                 (active_scenario,),
             )
             row = cur.fetchone()
@@ -1816,55 +1814,26 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     factors = LiverFactors(**saved_factors_raw)
                 except Exception:
                     factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
-                saved_cd = row[1] if row[1] else {}
-                if isinstance(saved_cd, dict) and "market_analysis" in saved_cd:
-                    saved_market_analysis = saved_cd["market_analysis"]
             else:
                 factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
         else:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
-        if saved_market_analysis:
-            # Normalise legacy keys (scenarios saved before the payer-rename use
-            # market_volume/market_share; convert them to payer_volume/payer_share).
-            saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
-            # Use the exact data that was saved (includes any edited table values)
-            # Recalculate market_share from market_volume to ensure consistency on load
-            market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
-            # Still need tab1_ets for the factor sliders
-            if granularity == "yearly":
-                _tmv_train = get_total_market_volume_yearly(cur, payload.ta, from_year, train_end_year, None)
-            else:
-                _tmv_train = get_total_market_volume(cur, payload.ta, from_year, from_month, train_end_year, train_end_month, None)
-            try:
-                _ts_y, _ts_m = _parse_ym(cfg.get("train_start_date", ""))
-                _ts_ym = _ts_y * 100 + _ts_m
-            except (ValueError, IndexError):
-                _ts_y, _ts_m, _ts_ym = 0, 0, 0
-            if _ts_ym and granularity == "yearly":
-                _tmv_values = [float(r[-1]) for r in _tmv_train
-                               if r[-1] is not None and r[0] >= _ts_y]
-            elif _ts_ym:
-                _tmv_values = [float(r[-1]) for r in _tmv_train
-                               if r[-1] is not None and r[0] * 100 + r[1] >= _ts_ym]
-            else:
-                _tmv_values = [float(r[-1]) for r in _tmv_train if r[-1] is not None]
-            if len(_tmv_values) >= 4:
-                _t1a, _t1b, _t1g = estimate_parameters(_tmv_values)
-            else:
-                _t1a, _t1b, _t1g = 0.30, 0.20, 0.98
-            tab1_ets = EtsParams(alpha=round(_t1a, 4), beta=round(_t1b, 4), gamma=round(_t1g, 4))
-        else:
-            market_analysis, tab1_ets = _build_market_analysis_both_granularities(
-                cur, payload.ta, from_year, from_month,
-                train_end_year, train_end_month, forecast_periods, factors,
-                sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
-                scenario_name=payload.scenario,
-            )
-            market_analysis = _recompute_all_market_shares_nested(market_analysis)
+        # Always freshly compute market_analysis using the resolved factors.
+        # For non-Base scenarios, factors are loaded from DB (scenario's saved
+        # parameters); for Base, they are estimated from the data.
+        # This ensures payer/product filter changes are always reflected in the
+        # chart — previously non-Base returned saved data unchanged.
+        market_analysis, tab1_ets = _build_market_analysis_both_granularities(
+            cur, payload.ta, from_year, from_month,
+            train_end_year, train_end_month, forecast_periods, factors,
+            sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+            scenario_name=payload.scenario,
+        )
+        market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
-        if active_scenario != "Base" and saved_market_analysis and saved_factors_raw:
+        if active_scenario != "Base" and saved_factors_raw:
             # Use the factors exactly as saved — preserves active_model, slider values, etc.
             response_factors = dict(saved_factors_raw)
         else:
