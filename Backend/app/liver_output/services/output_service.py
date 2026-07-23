@@ -425,13 +425,24 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
 
 def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: list, month_keys: list,
                           forecast_start_index: int, year_labels: list, yearly_fsi: int,
-                          parents: list, children: list, parent_agg_key: str, cell_key) -> dict:
+                          parents: list, children: list, parent_agg_key: str, cell_key,
+                          chart_parents: set) -> dict:
     """
     Build one 3-level hierarchical tab: Grand Total (per scenario) -> parent entity -> child
     entity (leaf). Percentages at every level are computed against that scenario's grand
     total, not the immediate parent's total — matching the target contract (this differs
     from the existing Liver Model Input screen's payer_product/product_payer tabs, which
     use % of parent).
+
+    The TABLE always covers every entity in `parents`/`children` (the full master
+    payer/product list, via `aggregates` built over that same full list) — it is
+    NOT limited to the user's selected filter. The CHART emits a line for every
+    child under a parent that's in the selected filter — e.g. tab4 (payer_product)
+    shows every product for each selected payer, tab5 (product_payer) shows every
+    payer for each selected product — matching Model Input's _fmt_hier, which
+    filters its chart by parent only (chart_parent_filter), never by child.
+    (chart_parents/chart_children), so it doesn't try to plot every master
+    combination.
 
     parent_agg_key: "by_product" or "by_payer" — which aggregate holds the parent rows.
     cell_key(parent, child): maps to the (product, payer) tuple used to key aggregates["cells"].
@@ -480,19 +491,19 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
                     child_rows = []
                     for child in children:
                         cell_view = cell_vols[(parent, child)] if is_monthly else _yearly(cell_vols[(parent, child)])
-                        child_rows.append(build_hierarchy_row(child, _metric_vals(cell_view), target_metric))
+                        cell_metric_vals = _metric_vals(cell_view)
+                        child_rows.append(build_hierarchy_row(child, cell_metric_vals, target_metric))
+                        # One chart line per (parent, child) cell per scenario, for every
+                        # child under a SELECTED parent — e.g. all products for a selected
+                        # payer. The table above covers every master entity regardless.
+                        if parent in chart_parents:
+                            chart_series.append((f"{parent} - {child} ({scenario})", cell_metric_vals))
 
                     parent_view = parent_vols[parent] if is_monthly else _yearly(parent_vols[parent])
                     parent_metric_vals = _metric_vals(parent_view)
                     parent_rows.append(
                         build_hierarchy_row(parent, parent_metric_vals, target_metric, children=child_rows)
                     )
-                    # One chart line per parent per scenario — the same grain as the
-                    # sibling flat tab's chart (payer_product ~ payer_distribution,
-                    # product_payer ~ product_distribution). The table above already
-                    # carries the child-level drill-down; plotting all parent x child x
-                    # scenario combinations here would be unreadable.
-                    chart_series.append((f"{parent} ({scenario})", parent_metric_vals))
 
                 rows.append(
                     build_hierarchy_row(
@@ -577,35 +588,49 @@ def apply_output_filters(payload) -> dict:
         display_offset          = len(wide_month_tuples) - len(month_tuples)
         wide_forecast_start_index = forecast_start_index + display_offset
 
+        # Every tab is computed over the FULL master payer/product list, not the
+        # selected filter — matching Model Input, where Tab 1's TMV query passes
+        # no payer filter at all, and Tabs 2/3's flat chart+table (_fmt_flat) and
+        # Tabs 4/5's hierarchy TABLE (_fmt_hier) always include every entity
+        # regardless of any selection. The selected filter only narrows Tabs 4/5's
+        # CHART (_fmt_hier's chart_parent_filter/chart_child_filter) — never any
+        # table, and never Tabs 1-3 at all.
+        all_payers   = get_payers(cur)
+        all_products = get_products(cur)
+
         aggregates = {}
         for scenario in scenario_names:
             cube = _scenario_cube(
-                cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, payers, products
+                cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, all_payers, all_products
             )
             wide_aggregates = _build_scenario_aggregates(
-                cube, wide_month_tuples, wide_forecast_start_index, payers, products
+                cube, wide_month_tuples, wide_forecast_start_index, all_payers, all_products
             )
             aggregates[scenario] = _slice_aggregates(wide_aggregates, display_offset)
 
         common_args = (month_tuples, month_keys, forecast_start_index, year_labels, yearly_fsi)
+        selected_payers   = set(payers)
+        selected_products = set(products)
 
         output_tabs = {
             "total_market_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
             "payer_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=payers, agg_key="by_payer"
+                aggregates, scenario_names, *common_args, entities=all_payers, agg_key="by_payer"
             ),
             "product_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=products, agg_key="by_product"
+                aggregates, scenario_names, *common_args, entities=all_products, agg_key="by_product"
             ),
             "product_payer": _build_hierarchy_tab(
                 aggregates, scenario_names, *common_args,
-                parents=products, children=payers, parent_agg_key="by_product",
+                parents=all_products, children=all_payers, parent_agg_key="by_product",
                 cell_key=lambda p, c: (p, c),
+                chart_parents=selected_products,
             ),
             "payer_product": _build_hierarchy_tab(
                 aggregates, scenario_names, *common_args,
-                parents=payers, children=products, parent_agg_key="by_payer",
+                parents=all_payers, children=all_products, parent_agg_key="by_payer",
                 cell_key=lambda p, c: (c, p),
+                chart_parents=selected_payers,
             ),
         }
 
