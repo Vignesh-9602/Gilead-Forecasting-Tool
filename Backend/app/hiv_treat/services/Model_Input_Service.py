@@ -1,4 +1,4 @@
-import pandas as pd
+​import pandas as pd
 from collections import OrderedDict
 from app.db.connection import get_connection
 
@@ -649,7 +649,6 @@ def build_factors(cur, ta, scenario):
             "Forecast",
         ),
     }
- 
 
 
 # =========================================================
