@@ -8,7 +8,7 @@ import pandas as pd
 # =========================================================
 # ================= CHART -> DB ROW CONVERSION =================
 # =========================================================
- 
+
 def _chart_row_to_forecast_data(months_bkt, forecast_start_index, values, factors=None):
     """
     Converts one response row's monthly chart data back into the DB's
@@ -18,7 +18,7 @@ def _chart_row_to_forecast_data(months_bkt, forecast_start_index, values, factor
     iso_months = [pd.to_datetime(m, format="%b-%y").strftime("%Y-%m-%d") for m in months_bkt]
     train_values = values[:forecast_start_index]
     forecast_values = values[forecast_start_index:]
- 
+
     data = {
         "months": iso_months,
         "train_values": train_values,
@@ -28,8 +28,8 @@ def _chart_row_to_forecast_data(months_bkt, forecast_start_index, values, factor
     if factors is not None:
         data["factors"] = factors
     return data
- 
- 
+
+
 def _upsert_row(
     cur,
     ta,
@@ -80,8 +80,8 @@ def _upsert_row(
         json.dumps(factors_col) if factors_col else None,
         json.dumps(forecast_data)
     ))
- 
- 
+
+
 def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
     """
     Persists the frontend's market_analysis payload:
@@ -140,18 +140,17 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 prod = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
                 _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
- 
- 
+
+
 # =========================================================
 # ================= RESPONSE BUILDER ==========================
 # =========================================================
- 
+
 def _build_total_only_block(cur, ta, scenario, start, end):
     """
-    Minimal block for every scenario that ISN'T the one just saved --
-    only total_market_volume, no factors, no other tabs. Matches the
-    target shape where Base/other scenarios only ever show
-    market_analysis.total_market_volume.
+    Minimal block -- only total_market_volume, no factors, no other tabs.
+    Used by build_save_scenario_response for every scenario that ISN'T the
+    one just saved.
     """
     total_data = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
     if not total_data:
@@ -160,21 +159,21 @@ def _build_total_only_block(cur, ta, scenario, start, end):
                 "total_market_volume": {"market_volume": {}, "market_share": {}}
             }
         }
- 
+
     total = build_series(total_data, start, end)
     return {
         "market_analysis": {
             "total_market_volume": build_total_market_volume(
-                total["values"], total["months"], total["split_idx"],scenario
+                total["values"], total["months"], total["split_idx"], scenario
             )
         }
     }
- 
- 
+
+
 def _build_full_block(cur, ta, scenario, start, end, selected_market, selected_product, factors):
     """
-    Full detail for the scenario that was just saved: all 5 tabs
-    (monthly+yearly, chart+table) plus the factors block the frontend sent.
+    Full detail for a scenario: all 5 tabs (monthly+yearly, chart+table)
+    plus the factors block.
     """
     market_analysis = build_scenario_market_analysis(
         cur, ta, scenario, start, end, selected_market, selected_product
@@ -183,7 +182,6 @@ def _build_full_block(cur, ta, scenario, start, end, selected_market, selected_p
         "factors": factors or {},
         "market_analysis": market_analysis
     }
- 
 
 
 # =========================================================
@@ -237,6 +235,28 @@ def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
 
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def fetch_forecast_scenario_with_fallback(cur, ta, market, source, product, metric, scenario):
+    """
+    Try the requested scenario first. If no row exists for that exact
+    scenario, fall back to BASE.
+
+    Non-BASE scenarios generally only override market-level and
+    source-level shares, not every source x product combination --
+    those still need to come from BASE's mix. Without this fallback,
+    non-Retail markets (which are broken down by source, e.g.
+    Non-retail/Kaiser/Biktarvy) silently zero out for any scenario
+    that doesn't have that exact source+product row saved.
+    """
+    data = fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario)
+    if data is not None:
+        return data
+
+    if scenario.upper() != "BASE":
+        return fetch_forecast_scenario(cur, ta, market, source, product, metric, "BASE")
+
+    return None
 
 
 def get_markets(cur, ta):
@@ -614,13 +634,6 @@ def wrap_monthly_yearly_share(monthly_chart, monthly_table,
 def build_factors(cur, ta, scenario):
     is_base = scenario.upper() == "BASE"
 
-    print("================================")
-    print("BUILD FACTORS")
-    print("TA:", ta)
-    print("SCENARIO:", scenario)
-    print("IS BASE:", is_base)
-    print("================================")
-
     if is_base:
         cur.execute("""
             SELECT forecast_data
@@ -654,11 +667,6 @@ def build_factors(cur, ta, scenario):
         db_factors = row[0] or {}
         data = row[1] or {}
 
-    print("ROW:", row)
-    print("DB_FACTORS TYPE:", type(db_factors))
-    print("DB_FACTORS:", db_factors)
-    print("DATA TYPE:", type(data))
-
     months = data.get("months", [])
     split_idx = data.get("forecast_start_index", 0)
 
@@ -675,8 +683,6 @@ def build_factors(cur, ta, scenario):
         factors_data = data.get("factors", {}) or {}
     else:
         factors_data = db_factors or {}
-
-    print("FACTORS DATA:", factors_data)
 
     # --------------------------------------------------------
     # ETS
@@ -818,7 +824,7 @@ def build_factors(cur, ta, scenario):
 # ================= MARKET ANALYSIS BUILDERS ===============
 # =========================================================
 
-def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base"):
+def build_total_market_volume(total_vals, months, split_idx, scenario_label="Base"):
     """
     Total market volume — share is always 100%.
 
@@ -1006,6 +1012,10 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
     prod_vol_map accumulates RAW floats throughout.
     Monthly display rounds at output; yearly sums raws then rounds once.
     Yearly share = sum(prod_raw_in_year) / sum(total_raw_in_year) * 100.
+
+    Non-Retail markets are broken down by source, so each source's row
+    is fetched with fallback-to-BASE (see fetch_forecast_scenario_with_fallback)
+    since non-BASE scenarios don't always have every source x product row saved.
     """
     products  = get_products(cur, ta)
     n         = len(total_vals)
@@ -1034,32 +1044,24 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
                     prod_vol_map[prod][i] += prod_vol[i]
 
             else:
-                prod_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario
-                )
+                sources = get_sources(cur, ta, mkt)
+                for src in sources:
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    if not src_d:
+                        continue
+                    src_series = build_series(src_d, start, end)
+                    src_vol    = build_volume_from_share(mkt_vol, src_series["values"])
 
-                if not prod_d:
-                    continue
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
+                    if not prod_d:
+                        continue
+                    prod_series = build_series(prod_d, start, end)
+                    prod_vol    = build_volume_from_share(src_vol, prod_series["values"])
 
-                prod_series = build_series(
-                    prod_d,
-                    start,
-                    end
-                )
-
-                prod_vol = build_volume_from_share(
-                    mkt_vol,
-                    prod_series["values"]
-                )
-
-                for i in range(min(len(prod_vol), n)):
-                    prod_vol_map[prod][i] += prod_vol[i]
+                    for i in range(min(len(prod_vol), n)):
+                        prod_vol_map[prod][i] += prod_vol[i]
 
     prod_labels = list(prod_vol_map.keys())
     raw_vols    = [prod_vol_map[p] for p in prod_labels]
@@ -1146,6 +1148,9 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
     mp_vol accumulates RAW floats.
     Monthly display rounds at output.
     Yearly product share within market = sum(prod_raw) / sum(mkt_raw) * 100.
+
+    Non-Retail markets are broken down by source, with fallback-to-BASE
+    for source+product rows a scenario doesn't have saved.
     """
     n         = len(total_vals)
     all_years = get_ordered_years(months)
@@ -1178,37 +1183,38 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                     market_totals[mkt][:min_len], s["values"][:min_len])  # raw
 
             else:
+                total_prod_vol = [0.0] * n
+                sources        = get_sources(cur, ta, mkt)
 
-                prod_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario
-                )
+                for src in sources:
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    if not src_d:
+                        continue
+                    src_series = build_series(src_d, start, end)
 
-                if not prod_d:
-                    continue
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
+                    if not prod_d:
+                        continue
+                    prod_series = build_series(prod_d, start, end)
 
-                prod_series = build_series(
-                    prod_d,
-                    start,
-                    end
-                )
+                    min_len = min(len(market_totals[mkt]),
+                                  len(src_series["values"]),
+                                  len(prod_series["values"]))
 
-                min_len = min(
-                    len(market_totals[mkt]),
-                    len(prod_series["values"])
-                )
+                    src_vol  = build_volume_from_share(
+                        market_totals[mkt][:min_len], src_series["values"][:min_len])
+                    prod_vol = build_volume_from_share(src_vol, prod_series["values"][:min_len])
 
-                vol = build_volume_from_share(
-                    market_totals[mkt][:min_len],
-                    prod_series["values"][:min_len]
-                )
+                    for i in range(min_len):
+                        total_prod_vol[i] += prod_vol[i]
+
+                vol = total_prod_vol
+
             vol = vol + [0.0] * (n - len(vol))
-            mp_vol[mkt][prod] = vol
+            mp_vol[mkt][prod] = vol   # raw floats
+
     # --- CHART: selected market only ---
     vol_chart_series   = []
     share_chart_series = []
@@ -1323,6 +1329,9 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
     pm_vol accumulates RAW floats.
     Monthly display rounds at output.
     Yearly market share within product = sum(mkt_raw) / sum(prod_raw) * 100.
+
+    Non-Retail markets are broken down by source, with fallback-to-BASE
+    for source+product rows a scenario doesn't have saved.
     """
     n         = len(total_vals)
     all_years = get_ordered_years(months)
@@ -1352,66 +1361,50 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
                 vol     = build_volume_from_share(mkt_vol, s["values"][:min_len])  # raw
 
             else:
+                total_prod_vol = [0.0] * n
 
-                mkt_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    "ALL",
-                    "market_share",
-                    scenario
-                )
-
+                mkt_d = fetch_forecast_scenario(cur, ta, mkt, None, "ALL", "market_share", scenario)
                 if not mkt_d:
                     continue
+                mkt_series  = build_series(mkt_d, start, end)
+                min_len_mkt = min(len(total_vals), len(mkt_series["values"]))
+                mkt_vol     = build_volume_from_share(
+                    total_vals[:min_len_mkt], mkt_series["values"][:min_len_mkt])
 
-                mkt_series = build_series(
-                    mkt_d,
-                    start,
-                    end
-                )
+                sources = get_sources(cur, ta, mkt)
+                for src in sources:
+                    src_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario)
+                    if not src_d:
+                        continue
+                    src_series = build_series(src_d, start, end)
 
-                prod_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario
-                )
+                    prod_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
+                    if not prod_d:
+                        continue
+                    prod_series = build_series(prod_d, start, end)
 
-                if not prod_d:
-                    continue
+                    min_len  = min(len(mkt_vol),
+                                   len(src_series["values"]),
+                                   len(prod_series["values"]))
+                    src_vol  = build_volume_from_share(
+                        mkt_vol[:min_len], src_series["values"][:min_len])
+                    prod_vol = build_volume_from_share(
+                        src_vol, prod_series["values"][:min_len])
 
-                prod_series = build_series(
-                    prod_d,
-                    start,
-                    end
-                )
+                    for i in range(min_len):
+                        total_prod_vol[i] += prod_vol[i]
 
-                min_len = min(
-                    len(total_vals),
-                    len(mkt_series["values"]),
-                    len(prod_series["values"])
-                )
+                vol = total_prod_vol
 
-                mkt_vol = build_volume_from_share(
-                    total_vals[:min_len],
-                    mkt_series["values"][:min_len]
-                )
-
-                vol = build_volume_from_share(
-                    mkt_vol,
-                    prod_series["values"][:min_len]
-                )
             vol = vol + [0.0] * (n - len(vol))
-            pm_vol[prod][mkt] = vol
+            pm_vol[prod][mkt] = vol   # raw floats
+
             for i in range(n):
                 prod_total[i] += vol[i]
 
-        product_totals[prod] = prod_total
+        product_totals[prod] = prod_total   # raw floats
 
     # --- CHART: selected product only ---
     vol_chart_series   = []
@@ -1532,7 +1525,7 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 
     return {
         "total_market_volume": build_total_market_volume(
-            total_vals, months, split_idx,scenario),
+            total_vals, months, split_idx, scenario),
         "market_distribution": build_market_distribution(
             cur, ta, scenario, total_vals, months, split_idx, start, end),
         "product_distribution": build_product_distribution(
@@ -1551,14 +1544,19 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 # =========================================================
 
 def build_apply_scenario_response(cur, payload, config):
-
+    """
+    Returns EVERY available scenario with its FULL detail: factors +
+    all 5 tabs (total_market_volume, market_distribution,
+    product_distribution, market_product, product_market), each with
+    monthly/yearly x chart/table.
+    """
     ta    = payload.ta_name
     flt   = payload.selected_filter
     start = flt.start_date
     end   = flt.end_date
 
     available_scenarios = get_scenarios(cur, ta)
-    active_scenario     = available_scenarios[0]
+    active_scenario      = available_scenarios[0]
 
     scenarios_block = {}
 
@@ -1567,28 +1565,25 @@ def build_apply_scenario_response(cur, payload, config):
             cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario
         )
 
-        if has_data:
-            market_analysis = build_scenario_market_analysis(
-                cur, ta, scenario, start, end, flt.market, flt.product
-            )
-            if scenario.upper() == "BASE":
-                scenario_block = {
-                    "factors":         build_factors(cur, ta, scenario),
-                    "market_analysis": market_analysis
-                }
-            else:
-                scenario_block = {"market_analysis": market_analysis}
-        else:
-            scenario_block = {
+        if not has_data:
+            scenarios_block[scenario] = {
                 "market_analysis": {
                     "total_market_volume": {
                         "market_volume": {},
-                        "market_share":  {}
+                        "market_share": {}
                     }
                 }
             }
+            continue
 
-        scenarios_block[scenario] = scenario_block
+        market_analysis = build_scenario_market_analysis(
+            cur, ta, scenario, start, end, flt.market, flt.product
+        )
+
+        scenarios_block[scenario] = {
+            "factors": build_factors(cur, ta, scenario),
+            "market_analysis": market_analysis
+        }
 
     return {
         "ta_name": ta,
@@ -1608,17 +1603,16 @@ def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
     """
     Builds the full response shape:
       - available_scenarios: every scenario in the DB (Base first, then others)
-      - active_scenario: explicitly the scenario just saved (NOT available_scenarios[0])
-      - scenarios[active_scenario]: full detail (factors + all 5 tabs)
-      - scenarios[every other scenario]: total_market_volume ONLY, no factors
+      - active_scenario: explicitly the scenario just saved/applied
+      - scenarios[*]: FULL detail (factors + all 5 tabs) for EVERY scenario
     """
     start = selected_filter.start_date
     end = selected_filter.end_date
- 
+
     available_scenarios = get_scenarios(cur, ta)
     if active_scenario not in available_scenarios:
         available_scenarios.append(active_scenario)
- 
+
     scenarios_block = {}
     for scenario in available_scenarios:
         has_data = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
@@ -1629,21 +1623,14 @@ def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
                 }
             }
             continue
- 
-        if scenario == active_scenario:
-            # factors were saved onto this scenario's total-volume row already;
-            # re-read them so the response reflects what's actually persisted,
-            # rather than trusting the just-submitted payload blindly.
-            saved_total = fetch_forecast_scenario(cur, ta, "ALL", "ALL", "ALL", "market_volume", scenario)
-            saved_factors = build_factors(cur, ta, scenario)
-            scenarios_block[scenario] = _build_full_block(
-                cur, ta, scenario, start, end,
-                selected_filter.market, selected_filter.product,
-                saved_factors
-            )
-        else:
-            scenarios_block[scenario] = _build_total_only_block(cur, ta, scenario, start, end)
- 
+
+        factors = build_factors(cur, ta, scenario)
+        scenarios_block[scenario] = _build_full_block(
+            cur, ta, scenario, start, end,
+            selected_filter.market, selected_filter.product,
+            factors
+        )
+
     return {
         "ta_name": ta,
         "selected_filter": {
@@ -1656,4 +1643,3 @@ def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
         "active_scenario": active_scenario,
         "scenarios": scenarios_block
     }
- 
