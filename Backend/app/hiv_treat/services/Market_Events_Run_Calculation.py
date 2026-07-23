@@ -39,7 +39,7 @@ TAB_HIERARCHY = {
 TAB_VIEW_LEVELS = {
     "market_event": {
         "flat_key": "market_level",
-        "flat_label": "Market Level",
+        "flat_label": "Channel Level",
         "hierarchy_key": "product_market_level",
         "hierarchy_label": "Product-Market Level",
     },
@@ -942,49 +942,6 @@ def _overlay_cache_on_grid(grid: List[dict], cache_by_cell: Dict[Tuple[str, str]
         overlaid.append(copy.deepcopy(override) if override else cell)
     return overlaid
 
-# def _recalculate_all_rows(grid: List[dict]) -> List[dict]:
-
-#     grouped = {}
-
-#     for row in grid:
-#         grouped.setdefault(row["market"], []).append(row)
-
-#     output = []
-
-#     for market, rows in grouped.items():
-
-#         all_row = next(
-#             (r for r in rows if r["product"] == "ALL"),
-#             None,
-#         )
-
-#         normal_rows = [
-#             r
-#             for r in rows
-#             if r["product"] != "ALL"
-#         ]
-
-#         if (
-#             all_row is not None
-#             and normal_rows
-#         ):
-
-#             for i in range(len(all_row["forecast"])):
-
-#                 all_row["forecast"][i] = round(
-#                     sum(
-#                         r["forecast"][i]
-#                         for r in normal_rows
-#                     ),
-#                     4,
-#                 )
-
-#         output.extend(normal_rows)
-
-#         if all_row:
-#             output.append(all_row)
-
-#     return output
 
 def _derive_volume_grid(
     share_grid: List[dict],
@@ -1676,7 +1633,7 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
                                   agg: str, overall_series: Optional[dict] = None,
                                   volume_grid: Optional[List[dict]] = None,
                                   overall_volume_series: Optional[dict] = None,
-                                  touched_cells: Optional[Set[Tuple[str, str]]] = None) -> dict:
+                                  scope_cells: Optional[Set[Tuple[str, str]]] = None) -> dict:
     
     levels = TAB_VIEW_LEVELS[tab]
     view_options = [
@@ -1739,13 +1696,14 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         overall_volume_series,   # <-- add this
     )
 
-    # Once an event is configured for this tab, the hierarchy chart shows
-    # only the (market, product) cells the user actually touched -- not
+    # Once markets/products are selected in selected_filter, the hierarchy
+    # chart shows only the (market, product) cells implied by that
+    # selection -- every child under each selected parent -- instead of
     # the full parent-summed rollup. The table (hierarchy_rows, computed
     # above) keeps showing the full nested rollup regardless; only the
     # chart series change here.
-    if touched_cells:
-        monthly_parent_chart = _touched_entities_chart(grid, touched_cells, parent_field, child_field)
+    if scope_cells:
+        monthly_parent_chart = _scoped_cells_chart(grid, scope_cells, parent_field, child_field)
 
     if metric == "market_share":
         monthly_child_chart, flat_rows = _monthly_flat_view(
@@ -1807,16 +1765,16 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         child_series = _group_series_by_field(grid, child_field)
         child_yearly = _to_yearly_chart(child_series, agg)
 
-    # Same touched-values swap as monthly, but built off the already-
+    # Same scoped-values swap as monthly, but built off the already-
     # scaffolded per-cell yearly helpers (_yearly_cell_shares /
-    # _yearly_cell_totals) instead of _touched_entities_chart, since
+    # _yearly_cell_totals) instead of _scoped_cells_chart, since
     # yearly needs the year-bucketing logic those helpers already
     # implement. cell_rows carry both "parent" and "child" keys, so we
     # filter on the (parent, child) pair -- same identity used by
-    # _touched_entities_chart for monthly -- to keep each product only
-    # paired with the markets it was actually configured against, not
+    # _scoped_cells_chart for monthly -- to keep each product only
+    # paired with the markets it's actually selected against, not
     # every market it happens to share a name with.
-    if touched_cells:
+    if scope_cells:
         if metric == "market_share":
             cell_rows = _yearly_cell_shares(volume_grid, parent_field, child_field, overall_volume_series)
         else:
@@ -1828,7 +1786,7 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
             "series": [
                 {"label": f"{c['parent']} - {c['child']}", "history": c["history"], "forecast": c["forecast"]}
                 for c in cell_rows
-                if (c["parent"], c["child"]) in touched_cells
+                if (c["parent"], c["child"]) in scope_cells
             ],
         }
 
@@ -1864,27 +1822,49 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     }
 
 
-def _touched_entities_for_tab(tab: str, rows: List[dict]) -> Set[Tuple[str, str]]:
+def _selected_filter_cells(
+    tab: str,
+    entities: Dict[str, List[str]],
+    selected_filter: dict,
+) -> Optional[Set[Tuple[str, str]]]:
+    """Scopes the hierarchy CHART to the parent entities picked in
+    selected_filter, expanded to every child under them -- independent of
+    events, and identical on every tab/run (active or not).
 
-    touched: Set[Tuple[str, str]] = set()
-    for row in rows:
-        if tab == "market_event":
-            touched_markets = {row["markets"][0]} | set(row.get("impacted_markets", []))
-            for product in (row.get("products") or []):
-                for market in touched_markets:
-                    touched.add((product, market))
-        elif tab == "product_event":
-            touched_products = {row["products"][0]} | set(row.get("impacted_products", []))
-            for market in (row.get("markets") or []):
-                for product in touched_products:
-                    touched.add((market, product))
-    return touched
+    product_event's parent is market (see TAB_HIERARCHY), so
+    selected_filter['markets'] chooses which parent rows appear, each
+    paired with EVERY child product
+    (e.g. markets=['Retail'] -> 'Retail - Truvada', 'Retail - Biktarvy',
+    'Retail - Descovy').
+
+    market_event's parent is product, so selected_filter['products']
+    chooses which parent rows appear, each paired with EVERY child market
+    (e.g. products=['Truvada'] -> 'Truvada - Retail', 'Truvada - Non-retail').
+
+    Returns None when nothing is selected for the relevant field, so the
+    caller falls back to the full parent-summed rollup instead of an
+    empty chart."""
+    if tab not in TAB_HIERARCHY:
+        return None
+    parent_field, child_field = TAB_HIERARCHY[tab]
+    parent_key = "markets" if parent_field == "market" else "products"
+    child_key = "markets" if child_field == "market" else "products"
+
+    selected_parents = selected_filter.get(parent_key) or []
+    if not selected_parents:
+        return None
+
+    all_children = entities.get(child_key, [])
+    return {(parent, child) for parent in selected_parents for child in all_children}
 
 
-def _touched_entities_chart(grid: List[dict], touched_pairs: Set[Tuple[str, str]],
-                             parent_field: str, child_field: str) -> dict:
+def _scoped_cells_chart(grid: List[dict], cell_pairs: Set[Tuple[str, str]],
+                         parent_field: str, child_field: str) -> dict:
+    """Builds a monthly chart with one series per (parent, child) grid cell
+    named in cell_pairs -- e.g. the (market, product) pairs implied by
+    selected_filter (see _selected_filter_cells)."""
 
-    if not grid or not touched_pairs:
+    if not grid or not cell_pairs:
         return {"months": [], "forecast_start_index": 0, "series": []}
     months = grid[0]["months"]
     fsi = grid[0]["forecast_start_index"]
@@ -1892,7 +1872,7 @@ def _touched_entities_chart(grid: List[dict], touched_pairs: Set[Tuple[str, str]
         {"label": f"{cell[parent_field]} - {cell[child_field]}",
          "history": cell["history"], "forecast": cell["forecast"]}
         for cell in grid
-        if (cell[parent_field], cell[child_field]) in touched_pairs
+        if (cell[parent_field], cell[child_field]) in cell_pairs
     ]
     return {"months": months, "forecast_start_index": fsi, "series": series}
 
@@ -1900,22 +1880,23 @@ def _touched_entities_chart(grid: List[dict], touched_pairs: Set[Tuple[str, str]
 def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities: Dict[str, List[str]],
                             cache: Optional[CacheType] = None,
                             date_range: Tuple[Optional[str], Optional[str]] = (None, None),
-                            touched_cells: Optional[Set[Tuple[str, str]]] = None
+                            selected_filter: Optional[dict] = None
                             ) -> Tuple[Dict, Optional[str]]:
     """Shared by build_metrics_views (active tab, overlays cache onto grid)
     and build_latest_metrics_views (other tabs, plain fresh DB read).
     `entities` is the full product/market universe, not selected_filter --
     filter only clips the display range, applied last.
 
-    touched_cells is the set of touched (parent, child) entity pairs --
-    see _touched_entities_for_tab. Only ever passed for the tab actually
-    being edited this run (build_metrics_views); build_latest_metrics_views
-    always calls this with touched_cells=None, so the other two tabs keep
-    the old parent-summed chart."""
+    `selected_filter` drives which (market, product) cells the hierarchy
+    CHART shows this run -- see _selected_filter_cells. This is computed
+    identically regardless of which tab is being actively edited, so the
+    chart's scope stays stable across runs instead of depending on which
+    events happen to be configured."""
     parent_field, child_field = TAB_HIERARCHY[tab]
     markets = entities.get("markets", [])
     products = entities.get("products", [])
     start_date, end_date = date_range
+    scope_cells = _selected_filter_cells(tab, entities, selected_filter or {})
 
     share_grid = fetch_grid(
     scenario_name,
@@ -1930,12 +1911,6 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             share_grid,
             cache["market_share"],
         )
-
-    #
-    # NEW
-    # Refresh ALL rows after overlay
-    #
-    # share_grid = _recalculate_all_rows(share_grid)
 
     overall_share = None
     if share_grid:
@@ -1988,11 +1963,11 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
         "market_share": build_hierarchical_dual_view(
             tab, "market_share", share_grid, parent_field, child_field, YEARLY_AGG["market_share"],
             overall_series=overall_share, volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series, touched_cells=touched_cells),
+            overall_volume_series=overall_volume_series, scope_cells=scope_cells),
         "market_volume": build_hierarchical_dual_view(
             tab, "market_volume", volume_grid, parent_field, child_field, YEARLY_AGG["market_volume"],
             overall_series=overall_volume_series, volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series, touched_cells=touched_cells),
+            overall_volume_series=overall_volume_series, scope_cells=scope_cells),
     }
     forecast_start_date = _forecast_start_date_from(
         {"market_share": share_grid, "market_volume": overall_volume_rows})
@@ -2099,16 +2074,16 @@ def _forecast_start_date_from(series_by_metric: Dict[str, List[dict]]) -> Option
 
 
 def build_metrics_views(tab: str, scenario_name: str, ta_name: str, entities: dict,
-                         events: List[EventInput], rows: List[dict],
-                         date_range: Tuple[Optional[str], Optional[str]] = (None, None)
+                         events: List[EventInput],
+                         date_range: Tuple[Optional[str], Optional[str]] = (None, None),
+                         selected_filter: Optional[dict] = None
                          ) -> Tuple[Dict, Optional[str], CacheType]:
     """Builds metrics_views for the actively-edited tab, plus returns the raw
     cache so the caller can persist without recomputing.
 
-    `rows` is the raw event-config rows for this tab this run (used only
-    to derive touched_cells for the hierarchy chart -- see
-    _touched_entities_for_tab). Not needed for overall_event (no hierarchy
-    chart to scope)."""
+    `selected_filter` is passed straight through to _build_hierarchy_views,
+    which uses it to scope the hierarchy chart -- see _selected_filter_cells.
+    Not needed for overall_event (no hierarchy chart to scope)."""
     cache = apply_events_to_baseline(events, entities)
 
     if tab not in TAB_HIERARCHY:
@@ -2123,20 +2098,22 @@ def build_metrics_views(tab: str, scenario_name: str, ta_name: str, entities: di
         }
         return metrics_views, _forecast_start_date_from(series_by_metric), cache
 
-    touched_cells = _touched_entities_for_tab(tab, rows)
     metrics_views, forecast_start_date = _build_hierarchy_views(
-        tab, scenario_name, ta_name, entities, cache=cache, date_range=date_range, touched_cells=touched_cells
+        tab, scenario_name, ta_name, entities, cache=cache, date_range=date_range,
+        selected_filter=selected_filter,
     )
     return metrics_views, forecast_start_date, cache
 
 
 def build_latest_metrics_views(tab: str, scenario_name: str, ta_name: str, entities: dict,
-                                date_range: Tuple[Optional[str], Optional[str]] = (None, None)
+                                date_range: Tuple[Optional[str], Optional[str]] = (None, None),
+                                selected_filter: Optional[dict] = None
                                 ) -> Tuple[Dict, Optional[str]]:
     """Same shape as build_metrics_views but for a tab not being edited this
-    run -- fresh DB read, reflects the latest persisted values. touched_cells
-    is never passed here (defaults to None in _build_hierarchy_views), so
-    non-active tabs always keep the full parent-summed hierarchy chart."""
+    run -- fresh DB read, reflects the latest persisted values.
+    `selected_filter` is threaded through the same way as in
+    build_metrics_views, so non-active tabs scope their hierarchy chart
+    identically to the active one."""
     start_date, end_date = date_range
     if tab not in TAB_HIERARCHY:
         series_by_metric = {
@@ -2150,7 +2127,10 @@ def build_latest_metrics_views(tab: str, scenario_name: str, ta_name: str, entit
         }
         return metrics_views, _forecast_start_date_from(series_by_metric)
 
-    return _build_hierarchy_views(tab, scenario_name, ta_name, entities, cache=None, date_range=date_range)
+    return _build_hierarchy_views(
+        tab, scenario_name, ta_name, entities, cache=None, date_range=date_range,
+        selected_filter=selected_filter,
+    )
 
 
 # ======================================================
@@ -2419,7 +2399,8 @@ def run_calculation(payload: dict) -> dict:
 
     events = [row_to_event(row, tab, scenario_name, ta_name) for row in rows]
     active_metrics_views, forecast_start_date, cache = build_metrics_views(
-        tab, scenario_name, ta_name, entities, events, rows, date_range=date_range
+        tab, scenario_name, ta_name, entities, events, date_range=date_range,
+        selected_filter=selected_filter,
     )
 
     # Persist before building the other two tabs so their fresh DB reads pick up this run's changes.
@@ -2434,7 +2415,8 @@ def run_calculation(payload: dict) -> dict:
             tab_rows = rows
         else:
             metrics_views, tab_forecast_start_date = build_latest_metrics_views(
-                t, scenario_name, ta_name, entities, date_range=date_range
+                t, scenario_name, ta_name, entities, date_range=date_range,
+                selected_filter=selected_filter,
             )
             tab_rows = []  # other tabs' event config untouched this run
         event_tabs[t] = {
