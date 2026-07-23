@@ -32,6 +32,7 @@ export default function HIVOutputTable({
     selectedMetric,
     setSelectedMetric,
     metricOptions = [],
+    forecastStartIndex
 }) {
 
     const [expandedRows, setExpandedRows] = useState({});
@@ -43,12 +44,28 @@ export default function HIVOutputTable({
     const headers = tableData.headers || [];
     const rows = tableData.rows || [];
 
+    const formatCellValue = (value) => {
+        if (value === null || value === undefined || value === "") {
+            return "";
+        }
+
+        if (selectedMetric === "market_share") {
+            return `${value}%`;
+        }
+
+        return Number(value).toLocaleString();
+    };
+
     // const [expandedRows, setExpandedRows] = useState({});
     const handleToggle = (key) => {
-        setExpandedRows((prev) => ({
-            ...prev,
-            [key]: !prev[key],
-        }));
+        setExpandedRows((prev) => {
+            const current = prev[key] ?? true;
+
+            return {
+                ...prev,
+                [key]: !current,
+            };
+        });
     };
 
     const renderHierarchyRows = (
@@ -80,13 +97,16 @@ export default function HIVOutputTable({
                             background: "#fff",
                             zIndex: 1,
                             minWidth: 280,
+                            fontWeight: isTotalRow ? 700 : 400,
+                            color: "#334155",
+                            borderRight: "1px solid #E2E8F0",
                         }}
                     >
                         <Box
                             sx={{
                                 display: "flex",
                                 alignItems: "center",
-                                pl: level * 3,
+                                pl: level * 2,
                             }}
                         >
 
@@ -97,6 +117,7 @@ export default function HIVOutputTable({
                                     onClick={() =>
                                         handleToggle(rowKey)
                                     }
+                                    sx={{ p: 0.25 }}
                                 >
                                     {expanded ? (
                                         <KeyboardArrowDownIcon fontSize="small" />
@@ -107,13 +128,15 @@ export default function HIVOutputTable({
 
                             ) : (
 
-                                <Box sx={{ width: 40 }} />
+                                <Box sx={{ width: 24 }} />
 
                             )}
 
                             <Typography
                                 sx={{
-                                    fontWeight: isTotalRow ? 700 : 500,
+                                    fontSize: 14,
+                                    fontWeight: isTotalRow ? 700 : 400,
+                                    color: "#334155",
                                 }}
                             >
                                 {row.label}
@@ -128,12 +151,16 @@ export default function HIVOutputTable({
                             key={index}
                             align="center"
                             sx={{
-                                fontWeight: isTotalRow ? 700 : 500,
+                                backgroundColor:
+                                    index < forecastStartIndex
+                                        ? "#F1F5F9"   // History
+                                        : "#FFFFFF",  // Forecast
+                                fontSize: 14,
+                                fontWeight: isTotalRow ? 700 : 400,
+                                color: "#334155",
                             }}
                         >
-                            {typeof value === "number"
-                                ? value.toLocaleString()
-                                : value}
+                            {formatCellValue(value)}
                         </TableCell>
 
                     ))}
@@ -325,12 +352,7 @@ export default function HIVOutputTable({
                                                 left: index === 0 ? 0 : undefined,
                                                 zIndex: index === 0 ? 5 : 2,
 
-                                                backgroundColor:
-                                                    index === 0
-                                                        ? "#F8FAFC"
-                                                        : index < tableData.forecast_start_index
-                                                            ? "#F8FAFC"
-                                                            : "#FFFFFF",
+                                                backgroundColor: "#F8FAFC",
 
                                                 minWidth: index === 0 ? 200 : 95,
                                                 width: index === 0 ? 200 : 95,
@@ -348,61 +370,52 @@ export default function HIVOutputTable({
                         </TableHead>
 
                         <TableBody>
-
-                            {tableData.type === "hierarchy"
-
-                                ? rows.map((row, index) =>
-                                    renderHierarchyRows(
-                                        row,
-                                        0,
-                                        String(index)
-                                    )
+                            {tableData.type === "hierarchy" ? (
+                                rows.map((row, index) =>
+                                    renderHierarchyRows(row, 0, String(index))
                                 )
+                            ) : (
+                                rows.map((row) => {
+                                    const isTotalRow =
+                                        row.label?.toLowerCase().includes("grand total");
 
-                                : rows.map((row) => (
-
-                                    <TableRow
-                                        key={row.label}
-                                    >
-
-                                        <TableCell
-                                            sx={{
-                                                position: "sticky",
-                                                left: 0,
-                                                backgroundColor: "#FFFFFF",
-                                                zIndex: 1,
-                                                minWidth: 280,
-                                                fontWeight: 600,
-                                                borderRight: "1px solid #E2E8F0",
-                                            }}
-                                        >
-                                            {row.label}
-                                        </TableCell>
-
-                                        {row.values.map((value, index) => (
-
+                                    return (
+                                        <TableRow key={row.label}>
                                             <TableCell
-                                                key={index}
-                                                align="center"
                                                 sx={{
-                                                    backgroundColor:
-                                                        index < tableData.forecast_start_index
-                                                            ? "#F8FAFC"
-                                                            : "#FFFFFF",
-                                                    fontWeight: 500,
+                                                    position: "sticky",
+                                                    left: 0,
+                                                    backgroundColor: "#FFFFFF",
+                                                    zIndex: 1,
+                                                    minWidth: 280,
+                                                    fontWeight: isTotalRow ? 700 : 400,
+                                                    color: "#334155",
+                                                    borderRight: "1px solid #E2E8F0",
                                                 }}
                                             >
-                                                {typeof value === "number"
-                                                    ? value.toLocaleString()
-                                                    : value}
+                                                {row.label}
                                             </TableCell>
 
-                                        ))}
-
-                                    </TableRow>
-
-                                ))}
-
+                                            {row.values.map((value, index) => (
+                                                <TableCell
+                                                    key={index}
+                                                    align="center"
+                                                    sx={{
+                                                        backgroundColor:
+                                                            index < forecastStartIndex
+                                                                ? "#F1F5F9"
+                                                                : "#FFFFFF",
+                                                        fontWeight: isTotalRow ? 700 : 400,
+                                                        color: "#334155",
+                                                    }}
+                                                >
+                                                    {formatCellValue(value)}
+                                                </TableCell>
+                                            ))}
+                                        </TableRow>
+                                    );
+                                })
+                            )}
                         </TableBody>
 
                     </Table>

@@ -668,7 +668,7 @@ def build_grand_total_label(
 
     return (
         f"Grand Total "
-        f"({scenario_name} Scenario)"
+        f"({scenario_name})"
     )
 
 def metric_display_name(
@@ -1150,7 +1150,7 @@ def ensure_scenario_suffix(
     ):
         return scenario_name
 
-    return f"{scenario_name} Scenario"
+    return f"{scenario_name}"
 
 def prepare_market_distribution_chart(
     source_period,

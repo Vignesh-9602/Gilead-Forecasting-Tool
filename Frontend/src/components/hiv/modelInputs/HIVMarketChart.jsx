@@ -42,9 +42,105 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
     //     "#4F46E5",
     // ];
 
-    const ACTIVE_COLOR = "#F59E0B";   // Yellow
-    const FADED_COLOR = "#D1D5DB";    // Gray
-    const DEFAULT_COLOR = "#2563EB";  // Blue
+    // const ACTIVE_COLOR = "#F59E0B";   // Yellow
+    // const FADED_COLOR = "#D1D5DB";    // Gray
+    // const DEFAULT_COLOR = "#2563EB";  // Blue
+
+    const SCENARIO_COLORS = [
+        "#2563EB", // Blue
+        "#F59E0B", // Orange
+        "#16A34A", // Green
+        "#9333EA", // Purple
+        "#DC2626", // Red
+        "#0891B2", // Cyan
+        "#D97706", // Amber
+        "#4F46E5", // Indigo
+    ];
+
+    const MARKET_COLORS = {
+        Retail: "#2563EB",
+        "Non-retail": "#F59E0B",
+    };
+
+    const PRODUCT_COLORS = {
+        Biktarvy: "#2563EB",
+        Truvada: "#F59E0B",
+        Descovy: "#16A34A",
+    };
+
+    const getSeriesColor = (item, index) => {
+
+        const label = item.label || "";
+
+        switch (activeTab) {
+
+            case "total_market_volume":
+                return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
+
+            case "market_distribution": {
+
+                if (label.startsWith("Retail")) {
+                    return MARKET_COLORS.Retail;
+                }
+
+                if (label.startsWith("Non-retail")) {
+                    return MARKET_COLORS["Non-retail"];
+                }
+
+                return "#64748B";
+            }
+
+            case "product_distribution": {
+
+                if (label.startsWith("Biktarvy")) {
+                    return PRODUCT_COLORS.Biktarvy;
+                }
+
+                if (label.startsWith("Truvada")) {
+                    return PRODUCT_COLORS.Truvada;
+                }
+
+                if (label.startsWith("Descovy")) {
+                    return PRODUCT_COLORS.Descovy;
+                }
+
+                return "#64748B";
+            }
+
+            case "market_product": {
+
+                if (label.includes("Biktarvy")) {
+                    return PRODUCT_COLORS.Biktarvy;
+                }
+
+                if (label.includes("Truvada")) {
+                    return PRODUCT_COLORS.Truvada;
+                }
+
+                if (label.includes("Descovy")) {
+                    return PRODUCT_COLORS.Descovy;
+                }
+
+                return "#64748B";
+            }
+
+            case "product_market": {
+
+                if (label.includes("Retail")) {
+                    return MARKET_COLORS.Retail;
+                }
+
+                if (label.includes("Non-retail")) {
+                    return MARKET_COLORS["Non-retail"];
+                }
+
+                return "#64748B";
+            }
+
+            default:
+                return "#2563EB";
+        }
+    };
 
     const traces = series.flatMap((item, index) => {
 
@@ -66,70 +162,73 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
 
         ];
 
-        let color = ACTIVE_COLOR;
-        let width = 3;
+        // let color = ACTIVE_COLOR;
+        // let width = 3;
 
-        switch (activeTab) {
+        // switch (activeTab) {
 
-            case "total_market_volume": {
-                const colors = [
-                    "#2563EB",
-                    "#16A34A",
-                    "#DC2626",
-                    "#9333EA",
-                    "#EA580C",
-                    "#0891B2",
-                    "#D97706",
-                    "#4F46E5",
-                ];
+        //     case "total_market_volume": {
+        //         const colors = [
+        //             "#2563EB",
+        //             "#16A34A",
+        //             "#DC2626",
+        //             "#9333EA",
+        //             "#EA580C",
+        //             "#0891B2",
+        //             "#D97706",
+        //             "#4F46E5",
+        //         ];
 
-                color = colors[index % colors.length];
-                width = 3;
-                break;
-            }
+        //         color = colors[index % colors.length];
+        //         width = 3;
+        //         break;
+        //     }
 
-            case "market_distribution": {
-                const isSelected =
-                    item.label?.toLowerCase() === selectedMarket?.toLowerCase();
+        //     case "market_distribution": {
+        //         const isSelected =
+        //             item.label?.toLowerCase() === selectedMarket?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            case "product_distribution": {
-                const isSelected =
-                    item.label?.toLowerCase() === selectedProduct?.toLowerCase();
+        //     case "product_distribution": {
+        //         const isSelected =
+        //             item.label?.toLowerCase() === selectedProduct?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            case "market_product": {
-                const isSelected =
-                    item.market?.toLowerCase() === selectedMarket?.toLowerCase() &&
-                    item.product?.toLowerCase() === selectedProduct?.toLowerCase();
+        //     case "market_product": {
+        //         const isSelected =
+        //             item.market?.toLowerCase() === selectedMarket?.toLowerCase() &&
+        //             item.product?.toLowerCase() === selectedProduct?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            case "product_market": {
-                const isSelected =
-                    item.market?.toLowerCase() === selectedMarket?.toLowerCase() &&
-                    item.product?.toLowerCase() === selectedProduct?.toLowerCase();
+        //     case "product_market": {
+        //         const isSelected =
+        //             item.market?.toLowerCase() === selectedMarket?.toLowerCase() &&
+        //             item.product?.toLowerCase() === selectedProduct?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            default:
-                color = ACTIVE_COLOR;
-                width = 3;
-        }
+        //     default:
+        //         color = ACTIVE_COLOR;
+        //         width = 3;
+        // }
+
+        const color = getSeriesColor(item, index);
+        const width = 3;
 
         return [
 
@@ -145,7 +244,10 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
 
                 mode: "lines",
 
-                name: item.label,
+                name:
+                    item.scenario
+                        ? `${item.label} (${item.scenario})`
+                        : item.label,
 
                 line: {
                     color,

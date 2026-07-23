@@ -89,29 +89,62 @@ export default function HIVMarketAnalysis({
         !!currentData?.chart?.series?.length &&
         !!currentData?.table?.rows?.length;
 
-    const chartData =
-        activeTab === "total_market_volume"
-            ? (() => {
-                const scenarios = compareScenario
-                    .map(name => allScenariosData?.[name])
-                    .filter(Boolean);
+    const chartData = React.useMemo(() => {
 
-                if (!scenarios.length) {
-                    return currentData?.chart;
-                }
+        const scenarios = compareScenario
+            .map(name => ({
+                name,
+                data: allScenariosData?.[name],
+            }))
+            .filter(item => item.data);
 
-                const firstChart =
-                    scenarios[0]?.market_analysis?.total_market_volume?.[selectedMetric]?.[viewMode]?.chart;
+        if (!scenarios.length) {
+            return currentData?.chart;
+        }
 
-                return {
-                    ...firstChart,
-                    series: scenarios.flatMap(
-                        (scenario) =>
-                            scenario?.market_analysis?.total_market_volume?.[selectedMetric]?.[viewMode]?.chart?.series || []
-                    ),
-                };
-            })()
-            : currentData?.chart;
+        const firstChart =
+            scenarios[0]
+                ?.data
+                ?.market_analysis
+                ?.[activeTab]
+                ?.[selectedMetric]
+                ?.[viewMode]
+                ?.chart;
+
+        return {
+
+            ...firstChart,
+
+            series: scenarios.flatMap(({ name, data }) => {
+
+                return (
+                    data
+                        ?.market_analysis
+                        ?.[activeTab]
+                        ?.[selectedMetric]
+                        ?.[viewMode]
+                        ?.chart
+                        ?.series || []
+                ).map(item => ({
+
+                    ...item,
+
+                    scenario: name,
+
+                }));
+
+            }),
+
+        };
+
+    }, [
+        compareScenario,
+        allScenariosData,
+        activeTab,
+        selectedMetric,
+        viewMode,
+        currentData,
+    ]);
 
     return (
         <Paper

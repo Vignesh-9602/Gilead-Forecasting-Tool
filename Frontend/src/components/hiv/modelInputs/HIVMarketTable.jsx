@@ -65,29 +65,89 @@ export default function HIVMarketTable({
     //     useState([]);
 
 
-    const isTmvTab = activeTab === "total_market_volume";
+    // const isTmvTab = activeTab === "total_market_volume";
 
-    const tmvMergedRows = React.useMemo(() => {
-        if (!isTmvTab) return null;
+    // const tmvMergedRows = React.useMemo(() => {
+    //     if (!isTmvTab) return null;
 
-        return compareScenario
-            .map((scenarioName) => {
-                const scenarioRow =
-                    allScenariosData?.[scenarioName]
-                        ?.market_analysis
-                        ?.total_market_volume
-                        ?.[selectedMetric]
-                        ?.[viewMode]
-                        ?.table
-                        ?.rows?.[0];
+    //     return compareScenario
+    //         .map((scenarioName) => {
+    //             const scenarioRow =
+    //                 allScenariosData?.[scenarioName]
+    //                     ?.market_analysis
+    //                     ?.total_market_volume
+    //                     ?.[selectedMetric]
+    //                     ?.[viewMode]
+    //                     ?.table
+    //                     ?.rows?.[0];
 
-                return scenarioRow || null;
-            })
-            .filter(Boolean);
-    }, [isTmvTab, allScenariosData, compareScenario, selectedMetric, viewMode]);
+    //             return scenarioRow || null;
+    //         })
+    //         .filter(Boolean);
+    // }, [isTmvTab, allScenariosData, compareScenario, selectedMetric, viewMode]);
+
+    const appendScenario = (rows, scenarioName) =>
+        rows.map((row) => {
+
+            const shouldAppendScenario =
+                row.label !== scenarioName;
+
+            return {
+
+                ...row,
+
+                scenario: scenarioName,
+
+                label: shouldAppendScenario
+                    ? `${row.label} (${scenarioName})`
+                    : row.label,
+
+                children: row.children
+                    ? appendScenario(
+                        row.children,
+                        scenarioName
+                    )
+                    : undefined,
+
+            };
+
+        });
+
+    const mergedRows = React.useMemo(() => {
+
+        return compareScenario.flatMap(scenarioName => {
+
+            const rows =
+                allScenariosData?.[scenarioName]
+                    ?.market_analysis
+                    ?.[activeTab]
+                    ?.[selectedMetric]
+                    ?.[viewMode]
+                    ?.table
+                    ?.rows;
+
+            if (!rows?.length) {
+                return [];
+            }
+
+            return appendScenario(rows, scenarioName);
+
+        });
+
+    }, [
+        compareScenario,
+        allScenariosData,
+        activeTab,
+        selectedMetric,
+        viewMode,
+    ]);
 
 
-    const effectiveRows = isTmvTab && tmvMergedRows?.length ? tmvMergedRows : tableData.rows;
+    // const effectiveRows = isTmvTab && tmvMergedRows?.length ? tmvMergedRows : tableData.rows;
+    const effectiveRows =
+        mergedRows.length
+            ? mergedRows
+            : tableData.rows;
     const { type } = tableData;
     const rows = effectiveRows;
 
@@ -136,7 +196,12 @@ export default function HIVMarketTable({
     const [editedRows, setEditedRows] = useState([]);
 
     useEffect(() => {
-        const sourceRows = isTmvTab && tmvMergedRows?.length ? tmvMergedRows : tableData?.rows;
+
+        const sourceRows =
+            mergedRows.length
+                ? mergedRows
+                : tableData.rows;
+
         if (!sourceRows?.length) return;
 
         const cloned = JSON.parse(JSON.stringify(sourceRows));
@@ -144,7 +209,11 @@ export default function HIVMarketTable({
         setTableRows(cloned);
         setOriginalRows(JSON.parse(JSON.stringify(cloned)));
         setEditedRows([]);
-    }, [tableData, tmvMergedRows, isTmvTab]);
+
+    }, [
+        mergedRows,
+        tableData,
+    ]);
 
     const handleCancel = () => {
 
@@ -156,16 +225,59 @@ export default function HIVMarketTable({
 
     };
 
+    const removeScenario = (rows) =>
+        rows.map(row => ({
+
+            ...row,
+
+            label: row.label.split(" (")[0],
+
+            scenario: undefined,
+
+            children: row.children
+                ? removeScenario(row.children)
+                : undefined,
+
+        }));
+
     const handleRefresh = async () => {
-        const updatedMarketAnalysis = JSON.parse(JSON.stringify(marketAnalysis));
-        updatedMarketAnalysis[activeTab][selectedMetric][viewMode].table.rows = tableRows;
+
+        const updatedMarketAnalysis =
+            JSON.parse(JSON.stringify(marketAnalysis));
+
+        const activeRows =
+            tableRows.filter(
+                row =>
+                    row.scenario === activeScenario
+            );
+
+        updatedMarketAnalysis
+        [activeTab]
+        [selectedMetric]
+        [viewMode]
+            .table
+            .rows =
+            removeScenario(activeRows);
 
         try {
-            await onEdit(updatedMarketAnalysis, editedRows);
-            setEditable(false); // only exit edit mode on success
-        } catch (err) {
-            console.error("Edit failed, staying in edit mode", err);
+
+            await onEdit(
+                updatedMarketAnalysis,
+                editedRows
+            );
+
+            setEditable(false);
+
         }
+        catch (err) {
+
+            console.error(
+                "Edit failed",
+                err
+            );
+
+        }
+
     };
 
     const handleCellChange = (
@@ -195,9 +307,11 @@ export default function HIVMarketTable({
         setTableRows(updated);
 
         const editedLabel =
-            childIndex === null
-                ? updated[rowIndex].label
-                : updated[rowIndex].children[childIndex].label;
+            (
+                childIndex === null
+                    ? updated[rowIndex].label
+                    : updated[rowIndex].children[childIndex].label
+            ).split(" (")[0];
 
         setEditedRows((prev) =>
             prev.includes(editedLabel)
@@ -208,65 +322,98 @@ export default function HIVMarketTable({
     };
 
     const isHighlightedRow = (row, parentRow = null) => {
+
+        const rowLabel =
+            row.label.split(" (")[0];
+
+        const parentLabel =
+            parentRow?.label
+                ?.split(" (")[0];
+
         switch (activeTab) {
+
             case "market_distribution":
+
                 return (
-                    row.label?.toLowerCase() ===
+                    rowLabel.toLowerCase() ===
                     selectedMarket?.toLowerCase()
                 );
 
             case "product_distribution":
+
                 return (
-                    row.label?.toLowerCase() ===
+                    rowLabel.toLowerCase() ===
                     selectedProduct?.toLowerCase()
                 );
 
             case "market_product":
+
                 return (
-                    parentRow?.label?.toLowerCase() ===
-                    selectedMarket?.toLowerCase() &&
-                    row.label?.toLowerCase() ===
+
+                    parentLabel?.toLowerCase() ===
+                    selectedMarket?.toLowerCase()
+
+                    &&
+
+                    rowLabel.toLowerCase() ===
                     selectedProduct?.toLowerCase()
+
                 );
 
             case "product_market":
+
                 return (
-                    parentRow?.label?.toLowerCase() ===
-                    selectedProduct?.toLowerCase() &&
-                    row.label?.toLowerCase() ===
+
+                    parentLabel?.toLowerCase() ===
+                    selectedProduct?.toLowerCase()
+
+                    &&
+
+                    rowLabel.toLowerCase() ===
                     selectedMarket?.toLowerCase()
+
                 );
 
             default:
+
                 return false;
+
         }
+
     };
 
     const canEditCell = (row, isChild = false) => {
         if (!editable) return false;
 
+        const originalLabel =
+            row.label.split(" (")[0];
+
+        if (row.scenario !== activeScenario) {
+            return false;
+        }
+
         switch (activeTab) {
-            case "total_market_volume":
-                return row.label === activeScenario;
 
             case "market_distribution":
-                // Allow editing except the Overall row
-                return row.label !== "Overall";
+
+                return originalLabel !== "Overall";
 
             case "product_distribution":
-                // Allow editing except the Overall row
-                return row.label !== "Overall";
+
+                return originalLabel !== "Overall";
 
             case "market_product":
-                // Only child rows are editable
+
                 return isChild;
 
             case "product_market":
-                // Only child rows are editable
+
                 return isChild;
 
-            default:
-                return false;
+            case "total_market_volume":
+
+                return true;
+
         }
     };
 
@@ -561,78 +708,81 @@ export default function HIVMarketTable({
                     </Box>
 
                     {isTotalMarketVolume && (
-                        <>
-                            <Button
-                                variant="contained"
-                                sx={primaryButtonStyle}
-                                disabled={!selectedRow}
-                                onClick={async () => {
-                                    await onApplyScenario(selectedRow);
-                                }}
-                            >
-                                Apply Selected Scenario
-                            </Button>
-
-                            <FormControl sx={inputStyle}>
-                                <Select
-                                    multiple
-                                    displayEmpty
-                                    value={compareScenario}
-                                    onChange={(e) => {
-                                        let value = e.target.value;
-
-                                        if (!value.includes(activeScenario)) {
-                                            value = [...value, activeScenario];
-                                        }
-
-                                        setCompareScenario(value);
-                                    }}
-                                    input={
-                                        <OutlinedInput />
-                                    }
-                                    displayEmpty
-                                    renderValue={(selected) => {
-                                        if (!selected.length) {
-                                            return "Compare Scenarios";
-                                        }
-
-                                        if (selected.length === availableScenarios.length) {
-                                            return "All Scenarios";
-                                        }
-
-                                        return selected.join(", ");
-                                    }}
-                                >
-                                    {availableScenarios.map((option) => {
-                                        const isActive = option === activeScenario;
-
-                                        return (
-                                            <MenuItem
-                                                key={option}
-                                                value={option}
-                                                disabled={isActive}
-                                            >
-                                                <Checkbox
-                                                    checked={compareScenario.includes(option)}
-                                                    disabled={isActive}
-                                                />
-
-                                                <ListItemText
-                                                    primary={
-                                                        isActive
-                                                            ? `${option} (Active)`
-                                                            : option
-                                                    }
-                                                />
-                                            </MenuItem>
-                                        );
-                                    })}
-                                </Select>
-                            </FormControl>
-
-                        </>
+                        // <>
+                        <Button
+                            variant="contained"
+                            sx={primaryButtonStyle}
+                            disabled={!selectedRow}
+                            onClick={async () => {
+                                await onApplyScenario(selectedRow);
+                            }}
+                        >
+                            Apply Selected Scenario
+                        </Button>
 
                     )}
+
+
+
+                    <FormControl sx={inputStyle}>
+                        <Select
+                            multiple
+                            displayEmpty
+                            value={compareScenario}
+                            onChange={(e) => {
+                                let value = e.target.value;
+
+                                if (!value.includes(activeScenario)) {
+                                    value = [...value, activeScenario];
+                                }
+
+                                setCompareScenario(value);
+                            }}
+                            input={
+                                <OutlinedInput />
+                            }
+                            displayEmpty
+                            renderValue={(selected) => {
+                                if (!selected.length) {
+                                    return "Compare Scenarios";
+                                }
+
+                                if (selected.length === availableScenarios.length) {
+                                    return "All Scenarios";
+                                }
+
+                                return selected.join(", ");
+                            }}
+                        >
+                            {availableScenarios.map((option) => {
+                                const isActive = option === activeScenario;
+
+                                return (
+                                    <MenuItem
+                                        key={option}
+                                        value={option}
+                                        disabled={isActive}
+                                    >
+                                        <Checkbox
+                                            checked={compareScenario.includes(option)}
+                                            disabled={isActive}
+                                        />
+
+                                        <ListItemText
+                                            primary={
+                                                isActive
+                                                    ? `${option} (Active)`
+                                                    : option
+                                            }
+                                        />
+                                    </MenuItem>
+                                );
+                            })}
+                        </Select>
+                    </FormControl>
+
+                    {/* </> */}
+
 
                     <FormControl
                         sx={{
@@ -813,8 +963,8 @@ export default function HIVMarketTable({
                                                 {isTotalMarketVolume && (
                                                     <Radio
                                                         size="small"
-                                                        checked={selectedRow === row.label}
-                                                        onChange={() => setSelectedRow(row.label)}
+                                                        checked={selectedRow === row.scenario}
+                                                        onChange={() => setSelectedRow(row.scenario)}
                                                     />
                                                 )}
                                                 {row.label}

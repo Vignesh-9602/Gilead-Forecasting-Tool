@@ -311,6 +311,19 @@ export default function HIVOutput() {
                                 renderValue={(v) =>
                                     v ? dayjs(v).format("MMM YY") : ""
                                 }
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                            "& .MuiMenuItem-root": {
+                                                minHeight: 32,
+                                                fontSize: "15px",
+                                                py: 0.5,
+                                            },
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths.map((month) => (
                                     <MenuItem key={month} value={month}>
@@ -333,6 +346,19 @@ export default function HIVOutput() {
                                 renderValue={(v) =>
                                     v ? dayjs(v).format("MMM YY") : ""
                                 }
+                                MenuProps={{
+                                    PaperProps: {
+                                        sx: {
+                                            maxHeight: 300,
+                                            width: 130,
+                                            "& .MuiMenuItem-root": {
+                                                minHeight: 32,
+                                                fontSize: "15px",
+                                                py: 0.5,
+                                            },
+                                        },
+                                    },
+                                }}
                             >
                                 {availableMonths
                                     .filter(
