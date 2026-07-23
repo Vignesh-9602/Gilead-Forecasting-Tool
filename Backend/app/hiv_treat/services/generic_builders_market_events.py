@@ -264,21 +264,256 @@ def build_product_rows(tree, metric):
 
     return rows
 
-def build_product_event(tree):
+def build_market_product_chart(
+    table,
+    period_key,
+):
+    """
+    Convert hierarchy:
+
+        Market
+            Product
+
+    into chart labels:
+
+        Market - Product
+    """
+
+    headers = list(
+        table.get("headers") or []
+    )
+
+    if (
+        headers
+        and str(headers[0]).strip().lower()
+        == "metric"
+    ):
+        headers = headers[1:]
+
+    forecast_start_index = table.get(
+        "forecast_start_index",
+        len(headers),
+    )
+
+    series = []
+
+    for market_row in table.get("rows", []):
+        if not isinstance(market_row, dict):
+            continue
+
+        market_name = str(
+            market_row.get("label", "")
+        ).strip()
+
+        if market_name.lower() in {
+            "overall",
+            "total",
+            "all",
+            "grand total",
+        }:
+            continue
+
+        for product_row in (
+            market_row.get("children") or []
+        ):
+            if not isinstance(product_row, dict):
+                continue
+
+            product_name = str(
+                product_row.get("label", "")
+            ).strip()
+
+            if not product_name:
+                continue
+
+            values = list(
+                product_row.get("values") or []
+            )
+
+            series.append(
+                {
+                    "label": (
+                        f"{market_name} - "
+                        f"{product_name}"
+                    ),
+                    "history": values[
+                        :forecast_start_index
+                    ],
+                    "forecast": values[
+                        forecast_start_index:
+                    ],
+                }
+            )
+
+    return {
+        period_key: headers,
+        "forecast_start_index":
+            forecast_start_index,
+        "series": series,
+    }
+
+
+def build_product_chart_rows(
+    tree,
+    metric,
+    selected_markets=None,
+):
+    """
+    Build rows for the Market-Product chart.
+
+    Includes:
+        - only selected markets
+        - all products under those markets
+    """
+
+    months_count = len(tree["months"])
+    overall_volume = tree["overall"]["volume"]
+
+    selected_market_set = {
+        str(market).strip().lower()
+        for market in (selected_markets or [])
+        if market
+    }
+
+    rows = []
+
+    for market_name in sorted(tree["markets"]):
+        normalized_market_name = (
+            str(market_name)
+            .strip()
+            .lower()
+        )
+
+        if (
+            selected_market_set
+            and normalized_market_name
+            not in selected_market_set
+        ):
+            continue
+
+        market = tree["markets"][market_name]
+
+        market_row = {
+            "label": market_name,
+            "values": [0.0] * months_count,
+            "children": [],
+        }
+
+        for product_name in sorted(tree["products"]):
+            market_product_volume = [
+                0.0
+            ] * months_count
+
+            for source in market.get(
+                "sources",
+                {},
+            ).values():
+                product_node = (
+                    source
+                    .get("products", {})
+                    .get(product_name)
+                )
+
+                if not product_node:
+                    continue
+
+                product_values = (
+                    product_node.get("volume", [])
+                )
+
+                market_product_volume = [
+                    round(current + value, 2)
+                    for current, value in zip(
+                        market_product_volume,
+                        product_values,
+                    )
+                ]
+
+            if metric == "volume":
+                child_values = (
+                    market_product_volume
+                )
+            else:
+                child_values = [
+                    round(
+                        product_volume
+                        / total_volume
+                        * 100,
+                        2,
+                    )
+                    if total_volume
+                    else 0.0
+                    for (
+                        product_volume,
+                        total_volume,
+                    ) in zip(
+                        market_product_volume,
+                        overall_volume,
+                    )
+                ]
+
+            market_row["children"].append(
+                {
+                    "label": product_name,
+                    "values": child_values,
+                }
+            )
+
+            market_row["values"] = [
+                round(current + value, 2)
+                for current, value in zip(
+                    market_row["values"],
+                    child_values,
+                )
+            ]
+
+        if market_row["children"]:
+            rows.append(market_row)
+
+    return rows
+
+
+
+def build_product_event(
+    tree,
+    selected_markets=None,
+):
     """
     Build Product Event.
 
-    Provides two views:
+    Product-level view:
+        Overall
+        Biktarvy
+        Descovy
+        Truvada
 
-    1. market_level
-       Overall
-       Retail
-       Non-retail
+    Market-product table:
+        Overall
+        Market
+            Product
 
-    2. market_product_level
-       Overall
-       Market
-           Product
+    Market-product chart:
+        Includes only selected markets.
+        Includes every product under those markets.
+
+    Example:
+        selected_markets = ["Non-retail"]
+
+        Chart:
+            Non-retail - Biktarvy
+            Non-retail - Descovy
+            Non-retail - Truvada
+
+        Table:
+            Overall
+            Retail
+                Biktarvy
+                Descovy
+                Truvada
+            Non-retail
+                Biktarvy
+                Descovy
+                Truvada
     """
 
     months = tree["months"]
@@ -296,7 +531,7 @@ def build_product_event(tree):
     ]
 
     # =====================================================
-    # Monthly rows
+    # Complete table rows
     # =====================================================
 
     product_level_share_rows = build_product_level_rows(
@@ -304,6 +539,7 @@ def build_product_event(tree):
         metric="share",
     )
 
+    # Complete table: all markets and all products.
     market_product_share_rows = build_product_rows(
         tree,
         metric="share",
@@ -314,13 +550,35 @@ def build_product_event(tree):
         metric="volume",
     )
 
+    # Complete table: all markets and all products.
     market_product_volume_rows = build_product_rows(
         tree,
         metric="volume",
     )
 
     # =====================================================
-    # Monthly tables
+    # Chart-specific rows
+    # =====================================================
+
+    # Selected markets + all products.
+    market_product_share_chart_rows = (
+        build_product_chart_rows(
+            tree=tree,
+            metric="share",
+            selected_markets=selected_markets,
+        )
+    )
+
+    market_product_volume_chart_rows = (
+        build_product_chart_rows(
+            tree=tree,
+            metric="volume",
+            selected_markets=selected_markets,
+        )
+    )
+
+    # =====================================================
+    # Monthly response tables
     # =====================================================
 
     product_level_share_monthly = build_monthly_table(
@@ -351,7 +609,25 @@ def build_product_event(tree):
         hierarchy=True,
     )
 
-    # Flat views should be non-editable
+    # =====================================================
+    # Internal monthly chart tables
+    # =====================================================
+
+    market_product_share_chart_monthly = build_monthly_table(
+        headers=months,
+        forecast_start_index=forecast_start_index,
+        rows=market_product_share_chart_rows,
+        hierarchy=True,
+    )
+
+    market_product_volume_chart_monthly = build_monthly_table(
+        headers=months,
+        forecast_start_index=forecast_start_index,
+        rows=market_product_volume_chart_rows,
+        hierarchy=True,
+    )
+
+    # Flat views should be non-editable.
     product_level_share_monthly["type"] = "flat"
     product_level_share_monthly["editable"] = False
 
@@ -359,10 +635,10 @@ def build_product_event(tree):
     product_level_volume_monthly["editable"] = False
 
     # =====================================================
-    # Yearly tables
+    # Yearly response tables
     # =====================================================
 
-    market_level_share_yearly = build_yearly_table(
+    product_level_share_yearly = build_yearly_table(
         product_level_share_monthly,
         aggregation="average",
     )
@@ -372,7 +648,7 @@ def build_product_event(tree):
         aggregation="average",
     )
 
-    market_level_volume_yearly = build_yearly_table(
+    product_level_volume_yearly = build_yearly_table(
         product_level_volume_monthly,
         aggregation="sum",
     )
@@ -382,12 +658,26 @@ def build_product_event(tree):
         aggregation="sum",
     )
 
-    # Preserve flat/non-editable configuration
-    market_level_share_yearly["type"] = "flat"
-    market_level_share_yearly["editable"] = False
+    # =====================================================
+    # Internal yearly chart tables
+    # =====================================================
 
-    market_level_volume_yearly["type"] = "flat"
-    market_level_volume_yearly["editable"] = False
+    market_product_share_chart_yearly = build_yearly_table(
+        market_product_share_chart_monthly,
+        aggregation="average",
+    )
+
+    market_product_volume_chart_yearly = build_yearly_table(
+        market_product_volume_chart_monthly,
+        aggregation="sum",
+    )
+
+    # Preserve flat/non-editable configuration.
+    product_level_share_yearly["type"] = "flat"
+    product_level_share_yearly["editable"] = False
+
+    product_level_volume_yearly["type"] = "flat"
+    product_level_volume_yearly["editable"] = False
 
     # =====================================================
     # Response
@@ -401,41 +691,59 @@ def build_product_event(tree):
             "market_share": {
                 "monthly": {
                     "view_options": view_options,
-                    "selected_view": "market_product_level",
+                    "selected_view":
+                        "market_product_level",
 
                     "product_level": {
                         "chart": build_monthly_chart(
                             exclude_overall_from_chart(
-                            product_level_share_monthly)
+                                product_level_share_monthly
+                            )
                         ),
-                        "table": product_level_share_monthly,
+                        "table":
+                            product_level_share_monthly,
                     },
 
                     "market_product_level": {
-                        "chart": build_monthly_chart(
-                            market_product_share_monthly
-                        ),
-                        "table": market_product_share_monthly,
+                        # Selected markets + all products.
+                        "chart":
+                            build_market_product_chart(
+                                market_product_share_chart_monthly,
+                                period_key="months",
+                            ),
+
+                        # Complete table with all cuts.
+                        "table":
+                            market_product_share_monthly,
                     },
                 },
 
                 "yearly": {
                     "view_options": view_options,
-                    "selected_view": "market_product_level",
+                    "selected_view":
+                        "market_product_level",
 
                     "product_level": {
                         "chart": build_yearly_chart(
                             exclude_overall_from_chart(
-                            market_level_share_yearly)
+                                product_level_share_yearly
+                            )
                         ),
-                        "table": market_level_share_yearly,
+                        "table":
+                            product_level_share_yearly,
                     },
 
                     "market_product_level": {
-                        "chart": build_yearly_chart(
-                            market_product_share_yearly
-                        ),
-                        "table": market_product_share_yearly,
+                        # Selected markets + all products.
+                        "chart":
+                            build_market_product_chart(
+                                market_product_share_chart_yearly,
+                                period_key="years",
+                            ),
+
+                        # Complete table with all cuts.
+                        "table":
+                            market_product_share_yearly,
                     },
                 },
             },
@@ -443,39 +751,59 @@ def build_product_event(tree):
             "market_volume": {
                 "monthly": {
                     "view_options": view_options,
-                    "selected_view": "market_product_level",
+                    "selected_view":
+                        "market_product_level",
 
                     "product_level": {
                         "chart": build_monthly_chart(
-                            product_level_volume_monthly
+                            exclude_overall_from_chart(
+                                product_level_volume_monthly
+                            )
                         ),
-                        "table": product_level_volume_monthly,
+                        "table":
+                            product_level_volume_monthly,
                     },
 
                     "market_product_level": {
-                        "chart": build_monthly_chart(
-                            market_product_volume_monthly
-                        ),
-                        "table": market_product_volume_monthly,
+                        # Selected markets + all products.
+                        "chart":
+                            build_market_product_chart(
+                                market_product_volume_chart_monthly,
+                                period_key="months",
+                            ),
+
+                        # Complete table with all cuts.
+                        "table":
+                            market_product_volume_monthly,
                     },
                 },
 
                 "yearly": {
                     "view_options": view_options,
-                    "selected_view": "market_product_level",
+                    "selected_view":
+                        "market_product_level",
 
                     "product_level": {
                         "chart": build_yearly_chart(
-                            market_level_volume_yearly
+                            exclude_overall_from_chart(
+                                product_level_volume_yearly
+                            )
                         ),
-                        "table": market_level_volume_yearly,
+                        "table":
+                            product_level_volume_yearly,
                     },
 
                     "market_product_level": {
-                        "chart": build_yearly_chart(
-                            market_product_volume_yearly
-                        ),
-                        "table": market_product_volume_yearly,
+                        # Selected markets + all products.
+                        "chart":
+                            build_market_product_chart(
+                                market_product_volume_chart_yearly,
+                                period_key="years",
+                            ),
+
+                        # Complete table with all cuts.
+                        "table":
+                            market_product_volume_yearly,
                     },
                 },
             },
@@ -565,22 +893,115 @@ def build_market_rows(tree, metric):
 
     return rows
 
-def build_market_event(tree):
+def build_product_market_chart(
+    table,
+    period_key,
+):
+    headers = list(
+        table.get("headers") or []
+    )
+
+    if (
+        headers
+        and str(headers[0]).strip().lower()
+        == "metric"
+    ):
+        headers = headers[1:]
+
+    forecast_start_index = table.get(
+        "forecast_start_index",
+        len(headers),
+    )
+
+    series = []
+
+    for product_row in table.get("rows", []):
+        if not isinstance(product_row, dict):
+            continue
+
+        product_name = str(
+            product_row.get("label", "")
+        ).strip()
+
+        if product_name.lower() in {
+            "overall",
+            "total",
+            "grand total",
+            "all",
+        }:
+            continue
+
+        for market_row in (
+            product_row.get("children") or []
+        ):
+            if not isinstance(market_row, dict):
+                continue
+
+            market_name = str(
+                market_row.get("label", "")
+            ).strip()
+
+            if not market_name:
+                continue
+
+            values = list(
+                market_row.get("values") or []
+            )
+
+            series.append(
+                {
+                    "label": (
+                        f"{market_name} - "
+                        f"{product_name}"
+                    ),
+                    "history": values[
+                        :forecast_start_index
+                    ],
+                    "forecast": values[
+                        forecast_start_index:
+                    ],
+                }
+            )
+
+    return {
+        period_key: headers,
+        "forecast_start_index":
+            forecast_start_index,
+        "series": series,
+    }
+
+def build_market_event(
+    tree,
+    selected_products=None,
+):
     """
     Build Market Event.
 
-    Provides two views:
+    Table behaviour:
+        Includes all products and all market cuts.
 
-    1. product_level
-       Overall
-       Biktarvy
-       Descovy
-       Truvada
+    Product-Market chart behaviour:
+        Includes only selected products.
+        Includes all markets for those selected products.
 
-    2. product_market_level
-       Overall
-       Product
-           Market
+    Example:
+        selected_products = ["Biktarvy"]
+
+        Chart:
+            Retail - Biktarvy
+            Non-retail - Biktarvy
+
+        Table:
+            Overall
+            Biktarvy
+                Retail
+                Non-retail
+            Descovy
+                Retail
+                Non-retail
+            Truvada
+                Retail
+                Non-retail
     """
 
     months = tree["months"]
@@ -598,7 +1019,7 @@ def build_market_event(tree):
     ]
 
     # =====================================================
-    # Monthly rows
+    # Complete table rows
     # =====================================================
 
     market_level_share_rows = build_market_level_rows(
@@ -606,6 +1027,7 @@ def build_market_event(tree):
         metric="share",
     )
 
+    # Table contains every product and every market.
     product_market_share_rows = build_market_rows(
         tree,
         metric="share",
@@ -616,13 +1038,31 @@ def build_market_event(tree):
         metric="volume",
     )
 
+    # Table contains every product and every market.
     product_market_volume_rows = build_market_rows(
         tree,
         metric="volume",
     )
 
     # =====================================================
-    # Monthly tables
+    # Product-Market chart rows
+    # =====================================================
+
+    # Chart contains selected products across every market.
+    product_market_share_chart_rows = build_market_chart_rows(
+        tree=tree,
+        metric="share",
+        selected_products=selected_products,
+    )
+
+    product_market_volume_chart_rows = build_market_chart_rows(
+        tree=tree,
+        metric="volume",
+        selected_products=selected_products,
+    )
+
+    # =====================================================
+    # Monthly response tables
     # =====================================================
 
     market_level_share_monthly = build_monthly_table(
@@ -653,7 +1093,27 @@ def build_market_event(tree):
         hierarchy=True,
     )
 
-    # Product-level tables should be flat and non-editable.
+    # =====================================================
+    # Internal monthly chart tables
+    # =====================================================
+
+    # These objects are used only to generate chart series.
+    # They are not returned as the displayed table.
+    product_market_share_chart_monthly = build_monthly_table(
+        headers=months,
+        forecast_start_index=forecast_start_index,
+        rows=product_market_share_chart_rows,
+        hierarchy=True,
+    )
+
+    product_market_volume_chart_monthly = build_monthly_table(
+        headers=months,
+        forecast_start_index=forecast_start_index,
+        rows=product_market_volume_chart_rows,
+        hierarchy=True,
+    )
+
+    # Market-level tables are flat and non-editable.
     market_level_share_monthly["type"] = "flat"
     market_level_share_monthly["editable"] = False
 
@@ -661,7 +1121,7 @@ def build_market_event(tree):
     market_level_volume_monthly["editable"] = False
 
     # =====================================================
-    # Yearly tables
+    # Yearly response tables
     # =====================================================
 
     product_level_share_yearly = build_yearly_table(
@@ -684,7 +1144,21 @@ def build_market_event(tree):
         aggregation="sum",
     )
 
-    # Preserve flat/non-editable settings for yearly views.
+    # =====================================================
+    # Internal yearly chart tables
+    # =====================================================
+
+    product_market_share_chart_yearly = build_yearly_table(
+        product_market_share_chart_monthly,
+        aggregation="average",
+    )
+
+    product_market_volume_chart_yearly = build_yearly_table(
+        product_market_volume_chart_monthly,
+        aggregation="sum",
+    )
+
+    # Preserve flat/non-editable settings.
     product_level_share_yearly["type"] = "flat"
     product_level_share_yearly["editable"] = False
 
@@ -715,9 +1189,13 @@ def build_market_event(tree):
                     },
 
                     "product_market_level": {
-                        "chart": build_monthly_chart(
-                            product_market_share_monthly
+                        # Selected products across all markets.
+                        "chart": build_product_market_chart(
+                            product_market_share_chart_monthly,
+                            period_key="months",
                         ),
+
+                        # Complete table with all cuts.
                         "table": product_market_share_monthly,
                     },
                 },
@@ -736,9 +1214,13 @@ def build_market_event(tree):
                     },
 
                     "product_market_level": {
-                        "chart": build_yearly_chart(
-                            product_market_share_yearly
+                        # Selected products across all markets.
+                        "chart": build_product_market_chart(
+                            product_market_share_chart_yearly,
+                            period_key="years",
                         ),
+
+                        # Complete table with all cuts.
                         "table": product_market_share_yearly,
                     },
                 },
@@ -759,9 +1241,13 @@ def build_market_event(tree):
                     },
 
                     "product_market_level": {
-                        "chart": build_monthly_chart(
-                            product_market_volume_monthly
+                        # Selected products across all markets.
+                        "chart": build_product_market_chart(
+                            product_market_volume_chart_monthly,
+                            period_key="months",
                         ),
+
+                        # Complete table with all cuts.
                         "table": product_market_volume_monthly,
                     },
                 },
@@ -780,15 +1266,132 @@ def build_market_event(tree):
                     },
 
                     "product_market_level": {
-                        "chart": build_yearly_chart(
-                            product_market_volume_yearly
+                        # Selected products across all markets.
+                        "chart": build_product_market_chart(
+                            product_market_volume_chart_yearly,
+                            period_key="years",
                         ),
+
+                        # Complete table with all cuts.
                         "table": product_market_volume_yearly,
                     },
                 },
             },
         },
     }
+
+def build_market_chart_rows(
+    tree,
+    metric,
+    selected_products=None,
+):
+    """
+    Build Product-Market chart rows.
+
+    Includes:
+        - only selected products
+        - every market for those products
+    """
+
+    months_count = len(tree["months"])
+    overall_volume = tree["overall"]["volume"]
+
+    selected_product_set = {
+        str(product).strip().lower()
+        for product in (selected_products or [])
+        if product
+    }
+
+    rows = []
+
+    for product_name in sorted(tree["products"]):
+        normalized_product_name = (
+            str(product_name)
+            .strip()
+            .lower()
+        )
+
+        if (
+            selected_product_set
+            and normalized_product_name
+            not in selected_product_set
+        ):
+            continue
+
+        product_row = {
+            "label": product_name,
+            "values": [0.0] * months_count,
+            "children": [],
+        }
+
+        # No selected-market filtering here.
+        # Every market is included for the selected product.
+        for market_name in sorted(tree["markets"]):
+            market = tree["markets"][market_name]
+
+            market_product_volume = [0.0] * months_count
+
+            for source in market.get("sources", {}).values():
+                product_node = (
+                    source
+                    .get("products", {})
+                    .get(product_name)
+                )
+
+                if not product_node:
+                    continue
+
+                product_values = product_node.get(
+                    "volume",
+                    [],
+                )
+
+                market_product_volume = [
+                    round(current + value, 2)
+                    for current, value in zip(
+                        market_product_volume,
+                        product_values,
+                    )
+                ]
+
+            if metric == "volume":
+                child_values = market_product_volume
+
+            else:
+                child_values = [
+                    round(
+                        product_volume
+                        / total_volume
+                        * 100,
+                        2,
+                    )
+                    if total_volume
+                    else 0.0
+                    for product_volume, total_volume in zip(
+                        market_product_volume,
+                        overall_volume,
+                    )
+                ]
+
+            product_row["children"].append(
+                {
+                    "label": market_name,
+                    "values": child_values,
+                }
+            )
+
+            product_row["values"] = [
+                round(current + value, 2)
+                for current, value in zip(
+                    product_row["values"],
+                    child_values,
+                )
+            ]
+
+        if product_row["children"]:
+            rows.append(product_row)
+
+    return rows
 
 def build_overall_impact_curve_configuration(tree):
 

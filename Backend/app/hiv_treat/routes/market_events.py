@@ -364,7 +364,8 @@ def apply_market_event_filters(
         )
 
         market_event = build_market_event(
-            tree
+            tree=tree,
+            selected_products=selected_filter.products,
         )
 
         debug_event_summary(
@@ -373,7 +374,8 @@ def apply_market_event_filters(
         )
 
         product_event = build_product_event(
-            tree
+            tree,
+            selected_markets=selected_filter.markets,
         )
 
         debug_event_summary(
