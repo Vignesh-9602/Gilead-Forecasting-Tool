@@ -67,6 +67,106 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
     const FADED_COLOR = "#D1D5DB";    // Gray
     const DEFAULT_COLOR = "#2563EB";  // Blue
 
+    const SCENARIO_COLORS = [
+        "#2563EB", // Blue
+        "#F59E0B", // Orange
+        "#16A34A", // Green
+        "#9333EA", // Purple
+        "#DC2626", // Red
+        "#0891B2", // Cyan
+        "#D97706", // Amber
+        "#4F46E5", // Indigo
+    ];
+
+    const PAYER_COLORS = {
+        "Cash": "#2563EB",
+        "Commercial": "#F59E0B",
+        "Medicaid": "#16A34A",
+        "Medicare": "#9333EA",
+    };
+
+    const PRODUCT_COLORS = {
+        "ASGA": "#2563EB",
+        "GILD": "#F59E0B",
+        "Other": "#16A34A",
+    };
+
+    const getSeriesColor = (item, index) => {
+
+        const label = item.label || "";
+
+        switch (activeTab) {
+
+            case "total_market_volume":
+                return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
+
+            case "payer_distribution": {
+
+                if (label.startsWith("Cash"))
+                    return PAYER_COLORS["Cash"];
+
+                if (label.startsWith("Commercial"))
+                    return PAYER_COLORS["Commercial"];
+
+                if (label.startsWith("Medicaid"))
+                    return PAYER_COLORS["Medicaid"];
+
+                if (label.startsWith("Medicare"))
+                    return PAYER_COLORS["Medicare"];
+
+                return "#64748B";
+            }
+
+            case "product_distribution": {
+
+                if (label.startsWith("ASGA"))
+                    return PRODUCT_COLORS.ASGA;
+
+                if (label.startsWith("GILD"))
+                    return PRODUCT_COLORS.GILD;
+
+                if (label.startsWith("Other"))
+                    return PRODUCT_COLORS.Other;
+
+                return "#64748B";
+            }
+
+            case "payer_product": {
+
+                if (label.includes("ASGA"))
+                    return PRODUCT_COLORS.ASGA;
+
+                if (label.includes("GILD"))
+                    return PRODUCT_COLORS.GILD;
+
+                if (label.includes("Other"))
+                    return PRODUCT_COLORS.Other;
+
+                return "#64748B";
+            }
+
+            case "product_payer": {
+
+                if (label.includes("Cash"))
+                    return PAYER_COLORS["Cash"];
+
+                if (label.includes("Commercial"))
+                    return PAYER_COLORS["Commercial"];
+
+                if (label.includes("Medicaid"))
+                    return PAYER_COLORS["Medicaid"];
+
+                if (label.includes("Medicare"))
+                    return PAYER_COLORS["Medicare"];
+
+                return "#64748B";
+            }
+
+            default:
+                return "#2563EB";
+        }
+    };
+
     const traces = series.flatMap((item, index) => {
 
         const historyMonths =
@@ -87,58 +187,55 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
 
         ];
 
-        let color = ACTIVE_COLOR;
-        let width = 3;
+        // let color = ACTIVE_COLOR;
+        // let width = 3;
 
-        switch (activeTab) {
+        // switch (activeTab) {
 
-            case "total_market_volume":
-                color = ACTIVE_COLOR;
-                width = 3;
-                break;
+        //     case "total_market_volume":
+        //         color = ACTIVE_COLOR;
+        //         width = 3;
+        //         break;
 
-            case "payer_distribution": {
-                // Series labels look like "Cash (BASE)" — strip the
-                // trailing " (Scenario)" part before comparing to the
-                // bare payer name the filter panel uses.
-                const baseLabel = item.label?.split(" (")[0];
-                const isSelected =
-                    baseLabel?.toLowerCase() === selectedPayer?.toLowerCase();
+        //     case "payer_distribution": {
+        //         const baseLabel = item.label?.split(" (")[0];
+        //         const isSelected =
+        //             baseLabel?.toLowerCase() === selectedPayer?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            case "product_distribution": {
-                const baseLabel = item.label?.split(" (")[0];
-                const isSelected =
-                    baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
+        //     case "product_distribution": {
+        //         const baseLabel = item.label?.split(" (")[0];
+        //         const isSelected =
+        //             baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            case "payer_product":
-            case "product_payer": {
-                // These tabs' chart series only carry a plain label like
-                // "Commercial (BASE)" — no separate payer/product fields —
-                // so match against either the selected payer or product.
-                const baseLabel = item.label?.split(" (")[0];
-                const isSelected =
-                    baseLabel?.toLowerCase() === selectedPayer?.toLowerCase() ||
-                    baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
+        //     case "payer_product":
+        //     case "product_payer": {
+        //         const baseLabel = item.label?.split(" (")[0];
+        //         const isSelected =
+        //             baseLabel?.toLowerCase() === selectedPayer?.toLowerCase() ||
+        //             baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
 
-                color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-                width = isSelected ? 3 : 2;
-                break;
-            }
+        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
+        //         width = isSelected ? 3 : 2;
+        //         break;
+        //     }
 
-            default:
-                color = ACTIVE_COLOR;
-                width = 3;
-        }
+        //     default:
+        //         color = ACTIVE_COLOR;
+        //         width = 3;
+        // }
+
+        const color = getSeriesColor(item, index);
+        const width = 3;
 
         return [
 
@@ -187,6 +284,8 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
                 type: "scatter",
 
                 mode: "lines",
+
+                name: item.label,
 
                 showlegend: false,
 
