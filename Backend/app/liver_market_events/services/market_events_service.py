@@ -1938,7 +1938,44 @@ def extract_snapshot_from_market_analysis(market_analysis: dict) -> dict | None:
     }
 
 
-def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, filter_payers=None) -> dict:
+def _clip_snapshot_to_range(months: list, forecast_start_index: int, total_all: list,
+                             saved_series: dict, start_date: str | None, end_date: str | None) -> tuple:
+    """
+    Narrow a reconstructed snapshot's months/total_all/series down to
+    [start_date, end_date] (inclusive), the same clipping HIV's own
+    _clip_series_to_range does for its saved-scenario views. Without this,
+    a saved (non-BASE) scenario always shows the full month range it was
+    ORIGINALLY saved with -- a newly applied date filter narrows BASE (see
+    _compute_base_event_tabs, which slices selected_filter's start_date/
+    end_date directly) but had no effect here at all.
+
+    forecast_start_index is re-derived relative to the clipped window.
+    A start/end outside the snapshot's own range clamps to what's available
+    (widening isn't possible -- the snapshot has no data beyond what was
+    saved), matching HIV's clamp-not-extend behavior.
+    """
+    if not months or (not start_date and not end_date):
+        return months, forecast_start_index, total_all, saved_series
+
+    lo = 0
+    hi = len(months)
+    if start_date:
+        lo = next((i for i, mth in enumerate(months) if mth >= start_date), len(months))
+    if end_date:
+        hi = next((i for i, mth in enumerate(months) if mth > end_date), len(months))
+
+    clipped_months = months[lo:hi]
+    clipped_total = total_all[lo:hi]
+    clipped_fsi = max(0, min(len(clipped_months), forecast_start_index - lo))
+    clipped_series = {
+        product: {payer: vals[lo:hi] for payer, vals in payer_map.items()}
+        for product, payer_map in saved_series.items()
+    }
+    return clipped_months, clipped_fsi, clipped_total, clipped_series
+
+
+def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, filter_payers=None,
+                                           start_date: str | None = None, end_date: str | None = None) -> dict:
     """
     Rebuild a full event_tabs from a compact volume snapshot.
 
@@ -1949,6 +1986,10 @@ def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, 
     forecast_start_index = snapshot["forecast_start_index"]
     total_all            = [float(v) for v in snapshot["total_all"]]
     saved_series         = snapshot.get("series", {})
+
+    months, forecast_start_index, total_all, saved_series = _clip_snapshot_to_range(
+        months, forecast_start_index, total_all, saved_series, start_date, end_date
+    )
 
     month_tuples = [(int(m[:4]), int(m[5:7])) for m in months]
 
@@ -2240,11 +2281,14 @@ def _load_saved_event_tabs(cur, scenario_name: str, ta: str,
     raw = load_scenario_event_tabs(cur, scenario_name)
     filter_products = (selected_filter or {}).get("products")
     filter_payers   = (selected_filter or {}).get("payers")
+    filter_start    = (selected_filter or {}).get("start_date")
+    filter_end      = (selected_filter or {}).get("end_date")
 
     if raw is not None:
         if "series" in raw:
             return _reconstruct_event_tabs_from_snapshot(
-                raw, filter_products=filter_products, filter_payers=filter_payers
+                raw, filter_products=filter_products, filter_payers=filter_payers,
+                start_date=filter_start, end_date=filter_end,
             )
         # Legacy full format
         return raw
@@ -2255,7 +2299,8 @@ def _load_saved_event_tabs(cur, scenario_name: str, ta: str,
         snapshot = extract_snapshot_from_market_analysis(ma)
         if snapshot:
             return _reconstruct_event_tabs_from_snapshot(
-                snapshot, filter_products=filter_products, filter_payers=filter_payers
+                snapshot, filter_products=filter_products, filter_payers=filter_payers,
+                start_date=filter_start, end_date=filter_end,
             )
 
     # Nothing saved at all — fall back to BASE
