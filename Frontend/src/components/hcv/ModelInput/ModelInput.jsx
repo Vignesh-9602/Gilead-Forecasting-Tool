@@ -2646,7 +2646,13 @@ export default function PBCModelInput() {
               any = true;
             }
           });
-          monthly_data[m] = any ? sum : null;
+          // A full market-share breakdown always sums to 100% by
+          // definition. Each payer's (or product's) own combos already sum
+          // to 100% within that payer, so summing across every payer as
+          // well inflates the raw total to e.g. 400% for 4 payers — show
+          // the correct 100% instead (whenever there's actually data for
+          // this month), rather than that inflated raw sum.
+          monthly_data[m] = !any ? null : isPercentTab ? 100 : sum;
         });
         return {
           brandName: scenarioName,
@@ -2698,7 +2704,7 @@ export default function PBCModelInput() {
               any = true;
             }
           });
-          monthly_data[m] = any ? sum : null;
+          monthly_data[m] = !any ? null : isPercentTab ? 100 : sum;
         });
         mainRow = {
           hierarchy: brandKey,
