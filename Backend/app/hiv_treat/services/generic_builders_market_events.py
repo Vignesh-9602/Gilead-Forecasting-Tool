@@ -1009,7 +1009,7 @@ def build_market_event(
 
     view_options = [
         {
-            "label": "Market Level",
+            "label": "Channel Level",
             "value": "market_level",
         },
         {

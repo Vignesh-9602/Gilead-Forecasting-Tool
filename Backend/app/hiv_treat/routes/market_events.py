@@ -134,12 +134,31 @@ def get_market_event_filters(
             if row["product"]
         ]
 
-        # Available Months
-        # Generated from configured start & end dates
-        available_months = generate_months(
-            config["start_date"],
-            config["end_date"]
+        # --------------------------------------------------
+        # Available Months — fetched from stored forecast_data,
+        # not generated from start/end dates
+        # --------------------------------------------------
+        cursor.execute(
+            """
+            SELECT forecast_data
+            FROM raw_hiv_treat.forecast_outputs
+            WHERE ta_name = %s
+              AND UPPER(TRIM(market)) = 'ALL'
+              AND UPPER(TRIM(product)) = 'ALL'
+            LIMIT 1
+            """,
+            (ta_name,),
         )
+
+        row = cursor.fetchone()
+        if not row or not row.get("forecast_data"):
+            raise HTTPException(
+                status_code=404,
+                detail="No month data found."
+            )
+
+        months = row["forecast_data"].get("months", [])
+        available_months = sorted(months)
 
         return {
             "ta_name": ta_name,
