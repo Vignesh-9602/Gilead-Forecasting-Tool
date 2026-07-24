@@ -1797,6 +1797,12 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
 
         active_scenario   = payload.scenario or "Base"
         all_scenario_names = get_scenarios(cur)
+        # "Base" is now a real persisted row (see the Base-persist block below),
+        # so it must be excluded here the same way _persist_and_respond /
+        # _build_scenario_response already do -- otherwise it's prepended AND
+        # present in all_scenario_names, listing "Base" twice.
+        if "Base" in all_scenario_names:
+            all_scenario_names.remove("Base")
         available_scenarios = ["Base"] + all_scenario_names
 
         saved_factors_raw = None
@@ -1854,6 +1860,64 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
 
         if active_scenario == "Base":
             base_full_ma = market_analysis
+
+            # Persist this live Base computation the same way a real scenario
+            # gets saved (see _persist_and_respond), so Market Events can read
+            # it back as a stored snapshot instead of independently
+            # re-implementing Model Input's own forecasting logic (frozen-
+            # remainder shares, per-combo training windows, etc.) — two
+            # separate implementations of the same math kept drifting out of
+            # sync with each other, which is what caused the BASE-view
+            # mismatches between the two screens. Base is never user-editable
+            # here, so it's always safe to overwrite with the freshest
+            # computation.
+            #
+            # Deliberately recomputed at the config's OWN train_start_date/
+            # forecast_periods rather than persisting `market_analysis` as-is:
+            # that one is scoped to whatever narrower from/to date the user
+            # currently has applied in Model Input's own display filter
+            # (payload.from_date/to_date). If the persisted snapshot only
+            # covered that narrow window, Market Events could never show/
+            # filter back to months outside it -- e.g. Model Input's display
+            # starts Aug-2020 while the model actually trained from Apr-2020,
+            # so Market Events would be stuck unable to reach Apr-2020 no
+            # matter what date range it was asked for. The persisted copy
+            # should always span the model's full range, independent of
+            # whatever narrower window the user's display happens to show.
+            #
+            # Best-effort: a failure here must not break the live Model Input response.
+            try:
+                wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
+                wide_forecast_periods = int(cfg["forecast_periods"])
+                persist_ma, _ = _build_market_analysis_both_granularities(
+                    cur, payload.ta, wide_from_year, wide_from_month,
+                    train_end_year, train_end_month, wide_forecast_periods, factors,
+                    sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                    scenario_name=payload.scenario,
+                )
+                persist_ma = _recompute_all_market_shares_nested(persist_ma)
+                wide_end_date = _add_months(
+                    date_type(train_end_year, train_end_month, 1), wide_forecast_periods
+                ).isoformat()
+
+                save_scenario(
+                    cur,
+                    scenario_name="Base",
+                    ta=payload.ta,
+                    payer=_first(payload.payer) or "",
+                    product=_first(payload.brand) or "",
+                    from_date=cfg["train_start_date"],
+                    to_date=wide_end_date,
+                    chart_data={"market_analysis": persist_ma},
+                    factors=response_factors,
+                )
+                base_snapshot = extract_snapshot_from_market_analysis(persist_ma)
+                if base_snapshot:
+                    save_market_events_scenario(cur, "Base", base_snapshot)
+                conn.commit()
+            except Exception as _base_persist_err:
+                conn.rollback()
+                print(f"[liver] Base snapshot persist skipped: {_base_persist_err}")
         else:
             base_factors = _estimate_default_factors(
                 cur, payload.ta, from_year, from_month,
@@ -2024,6 +2088,10 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
 
         active_scenario    = payload.scenario_name or "Base"
         all_scenario_names = get_scenarios(cur)
+        # See apply_liver_filters: "Base" is now a real persisted row, so it
+        # must be excluded here too or it's listed twice.
+        if "Base" in all_scenario_names:
+            all_scenario_names.remove("Base")
         available_scenarios = ["Base"] + all_scenario_names
 
         # Tab1 only changes when the user explicitly recalculates total_market_volume.
@@ -2684,7 +2752,10 @@ def refresh_liver(payload):
 
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
         all_saved_cd = {r[0]: (r[1] or {}) for r in cur.fetchall()}
-        available_scenarios = ["Base"] + list(all_saved_cd.keys())
+        # "Base" is now a real persisted row (see apply_liver_filters), so it
+        # must be excluded here too or it's listed twice. all_saved_cd itself
+        # keeps its "Base" key untouched -- only this scenario-name list drops it.
+        available_scenarios = ["Base"] + [s for s in all_saved_cd.keys() if s != "Base"]
     finally:
         cur.close()
         conn.close()

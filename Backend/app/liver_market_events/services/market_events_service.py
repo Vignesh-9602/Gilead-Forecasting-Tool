@@ -234,12 +234,18 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
         else:
             available_months, forecast_start_date = _available_months_fallback(cur, ta)
 
-        if sf.scenario_name.upper() == "BASE":
-            saved_event_tabs = _compute_base_event_tabs(cur, ta, sf.model_dump(), forecast_start_date)
-        else:
-            saved_event_tabs = _load_saved_event_tabs(
-                cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
-            )
+        # "BASE" is no longer computed independently here — Model Input now
+        # persists its own live Base computation as a normal saved scenario
+        # (see apply_liver_filters in liver_service.py), so _load_saved_event_tabs
+        # reads it back the exact same way it reads any other saved scenario
+        # (its scenario_name lookup is case-insensitive, so "BASE" matches the
+        # "Base" row Model Input writes). This guarantees the two screens can
+        # no longer drift apart the way independent re-implementations did.
+        # _compute_base_event_tabs remains as _load_saved_event_tabs's own
+        # internal fallback for a TA that has never had Model Input opened yet.
+        saved_event_tabs = _load_saved_event_tabs(
+            cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
+        )
 
         payer_event_config = {
             "products":            products,
@@ -1748,12 +1754,12 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
         else:
             available_months, forecast_start_date = _available_months_fallback(cur, ta)
 
-        if sf.scenario_name.upper() == "BASE":
-            saved_event_tabs = _compute_base_event_tabs(cur, ta, sf.model_dump(), forecast_start_date)
-        else:
-            saved_event_tabs = _load_saved_event_tabs(
-                cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
-            )
+        # See apply_market_events_filters above: "BASE" now reads Model Input's
+        # own persisted live computation via _load_saved_event_tabs, the same
+        # path used for any other saved scenario.
+        saved_event_tabs = _load_saved_event_tabs(
+            cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
+        )
 
         normalized_metric = _normalize_metric(payload.selected_metric)
         internal_metric = _resolve_metric_key(payload.selected_tab, normalized_metric)
