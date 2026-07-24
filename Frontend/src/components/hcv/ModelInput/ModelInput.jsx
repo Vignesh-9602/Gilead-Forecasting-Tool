@@ -117,15 +117,18 @@ const ForecastChart = ({
   const fsi = chartData.forecast_start_index || 0;
   const series = chartData.series || [];
 
-  const allMonths = months.map((m) => {
-    const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
-    return parsed.isValid()
-      ? parsed.format("MMM-YY")
-      : new Date(m).toLocaleDateString("en-US", {
-        month: "short",
-        year: "2-digit",
-      });
-  });
+  const formatMonths = (rawMonths) =>
+    (rawMonths || []).map((m) => {
+      const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
+      return parsed.isValid()
+        ? parsed.format("MMM-YY")
+        : new Date(m).toLocaleDateString("en-US", {
+          month: "short",
+          year: "2-digit",
+        });
+    });
+
+  const allMonths = formatMonths(months);
 
   const isTotalMarket = activeTab === "total_market";
   const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
@@ -183,6 +186,13 @@ const ForecastChart = ({
           train_values: toNums(s.history || s.train_values),
           forecast_values: toNums(s.forecast || s.forecast_values),
           scenario: name,
+          // This scenario's OWN months/forecast start — a newly created
+          // scenario can have a different date range than the currently
+          // active one, so its values must be plotted against its own
+          // dates, not blanket-applied to the active scenario's x-axis.
+          months: rawChart.months || null,
+          forecastStartIndex:
+            rawChart.forecast_start_index != null ? rawChart.forecast_start_index : null,
         }));
       })
       : null;
@@ -273,15 +283,21 @@ const ForecastChart = ({
         ? `${s.label} (${s.scenario})`
         : s.label;
 
+    // Use this trace's own months/forecast-start if it carries them (a
+    // comparison scenario with a different date range than the currently
+    // active one) — otherwise fall back to the shared active-scenario axis.
+    const itemMonths = s.months && s.months.length ? formatMonths(s.months) : allMonths;
+    const itemFsi = s.forecastStartIndex != null ? s.forecastStartIndex : fsi;
+
     const forecastX =
-      fsi > 0
-        ? [allMonths[fsi - 1], ...allMonths.slice(fsi)]
-        : allMonths.slice(fsi);
+      itemFsi > 0
+        ? [itemMonths[itemFsi - 1], ...itemMonths.slice(itemFsi)]
+        : itemMonths.slice(itemFsi);
     const lastTrain = s.train_values?.length
       ? s.train_values[s.train_values.length - 1]
       : null;
     const forecastY =
-      fsi > 0
+      itemFsi > 0
         ? [
           lastTrain ?? null,
           ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
@@ -290,9 +306,9 @@ const ForecastChart = ({
           ? s.forecast_values
           : [];
 
-    const trainX = allMonths.slice(0, fsi);
+    const trainX = itemMonths.slice(0, itemFsi);
     const trainY = Array.isArray(s.train_values)
-      ? s.train_values.slice(0, fsi)
+      ? s.train_values.slice(0, itemFsi)
       : [];
 
     return [
@@ -1848,6 +1864,14 @@ export default function PBCModelInput() {
   };
 
   const handleApplyFilter = async () => {
+    if (!resolveFromDate()) {
+      showSnackbar("Please select a From Date before applying filters", "error");
+      return;
+    }
+    if (!toDate) {
+      showSnackbar("Please select a To Date before applying filters", "error");
+      return;
+    }
     try {
       setLoading(true);
       if (isHCV) {
@@ -2497,12 +2521,12 @@ export default function PBCModelInput() {
     if (!liverRawData?.scenarios) return [];
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
     const activeMetricKey = toApiMetricKey(metric);
-    const months = chartData?.months || [];
+    const fallbackMonths = chartData?.months || [];
     const scenarioNames = selectedCompareScenarios || [];
 
-    const toMonthly = (values) => {
+    const toMonthly = (values, monthsForThisScenario) => {
       const obj = {};
-      months.forEach((m, i) => {
+      monthsForThisScenario.forEach((m, i) => {
         const v = values?.[i];
         obj[m] = v == null ? null : Number(v);
       });
@@ -2523,6 +2547,12 @@ export default function PBCModelInput() {
         tabObj.payer_volume ||
         tabObj.payer_share ||
         Object.values(tabObj)[0];
+      // Each scenario carries its own months list (e.g. a newly created
+      // scenario can have a different date range than whatever's currently
+      // displayed) — use THIS scenario's own months to zip its values,
+      // rather than assuming every scenario shares the active one's dates.
+      const months =
+        metricObj?.monthly?.chart?.months || metricObj?.chart?.months || fallbackMonths;
       const rows =
         metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
 
@@ -2538,7 +2568,7 @@ export default function PBCModelInput() {
         const taggedParent = isComboTab ? parentLabel : `${parentLabel} (${scenarioName})`;
         out.push({
           hierarchy: taggedParent,
-          monthly_data: toMonthly(r.values || r.total || []),
+          monthly_data: toMonthly(r.values || r.total || [], months),
           is_applied: false,
           is_scenario_overlay: true,
           scenario: scenarioName,
@@ -2546,7 +2576,7 @@ export default function PBCModelInput() {
         (r.children || []).forEach((c) => {
           out.push({
             hierarchy: `${taggedParent} - ${c.label}`,
-            monthly_data: toMonthly(c.values || []),
+            monthly_data: toMonthly(c.values || [], months),
             is_applied: false,
             is_scenario_overlay: true,
             scenario: scenarioName,
@@ -3052,6 +3082,7 @@ export default function PBCModelInput() {
             <Button
               variant="contained"
               onClick={handleApplyFilter}
+              disabled={!resolveFromDate() || !toDate}
               sx={{
                 textTransform: "none",
                 borderRadius: "6px",
@@ -4291,6 +4322,24 @@ export default function PBCModelInput() {
                           const isTotalRow =
                             (group.brandName || "").trim().toLowerCase().startsWith("total");
 
+                          // On Product/Payer Distribution, comparison-scenario
+                          // rows already show "(ScenarioName)" in the label
+                          // (baked in via scenarioOverlayTableRows), but the
+                          // applied/base scenario's own rows didn't show
+                          // anything — inconsistent, and ambiguous once more
+                          // than one scenario is being compared. Add the same
+                          // bracket to the applied scenario's rows too, for
+                          // display only (group.brandName itself stays clean,
+                          // since it's also used as the edit/save key).
+                          const showsAppliedScenarioTag =
+                            (activeTab === "prod_dist" || activeTab === "payer_dist") &&
+                            !group.isScenarioOverlay &&
+                            !isTotalRow &&
+                            compareScenarioOptions.length > 1;
+                          const displayBrandName = showsAppliedScenarioTag
+                            ? `${group.brandName} (${currentlyAppliedScenario || "Base"})`
+                            : group.brandName;
+
                           // total_market tab: only the radio-selected scenario row
                           // is editable. Other tabs: only leaf rows (no children,
                           // not a Total row) are editable.
@@ -4429,7 +4478,7 @@ export default function PBCModelInput() {
                                               : "#334155",
                                       }}
                                     >
-                                      {group.brandName}
+                                      {displayBrandName}
                                     </Typography>
 
                                   </Box>
