@@ -318,6 +318,19 @@ export default function HIVMarketEvent() {
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
 
+    // The "To Date" dropdown only lists months >= fromDate, but nothing
+    // corrected `toDate` itself when a later `fromDate` pushed it out of
+    // range — the Select would render blank while `toDate` silently kept
+    // its old (now invalid, end < start) value, and that stale value still
+    // got sent to Apply Filter. Keep it valid automatically instead.
+    useEffect(() => {
+        if (!fromDate || !toDate) return;
+
+        if (dayjs(toDate).isBefore(dayjs(fromDate))) {
+            setToDate(fromDate);
+        }
+    }, [fromDate]);
+
     const [activeTab, setActiveTab] =
         useState("overall_event");
 
@@ -1273,19 +1286,6 @@ export default function HIVMarketEvent() {
                                         e.target.value
                                     )
                                 }
-                                 MenuProps={{
-                                        PaperProps: {
-                                            sx: {
-                                                maxHeight: 300,
-                                                width: 130,
-                                                "& .MuiMenuItem-root": {
-                                                    minHeight: 32,
-                                                    fontSize: "15px",
-                                                    py: 0.5,
-                                                },
-                                            },
-                                        },
-                                    }}
                             >
 
                                 {availableScenarios.map((item) => (
@@ -1698,9 +1698,22 @@ export default function HIVMarketEvent() {
 
                     <Tabs
                         value={activeTab}
-                        onChange={(_, value) =>
-                            setActiveTab(value)
-                        }
+                        onChange={(_, value) => {
+                            setActiveTab(value);
+
+                            // Payer Event / Product Event should default to
+                            // the "Share" view rather than whatever metric
+                            // happened to be selected on the previous tab.
+                            if (value === "payer_event" || value === "product_event") {
+                                const hasShareMetric = metricFilters.some(
+                                    (item) => item.value === "market_share",
+                                );
+
+                                if (hasShareMetric) {
+                                    setSelectedMetric("market_share");
+                                }
+                            }
+                        }}
                     >
 
                         {EVENT_TABS.map((tab) => (
@@ -2822,6 +2835,8 @@ export default function HIVMarketEvent() {
                         subViewOptions={currentSubViewOptions}
                         onRefreshTable={handleRefreshLiverMarketEventTable}
                         onSaveTable={handleSaveLiverMarketEventTable}
+                        selectedPayers={selectedPayers}
+                        selectedProducts={selectedProducts}
                     />
                 </AccordionDetails>
             </Accordion>

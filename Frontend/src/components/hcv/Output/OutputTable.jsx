@@ -42,12 +42,18 @@ const formatCellValue = (value, isShare) => {
         : Math.round(numeric).toLocaleString();
 };
 
+const SELECTED_COLOR = "#F59E0B"; // Amber — matches the chart's highlight color
+const SELECTED_BG = "#FFF7ED";
+
 // rows: [{ key, label, metricLabel, values, rowType: 'total'|'group'|'child'|'leaf', children? }]
 export default function OutputTable({
     pivotLabel = "Total Volume Base",
     headers = [],
     rows = [],
     metric = "market_volume",
+    selectedPayer,
+    selectedProduct,
+    forecastStartIndex,
 }) {
     const [expandedKeys, setExpandedKeys] = useState({});
 
@@ -79,7 +85,29 @@ export default function OutputTable({
         }));
     };
 
-    const renderRow = (row) => {
+    // Does this row's own label match the currently selected payer or product?
+    // Flat-table rows carry a trailing "(BASE Scenario)" suffix (e.g.
+    // "Cash (BASE Scenario)"), so compare against the base name only —
+    // hierarchy rows are already bare names ("Cash", "ASGA") and pass
+    // through this split unchanged.
+    const selfMatches = (row) => {
+        if (!row.label) return false;
+        const baseLabel = row.label.split(" (")[0].trim().toLowerCase();
+        return (
+            baseLabel === selectedPayer?.toLowerCase() ||
+            baseLabel === selectedProduct?.toLowerCase()
+        );
+    };
+
+    // ancestorMatched: whether this row's parent group was itself highlighted.
+    // Called with `true` for every top-level row (rows.map below) — flat
+    // tables (Payer/Product Distribution) have no real parent to check, and
+    // hierarchy roots' own group-level self-match is what actually gates
+    // them. Only recursive calls into row.children pass the parent's real
+    // isSelected, so a leaf like "ASGA" only lights up inside the specific
+    // selected payer's group, not under every payer's ASGA row — mirrors
+    // ModelInput.jsx's isAppliedParent / isAppliedChild cross-check.
+    const renderRow = (row, ancestorMatched = false) => {
         const hasChildren = Array.isArray(row.children) && row.children.length > 0;
         const isExpanded = expandedKeys[row.key] ?? true;
 
@@ -87,7 +115,22 @@ export default function OutputTable({
         const isGroup = row.rowType === "group" || hasChildren;
         const isChild = row.rowType === "child";
 
-        const rowBg = isTotal ? "#f1f5f9" : isGroup ? "#f8fafc" : "#fff";
+        const matchesHere = selfMatches(row);
+        const isSelected = isGroup ? matchesHere : ancestorMatched && matchesHere;
+
+        const rowBg = isSelected
+            ? SELECTED_BG
+            : isTotal
+                ? "#f1f5f9"
+                : isGroup
+                    ? "#f8fafc"
+                    : "#fff";
+
+        const labelColor = isSelected
+            ? SELECTED_COLOR
+            : isTotal
+                ? "#1e293b"
+                : "#334155";
 
         return (
             <React.Fragment key={row.key}>
@@ -101,8 +144,8 @@ export default function OutputTable({
                             backgroundColor: rowBg,
                             minWidth: 220,
                             maxWidth: 220,
-                            fontWeight: isTotal ? 800 : isGroup ? 700 : 500,
-                            color: isTotal ? "#1e293b" : isGroup ? "#4F46E5" : "#334155",
+                            fontWeight: isTotal || isSelected ? 700 : 400,
+                            color: labelColor,
                             borderRight: "2px solid #E2E8F0",
                             borderBottom: isTotal ? "2px solid #E2E8F0" : "1px solid #E2E8F0",
                             cursor: hasChildren ? "pointer" : "default",
@@ -117,7 +160,7 @@ export default function OutputTable({
                                         width: 14,
                                         fontWeight: 700,
                                         fontSize: "9px",
-                                        color: "#4F46E5",
+                                        color: isSelected ? SELECTED_COLOR : "#64748B",
                                         flexShrink: 0,
                                     }}
                                 >
@@ -126,7 +169,7 @@ export default function OutputTable({
                             )}
                             <Typography
                                 sx={{
-                                    fontSize: "12px",
+                                    fontSize: 14,
                                     fontWeight: "inherit",
                                     color: "inherit",
                                     whiteSpace: "nowrap",
@@ -137,33 +180,53 @@ export default function OutputTable({
                         </Box>
                     </TableCell>
 
-                    {(row.values || []).map((value, index) => (
-                        <TableCell
-                            key={index}
-                            align="right"
-                            sx={{
-                                minWidth: 90,
-                                backgroundColor: rowBg,
-                                borderRight: "1px solid #E2E8F0",
-                                borderBottom: isTotal ? "2px solid #E2E8F0" : "1px solid #E2E8F0",
-                            }}
-                        >
-                            <Typography
+                    {(row.values || []).map((value, index) => {
+                        const isForecastColumn =
+                            typeof forecastStartIndex === "number" && index >= forecastStartIndex;
+
+                        // The highlight only applies to forecast columns —
+                        // history columns keep their normal shading even on
+                        // a selected row, same as ModelInput.jsx.
+                        const highlightThisCell = isSelected && isForecastColumn;
+
+                        const cellBg = highlightThisCell
+                            ? SELECTED_BG
+                            : isForecastColumn
+                                ? "#FFFFFF"
+                                : "#F1F5F9";
+
+                        const cellColor = highlightThisCell
+                            ? SELECTED_COLOR
+                            : "#334155";
+
+                        return (
+                            <TableCell
+                                key={index}
+                                align="right"
                                 sx={{
-                                    fontSize: "12px",
-                                    fontWeight: isTotal ? 800 : isGroup ? 700 : 500,
-                                    color: isGroup && !isTotal ? "#4F46E5" : "#334155",
+                                    minWidth: 90,
+                                    backgroundColor: cellBg,
+                                    borderRight: "1px solid #E2E8F0",
+                                    borderBottom: isTotal ? "2px solid #E2E8F0" : "1px solid #E2E8F0",
                                 }}
                             >
-                                {formatCellValue(value, isShare)}
-                            </Typography>
-                        </TableCell>
-                    ))}
+                                <Typography
+                                    sx={{
+                                        fontSize: 14,
+                                        fontWeight: isTotal || highlightThisCell ? 700 : 400,
+                                        color: cellColor,
+                                    }}
+                                >
+                                    {formatCellValue(value, isShare)}
+                                </Typography>
+                            </TableCell>
+                        );
+                    })}
                 </TableRow>
 
                 {hasChildren &&
                     isExpanded &&
-                    row.children.map((child) => renderRow(child))}
+                    row.children.map((child) => renderRow(child, isSelected))}
             </React.Fragment>
         );
     };
@@ -212,7 +275,7 @@ export default function OutputTable({
                                         zIndex: 5,
                                         backgroundColor: "#f8fafc",
                                         fontWeight: 700,
-                                        fontSize: "11px",
+                                        fontSize: 14,
                                         color: "#64748b",
                                         minWidth: 220,
                                         maxWidth: 220,
@@ -233,7 +296,7 @@ export default function OutputTable({
                                             zIndex: 4,
                                             backgroundColor: "#f8fafc",
                                             fontWeight: 700,
-                                            fontSize: "11px",
+                                            fontSize: 14,
                                             color: "#64748b",
                                             minWidth: 90,
                                             borderRight: "1px solid #E2E8F0",
@@ -246,7 +309,7 @@ export default function OutputTable({
                             </TableRow>
                         </TableHead>
 
-                        <TableBody>{rows.map((row) => renderRow(row))}</TableBody>
+                        <TableBody>{rows.map((row) => renderRow(row, true))}</TableBody>
                     </Table>
                 </TableContainer>
             )}

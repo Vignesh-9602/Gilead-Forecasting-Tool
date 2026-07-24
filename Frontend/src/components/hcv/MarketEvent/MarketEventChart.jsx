@@ -10,7 +10,7 @@ import Plot from "react-plotly.js";
 const PlotComponent =
     Plot.default || Plot;
 
-export default function HIVImpactCurveChart({
+export default function MarketEventChart({
     chartData,
     activeTab,
 }) {
@@ -58,16 +58,22 @@ export default function HIVImpactCurveChart({
     const labels =
         (months || years || []).map(formatMonthLabel);
 
+    const hasHistory = forecast_start_index > 0;
+
     const historyX =
         labels.slice(
             0,
             forecast_start_index
         );
 
-    const forecastX =
-        labels.slice(
-            forecast_start_index - 1
-        );
+    // When the selected date range excludes all historical months
+    // (forecast_start_index === 0), there's no history point to anchor the
+    // forecast line to — labels.slice(forecast_start_index - 1) would
+    // otherwise become labels.slice(-1), which only grabs the LAST label
+    // instead of the full range.
+    const forecastX = hasHistory
+        ? labels.slice(forecast_start_index - 1)
+        : labels.slice(0);
 
     const traces = [];
 
@@ -114,16 +120,26 @@ export default function HIVImpactCurveChart({
 
         });
 
+        // Anchor the dotted forecast line to the last history point so the
+        // two lines connect visually — but only when a history point
+        // actually exists (otherwise this prepends `undefined`, which
+        // silently breaks the trace since x/y lengths would no longer
+        // match forecastX above).
+        const lastHistoryValue =
+            hasHistory && item.history && item.history.length
+                ? item.history[item.history.length - 1]
+                : null;
+
+        const forecastY =
+            lastHistoryValue !== null
+                ? [lastHistoryValue, ...(item.forecast || [])]
+                : (item.forecast || []);
+
         traces.push({
 
             x: forecastX,
 
-            y: [
-                item.history[
-                item.history.length - 1
-                ],
-                ...item.forecast,
-            ],
+            y: forecastY,
 
             mode: "lines",
 

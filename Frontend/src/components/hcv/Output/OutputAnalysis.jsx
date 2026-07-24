@@ -153,6 +153,9 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayer, selected
                         headers={tableHeaders}
                         rows={tableRows}
                         metric={selectedMetric}
+                        selectedPayer={selectedPayer}
+                        selectedProduct={selectedProduct}
+                        forecastStartIndex={currentData?.chart?.forecast_start_index}
                     />
                 </Box>
                 :
