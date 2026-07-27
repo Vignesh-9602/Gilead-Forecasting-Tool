@@ -1449,32 +1449,57 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
 #         "scenarios":           scenarios_block
 #     }
 
-def build_apply_scenario_response(cur, payload, config):
+def build_apply_scenario_response(
+    cur,
+    payload,
+    config,
+):
     ta = payload.ta_name
     flt = payload.selected_filter
+
     start = flt.start_date
     end = flt.end_date
 
-    available_scenarios = get_scenarios(cur, ta)
-    active_scenario     = available_scenarios[0]
+    available_scenarios = get_scenarios(
+        cur,
+        ta,
+    )
+
+    requested_scenario = getattr(
+        payload,
+        "scenario_name",
+        None,
+    )
+
+    active_scenario = (
+        requested_scenario
+        if requested_scenario in available_scenarios
+        else available_scenarios[0]
+    )
 
     scenarios_block = {}
 
     for scenario in available_scenarios:
 
-        market_analysis = build_scenario_market_analysis(
-            cur,
-            ta,
-            scenario,
-            start,
-            end,
-            flt.market,
-            flt.product
+        market_analysis = (
+            build_scenario_market_analysis(
+                cur,
+                ta,
+                scenario,
+                start,
+                end,
+                flt.market,
+                flt.product,
+            )
         )
 
         scenarios_block[scenario] = {
-            "factors": build_factors(cur, ta, scenario),
-            "market_analysis": market_analysis
+            "factors": build_factors(
+                cur,
+                ta,
+                scenario,
+            ),
+            "market_analysis": market_analysis,
         }
 
     return {
@@ -1483,9 +1508,11 @@ def build_apply_scenario_response(cur, payload, config):
             "start_date": start,
             "end_date": end,
             "market": flt.market,
-            "product": flt.product
+            "product": flt.product,
         },
-        "available_scenarios": available_scenarios,
-        "active_scenario": active_scenario,  # or remove this field if not needed
-        "scenarios": scenarios_block
+        "available_scenarios": (
+            available_scenarios
+        ),
+        "active_scenario": active_scenario,
+        "scenarios": scenarios_block,
     }
