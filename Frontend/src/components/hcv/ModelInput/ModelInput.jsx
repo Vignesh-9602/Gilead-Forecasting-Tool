@@ -2503,26 +2503,40 @@ export default function PBCModelInput() {
     setEditedHierarchies((prev) => ({ ...prev, [hierarchyKey]: true }));
   };
 
-  // Payer-Product / Product-Payer group by scenario at the top level
-  // (see groupedTableHierarchy); Product/Payer Distribution stay flat with
-  // inline "(ScenarioName)" tags — see scenarioOverlayTableRows below.
-  const isComboTab = activeTab === "payer_prod" || activeTab === "prod_payer";
-  const isScenarioGroupedTab = isComboTab;
+  // Tags a clean hierarchy string with its scenario, recursively through
+  // the "Parent - Child" split — mirrors HIV's appendScenario exactly
+  // (HIVMarketTable.jsx), which tags every row including the applied
+  // scenario's own, not just comparison scenarios.
+  const tagHierarchyWithScenario = (hierarchy, scenarioName) => {
+    if (!hierarchy || hierarchy === scenarioName) return hierarchy;
+    if (hierarchy.includes(" - ")) {
+      const idx = hierarchy.indexOf(" - ");
+      const parent = hierarchy.slice(0, idx);
+      const child = hierarchy.slice(idx + 3);
+      return `${parent} (${scenarioName}) - ${child} (${scenarioName})`;
+    }
+    return `${hierarchy} (${scenarioName})`;
+  };
 
-  // Extra table rows for every OTHER selected Compare Scenario, on tabs
-  // besides Total Market Volume (which already gets one row per scenario
-  // from its own bespoke handling upstream in normalizeLiverResponse).
-  // Mirrors HIV's mergedRows/appendScenario: pull each scenario's own rows
-  // for the active tab/metric directly from the raw per-scenario API data,
-  // tag the top-level label with "(ScenarioName)" so it renders as its own
-  // distinguishable group instead of merging into the active scenario's.
-  const scenarioOverlayTableRows = useMemo(() => {
-    if (activeTab === "total_market") return [];
-    if (!liverRawData?.scenarios) return [];
+  // Every selected scenario's rows, tagged uniformly (mirrors HIV's
+  // mergedRows/appendScenario): the applied scenario's own rows come from
+  // tableData, comparison scenarios come from the raw per-scenario API
+  // data — both get the SAME "(ScenarioName)" treatment at every level of
+  // the hierarchy, not just comparison rows. total_market is left as a
+  // simple passthrough since its rows are already one-per-scenario,
+  // named by the scenario itself, from upstream.
+  const taggedTableRows = useMemo(() => {
+    if (activeTab === "total_market") {
+      return tableData.map((row) => ({ ...row, scenario: row.hierarchy, cleanHierarchy: row.hierarchy }));
+    }
+
+    const scenarioNames = selectedCompareScenarios.length
+      ? selectedCompareScenarios
+      : (currentlyAppliedScenario ? [currentlyAppliedScenario] : []);
+
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
     const activeMetricKey = toApiMetricKey(metric);
     const fallbackMonths = chartData?.months || [];
-    const scenarioNames = selectedCompareScenarios || [];
 
     const toMonthly = (values, monthsForThisScenario) => {
       const obj = {};
@@ -2535,50 +2549,53 @@ export default function PBCModelInput() {
 
     const out = [];
     scenarioNames.forEach((scenarioName) => {
-      // The currently applied scenario's rows already come through as the
-      // base tableData — don't duplicate them here.
-      if (scenarioName === currentlyAppliedScenario) return;
+      if (scenarioName === currentlyAppliedScenario) {
+        // Applied scenario's rows already exist in tableData — just tag them.
+        tableData.forEach((row) => {
+          out.push({
+            ...row,
+            scenario: scenarioName,
+            cleanHierarchy: row.hierarchy,
+            hierarchy: tagHierarchyWithScenario(row.hierarchy, scenarioName),
+          });
+        });
+        return;
+      }
 
+      // Comparison scenario: pull its own rows directly from the raw API
+      // data (never re-derived from the applied scenario's tableData).
       const tabObj =
-        liverRawData.scenarios[scenarioName]?.market_analysis?.[backendTabKey];
+        liverRawData?.scenarios?.[scenarioName]?.market_analysis?.[backendTabKey];
       if (!tabObj) return;
       const metricObj =
         tabObj[activeMetricKey] ||
         tabObj.payer_volume ||
         tabObj.payer_share ||
         Object.values(tabObj)[0];
-      // Each scenario carries its own months list (e.g. a newly created
-      // scenario can have a different date range than whatever's currently
-      // displayed) — use THIS scenario's own months to zip its values,
-      // rather than assuming every scenario shares the active one's dates.
+      // Each scenario carries its own months — a newly created scenario can
+      // have a different date range than the currently displayed one, so
+      // use THIS scenario's own months rather than assuming a shared axis.
       const months =
         metricObj?.monthly?.chart?.months || metricObj?.chart?.months || fallbackMonths;
-      const rows =
-        metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
+      const rows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
 
       rows.forEach((r) => {
         const parentLabel = r.label || r.hierarchy || "";
         if (!parentLabel) return;
-        // Payer-Product / Product-Payer regroup by scenario at the top
-        // level (see groupedTableHierarchy), so keep their combo labels
-        // clean — the scenario is tracked via the `scenario` field instead
-        // of a "(ScenarioName)" suffix. Product/Payer Distribution stay
-        // flat: each scenario's row sits alongside the applied scenario's,
-        // tagged inline as e.g. "Cash (High Growth)".
-        const taggedParent = isComboTab ? parentLabel : `${parentLabel} (${scenarioName})`;
         out.push({
-          hierarchy: taggedParent,
+          hierarchy: tagHierarchyWithScenario(parentLabel, scenarioName),
+          cleanHierarchy: parentLabel,
           monthly_data: toMonthly(r.values || r.total || [], months),
           is_applied: false,
-          is_scenario_overlay: true,
           scenario: scenarioName,
         });
         (r.children || []).forEach((c) => {
+          const cleanCombo = `${parentLabel} - ${c.label}`;
           out.push({
-            hierarchy: `${taggedParent} - ${c.label}`,
+            hierarchy: tagHierarchyWithScenario(cleanCombo, scenarioName),
+            cleanHierarchy: cleanCombo,
             monthly_data: toMonthly(c.values || [], months),
             is_applied: false,
-            is_scenario_overlay: true,
             scenario: scenarioName,
           });
         });
@@ -2587,6 +2604,7 @@ export default function PBCModelInput() {
     return out;
   }, [
     activeTab,
+    tableData,
     liverRawData,
     metric,
     chartData,
@@ -2595,43 +2613,40 @@ export default function PBCModelInput() {
   ]);
 
   // ── Hierarchy grouping ────────────────────────────────────────────────────
+  const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
+
   const groupedTableHierarchy = useMemo(() => {
-    if (isScenarioGroupedTab) {
-      // Group by SCENARIO at the top level: expanding a scenario reveals
-      // every product/payer (or payer-product combination, on the two
-      // cross tabs) as a flat child row. The applied scenario's own rows
-      // come from `tableData` (untagged); comparison scenarios come from
-      // scenarioOverlayTableRows, tracked via their `scenario` field
-      // rather than a label suffix.
+    if (isScenarioParentTab) {
+      // Product/Payer Distribution: group by SCENARIO so each scenario's
+      // set of payers/products can be collapsed as a block. Unlike the
+      // combo tabs, these entities have no real hierarchy of their own
+      // (they're flat), so grouping them under their scenario instead is a
+      // clean addition rather than a restructuring of an existing tree.
       const byScenario = {};
-      const belongsToThisTab = (hierarchy) => {
-        const hasCombo = (hierarchy || "").includes(" - ");
-        // Combo tabs (Payer-Product/Product-Payer) want the flat combo
-        // rows; Distribution tabs (Product/Payer) are single-entity and
-        // never have a " - " separator, so exclude any that do (the base
-        // pipeline also emits a parent-only aggregate row alongside combo
-        // rows, which combo tabs need to skip here too).
-        return isComboTab ? hasCombo : !hasCombo;
-      };
-      tableData.forEach((row) => {
-        if (!belongsToThisTab(row.hierarchy)) return;
-        const name = currentlyAppliedScenario || "Applied Scenario";
-        if (!byScenario[name]) byScenario[name] = { rows: [], isScenarioOverlay: false };
-        byScenario[name].rows.push(row);
-      });
-      scenarioOverlayTableRows.forEach((row) => {
-        if (!belongsToThisTab(row.hierarchy)) return;
+      taggedTableRows.forEach((row) => {
         const name = row.scenario || "Unknown Scenario";
-        if (!byScenario[name]) byScenario[name] = { rows: [], isScenarioOverlay: true };
+        if (!byScenario[name]) byScenario[name] = { rows: [], scenario: name };
         byScenario[name].rows.push(row);
       });
 
       return Object.keys(byScenario).map((scenarioName) => {
         const entry = byScenario[scenarioName];
-        const children = entry.rows.map((row) => ({
-          ...row,
-          cleanLabel: row.hierarchy,
-        }));
+        // Exclude any pre-existing "Total"/"Grand Total" row from the raw
+        // data — it would otherwise get summed alongside the individual
+        // entities it's already the total of (double-counting the same
+        // 100% twice), and the group's own row now serves as that total.
+        const children = entry.rows
+          .filter((row) => {
+            const clean = (row.hierarchy || "").split(" (")[0].trim().toLowerCase();
+            return !clean.startsWith("total") && !clean.startsWith("grand total");
+          })
+          .map((row) => ({
+            ...row,
+            // Strip the "(ScenarioName)" tag for the child label — the
+            // scenario is already shown by the parent group, so repeating
+            // it on every child would be redundant.
+            cleanLabel: (row.hierarchy || "").split(" (")[0].trim(),
+          }));
         const months =
           chartData?.months ||
           (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
@@ -2646,42 +2661,45 @@ export default function PBCModelInput() {
               any = true;
             }
           });
-          // A full market-share breakdown always sums to 100% by
-          // definition. Each payer's (or product's) own combos already sum
-          // to 100% within that payer, so summing across every payer as
-          // well inflates the raw total to e.g. 400% for 4 payers — show
-          // the correct 100% instead (whenever there's actually data for
-          // this month), rather than that inflated raw sum.
-          monthly_data[m] = !any ? null : isPercentTab ? 100 : sum;
+          // Unlike the combo tabs, a flat single-dimension breakdown
+          // (payer-only or product-only) genuinely sums to 100% on its own
+          // — no multi-payer inflation issue here — so the plain sum is
+          // already the correct total.
+          monthly_data[m] = any ? sum : null;
         });
         return {
           brandName: scenarioName,
           mainRow: {
             hierarchy: scenarioName,
             monthly_data,
-            is_applied: !entry.isScenarioOverlay,
+            is_applied: entry.rows.some((r) => r.is_applied),
           },
           children,
-          isScenarioOverlay: entry.isScenarioOverlay,
+          isScenarioOverlay: scenarioName !== currentlyAppliedScenario,
           isScenarioGroup: true,
         };
       });
     }
 
+    // total_market, Payer-Product, Product-Payer: one unified path.
+    // taggedTableRows already carries each scenario's rows uniquely
+    // tagged, so the same simple split-on-" - " grouping naturally
+    // produces one group per scenario-tagged entity (e.g. "PayerA (Base)"
+    // and "PayerA (High Growth)" become separate top-level groups)
+    // without any further special-casing.
     const map = {};
-    [...tableData, ...scenarioOverlayTableRows].forEach((row) => {
+    taggedTableRows.forEach((row) => {
       const raw = row.hierarchy || "";
       if (raw.includes(" - ")) {
         const parts = raw.split(" - ");
         const brandKey = parts[0].trim();
         const payerKey = parts.slice(1).join(" - ").trim();
-        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], isScenarioOverlay: row.is_scenario_overlay };
+        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], scenario: row.scenario };
         map[brandKey].children.push({ ...row, cleanLabel: payerKey });
       } else {
         const brandKey = raw.trim();
-        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], isScenarioOverlay: row.is_scenario_overlay };
+        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], scenario: row.scenario };
         map[brandKey].mainRow = row;
-        if (row.is_scenario_overlay) map[brandKey].isScenarioOverlay = true;
       }
     });
 
@@ -2689,7 +2707,15 @@ export default function PBCModelInput() {
       const entry = map[brandKey];
       let mainRow = entry.mainRow;
       if (!mainRow) {
-        const children = entry.children || [];
+        // Exclude any pre-existing "Total"/"Grand Total" child (if the
+        // backend ever includes one alongside the real entities) from the
+        // sum below — same double-counting risk as the flat tabs' scenario
+        // total: it would otherwise be summed alongside the entities it's
+        // already the total of.
+        const children = (entry.children || []).filter((c) => {
+          const clean = (c.cleanLabel || "").trim().toLowerCase();
+          return !clean.startsWith("total") && !clean.startsWith("grand total");
+        });
         const months =
           chartData?.months ||
           (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
@@ -2718,10 +2744,15 @@ export default function PBCModelInput() {
         brandName: brandKey,
         mainRow,
         children: entry.children,
-        isScenarioOverlay: !!entry.isScenarioOverlay,
+        // total_market's own radio-selection mechanism already gates
+        // editability there — this flag is only meaningful for the other
+        // tabs, where it marks a group as belonging to a comparison
+        // scenario (not the applied one) so it can't be edited.
+        isScenarioOverlay:
+          activeTab === "total_market" ? false : entry.scenario !== currentlyAppliedScenario,
       };
     });
-  }, [isScenarioGroupedTab, isComboTab, tableData, scenarioOverlayTableRows, chartData, currentlyAppliedScenario]);
+  }, [activeTab, isScenarioParentTab, taggedTableRows, chartData, currentlyAppliedScenario, isPercentTab]);
 
   // ── Monthly / Yearly toggle helpers ──────────────────────────────────────
   // displayColumns are the column keys actually rendered in the table header.
@@ -4269,13 +4300,16 @@ export default function PBCModelInput() {
                     <>
                       {groupedTableHierarchy
                         .filter((group) => {
-                          // On tabs NOT grouped by scenario: always show all rows.
-                          if (activeTab !== "total_market" && !group.isScenarioGroup) return true;
-                          // On scenario-grouped tabs (total_market, and now
-                          // Payer-Product/Product-Payer): only filter once the
-                          // user has explicitly toggled the Compare Scenarios
-                          // checkboxes. Before that, show every scenario so
-                          // they're all visible on initial load / apply-filter.
+                          // Product/Payer Distribution and the two cross tabs
+                          // are already scoped to selectedCompareScenarios
+                          // upstream, in taggedTableRows — only total_market
+                          // (whose rows always include every scenario) needs
+                          // filtering here.
+                          if (activeTab !== "total_market") return true;
+                          // Only filter once the user has explicitly toggled
+                          // the Compare Scenarios checkboxes. Before that,
+                          // show every scenario so they're all visible on
+                          // initial load / apply-filter.
                           if (!userHasCustomizedCompare) return true;
                           if (!selectedCompareScenarios.length) return true;
                           return (
@@ -4307,19 +4341,25 @@ export default function PBCModelInput() {
                             .trim()
                             .toLowerCase();
 
+                          // group.brandName is always the scenario-tagged
+                          // display label now (e.g. "PayerA (Base Case)") —
+                          // edits must use the clean/original name, same as
+                          // HIV strips "(scenario)" back off before saving.
+                          const cleanBrandName =
+                            group.mainRow?.cleanHierarchy || (group.brandName || "").split(" (")[0];
+
                           let isAppliedParent = false;
 
-                          if (activeTab === "prod_dist") {
-                            isAppliedParent = targetParentLabel === currentBrand;
-                          } else if (activeTab === "payer_dist") {
-                            isAppliedParent = targetParentLabel === currentPayer;
-                          } else if (group.isScenarioGroup) {
-                            // Parent rows are scenario names here (combo
-                            // tabs only) — highlight the applied scenario's
-                            // group instead of trying to match the focused
-                            // payer/product filter against it (that
-                            // matching happens at the child level).
+                          if (activeTab === "prod_dist" || activeTab === "payer_dist") {
+                            // Parent rows are scenario names now (grouped
+                            // for collapsing) — highlight the applied
+                            // scenario's group; entity matching happens at
+                            // the child level below.
                             isAppliedParent = !group.isScenarioOverlay;
+                          } else if (activeTab === "payer_prod") {
+                            isAppliedParent = targetParentLabel === currentPayer;
+                          } else if (activeTab === "prod_payer") {
+                            isAppliedParent = targetParentLabel === currentBrand;
                           }
 
                           // Rows whose label starts with "Total" are always
@@ -4327,24 +4367,6 @@ export default function PBCModelInput() {
                           // have no children in the grouped structure.
                           const isTotalRow =
                             (group.brandName || "").trim().toLowerCase().startsWith("total");
-
-                          // On Product/Payer Distribution, comparison-scenario
-                          // rows already show "(ScenarioName)" in the label
-                          // (baked in via scenarioOverlayTableRows), but the
-                          // applied/base scenario's own rows didn't show
-                          // anything — inconsistent, and ambiguous once more
-                          // than one scenario is being compared. Add the same
-                          // bracket to the applied scenario's rows too, for
-                          // display only (group.brandName itself stays clean,
-                          // since it's also used as the edit/save key).
-                          const showsAppliedScenarioTag =
-                            (activeTab === "prod_dist" || activeTab === "payer_dist") &&
-                            !group.isScenarioOverlay &&
-                            !isTotalRow &&
-                            compareScenarioOptions.length > 1;
-                          const displayBrandName = showsAppliedScenarioTag
-                            ? `${group.brandName} (${currentlyAppliedScenario || "Base"})`
-                            : group.brandName;
 
                           // total_market tab: only the radio-selected scenario row
                           // is editable. Other tabs: only leaf rows (no children,
@@ -4484,7 +4506,7 @@ export default function PBCModelInput() {
                                               : "#334155",
                                       }}
                                     >
-                                      {displayBrandName}
+                                      {group.brandName}
                                     </Typography>
 
                                   </Box>
@@ -4524,7 +4546,7 @@ export default function PBCModelInput() {
                                             : String(Math.round(Number(val)))}
                                           onChange={(e) => {
                                             if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                              handleCellChange(group.brandName, col, e.target.value);
+                                              handleCellChange(cleanBrandName, col, e.target.value);
                                             }
                                           }}
                                           style={{
@@ -4551,9 +4573,15 @@ export default function PBCModelInput() {
 
                           {showChildren &&
                             group.children.map((childRow, idx) => {
-                              const childLabel = (childRow.cleanLabel || "").toLowerCase();
+                              // childRow.cleanLabel is always scenario-tagged now
+                              // (e.g. "ProductB (Base Case)") — strip it before
+                              // matching against the focused payer/product.
+                              const childLabel = (childRow.cleanLabel || "")
+                                .split(" (")[0]
+                                .trim()
+                                .toLowerCase();
                               let isAppliedChild = false;
-                              if (group.isScenarioGroup && !group.isScenarioOverlay) {
+                              if (!group.isScenarioOverlay) {
                                 if (activeTab === "prod_dist") {
                                   isAppliedChild = !!currentBrand && childLabel === currentBrand;
                                 } else if (activeTab === "payer_dist") {
@@ -4633,7 +4661,7 @@ export default function PBCModelInput() {
                                                   : String(Math.round(Number(childVal)))}
                                                 onChange={(e) => {
                                                   if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                                    handleCellChange(childRow.hierarchy, col, e.target.value);
+                                                    handleCellChange(childRow.cleanHierarchy || childRow.hierarchy, col, e.target.value);
                                                   }
                                                 }}
                                                 style={{

@@ -27,6 +27,32 @@ const DEFAULT_METRIC_BY_TAB = {
     product_payer: "payer_volume",
 };
 
+// Flat tables (Total Market Volume, Payer/Product Distribution) come back
+// as a flat list — every scenario's "Grand Total" row followed by its
+// breakdown rows, all as siblings with no nesting. Group each scenario's
+// rows under its own "Grand Total" parent so they can be collapsed, same
+// as the genuine Payer-Product / Product-Payer hierarchy tables already are.
+const groupFlatRowsByScenario = (rows = []) => {
+    const groups = [];
+    let current = null;
+
+    rows.forEach((row) => {
+        const isGrandTotal = row.label?.toLowerCase().includes("grand total");
+
+        if (isGrandTotal) {
+            current = { ...row, children: [] };
+            groups.push(current);
+        } else if (current) {
+            current.children.push(row);
+        } else {
+            // Defensive fallback: a row appearing before any Grand Total row.
+            groups.push(row);
+        }
+    });
+
+    return groups;
+};
+
 // Converts the API/mock row shape ({ label, target_metric, values, children })
 // into what the current OutputTable component expects
 // ({ key, label, metricLabel, values, rowType, children }).
@@ -57,7 +83,12 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayer, selected
     // Table headers minus the leading "Metric" column, since OutputTable
     // renders its own first two columns (pivotLabel + Target Metric).
     const tableHeaders = currentData?.table?.headers?.slice(1) || [];
-    const tableRows = transformTableRows(currentData?.table?.rows);
+
+    const isHierarchicalTable = currentData?.table?.type === "hierarchy";
+
+    const rawRows = currentData?.table?.rows || [];
+    const groupedRows = isHierarchicalTable ? rawRows : groupFlatRowsByScenario(rawRows);
+    const tableRows = transformTableRows(groupedRows);
 
     const activeTabLabel = TABS.find((t) => t.value === activeTab)?.label || "Output Table";
 
@@ -156,6 +187,7 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayer, selected
                         selectedPayer={selectedPayer}
                         selectedProduct={selectedProduct}
                         forecastStartIndex={currentData?.chart?.forecast_start_index}
+                        isHierarchical={isHierarchicalTable}
                     />
                 </Box>
                 :
