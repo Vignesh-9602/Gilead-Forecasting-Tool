@@ -59,6 +59,10 @@ export default function HIVOutputAnalysis({ outputAnalysis, selectedMarket, sele
                         selectedMetric={selectedMetric}
                         setSelectedMetric={setSelectedMetric}
                         forecastStartIndex={currentData.chart.forecast_start_index}
+                        selectedMarket={selectedMarket}
+                        selectedProduct={selectedProduct}
+                        activeTab={activeTab}
+
                         metricOptions={[
                             {
                                 label: "Market Volume",

@@ -32,7 +32,10 @@ export default function HIVOutputTable({
     selectedMetric,
     setSelectedMetric,
     metricOptions = [],
-    forecastStartIndex
+    forecastStartIndex,
+    selectedMarket,
+    selectedProduct,
+    activeTab,
 }) {
 
     const [expandedRows, setExpandedRows] = useState({});
@@ -68,11 +71,75 @@ export default function HIVOutputTable({
         });
     };
 
+    const isHighlightedRow = (
+        row,
+        parentRow = null
+    ) => {
+
+        const rowLabel =
+            row.label
+                ?.replace(/\s*\(.*?\)\s*/g, "")
+                .toLowerCase();
+
+        const parentLabel =
+            parentRow?.label
+                ?.replace(/\s*\(.*?\)\s*/g, "")
+                .toLowerCase();
+
+        const market =
+            selectedMarket?.toLowerCase();
+
+        const product =
+            selectedProduct?.toLowerCase();
+
+        switch (activeTab) {
+
+            case "total_market_volume":
+
+                return false;
+
+            case "market_distribution":
+
+                return rowLabel === market;
+
+            case "product_distribution":
+
+                return rowLabel === product;
+
+            case "market_product":
+
+                return (
+                    parentLabel === market &&
+                    rowLabel === product
+                );
+
+            case "product_market":
+
+                return (
+                    parentLabel === product &&
+                    rowLabel === market
+                );
+
+            default:
+
+                return false;
+        }
+
+    };
+
     const renderHierarchyRows = (
         row,
         level = 0,
-        rowKey = ""
+        rowKey = "",
+        parentRow = null
+
     ) => {
+
+        const highlighted =
+            isHighlightedRow(
+                row,
+                parentRow
+            );
 
         const hasChildren =
             row.children &&
@@ -94,12 +161,36 @@ export default function HIVOutputTable({
                         sx={{
                             position: "sticky",
                             left: 0,
-                            background: "#fff",
+                            // background: "#fff",
                             zIndex: 1,
                             minWidth: 280,
-                            fontWeight: isTotalRow ? 700 : 400,
-                            color: "#334155",
+                            // fontWeight: isTotalRow ? 700 : 400,
+                            // color: "#334155",
                             borderRight: "1px solid #E2E8F0",
+
+                            background:
+
+                                highlighted
+
+                                    ? "#FFFBEB"
+
+                                    : "#F8FAFC",
+
+                            fontWeight:
+
+                                highlighted || isTotalRow
+
+                                    ? 700
+
+                                    : 400,
+
+                            color:
+
+                                highlighted
+
+                                    ? "#F59E0B"
+
+                                    : "#334155",
                         }}
                     >
                         <Box
@@ -117,7 +208,12 @@ export default function HIVOutputTable({
                                     onClick={() =>
                                         handleToggle(rowKey)
                                     }
-                                    sx={{ p: 0.25 }}
+                                    sx={{
+                                        p: 0.25,
+                                        // color: highlighted
+                                        //     ? "#F59E0B"
+                                        //     : "#64748B",
+                                    }}
                                 >
                                     {expanded ? (
                                         <KeyboardArrowDownIcon fontSize="small" />
@@ -135,8 +231,15 @@ export default function HIVOutputTable({
                             <Typography
                                 sx={{
                                     fontSize: 14,
-                                    fontWeight: isTotalRow ? 700 : 400,
-                                    color: "#334155",
+                                    fontWeight:
+                                        highlighted || isTotalRow
+                                            ? 700
+                                            : 400,
+
+                                    color:
+                                        highlighted
+                                            ? "#F59E0B"
+                                            : "#334155",
                                 }}
                             >
                                 {row.label}
@@ -152,9 +255,16 @@ export default function HIVOutputTable({
                             align="center"
                             sx={{
                                 backgroundColor:
-                                    index < forecastStartIndex
-                                        ? "#F1F5F9"   // History
-                                        : "#FFFFFF",  // Forecast
+
+                                    highlighted
+
+                                        ? "#FFFBEB"
+
+                                        : index < forecastStartIndex
+
+                                            ? "#F8FAFC"
+
+                                            : "#FFFFFF",
                                 fontSize: 14,
                                 fontWeight: isTotalRow ? 700 : 400,
                                 color: "#334155",
@@ -167,17 +277,20 @@ export default function HIVOutputTable({
 
                 </TableRow>
 
-                {hasChildren &&
+                {
+                    hasChildren &&
                     expanded &&
                     row.children.map((child, index) =>
                         renderHierarchyRows(
                             child,
                             level + 1,
-                            `${rowKey}-${index}`
+                            `${rowKey}-${index}`,
+                            row
                         )
-                    )}
+                    )
+                }
 
-            </React.Fragment>
+            </React.Fragment >
         );
     };
 
@@ -379,18 +492,36 @@ export default function HIVOutputTable({
                                     const isTotalRow =
                                         row.label?.toLowerCase().includes("grand total");
 
+                                    const highlighted =
+                                        isHighlightedRow(row);
+
                                     return (
                                         <TableRow key={row.label}>
                                             <TableCell
                                                 sx={{
                                                     position: "sticky",
                                                     left: 0,
-                                                    backgroundColor: "#FFFFFF",
+                                                    // backgroundColor: "#FFFFFF",
                                                     zIndex: 1,
                                                     minWidth: 280,
-                                                    fontWeight: isTotalRow ? 700 : 400,
-                                                    color: "#334155",
+                                                    // fontWeight: isTotalRow ? 700 : 400,
+                                                    // color: "#334155",
                                                     borderRight: "1px solid #E2E8F0",
+
+                                                    backgroundColor:
+                                                        highlighted
+                                                            ? "#FFFBEB"
+                                                            : "#F8FAFC",
+
+                                                    fontWeight:
+                                                        highlighted || isTotalRow
+                                                            ? 700
+                                                            : 400,
+
+                                                    color:
+                                                        highlighted
+                                                            ? "#F59E0B"
+                                                            : "#334155",
                                                 }}
                                             >
                                                 {row.label}
@@ -402,9 +533,14 @@ export default function HIVOutputTable({
                                                     align="center"
                                                     sx={{
                                                         backgroundColor:
-                                                            index < forecastStartIndex
-                                                                ? "#F1F5F9"
-                                                                : "#FFFFFF",
+
+                                                            highlighted
+
+                                                                ? "#FFFBEB"
+
+                                                                : index < forecastStartIndex
+                                                                    ? "#F8FAFC"
+                                                                    : "#FFFFFF",
                                                         fontWeight: isTotalRow ? 700 : 400,
                                                         color: "#334155",
                                                     }}
