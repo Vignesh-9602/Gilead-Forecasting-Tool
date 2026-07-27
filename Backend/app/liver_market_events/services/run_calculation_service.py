@@ -32,6 +32,8 @@ from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
     get_volume_by_product_payer,
+    save_impact_rows,
+    load_impact_rows,
 )
 from app.liver_market_events.services.market_events_service import (
     CURVE_TYPES,
@@ -44,6 +46,7 @@ from app.liver_market_events.services.market_events_service import (
     _get_date_range_from_configs,
     _get_scenarios_with_base,
     _merge_config_with_saved_data,
+    _persist_market_events_result,
 )
 
 
@@ -550,9 +553,21 @@ def run_market_events_calculation(payload) -> dict:
         sf = payload.selected_filter
         tab = payload.selected_tab
 
+        if sf.scenario_name.strip().upper() == "BASE":
+            raise ValueError(
+                "Run Calculation cannot be run on the Base scenario. "
+                "Please select or create a scenario first."
+            )
+
         payers = get_payers(cur)
         products = get_products(cur)
         scenarios = _get_scenarios_with_base(cur)
+
+        if sf.scenario_name not in scenarios:
+            raise ValueError(
+                f"Scenario '{sf.scenario_name}' does not exist. "
+                "Scenarios can only be created in the model input module."
+            )
 
         configs = get_configs_for_selection(cur, ta, sf.payers, sf.products)
         min_start, forecast_start_date, max_end = _get_date_range_from_configs(configs)
@@ -660,6 +675,23 @@ def run_market_events_calculation(payload) -> dict:
             for t in ("payer_event", "product_event", "overall_event")
         }
 
+        # Persist this run's event rows for the active tab (whole-array
+        # replace -- the frontend always resends the complete current list,
+        # never a single row to add/delete, see save_impact_rows), so they
+        # survive a tab switch, a page reload, or the next apply-filters/
+        # refresh call instead of vanishing the moment this response is sent.
+        # Persisted even when empty (0 rows): that correctly captures "the
+        # user deleted their last event and reran," not "leave whatever was
+        # there before."
+        save_impact_rows(cur, ta, sf.scenario_name, tab, event_rows)
+        conn.commit()
+
+        # The other two tabs weren't touched by this run -- load their own
+        # independently-persisted rows instead of blanking them to [].
+        payer_rows   = event_rows if tab == "payer_event"   else load_impact_rows(cur, ta, sf.scenario_name, "payer_event")
+        product_rows = event_rows if tab == "product_event" else load_impact_rows(cur, ta, sf.scenario_name, "product_event")
+        overall_rows = event_rows if tab == "overall_event" else load_impact_rows(cur, ta, sf.scenario_name, "overall_event")
+
         # ── Assemble impact_curve_configuration per tab ────────────────────
         payer_event_cfg = {
             "products":            products,
@@ -667,7 +699,7 @@ def run_market_events_calculation(payload) -> dict:
             "impact_payers":       payers,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                event_rows if tab == "payer_event" else [],
+            "rows":                payer_rows,
         }
         product_event_cfg = {
             "products":            products,
@@ -675,7 +707,7 @@ def run_market_events_calculation(payload) -> dict:
             "impact_products":     products,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                event_rows if tab == "product_event" else [],
+            "rows":                product_rows,
         }
         overall_event_cfg = {
             "products":            products,
@@ -683,12 +715,19 @@ def run_market_events_calculation(payload) -> dict:
             "impact_payers":       ["Overall"],
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                event_rows if tab == "overall_event" else [],
+            "rows":                overall_rows,
         }
 
         event_tabs = _merge_config_with_saved_data(
             payer_event_cfg, product_event_cfg, overall_event_cfg, saved_tabs
         )
+
+        # Auto-save the computed result directly into this (non-Base, already
+        # confirmed to exist above) scenario -- same persistence Save Scenario
+        # already does manually (see _persist_market_events_result), so
+        # running a calculation no longer requires a separate explicit save
+        # step to make its result durable.
+        _persist_market_events_result(cur, conn, sf.scenario_name, event_tabs)
 
         return {
             "ta_name":             ta,
