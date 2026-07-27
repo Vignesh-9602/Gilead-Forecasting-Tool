@@ -39,7 +39,9 @@ export default function HIVImpactCurveTable({
     editedTableRows,
     setEditedTableRows,
     onEditRefresh,
-    setEditedFields
+    setEditedFields,
+    selectedMarket,
+    selectedProduct,
 }) {
 
     const [editable, setEditable] = useState(false);
@@ -175,9 +177,6 @@ export default function HIVImpactCurveTable({
 
     };
 
-
-
-
     const handleCellChange = (
         rowIndex,
         valueIndex,
@@ -208,6 +207,84 @@ export default function HIVImpactCurveTable({
 
         setEditableRows(updated);
         setEditedTableRows(updated);
+
+    };
+
+    const isHighlightedRow = (
+        row,
+        parentRow = null
+    ) => {
+
+        const rowLabel =
+            row.label?.toLowerCase();
+
+        const parentLabel =
+            parentRow?.label?.toLowerCase();
+
+        const market =
+            selectedMarket?.toLowerCase();
+
+        const product =
+            selectedProduct?.toLowerCase();
+
+        switch (activeTab) {
+
+            case "overall_event":
+
+                return false;
+
+            // ---------------- CHANNEL EVENT ----------------
+
+            case "market_event":
+
+                switch (selectedTableView) {
+
+                    // Market Level
+                    case "market_level":
+
+                        return rowLabel === market;
+
+                    // Product -> Market
+                    case "product_market_level":
+
+                        return (
+                            parentLabel === product &&
+                            rowLabel === market
+                        );
+
+                    default:
+
+                        return false;
+                }
+
+            // ---------------- PRODUCT EVENT ----------------
+
+            case "product_event":
+
+                switch (selectedTableView) {
+
+                    // Product Level
+                    case "product_level":
+
+                        return rowLabel === product;
+
+                    // Market -> Product
+                    case "market_product_level":
+
+                        return (
+                            parentLabel === market &&
+                            rowLabel === product
+                        );
+
+                    default:
+
+                        return false;
+                }
+
+            default:
+
+                return false;
+        }
 
     };
 
@@ -325,119 +402,148 @@ export default function HIVImpactCurveTable({
         row,
         rowIndex,
         level = 0,
-        childIndex = null
-    ) => (
-        <React.Fragment
-            key={`${rowIndex}-${childIndex}-${row.label}`}
-        >
+        childIndex = null,
+        parentRow = null
+    ) => {
 
-            <TableRow>
+        const highlighted =
+            isHighlightedRow(
+                row,
+                parentRow
+            );
 
-                <TableCell
-                    sx={{
-                        position: "sticky",
-                        left: 0,
-                        zIndex: 2,
-                        backgroundColor: "#fff",
-                        minWidth: 180,
-                        width: 180,
-                        fontWeight:
-                            level === 0 ? 700 : 500,
-                    }}
+        return (
+            <>
+                <React.Fragment
+                    key={`${rowIndex}-${childIndex}-${row.label}`}
                 >
 
-                    <Box
-                        sx={{
-                            display: "flex",
-                            alignItems: "center",
-                            pl: level === 0 ? 0 : 1.5,
-                        }}
-                    >
+                    <TableRow>
 
-                        {isHierarchy &&
-                            row.children?.length > 0 && (
+                        <TableCell
+                            sx={{
+                                position: "sticky",
+                                left: 0,
+                                zIndex: 2,
+                                minWidth: 180,
+                                width: 180,
+                                backgroundColor:
+                                    highlighted
+                                        ? "#FFFBEB"
+                                        : "#F8FAFC",
 
-                                <IconButton
-                                    size="small"
-                                    onClick={() =>
-                                        toggleRow(row.label)
-                                    }
-                                    sx={{
-                                        p: 0.25,
-                                        mr: 0.5,
-                                        ml: -0.5,
-                                    }}
-                                >
+                                color:
+                                    highlighted
+                                        ? "#F59E0B"
+                                        : "#334155",
 
-                                    {expandedRows[row.label]
-                                        ? (
-                                            <KeyboardArrowDownIcon
-                                                sx={{
-                                                    fontSize: 18,
-                                                }}
-                                            />
-                                        )
-                                        : (
-                                            <KeyboardArrowDownIcon
-                                                sx={{
-                                                    fontSize: 18,
-                                                }}
-                                            />
-                                        )}
+                                fontWeight: 700,
+                            }}
+                        >
 
-                                </IconButton>
+                            <Box
+                                sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    pl: level === 0 ? 0 : 1.5,
+                                }}
+                            >
 
-                            )}
+                                {isHierarchy &&
+                                    row.children?.length > 0 && (
 
-                        {row.label}
+                                        <IconButton
+                                            size="small"
+                                            onClick={() =>
+                                                toggleRow(row.label)
+                                            }
+                                            sx={{
+                                                p: 0.25,
+                                                mr: 0.5,
+                                                ml: -0.5,
+                                            }}
+                                        >
 
-                    </Box>
+                                            {expandedRows[row.label]
+                                                ? (
+                                                    <KeyboardArrowDownIcon
+                                                        sx={{
+                                                            fontSize: 18,
+                                                        }}
+                                                    />
+                                                )
+                                                : (
+                                                    <KeyboardArrowDownIcon
+                                                        sx={{
+                                                            fontSize: 18,
+                                                        }}
+                                                    />
+                                                )}
 
-                </TableCell>
+                                        </IconButton>
 
-                {row.values.map((value, index) => (
+                                    )}
 
-                    <TableCell
-                        key={index}
-                        align="center"
-                        sx={{
-                            background:
-                                index <
-                                    tableData.forecast_start_index
-                                    ? "#F8FAFC"
-                                    : "#fff",
-                        }}
-                    >
+                                {row.label}
 
-                        {renderEditableCell(
-                            value,
-                            row,
-                            rowIndex,
-                            index,
-                            childIndex,
-                            level
+                            </Box>
+
+                        </TableCell>
+
+                        {row.values.map((value, index) => (
+
+                            <TableCell
+                                key={index}
+                                align="center"
+                                sx={{
+
+                                    backgroundColor:
+
+                                        highlighted
+
+                                            ? "#FFFBEB"
+
+                                            : index <
+                                                tableData.forecast_start_index
+
+                                                ? "#F8FAFC"
+
+                                                : "#FFFFFF",
+                                }}
+                            >
+
+                                {renderEditableCell(
+                                    value,
+                                    row,
+                                    rowIndex,
+                                    index,
+                                    childIndex,
+                                    level
+                                )}
+
+                            </TableCell>
+
+                        ))}
+
+                    </TableRow>
+
+                    {isHierarchy &&
+                        expandedRows[row.label] &&
+                        row.children?.map(
+                            (child, idx) =>
+                                renderRow(
+                                    child,
+                                    rowIndex,
+                                    level + 1,
+                                    idx,
+                                    row
+                                )
                         )}
 
-                    </TableCell>
-
-                ))}
-
-            </TableRow>
-
-            {isHierarchy &&
-                expandedRows[row.label] &&
-                row.children?.map(
-                    (child, idx) =>
-                        renderRow(
-                            child,
-                            rowIndex,
-                            level + 1,
-                            idx
-                        )
-                )}
-
-        </React.Fragment>
-    );
+                </React.Fragment>
+            </>
+        )
+    };
 
     const viewOptionsLevel = currentMetricData?.view_options || [];
 

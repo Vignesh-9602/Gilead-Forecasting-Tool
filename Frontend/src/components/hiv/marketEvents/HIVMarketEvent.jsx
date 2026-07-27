@@ -2848,6 +2848,8 @@ export default function HIVMarketEvent() {
                         handleEditRefresh
                     }
                     setEditedFields={setEditedFields}
+                    selectedMarket={selectedMarkets?.[0]}
+                    selectedProduct={selectedProducts?.[0]}
                 />
 
                 <Menu

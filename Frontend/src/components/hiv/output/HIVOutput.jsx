@@ -17,13 +17,6 @@ import { mockOutputData } from "./OutputMock";
 import { getHIVOutputFilters, applyHIVOutputFilters } from "../../../services/apiService";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
-/**
- * HIVOutput.jsx
- *
- * Starter component for the Output screen.
- * This contains the complete filter section only.
- * Remaining output widgets/charts/tables can be added below.
- */
 
 export default function HIVOutput() {
     const { favState } = useContext(GlobalContext);

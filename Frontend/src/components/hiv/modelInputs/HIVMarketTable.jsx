@@ -28,8 +28,14 @@ import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowRightIcon from "@mui/icons-material/KeyboardArrowRight";
+// import IconButton from "@mui/material/IconButton";
+// import Tooltip from "@mui/material/Tooltip";
+
+import DownloadIcon from "@mui/icons-material/Download";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 
 export default function HIVMarketTable({
     activeTab,
@@ -580,6 +586,129 @@ export default function HIVMarketTable({
         setEditable(true);
     };
 
+    const handleDownloadExcel = async () => {
+
+        if (!tableData?.rows?.length) return;
+
+        const workbook = new ExcelJS.Workbook();
+
+        const sheetName = {
+            total_market_volume: "Total Market Volume",
+            market_distribution: "Market Distribution",
+            product_distribution: "Product Distribution",
+            market_product: "Market Product",
+            product_market: "Product Market",
+        }[activeTab];
+
+        const worksheet =
+            workbook.addWorksheet(sheetName);
+
+        // Header
+        worksheet.addRow(["Scenario", activeScenario]);
+        worksheet.addRow(["Market", selectedMarket]);
+        worksheet.addRow(["Product", selectedProduct]);
+        worksheet.addRow([
+            "Metric",
+            selectedMetric === "market_share"
+                ? "Market Share"
+                : "Market Volume",
+        ]);
+        worksheet.addRow([
+            "View",
+            viewMode === "monthly"
+                ? "Monthly"
+                : "Yearly",
+        ]);
+
+        worksheet.addRow([]);
+
+        const headerRowNumber =
+            worksheet.rowCount + 1;
+
+        worksheet.addRow([
+            "Label",
+            ...months,
+        ]);
+
+        tableRows.forEach((row) => {
+
+            const excelRow =
+                worksheet.addRow([
+                    row.label,
+                    ...(row.values || []).map(value =>
+                        selectedMetric === "market_share"
+                            ? `${value}%`
+                            : Number(value).toLocaleString("en-US")
+                    ),
+                ]);
+
+            if (
+                row.children?.length ||
+                row.label === "Overall"
+            ) {
+                excelRow.font = {
+                    bold: true,
+                };
+            }
+
+            row.children?.forEach(child => {
+
+                worksheet.addRow([
+                    "    " + child.label,
+                    ...(child.values || []).map(value =>
+                        selectedMetric === "market_share"
+                            ? `${value}%`
+                            : Number(value).toLocaleString("en-US")
+                    ),
+                ]);
+
+            });
+
+        });
+
+        worksheet.getRow(headerRowNumber).font = {
+            bold: true,
+        };
+
+        worksheet.eachRow((row) => {
+
+            row.eachCell((cell) => {
+
+                cell.border = {
+                    top: { style: "thin" },
+                    left: { style: "thin" },
+                    right: { style: "thin" },
+                    bottom: { style: "thin" },
+                };
+
+                cell.alignment = {
+                    vertical: "middle",
+                    horizontal:
+                        cell.col === 1
+                            ? "left"
+                            : "center",
+                };
+
+            });
+
+        });
+
+        worksheet.getColumn(1).width = 30;
+
+        for (let i = 2; i <= months.length + 1; i++) {
+            worksheet.getColumn(i).width = 14;
+        }
+
+        const buffer =
+            await workbook.xlsx.writeBuffer();
+
+        saveAs(
+            new Blob([buffer]),
+            `${sheetName}_${viewMode}.xlsx`
+        );
+
+    };
+
     return (
         <Paper
             sx={{
@@ -601,7 +730,6 @@ export default function HIVMarketTable({
                     borderBottom: "1px solid #E2E8F0",
                 }}
             >
-
                 <Box
                     sx={{
                         display: "flex",
@@ -659,6 +787,15 @@ export default function HIVMarketTable({
                         flexWrap: "wrap",
                     }}
                 >
+
+                    <Tooltip title="Download Table">
+                        <IconButton
+                            size="small"
+                            onClick={handleDownloadExcel}
+                        >
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
 
                     <Box
                         sx={{
