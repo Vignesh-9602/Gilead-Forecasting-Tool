@@ -204,32 +204,6 @@ export default function Output() {
         </Box>
     );
 
-    const renderSingleSelect = (
-        label,
-        options,
-        value,
-        setValue
-    ) => (
-        <Box>
-            <Typography sx={labelStyle}>{label}</Typography>
-
-            <FormControl sx={inputStyle}>
-                <Select
-                    value={value?.[0] || ""}
-                    onChange={(e) =>
-                        setValue(e.target.value ? [e.target.value] : [])
-                    }
-                >
-                    {options.map((item) => (
-                        <MenuItem key={item} value={item}>
-                            {item}
-                        </MenuItem>
-                    ))}
-                </Select>
-            </FormControl>
-        </Box>
-    );
-
     return (
         <Box sx={{ p: 3 }}>
             <Paper
@@ -337,14 +311,14 @@ export default function Output() {
                         </FormControl>
                     </Box>
 
-                    {renderSingleSelect(
+                    {renderMultiSelect(
                         "PAYER",
                         availablePayers,
                         selectedPayers,
                         setSelectedPayers
                     )}
 
-                    {renderSingleSelect(
+                    {renderMultiSelect(
                         "PRODUCT",
                         availableProducts,
                         selectedProducts,
@@ -369,8 +343,8 @@ export default function Output() {
             {outputAnalysis && (
                 <OutputAnalysis
                     outputAnalysis={outputAnalysis}
-                    selectedPayer={selectedPayers?.[0]}
-                    selectedProduct={selectedProducts?.[0]}
+                    selectedPayers={selectedPayers}
+                    selectedProducts={selectedProducts}
                 />
             )}
         </Box>
