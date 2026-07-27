@@ -102,6 +102,8 @@ const ForecastChart = ({
   compareScenarioOptions = [],
   rawScenariosData,
   activeMetricKey,
+  filterFromYM,
+  filterToYM,
 }) => {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
@@ -170,6 +172,39 @@ const ForecastChart = ({
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
     const toNums = (v) => (Array.isArray(v) ? v.map((x) => (x == null ? null : Number(x))) : []);
 
+    // Comparison scenarios are pulled from raw, unfiltered per-scenario API
+    // data — clip them down to the currently selected From/To date window
+    // so they don't extend beyond what the user actually filtered to. The
+    // applied scenario's own chartData.series is already date-filtered by
+    // the backend from the same apply-filters request, so it needs no
+    // clipping.
+    const clipToFilterRange = (rawMonths, rawFsi, rawTrain, rawForecast) => {
+      if (!filterFromYM && !filterToYM) {
+        return { months: rawMonths, fsi: rawFsi, train: rawTrain, forecast: rawForecast };
+      }
+      const normYM = (m) => {
+        const d = dayjs(m, DATE_INPUT_FORMATS, true);
+        return d.isValid() ? d.format("YYYY-MM") : m;
+      };
+      const combined = rawMonths.map((m, i) => (i < rawFsi ? rawTrain[i] : rawForecast[i - rawFsi]));
+      const keptIdx = [];
+      rawMonths.forEach((m, i) => {
+        const ym = normYM(m);
+        if (filterFromYM && ym < filterFromYM) return;
+        if (filterToYM && ym > filterToYM) return;
+        keptIdx.push(i);
+      });
+      const months = keptIdx.map((i) => rawMonths[i]);
+      const combinedClipped = keptIdx.map((i) => combined[i]);
+      const fsi = keptIdx.filter((i) => i < rawFsi).length;
+      return {
+        months,
+        fsi,
+        train: combinedClipped.slice(0, fsi),
+        forecast: combinedClipped.slice(fsi),
+      };
+    };
+
     const overlaySeries = rawScenariosData
       ? scenarioNamesToShow.flatMap((name) => {
         const tabObj = rawScenariosData[name]?.market_analysis?.[backendTabKey];
@@ -180,24 +215,65 @@ const ForecastChart = ({
           tabObj.payer_share ||
           Object.values(tabObj)[0];
         const rawChart = metricObj?.monthly?.chart || metricObj?.chart;
-        if (!rawChart?.series?.length) return [];
-        return rawChart.series.map((s) => ({
-          label: s.label || "",
-          train_values: toNums(s.history || s.train_values),
-          forecast_values: toNums(s.forecast || s.forecast_values),
-          scenario: name,
-          // This scenario's OWN months/forecast start — a newly created
-          // scenario can have a different date range than the currently
-          // active one, so its values must be plotted against its own
-          // dates, not blanket-applied to the active scenario's x-axis.
-          months: rawChart.months || null,
-          forecastStartIndex:
-            rawChart.forecast_start_index != null ? rawChart.forecast_start_index : null,
-        }));
+        let seriesList = rawChart?.series;
+        let seriesMonths = rawChart?.months || [];
+        let seriesFsi = rawChart?.forecast_start_index != null ? rawChart.forecast_start_index : 0;
+
+        // Some tab/scenario combinations don't populate chart.series even
+        // though the table's own row data is present and correct (the
+        // table pulls from table.rows, not chart.series) — reconstruct an
+        // equivalent series list from table.rows in that case, rather than
+        // silently showing nothing for this scenario.
+        if (!seriesList?.length) {
+          const rawTable = metricObj?.monthly?.table || metricObj?.table;
+          const tableRows = rawTable?.rows || [];
+          if (tableRows.length) {
+            seriesMonths = seriesMonths.length ? seriesMonths : rawTable?.headers || [];
+            seriesList = [];
+            tableRows.forEach((r) => {
+              const parentLabel = r.label || r.hierarchy || "";
+              if (r.children?.length) {
+                r.children.forEach((c) => {
+                  seriesList.push({
+                    label: `${parentLabel} - ${c.label || ""}`,
+                    history: (c.values || []).slice(0, seriesFsi),
+                    forecast: (c.values || []).slice(seriesFsi),
+                  });
+                });
+              } else if (parentLabel) {
+                const vals = r.values || r.total || [];
+                seriesList.push({
+                  label: parentLabel,
+                  history: vals.slice(0, seriesFsi),
+                  forecast: vals.slice(seriesFsi),
+                });
+              }
+            });
+          }
+        }
+
+        if (!seriesList?.length) return [];
+        return seriesList.map((s) => {
+          const rawTrain = toNums(s.history || s.train_values);
+          const rawForecast = toNums(s.forecast || s.forecast_values);
+          const clipped = clipToFilterRange(seriesMonths, seriesFsi, rawTrain, rawForecast);
+          return {
+            label: s.label || "",
+            train_values: clipped.train,
+            forecast_values: clipped.forecast,
+            scenario: name,
+            // This scenario's OWN months/forecast start, clipped to the
+            // current filter — a comparison scenario can have a wider raw
+            // date range than what's currently selected.
+            months: clipped.months.length ? clipped.months : null,
+            forecastStartIndex: clipped.months.length ? clipped.fsi : null,
+          };
+        });
       })
       : null;
     filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
   }
+
 
   // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
   // by index into the SCENARIO_COLORS palette; the other tabs color by
@@ -344,6 +420,13 @@ const ForecastChart = ({
           autosize: true,
           height: 380,
           margin: { l: 50, r: 30, t: 8, b: 120 },
+          // Plotly truncates hover trace names to 15 characters by
+          // default (hoverlabel.namelength) — long names like "PayerA -
+          // ProductB (Scenario Name)" on the combo tabs were getting cut
+          // off. -1 disables truncation entirely.
+          hoverlabel: {
+            namelength: -1,
+          },
           legend: {
             orientation: "h",
             x: 0.5,
@@ -393,6 +476,11 @@ export default function PBCModelInput() {
   // changing the dropdown alone doesn't visually shift which row is amber.
   const [appliedPayerFilter, setAppliedPayerFilter] = useState("");
   const [appliedProductFilter, setAppliedProductFilter] = useState("");
+  // Same pattern for From/To Date — the chart clips comparison scenarios
+  // to this range, so it must only change on Apply Filter, not while the
+  // user is still picking dates.
+  const [appliedFromDate, setAppliedFromDate] = useState("");
+  const [appliedToDate, setAppliedToDate] = useState("");
   // Save Scenario modal
   const [saveScenarioDialogOpen, setSaveScenarioDialogOpen] = useState(false);
   const [newScenarioName, setNewScenarioName] = useState("");
@@ -498,11 +586,11 @@ export default function PBCModelInput() {
 
   // ── Date helpers ──────────────────────────────────────────────────────────
   const parseDateString = (s) => {
-    if (!s) return dayjs.invalid();
+    if (!s) return dayjs(NaN);
     const strict = dayjs(s, DATE_INPUT_FORMATS, true);
     if (strict.isValid()) return strict;
     const relaxed = dayjs(s);
-    return relaxed.isValid() ? relaxed : dayjs.invalid();
+    return relaxed.isValid() ? relaxed : dayjs(NaN);
   };
   const formatDateLabel = (s) => {
     const p = parseDateString(s);
@@ -1564,6 +1652,8 @@ export default function PBCModelInput() {
         // shows on first load without waiting for an explicit Apply click.
         setAppliedPayerFilter(localPayer);
         setAppliedProductFilter(localProduct);
+        setAppliedFromDate(localFrom);
+        setAppliedToDate(localTo);
 
         const defaultMetricOptions = [
           { label: "Market Volume", value: "market_volume" },
@@ -1718,6 +1808,8 @@ export default function PBCModelInput() {
       setAppliedBrand(df.product || "");
       setAppliedPayerFilter(df.payer || "");
       setAppliedProductFilter(df.product_filter || "");
+      setAppliedFromDate(df.from_date || "");
+      setAppliedToDate(df.to_date || "");
       const factors = data?.factors || {};
       let am = factors?.active_model || "ets";
       am = resolveModelForTab(am);
@@ -1817,6 +1909,8 @@ export default function PBCModelInput() {
         setAppliedBrand(productFilter || brand);
         setAppliedPayerFilter(payerFilter);
         setAppliedProductFilter(productFilter);
+        setAppliedFromDate(fromDate);
+        setAppliedToDate(toDate);
         const dataActiveScenario = data?.active_scenario || scenarioSelector;
         const dataScenarioObj =
           (data?.scenarios && data.scenarios[dataActiveScenario]) || null;
@@ -1881,6 +1975,8 @@ export default function PBCModelInput() {
         setAppliedBrand(productFilter || brand);
         setAppliedPayerFilter(payerFilter);
         setAppliedProductFilter(productFilter);
+        setAppliedFromDate(fromDate);
+        setAppliedToDate(toDate);
         const dataActiveScenario = data?.active_scenario || scenarioSelector;
         const dataScenarioObj =
           (data?.scenarios && data.scenarios[dataActiveScenario]) || null;
@@ -3737,6 +3833,8 @@ export default function PBCModelInput() {
                 compareScenarioOptions={compareScenarioOptions}
                 rawScenariosData={liverRawData?.scenarios}
                 activeMetricKey={toApiMetricKey(metric)}
+                filterFromYM={appliedFromDate ? toYearMonth(appliedFromDate) : ""}
+                filterToYM={appliedToDate ? toYearMonth(appliedToDate) : ""}
               />
             </AccordionDetails>
           </Accordion>
