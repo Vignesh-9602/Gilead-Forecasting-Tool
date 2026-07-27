@@ -2707,7 +2707,15 @@ export default function PBCModelInput() {
       const entry = map[brandKey];
       let mainRow = entry.mainRow;
       if (!mainRow) {
-        const children = entry.children || [];
+        // Exclude any pre-existing "Total"/"Grand Total" child (if the
+        // backend ever includes one alongside the real entities) from the
+        // sum below — same double-counting risk as the flat tabs' scenario
+        // total: it would otherwise be summed alongside the entities it's
+        // already the total of.
+        const children = (entry.children || []).filter((c) => {
+          const clean = (c.cleanLabel || "").trim().toLowerCase();
+          return !clean.startsWith("total") && !clean.startsWith("grand total");
+        });
         const months =
           chartData?.months ||
           (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
