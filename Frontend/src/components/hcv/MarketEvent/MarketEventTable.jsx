@@ -33,6 +33,8 @@ export default function HIVImpactCurveTable({
   subViewOptions,
   onRefreshTable,
   onSaveTable,
+  selectedPayers,
+  selectedProducts,
 }) {
   const [editable, setEditable] = useState(false);
 
@@ -363,6 +365,7 @@ export default function HIVImpactCurveTable({
     valueIndex,
     childIndex = null,
     isParentRow = false,
+    isOverallRow = false,
   ) => {
     const isMarketShare = selectedMetric === "market_share";
 
@@ -372,6 +375,7 @@ export default function HIVImpactCurveTable({
       editable &&
       isMarketShare &&
       !isOverallEvent &&
+      !isOverallRow &&
       (!isHierarchy || childIndex !== null);
 
     if (!canEdit) {
@@ -418,15 +422,86 @@ export default function HIVImpactCurveTable({
     );
   };
 
+  const normalize = (value) => String(value || "").trim().toLowerCase();
+
   const renderRow = (
     row,
     rowIndex,
     level = 0,
     childIndex = null,
     rowKey = String(rowIndex),
+    parentLabel = null,
   ) => {
     const hasChildren = Array.isArray(row.children) && row.children.length > 0;
     const isChildRow = level > 0;
+
+    // The "Overall" row is a flat summary row (no children of its own), so
+    // it was missing the bold treatment that only applied to grouping rows.
+    const isOverallRow =
+      String(row.label || "").trim().toLowerCase() === "overall";
+
+    const isBoldRow = hasChildren || isOverallRow;
+
+    // Which sub-view is currently active determines what a row actually
+    // represents. hierarchyOptions[0] is always the single-dimension
+    // "Payer Level" (Payer Event tab) / "Product Level" (Product Event tab)
+    // view — see HIERARCHY_VIEW_LABELS above — and [1] is the combined
+    // "X-Y Level" view.
+    const currentHierarchyIndex = hierarchyOptions.findIndex(
+      (option) => option.value === hierarchyView,
+    );
+
+    const isSingleLevelView = currentHierarchyIndex === 0;
+
+    const isSelectedRow = (() => {
+      if (activeTab === "overall_event") return false;
+
+      if (isSingleLevelView) {
+        // Flat, single-dimension view — rows are Payers themselves (Payer
+        // Event tab) or Products themselves (Product Event tab), so match
+        // directly against the corresponding selected list.
+        if (level !== 0) return false;
+
+        const rowLabelNorm = normalize(row.label);
+        if (!rowLabelNorm) return false;
+
+        const list =
+          activeTab === "payer_event" ? selectedPayers : selectedProducts;
+
+        return (Array.isArray(list) ? list : []).some(
+          (item) => normalize(item) === rowLabelNorm,
+        );
+      }
+
+      // Combined view: only highlight a specific payer+product COMBINATION
+      // — e.g. the "Cash" row nested under "ASGA" — not every row that
+      // matches either list on its own. Only child rows qualify, and only
+      // when both this row's label and its parent's label are selected.
+      if (level === 0) return false;
+
+      const childLabel = normalize(row.label);
+      const parentLabelNorm = normalize(parentLabel);
+
+      if (!childLabel || !parentLabelNorm) return false;
+
+      // Product Event's rows are rooted in Payers with Products nested
+      // underneath, and Payer Event's rows are rooted in Products with
+      // Payers nested underneath (see labelText above).
+      const childList =
+        activeTab === "product_event" ? selectedProducts : selectedPayers;
+      const parentListValues =
+        activeTab === "product_event" ? selectedPayers : selectedProducts;
+
+      const childMatches = (Array.isArray(childList) ? childList : []).some(
+        (item) => normalize(item) === childLabel,
+      );
+      const parentMatches = (Array.isArray(parentListValues)
+        ? parentListValues
+        : []
+      ).some((item) => normalize(item) === parentLabelNorm);
+
+      return childMatches && parentMatches;
+    })();
 
     return (
     <React.Fragment key={`${rowKey}-${row.label}`}>
@@ -441,11 +516,15 @@ export default function HIVImpactCurveTable({
             position: "sticky",
             left: 0,
             zIndex: 2,
-            backgroundColor: hasChildren ? "#F8FAFC" : "#fff",
+            backgroundColor: isSelectedRow
+              ? "#FFFBEB"
+              : hasChildren
+                ? "#F8FAFC"
+                : "#fff",
             minWidth: 360,
             width: 360,
             maxWidth: 360,
-            fontWeight: hasChildren ? 700 : 500,
+            fontWeight: isBoldRow ? 700 : 500,
             overflow: "hidden",
           }}
         >
@@ -486,8 +565,12 @@ export default function HIVImpactCurveTable({
             <Typography
               sx={{
                 fontSize: "13px",
-                fontWeight: hasChildren ? 700 : 500,
-                color: isChildRow ? "#475569" : "#334155",
+                fontWeight: isBoldRow ? 700 : 500,
+                color: isSelectedRow
+                  ? "#B45309"
+                  : isChildRow
+                    ? "#475569"
+                    : "#334155",
                 whiteSpace: "nowrap",
                 minWidth: 0,
               }}
@@ -497,30 +580,38 @@ export default function HIVImpactCurveTable({
           </Box>
         </TableCell>
 
-        {(Array.isArray(row.values) ? row.values : []).map((value, index) => (
-          <TableCell
-            key={index}
-            align="center"
-            sx={{
-              background:
-                hasChildren
-                  ? "#F8FAFC"
-                  : index < forecastStartIndex
-                    ? "#F8FAFC"
-                    : "#fff",
-              py: isChildRow ? "4px" : undefined,
-              px: isChildRow ? 1 : undefined,
-            }}
-          >
-            {renderEditableCell(value, rowIndex, index, childIndex, hasChildren)}
-          </TableCell>
-        ))}
+        {(Array.isArray(row.values) ? row.values : []).map((value, index) => {
+          const isForecastCell = index >= forecastStartIndex;
+
+          // Only forecast columns of a selected payer/product row get the
+          // amber highlight — historical data is left as-is.
+          const background =
+            isSelectedRow && isForecastCell
+              ? "#FFFBEB"
+              : index < forecastStartIndex
+                ? "#F8FAFC"
+                : "#fff";
+
+          return (
+            <TableCell
+              key={index}
+              align="center"
+              sx={{
+                background,
+                py: isChildRow ? "4px" : undefined,
+                px: isChildRow ? 1 : undefined,
+              }}
+            >
+              {renderEditableCell(value, rowIndex, index, childIndex, isBoldRow, isOverallRow)}
+            </TableCell>
+          );
+        })}
       </TableRow>
 
       {isHierarchy &&
         (expandedRows[rowKey] ?? true) &&
         row.children?.map((child, idx) =>
-          renderRow(child, rowIndex, level + 1, idx, `${rowKey}-${idx}`),
+          renderRow(child, rowIndex, level + 1, idx, `${rowKey}-${idx}`, row.label),
         )}
     </React.Fragment>
     );
@@ -818,7 +909,8 @@ export default function HIVImpactCurveTable({
 
                     color: "#334155",
                     borderRight: "1px solid #E2E8F0",
-                    backgroundColor: "#ffffff",
+                    backgroundColor:
+                      index < forecastStartIndex ? "#F8FAFC" : "#FFFFFF",
                   }}
                 >
                   {header}

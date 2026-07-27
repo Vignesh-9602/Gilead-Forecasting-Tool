@@ -6,6 +6,9 @@ import {
   FormControl,
   Select,
   MenuItem,
+  Checkbox,
+  ListItemText,
+  OutlinedInput,
   TextField,
   Button,
   ToggleButton,
@@ -71,17 +74,20 @@ const DATE_INPUT_FORMATS = [
   "YYYY-MM-DD",
   "YYYY-MM-DDTHH:mm:ssZ",
 ];
-const CHART_COLORS = [
-  "#4F46E5",
-  "#10b981",
-  "#f59e0b",
-  "#ef4444",
-  "#8b5cf6",
-  "#06b6d4",
-  "#ec4899",
-  "#0ea5e9",
-  "#84cc16",
+// Same palette as HIV's SCENARIO_COLORS (HIVMarketChart.jsx), used for
+// index-based coloring on Total Market Volume, and cycled per distinct
+// product/payer identity on the other tabs (see getSeriesColor below).
+const SCENARIO_COLORS = [
+  "#2563EB", // Blue
+  "#F59E0B", // Orange
+  "#16A34A", // Green
+  "#9333EA", // Purple
+  "#DC2626", // Red
+  "#0891B2", // Cyan
+  "#D97706", // Amber
+  "#4F46E5", // Indigo
 ];
+const NEUTRAL_COLOR = "#64748B"; // HIV's fallback for an unmatched label
 
 // ─── ForecastChart ────────────────────────────────────────────────────────────
 const ForecastChart = ({
@@ -93,6 +99,9 @@ const ForecastChart = ({
   appliedScenario,
   selectedCompareScenarios = [],
   userHasCustomizedCompare = false,
+  compareScenarioOptions = [],
+  rawScenariosData,
+  activeMetricKey,
 }) => {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
@@ -108,124 +117,153 @@ const ForecastChart = ({
   const fsi = chartData.forecast_start_index || 0;
   const series = chartData.series || [];
 
-  const allMonths = months.map((m) => {
-    const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
-    return parsed.isValid()
-      ? parsed.format("MMM-YY")
-      : new Date(m).toLocaleDateString("en-US", {
-        month: "short",
-        year: "2-digit",
-      });
-  });
+  const formatMonths = (rawMonths) =>
+    (rawMonths || []).map((m) => {
+      const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
+      return parsed.isValid()
+        ? parsed.format("MMM-YY")
+        : new Date(m).toLocaleDateString("en-US", {
+          month: "short",
+          year: "2-digit",
+        });
+    });
+
+  const allMonths = formatMonths(months);
 
   const isTotalMarket = activeTab === "total_market";
   const currentBrand = (productFilter || appliedBrand || "").toLowerCase();
   const currentPayer = (payerFilter || "").toLowerCase();
 
-  // Finds the series within a given scenario's series list that matches
-  // whatever product/payer is currently focused via the page filters —
-  // the same matching rules used below to highlight a trace.
-  const findFocusSeries = (seriesList) =>
-    seriesList.find((s) => {
-      const lbl = (s.label || "").toLowerCase();
-      if (activeTab === "prod_dist") return currentBrand && lbl === currentBrand;
-      if (activeTab === "payer_dist") return currentPayer && lbl === currentPayer;
-      if (activeTab === "payer_prod" || activeTab === "prod_payer")
-        return currentPayer && currentBrand && lbl.includes(currentPayer) && lbl.includes(currentBrand);
-      return false;
+  // Which scenarios to overlay on the chart. Mirrors the Compare Scenarios
+  // dropdown, which starts fully checked (every available scenario) and is
+  // narrowed only once the user unchecks something. Falls back to just the
+  // applied scenario if the dropdown is somehow empty.
+  const scenarioNamesToShow = selectedCompareScenarios.length
+    ? selectedCompareScenarios
+    : (appliedScenario ? [appliedScenario] : []);
+
+  let filteredSeries;
+  if (isTotalMarket) {
+    // Total Market Volume's `series` is built differently upstream
+    // (normalizeLiverResponse): it already contains one entry PER SCENARIO,
+    // where each item's `label` IS the scenario name — there's no separate
+    // product/payer dimension on this tab. So filter it directly against
+    // the Compare Scenarios selection here, rather than going through
+    // chartData.scenarioSeries (which is shaped for per-product/payer
+    // overlay on the other tabs and can come back empty/mismatched for
+    // this tab, silently falling back to showing every scenario
+    // regardless of what's checked).
+    const tmvFiltered = series.filter((s) =>
+      scenarioNamesToShow.includes(s.label || ""),
+    );
+    filteredSeries = (tmvFiltered.length ? tmvFiltered : series).map((s) => ({
+      ...s,
+      scenario: s.label,
+    }));
+  } else {
+    // Overlay every selected scenario's own series for the CURRENT tab,
+    // read directly from the raw per-scenario API data — the same pattern
+    // used for the table's scenario overlay. This mirrors HIV's Market
+    // Analysis chart, which always overlays the selected scenarios
+    // regardless of which tab is active, instead of requiring a
+    // product/payer to be focused first.
+    const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
+    const toNums = (v) => (Array.isArray(v) ? v.map((x) => (x == null ? null : Number(x))) : []);
+
+    const overlaySeries = rawScenariosData
+      ? scenarioNamesToShow.flatMap((name) => {
+        const tabObj = rawScenariosData[name]?.market_analysis?.[backendTabKey];
+        if (!tabObj) return [];
+        const metricObj =
+          tabObj[activeMetricKey] ||
+          tabObj.payer_volume ||
+          tabObj.payer_share ||
+          Object.values(tabObj)[0];
+        const rawChart = metricObj?.monthly?.chart || metricObj?.chart;
+        if (!rawChart?.series?.length) return [];
+        return rawChart.series.map((s) => ({
+          label: s.label || "",
+          train_values: toNums(s.history || s.train_values),
+          forecast_values: toNums(s.forecast || s.forecast_values),
+          scenario: name,
+          // This scenario's OWN months/forecast start — a newly created
+          // scenario can have a different date range than the currently
+          // active one, so its values must be plotted against its own
+          // dates, not blanket-applied to the active scenario's x-axis.
+          months: rawChart.months || null,
+          forecastStartIndex:
+            rawChart.forecast_start_index != null ? rawChart.forecast_start_index : null,
+        }));
+      })
+      : null;
+    filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
+  }
+
+  // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
+  // by index into the SCENARIO_COLORS palette; the other tabs color by
+  // identity instead of array position, so the same product/payer always
+  // gets the same color. On the two cross tabs (Payer-Product,
+  // Product-Payer) HIV colors by the CHILD dimension specifically
+  // (market_product colors by product, product_market colors by market) —
+  // mirrored here the same way. HIV hardcodes a small known set of names
+  // (Biktarvy, Retail, ...); HCV's products/payers are dynamic, so instead
+  // of a hardcoded map, colors are assigned to whichever distinct
+  // identities are actually present, in order of first appearance.
+  const buildIdentityColorMap = (labels) => {
+    const map = {};
+    let i = 0;
+    labels.forEach((label) => {
+      if (!label || map[label] != null) return;
+      map[label] = SCENARIO_COLORS[i % SCENARIO_COLORS.length];
+      i += 1;
     });
+    return map;
+  };
+  const childLabelOf = (label) =>
+    label.includes(" - ") ? label.split(" - ").slice(1).join(" - ").trim() : label;
 
-  // On non-total_market tabs, Compare Scenarios re-slices the chart to
-  // show the currently focused product/payer's line across every selected
-  // scenario (colored per scenario), instead of every product/payer for
-  // just the active scenario. Requires a product/payer to be focused —
-  // without one there's no single line to compare across scenarios.
-  const crossScenarioSeries = (() => {
-    if (isTotalMarket) return null;
-    if (!userHasCustomizedCompare || !selectedCompareScenarios.length) return null;
-    if (!chartData.scenarioSeries) return null;
-    if (!currentBrand && !currentPayer) return null;
+  const flatLabelColorMap = buildIdentityColorMap(series.map((s) => s.label || ""));
+  const childLabelColorMap = buildIdentityColorMap(
+    series.map((s) => childLabelOf(s.label || "")),
+  );
 
-    const scenarioNames = [
-      ...(appliedScenario && !selectedCompareScenarios.includes(appliedScenario)
-        ? [appliedScenario]
-        : []),
-      ...selectedCompareScenarios,
-    ];
-
-    const result = [];
-    scenarioNames.forEach((scenarioName) => {
-      const list = chartData.scenarioSeries[scenarioName];
-      if (!list) return;
-      const match = findFocusSeries(list);
-      if (match) result.push({ ...match, label: scenarioName });
-    });
-    return result.length ? result : null;
-  })();
-
-  const isCrossScenarioCompare = !isTotalMarket && !!crossScenarioSeries;
-
-  // Mirrors the table's own filtering exactly (see groupedTableHierarchy
-  // filter below) so the two are never inconsistent: before the user
-  // touches the Compare Scenarios checkboxes, show every scenario (they
-  // all start checked); once touched, respect the selection.
-  const filteredSeries = isTotalMarket
-    ? (userHasCustomizedCompare && selectedCompareScenarios.length
-      ? series.filter(
-        (s) =>
-          (s.label || "") === appliedScenario ||
-          selectedCompareScenarios.includes(s.label || ""),
-      )
-      : series)
-    : (crossScenarioSeries || series);
-
-  // On total_market, history is identical across every scenario, so drawing
-  // one historical line per scenario just stacks duplicates on top of each
-  // other. Draw it once, then draw one forecast line per scenario so the
-  // comparison only shows up where the scenarios actually diverge.
-  const historicalTrace = isTotalMarket && filteredSeries.length
-    ? (() => {
-      const historicalSeries =
-        filteredSeries.find((s) => (s.label || "") === appliedScenario) ||
-        filteredSeries[0];
-      return {
-        x: allMonths.slice(0, fsi),
-        y: Array.isArray(historicalSeries.train_values)
-          ? historicalSeries.train_values.slice(0, fsi)
-          : [],
-        type: "scatter",
-        mode: "lines",
-        name: "Historical",
-        legendgroup: "historical",
-        line: { color: "#f59e0b", width: 3.5 },
-      };
-    })()
-    : null;
+  const getSeriesColor = (item, index) => {
+    const label = item.label || "";
+    switch (activeTab) {
+      case "total_market":
+        return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
+      case "prod_dist":
+      case "payer_dist":
+        return flatLabelColorMap[label] || NEUTRAL_COLOR;
+      case "payer_prod":
+      case "prod_payer":
+        return childLabelColorMap[childLabelOf(label)] || NEUTRAL_COLOR;
+      default:
+        return "#2563EB";
+    }
+  };
 
   const traces = filteredSeries.flatMap((s, idx) => {
     const seriesLabel = (s.label || "").toLowerCase();
 
-    let isSelectedTrace = false;
-    if (isCrossScenarioCompare) {
-      // In compare mode, each trace IS a scenario — highlight the applied one.
-      isSelectedTrace = (s.label || "") === appliedScenario;
-    } else if (activeTab === "prod_dist" && currentBrand) {
-      isSelectedTrace = seriesLabel === currentBrand;
+    // Highlight the line(s) belonging to the currently applied scenario;
+    // when a specific product/payer is focused, only highlight that one.
+    let isSelectedTrace = s.scenario ? s.scenario === appliedScenario : true;
+
+    if (activeTab === "prod_dist" && currentBrand) {
+      isSelectedTrace = isSelectedTrace && seriesLabel === currentBrand;
     } else if (activeTab === "payer_dist" && currentPayer) {
-      isSelectedTrace = seriesLabel === currentPayer;
+      isSelectedTrace = isSelectedTrace && seriesLabel === currentPayer;
     } else if (
       (activeTab === "payer_prod" || activeTab === "prod_payer") &&
       currentPayer &&
       currentBrand
     ) {
       isSelectedTrace =
+        isSelectedTrace &&
         seriesLabel.includes(currentPayer) &&
         seriesLabel.includes(currentBrand);
-    } else if (isTotalMarket) {
-      // Highlight the currently applied scenario; other scenarios shown
-      // for comparison get distinct colors instead of being dimmed grey.
-      isSelectedTrace = (s.label || "") === appliedScenario;
-    } else {
+    } else if (!isTotalMarket && !s.scenario) {
       isSelectedTrace =
         (currentBrand && seriesLabel.includes(currentBrand)) ||
         (currentPayer && seriesLabel.includes(currentPayer));
@@ -233,15 +271,33 @@ const ForecastChart = ({
 
     const width = isSelectedTrace ? 3.5 : 1.5;
 
+    // Selected trace stays amber; every other trace uses HIV's identity/
+    // index-based color scheme above.
+    const color = isSelectedTrace ? "#f59e0b" : getSeriesColor(s, idx);
+
+    // Suffix the scenario name onto the legend label when overlaying more
+    // than one scenario, so e.g. "Biktarvy (Base Case)" vs "Biktarvy (High
+    // Growth)" are distinguishable — same convention as HIV's chart.
+    const name =
+      s.scenario && s.scenario !== s.label
+        ? `${s.label} (${s.scenario})`
+        : s.label;
+
+    // Use this trace's own months/forecast-start if it carries them (a
+    // comparison scenario with a different date range than the currently
+    // active one) — otherwise fall back to the shared active-scenario axis.
+    const itemMonths = s.months && s.months.length ? formatMonths(s.months) : allMonths;
+    const itemFsi = s.forecastStartIndex != null ? s.forecastStartIndex : fsi;
+
     const forecastX =
-      fsi > 0
-        ? [allMonths[fsi - 1], ...allMonths.slice(fsi)]
-        : allMonths.slice(fsi);
+      itemFsi > 0
+        ? [itemMonths[itemFsi - 1], ...itemMonths.slice(itemFsi)]
+        : itemMonths.slice(itemFsi);
     const lastTrain = s.train_values?.length
       ? s.train_values[s.train_values.length - 1]
       : null;
     const forecastY =
-      fsi > 0
+      itemFsi > 0
         ? [
           lastTrain ?? null,
           ...(Array.isArray(s.forecast_values) ? s.forecast_values : []),
@@ -250,38 +306,9 @@ const ForecastChart = ({
           ? s.forecast_values
           : [];
 
-    // total_market: forecast-only, colored per scenario (shares the single
-    // historical trace above). Other tabs: unchanged train + forecast pair,
-    // both using the original amber-selected / grey-unselected colors.
-    if (isTotalMarket) {
-      const forecastColor = isSelectedTrace
-        ? "#f59e0b"
-        : CHART_COLORS[idx % CHART_COLORS.length];
-      return [
-        {
-          x: forecastX,
-          y: forecastY,
-          type: "scatter",
-          mode: "lines",
-          name: s.label,
-          legendgroup: s.label,
-          line: { color: forecastColor, width, dash: "dot" },
-        },
-      ];
-    }
-
-    // Cross-scenario compare (non-total_market): each trace is a scenario,
-    // colored from the palette — history can differ per scenario on these
-    // tabs (unlike total_market), so both segments share one color per line.
-    // Default (no compare active): original amber-selected / grey-unselected.
-    const color = isSelectedTrace
-      ? "#f59e0b"
-      : isCrossScenarioCompare
-        ? CHART_COLORS[idx % CHART_COLORS.length]
-        : "#e2e8f0";
-    const trainX = allMonths.slice(0, fsi);
+    const trainX = itemMonths.slice(0, itemFsi);
     const trainY = Array.isArray(s.train_values)
-      ? s.train_values.slice(0, fsi)
+      ? s.train_values.slice(0, itemFsi)
       : [];
 
     return [
@@ -290,8 +317,8 @@ const ForecastChart = ({
         y: trainY,
         type: "scatter",
         mode: "lines",
-        name: s.label,
-        legendgroup: s.label,
+        name,
+        legendgroup: name,
         line: { color, width },
       },
       {
@@ -299,15 +326,15 @@ const ForecastChart = ({
         y: forecastY,
         type: "scatter",
         mode: "lines",
-        name: s.label,
-        legendgroup: s.label,
+        name,
+        legendgroup: name,
         showlegend: false,
         line: { color, width, dash: "dot" },
       },
     ];
   });
 
-  const allTraces = historicalTrace ? [historicalTrace, ...traces] : traces;
+  const allTraces = traces;
 
   return (
     <Box sx={{ width: "100%", height: 380 }}>
@@ -405,7 +432,6 @@ export default function PBCModelInput() {
   const [lot, setLot] = useState("");
   const [brand, setBrand] = useState("");
   const [totalMarketViewMode, setTotalMarketViewMode] = useState("monthly");
-  const [showScenariosDropdown, setShowScenariosDropdown] = useState(false);
   // All scenario names from the API — shown in the Compare Scenarios dropdown
   const [compareScenarioOptions, setCompareScenarioOptions] = useState([]);
   // Subset the user has chosen to display; empty = show all
@@ -1141,7 +1167,7 @@ export default function PBCModelInput() {
     metric: metric || "market_volume",
     from_date: resolveFromDate(),
     to_date: toDate || "",
-    scenario: currentlyAppliedScenario || scenarioSelector || "Base",
+    scenario_name: currentlyAppliedScenario || scenarioSelector || "Base",
   });
 
   // Build payload for the refresh-table API based on current (edited) table state.
@@ -1356,8 +1382,8 @@ export default function PBCModelInput() {
     // the user switches tabs and the current model is clearly a "wrong default".
     const isDefaultForOtherTab =
       activeTab === "total_market"
-        ? modelSelection === "linear"     // switching TO total_market, was linear
-        : modelSelection === "ets";       // switching AWAY from total_market, was ets
+        ? modelSelection === "moving_average"  // switching TO total_market, was moving_average
+        : modelSelection === "ets";            // switching AWAY from total_market, was ets
     if (isDefaultForOtherTab && modelSelection) {
       const newDefault = activeTab === "total_market" ? "ets" : "moving_average";
       setModelSelection(newDefault);
@@ -1558,7 +1584,7 @@ export default function PBCModelInput() {
             product: localProduct || "",
             metric: metric || defaultMetricOptions[0].value,
             from_date: cfg?.train_start_date || localFrom || "",
-            scenario: "Base",
+            scenario_name: "Base",
           };
           const applyResp = await applyLiverFilters(applyPayload);
           const data = applyResp?.data || {};
@@ -1838,6 +1864,14 @@ export default function PBCModelInput() {
   };
 
   const handleApplyFilter = async () => {
+    if (!resolveFromDate()) {
+      showSnackbar("Please select a From Date before applying filters", "error");
+      return;
+    }
+    if (!toDate) {
+      showSnackbar("Please select a To Date before applying filters", "error");
+      return;
+    }
     try {
       setLoading(true);
       if (isHCV) {
@@ -2306,10 +2340,6 @@ export default function PBCModelInput() {
   };
 
   // ── UI handlers ───────────────────────────────────────────────────────────
-  const toggleScenariosDropdown = (e) => {
-    if (e?.stopPropagation) e.stopPropagation();
-    setShowScenariosDropdown((s) => !s);
-  };
 
   // Seed Compare Scenarios dropdown from the API response's available_scenarios.
   // Called after every apply-filters / save-scenario / initial load response.
@@ -2327,22 +2357,30 @@ export default function PBCModelInput() {
 
     if (!merged.length) return;
     setCompareScenarioOptions(merged);
-    // Reset to "show all" whenever the available scenario list changes
-    // (new apply-filter, save-scenario, initial load). The user can then
-    // narrow the view by unchecking items in the Compare dropdown.
-    setSelectedCompareScenarios(merged);
-    setUserHasCustomizedCompare(false);
+    // Only default to "select all" on first load (nothing chosen yet) or
+    // before the user has ever touched the dropdown. Once the user has
+    // customized their selection, preserve it across apply-filter /
+    // save-scenario / refresh calls — just drop any scenario names that no
+    // longer exist in the new list. Previously this ran unconditionally on
+    // every call, silently re-checking scenarios the user had unchecked.
+    setSelectedCompareScenarios((prev) => {
+      if (!userHasCustomizedCompare || !prev.length) return merged;
+      const stillValid = prev.filter((name) => merged.includes(name));
+      return stillValid.length ? stillValid : merged;
+    });
   };
 
-  const handleScenarioSelectionChange = (s) => {
+  // Mirrors HIV's Compare Scenarios <Select multiple> onChange: the
+  // currently applied scenario is always force-included in the selection
+  // (its MenuItem/Checkbox are also disabled below so it can't be
+  // unchecked directly).
+  const handleCompareScenarioChange = (e) => {
+    let value = e.target.value;
+    if (currentlyAppliedScenario && !value.includes(currentlyAppliedScenario)) {
+      value = [...value, currentlyAppliedScenario];
+    }
     setUserHasCustomizedCompare(true);
-    setSelectedCompareScenarios((prev) => {
-      const updated = prev.includes(s)
-        ? prev.filter((x) => x !== s)
-        : [...prev, s];
-      // If the user deselects everything, restore all options.
-      return updated.length ? updated : compareScenarioOptions;
-    });
+    setSelectedCompareScenarios(value);
   };
   const handleActiveScenarioRadioChange = (name) => {
     setTentativeRadioSelectedScenario(name);
@@ -2465,29 +2503,150 @@ export default function PBCModelInput() {
     setEditedHierarchies((prev) => ({ ...prev, [hierarchyKey]: true }));
   };
 
-  // ── Hierarchy grouping ────────────────────────────────────────────────────
-  const groupedTableHierarchy = useMemo(() => {
-    const map = {};
-    tableData.forEach((row) => {
-      const raw = row.hierarchy || "";
-      if (raw.includes(" - ")) {
-        const parts = raw.split(" - ");
-        const brandKey = parts[0].trim();
-        const payerKey = parts.slice(1).join(" - ").trim();
-        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [] };
-        map[brandKey].children.push({ ...row, cleanLabel: payerKey });
-      } else {
-        const brandKey = raw.trim();
-        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [] };
-        map[brandKey].mainRow = row;
-      }
-    });
+  // Tags a clean hierarchy string with its scenario, recursively through
+  // the "Parent - Child" split — mirrors HIV's appendScenario exactly
+  // (HIVMarketTable.jsx), which tags every row including the applied
+  // scenario's own, not just comparison scenarios.
+  const tagHierarchyWithScenario = (hierarchy, scenarioName) => {
+    if (!hierarchy || hierarchy === scenarioName) return hierarchy;
+    if (hierarchy.includes(" - ")) {
+      const idx = hierarchy.indexOf(" - ");
+      const parent = hierarchy.slice(0, idx);
+      const child = hierarchy.slice(idx + 3);
+      return `${parent} (${scenarioName}) - ${child} (${scenarioName})`;
+    }
+    return `${hierarchy} (${scenarioName})`;
+  };
 
-    return Object.keys(map).map((brandKey) => {
-      const entry = map[brandKey];
-      let mainRow = entry.mainRow;
-      if (!mainRow) {
-        const children = entry.children || [];
+  // Every selected scenario's rows, tagged uniformly (mirrors HIV's
+  // mergedRows/appendScenario): the applied scenario's own rows come from
+  // tableData, comparison scenarios come from the raw per-scenario API
+  // data — both get the SAME "(ScenarioName)" treatment at every level of
+  // the hierarchy, not just comparison rows. total_market is left as a
+  // simple passthrough since its rows are already one-per-scenario,
+  // named by the scenario itself, from upstream.
+  const taggedTableRows = useMemo(() => {
+    if (activeTab === "total_market") {
+      return tableData.map((row) => ({ ...row, scenario: row.hierarchy, cleanHierarchy: row.hierarchy }));
+    }
+
+    const scenarioNames = selectedCompareScenarios.length
+      ? selectedCompareScenarios
+      : (currentlyAppliedScenario ? [currentlyAppliedScenario] : []);
+
+    const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
+    const activeMetricKey = toApiMetricKey(metric);
+    const fallbackMonths = chartData?.months || [];
+
+    const toMonthly = (values, monthsForThisScenario) => {
+      const obj = {};
+      monthsForThisScenario.forEach((m, i) => {
+        const v = values?.[i];
+        obj[m] = v == null ? null : Number(v);
+      });
+      return obj;
+    };
+
+    const out = [];
+    scenarioNames.forEach((scenarioName) => {
+      if (scenarioName === currentlyAppliedScenario) {
+        // Applied scenario's rows already exist in tableData — just tag them.
+        tableData.forEach((row) => {
+          out.push({
+            ...row,
+            scenario: scenarioName,
+            cleanHierarchy: row.hierarchy,
+            hierarchy: tagHierarchyWithScenario(row.hierarchy, scenarioName),
+          });
+        });
+        return;
+      }
+
+      // Comparison scenario: pull its own rows directly from the raw API
+      // data (never re-derived from the applied scenario's tableData).
+      const tabObj =
+        liverRawData?.scenarios?.[scenarioName]?.market_analysis?.[backendTabKey];
+      if (!tabObj) return;
+      const metricObj =
+        tabObj[activeMetricKey] ||
+        tabObj.payer_volume ||
+        tabObj.payer_share ||
+        Object.values(tabObj)[0];
+      // Each scenario carries its own months — a newly created scenario can
+      // have a different date range than the currently displayed one, so
+      // use THIS scenario's own months rather than assuming a shared axis.
+      const months =
+        metricObj?.monthly?.chart?.months || metricObj?.chart?.months || fallbackMonths;
+      const rows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
+
+      rows.forEach((r) => {
+        const parentLabel = r.label || r.hierarchy || "";
+        if (!parentLabel) return;
+        out.push({
+          hierarchy: tagHierarchyWithScenario(parentLabel, scenarioName),
+          cleanHierarchy: parentLabel,
+          monthly_data: toMonthly(r.values || r.total || [], months),
+          is_applied: false,
+          scenario: scenarioName,
+        });
+        (r.children || []).forEach((c) => {
+          const cleanCombo = `${parentLabel} - ${c.label}`;
+          out.push({
+            hierarchy: tagHierarchyWithScenario(cleanCombo, scenarioName),
+            cleanHierarchy: cleanCombo,
+            monthly_data: toMonthly(c.values || [], months),
+            is_applied: false,
+            scenario: scenarioName,
+          });
+        });
+      });
+    });
+    return out;
+  }, [
+    activeTab,
+    tableData,
+    liverRawData,
+    metric,
+    chartData,
+    selectedCompareScenarios,
+    currentlyAppliedScenario,
+  ]);
+
+  // ── Hierarchy grouping ────────────────────────────────────────────────────
+  const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
+
+  const groupedTableHierarchy = useMemo(() => {
+    if (isScenarioParentTab) {
+      // Product/Payer Distribution: group by SCENARIO so each scenario's
+      // set of payers/products can be collapsed as a block. Unlike the
+      // combo tabs, these entities have no real hierarchy of their own
+      // (they're flat), so grouping them under their scenario instead is a
+      // clean addition rather than a restructuring of an existing tree.
+      const byScenario = {};
+      taggedTableRows.forEach((row) => {
+        const name = row.scenario || "Unknown Scenario";
+        if (!byScenario[name]) byScenario[name] = { rows: [], scenario: name };
+        byScenario[name].rows.push(row);
+      });
+
+      return Object.keys(byScenario).map((scenarioName) => {
+        const entry = byScenario[scenarioName];
+        // Exclude any pre-existing "Total"/"Grand Total" row from the raw
+        // data — it would otherwise get summed alongside the individual
+        // entities it's already the total of (double-counting the same
+        // 100% twice), and the group's own row now serves as that total.
+        const children = entry.rows
+          .filter((row) => {
+            const clean = (row.hierarchy || "").split(" (")[0].trim().toLowerCase();
+            return !clean.startsWith("total") && !clean.startsWith("grand total");
+          })
+          .map((row) => ({
+            ...row,
+            // Strip the "(ScenarioName)" tag for the child label — the
+            // scenario is already shown by the parent group, so repeating
+            // it on every child would be redundant.
+            cleanLabel: (row.hierarchy || "").split(" (")[0].trim(),
+          }));
         const months =
           chartData?.months ||
           (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
@@ -2502,7 +2661,76 @@ export default function PBCModelInput() {
               any = true;
             }
           });
+          // Unlike the combo tabs, a flat single-dimension breakdown
+          // (payer-only or product-only) genuinely sums to 100% on its own
+          // — no multi-payer inflation issue here — so the plain sum is
+          // already the correct total.
           monthly_data[m] = any ? sum : null;
+        });
+        return {
+          brandName: scenarioName,
+          mainRow: {
+            hierarchy: scenarioName,
+            monthly_data,
+            is_applied: entry.rows.some((r) => r.is_applied),
+          },
+          children,
+          isScenarioOverlay: scenarioName !== currentlyAppliedScenario,
+          isScenarioGroup: true,
+        };
+      });
+    }
+
+    // total_market, Payer-Product, Product-Payer: one unified path.
+    // taggedTableRows already carries each scenario's rows uniquely
+    // tagged, so the same simple split-on-" - " grouping naturally
+    // produces one group per scenario-tagged entity (e.g. "PayerA (Base)"
+    // and "PayerA (High Growth)" become separate top-level groups)
+    // without any further special-casing.
+    const map = {};
+    taggedTableRows.forEach((row) => {
+      const raw = row.hierarchy || "";
+      if (raw.includes(" - ")) {
+        const parts = raw.split(" - ");
+        const brandKey = parts[0].trim();
+        const payerKey = parts.slice(1).join(" - ").trim();
+        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], scenario: row.scenario };
+        map[brandKey].children.push({ ...row, cleanLabel: payerKey });
+      } else {
+        const brandKey = raw.trim();
+        if (!map[brandKey]) map[brandKey] = { mainRow: null, children: [], scenario: row.scenario };
+        map[brandKey].mainRow = row;
+      }
+    });
+
+    return Object.keys(map).map((brandKey) => {
+      const entry = map[brandKey];
+      let mainRow = entry.mainRow;
+      if (!mainRow) {
+        // Exclude any pre-existing "Total"/"Grand Total" child (if the
+        // backend ever includes one alongside the real entities) from the
+        // sum below — same double-counting risk as the flat tabs' scenario
+        // total: it would otherwise be summed alongside the entities it's
+        // already the total of.
+        const children = (entry.children || []).filter((c) => {
+          const clean = (c.cleanLabel || "").trim().toLowerCase();
+          return !clean.startsWith("total") && !clean.startsWith("grand total");
+        });
+        const months =
+          chartData?.months ||
+          (children[0] ? Object.keys(children[0].monthly_data || {}) : []);
+        const monthly_data = {};
+        months.forEach((m) => {
+          let sum = 0,
+            any = false;
+          children.forEach((c) => {
+            const v = c.monthly_data?.[m];
+            if (v != null && !Number.isNaN(Number(v))) {
+              sum += Number(v);
+              any = true;
+            }
+          });
+          monthly_data[m] = !any ? null : isPercentTab ? 100 : sum;
         });
         mainRow = {
           hierarchy: brandKey,
@@ -2512,9 +2740,19 @@ export default function PBCModelInput() {
       } else {
         mainRow.monthly_data = mainRow.monthly_data || {};
       }
-      return { brandName: brandKey, mainRow, children: entry.children };
+      return {
+        brandName: brandKey,
+        mainRow,
+        children: entry.children,
+        // total_market's own radio-selection mechanism already gates
+        // editability there — this flag is only meaningful for the other
+        // tabs, where it marks a group as belonging to a comparison
+        // scenario (not the applied one) so it can't be edited.
+        isScenarioOverlay:
+          activeTab === "total_market" ? false : entry.scenario !== currentlyAppliedScenario,
+      };
     });
-  }, [tableData, chartData]);
+  }, [activeTab, isScenarioParentTab, taggedTableRows, chartData, currentlyAppliedScenario, isPercentTab]);
 
   // ── Monthly / Yearly toggle helpers ──────────────────────────────────────
   // displayColumns are the column keys actually rendered in the table header.
@@ -2606,6 +2844,7 @@ export default function PBCModelInput() {
           borderRadius: "16px",
           border: "1px solid #D8DEE8",
           boxShadow: "none",
+          overflow: "hidden",
         }}
       >
         {/* ── TOP FILTER BAR ── */}
@@ -2880,6 +3119,7 @@ export default function PBCModelInput() {
             <Button
               variant="contained"
               onClick={handleApplyFilter}
+              disabled={!resolveFromDate() || !toDate}
               sx={{
                 textTransform: "none",
                 borderRadius: "6px",
@@ -3494,6 +3734,9 @@ export default function PBCModelInput() {
                 appliedScenario={currentlyAppliedScenario}
                 selectedCompareScenarios={selectedCompareScenarios}
                 userHasCustomizedCompare={userHasCustomizedCompare}
+                compareScenarioOptions={compareScenarioOptions}
+                rawScenariosData={liverRawData?.scenarios}
+                activeMetricKey={toApiMetricKey(metric)}
               />
             </AccordionDetails>
           </Accordion>
@@ -3505,9 +3748,47 @@ export default function PBCModelInput() {
               borderRadius: "12px",
               border: "1px solid #D8DEE8",
               boxShadow: "none",
+              overflow: "hidden",
             }}
           >
             {/* Table controls row */}
+            {/* Shared button/input styling — matches HIV's primaryButtonStyle /
+                secondaryButtonStyle / inputStyle in HIVMarketTable.jsx exactly:
+                35px height, 8px border radius, and one uniform indigo for
+                every "primary" action (Save Scenario, Apply Selected
+                Scenario, Save, Refresh all share this — previously Save was
+                a one-off green button, which HIV doesn't do). */}
+            {(() => {
+              const primaryButtonStyle = {
+                height: "35px",
+                borderRadius: "8px",
+                textTransform: "none",
+                fontSize: "13px",
+                fontWeight: 600,
+                backgroundColor: "#4F46E5",
+                "&:hover": { backgroundColor: "#4338ca" },
+              };
+              const secondaryButtonStyle = {
+                height: "35px",
+                borderRadius: "8px",
+                textTransform: "none",
+                fontSize: "13px",
+                fontWeight: 600,
+                borderColor: "#e2e8f0",
+                color: "#64748b",
+                "&:hover": { borderColor: "#cbd5e1", backgroundColor: "#f8fafc" },
+              };
+              const tableInputStyle = {
+                bgcolor: "#fcfcfd",
+                borderRadius: "8px",
+                minWidth: "200px",
+                "& .MuiOutlinedInput-root": {
+                  borderRadius: "8px",
+                  height: "35px",
+                  backgroundColor: "#fcfcfd",
+                },
+              };
+              return (
             <Box
               sx={{
                 display: "flex",
@@ -3526,7 +3807,6 @@ export default function PBCModelInput() {
                     fontSize: "16px",
                     fontWeight: 700,
                     color: "#1e293b",
-                    textTransform: "uppercase",
                   }}
                 >
                   {activeTabLabel}
@@ -3538,14 +3818,7 @@ export default function PBCModelInput() {
                     setNewScenarioName("");
                     setSaveScenarioDialogOpen(true);
                   }}
-                  sx={{
-                    height: "35px",
-                    textTransform: "none",
-                    borderRadius: "8px",
-                    backgroundColor: "#4F46E5",
-                    fontSize: "13px",
-                    "&:hover": { backgroundColor: "#4338ca" },
-                  }}
+                  sx={primaryButtonStyle}
                 >
                   Save Scenario
                 </Button>
@@ -3576,7 +3849,7 @@ export default function PBCModelInput() {
               >
                 {/* Metric filter — non-total_market tabs only */}
                 {showMetricFilter && (
-                  <FormControl size="small" sx={{ minWidth: 160 }}>
+                  <FormControl sx={{ ...tableInputStyle, minWidth: "160px" }}>
                     <Select
                       value={metric}
                       onChange={async (e) => {
@@ -3599,16 +3872,7 @@ export default function PBCModelInput() {
                           await handleApplyFilterWithMetric(nm);
                         }
                       }}
-                      sx={{
-                        height: 32,
-                        borderRadius: "6px",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        backgroundColor: "white",
-                        "& .MuiOutlinedInput-notchedOutline": {
-                          borderColor: "#e2e8f0",
-                        },
-                      }}
+                      sx={{ fontSize: "13px", fontWeight: 600 }}
                     >
                       {filterOptions.metric_filters.map((item) => (
                         <MenuItem
@@ -3627,15 +3891,13 @@ export default function PBCModelInput() {
                 <Box
                   sx={{
                     display: "flex",
-                    alignItems: "center",
-                    backgroundColor: "#f1f5f9",
-                    borderRadius: "6px",
-                    p: "3px",
-                    gap: "2px",
+                    bgcolor: "#E2E8F0",
+                    borderRadius: "10px",
+                    p: "2px",
                   }}
                 >
                   {["monthly", "yearly"].map((mode) => (
-                    <Box
+                    <Button
                       key={mode}
                       onClick={() => {
                         if (mode === totalMarketViewMode) return;
@@ -3643,32 +3905,38 @@ export default function PBCModelInput() {
                         if (mode === "yearly" && tableEditing) handleCancelTableEdit();
                       }}
                       sx={{
+                        minWidth: 80,
+                        height: 30,
                         px: 1.5,
-                        py: 0.4,
-                        borderRadius: "4px",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        userSelect: "none",
-                        transition: "all 0.2s",
-                        backgroundColor: totalMarketViewMode === mode ? "white" : "transparent",
-                        color: totalMarketViewMode === mode ? "#4F46E5" : "#94a3b8",
-                        boxShadow: totalMarketViewMode === mode ? "0 1px 4px rgba(0,0,0,0.12)" : "none",
+                        py: 0.25,
+                        textTransform: "none",
+                        borderRadius: "8px",
+                        bgcolor: totalMarketViewMode === mode ? "#fff" : "transparent",
+                        color: totalMarketViewMode === mode ? "#4F46E5" : "#64748B",
+                        boxShadow: totalMarketViewMode === mode ? 1 : "none",
+                        "&:hover": {
+                          bgcolor: totalMarketViewMode === mode ? "#fff" : "transparent",
+                        },
                       }}
                     >
                       {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                    </Box>
+                    </Button>
                   ))}
                 </Box>
 
-                {/* Download / Save / Edit Changes / Cancel — table edit toolbar */}
+                {/* Download / Save / Edit Changes / Refresh / Cancel — table edit
+                    toolbar, ordered and gated to match HIV's exact layout:
+                    Save and Cancel are always visible (not hidden behind
+                    tableEditing like before), Save sits before Edit, and
+                    Refresh only appears while actively editing, after Edit —
+                    see HIVMarketTable.jsx's header row. */}
                 <Tooltip title="Download table as CSV">
                   <IconButton
                     size="small"
                     onClick={handleDownloadTable}
                     sx={{
                       border: "1px solid #e2e8f0",
-                      borderRadius: "6px",
+                      borderRadius: "8px",
                       width: 32,
                       height: 32,
                       color: "#64748b",
@@ -3679,218 +3947,103 @@ export default function PBCModelInput() {
                   </IconButton>
                 </Tooltip>
 
+                <Button
+                  variant="contained"
+                  disabled={(tableEditing && !isRefreshed) || isSavingEditChanges}
+                  onClick={handleConfirmSave}
+                  sx={primaryButtonStyle}
+                >
+                  {isSavingEditChanges ? "Saving..." : "Save"}
+                </Button>
+
+                <Button
+                  variant="outlined"
+                  onClick={handleEnterTableEdit}
+                  disabled={
+                    tableEditing ||
+                    (activeTab !== "total_market" && metric === "market_volume")
+                  }
+                  sx={secondaryButtonStyle}
+                >
+                  {tableEditing ? "Editing..." : "Edit Changes"}
+                </Button>
+
                 {tableEditing && (
                   <Button
-                    size="small"
                     variant="contained"
                     disabled={savingTable || Object.keys(editedHierarchies).length === 0}
                     onClick={handleSaveTableChanges}
-                    // startIcon={<RefreshIcon sx={{ fontSize: 16 }} />}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 700,
-                      borderRadius: "6px",
-                      backgroundColor: "#4F46E5",
-                      px: 2,
-                      "&:hover": { backgroundColor: "#4338ca" },
-                    }}
+                    sx={primaryButtonStyle}
                   >
                     {savingTable ? "Refreshing..." : "Refresh"}
                   </Button>
                 )}
 
-                {tableEditing ? (
-                  <Box
-                    sx={{
-                      height: 32,
-                      px: 1.5,
-                      display: "flex",
-                      alignItems: "center",
-                      borderRadius: "6px",
-                      border: "1px solid #e2e8f0",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                      color: "#94a3b8",
-                      backgroundColor: "#f8fafc",
-                      userSelect: "none",
-                      cursor: "default",
-                      pointerEvents: "none",
-                    }}
-                  >
-                    Editing...
-                  </Box>
-                ) : (
-  <Button
-    size="small"
-    variant="outlined"
-    onClick={handleEnterTableEdit}
-    disabled={activeTab !== "total_market" && metric === "market_volume"}
-    sx={{
-      textTransform: "none",
-      fontSize: "12px",
-      fontWeight: 600,
-      borderRadius: "6px",
-      borderColor: "#e2e8f0",
-      color: "#3d89f3",
-      px: 1.5,
-      "&:hover": {
-        borderColor: "#cbd5e1",
-        backgroundColor: "#f8fafc",
-      },
-    }}
-  >
-    Edit Changes
-  </Button>
-)}
-
-                {tableEditing && (
-                  <Button
-                    size="small"
-                    variant="contained"
-                    disabled={!isRefreshed || isSavingEditChanges}
-                    onClick={handleConfirmSave}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 700,
-                      borderRadius: "6px",
-                      backgroundColor: "#10b981",
-                      px: 2,
-                      "&:hover": { backgroundColor: "#059669" },
-                    }}
-                  >
-                    {isSavingEditChanges ? "Saving..." : "Save"}
-                  </Button>
-                )}
-
-                {tableEditing && (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={handleCancelTableEdit}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                      borderRadius: "6px",
-                      borderColor: "#e2e8f0",
-                      color: "#64748b",
-                      px: 1.5,
-                      "&:hover": {
-                        borderColor: "#cbd5e1",
-                        backgroundColor: "#f8fafc",
-                      },
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                )}
+                <Button
+                  variant="outlined"
+                  onClick={handleCancelTableEdit}
+                  disabled={!tableEditing || totalMarketViewMode === "yearly"}
+                  sx={secondaryButtonStyle}
+                >
+                  Cancel
+                </Button>
 
                 {/* Apply Selected Scenario — total_market only */}
                 {showScenarioControls && (
                   <Button
-                    size="small"
                     variant="contained"
                     onClick={applySelectedScenario}
-                    sx={{
-                      textTransform: "none",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                      borderRadius: "6px",
-                      backgroundColor: "#4F46E5",
-                      px: 1.5,
-                      "&:hover": { backgroundColor: "#4338ca" },
-                    }}
+                    sx={primaryButtonStyle}
                   >
                     Apply Selected Scenario
                   </Button>
                 )}
 
-                {/* Compare Scenarios — available on every tab; on non-total_market
-                    tabs it re-slices the chart to the currently focused
-                    product/payer across the selected scenarios. */}
+                {/* Compare Scenarios — available on every tab. Overlays every
+                    checked scenario's line(s)/row(s) on the chart and table,
+                    regardless of which tab is active or whether a
+                    product/payer is focused. Matches HIV's Compare
+                    Scenarios dropdown: a standard MUI multi-select with the
+                    applied scenario always checked and locked. */}
                 {showCompareScenarios && (
-                  <Box sx={{ position: "relative" }}>
-                    <Box
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleScenariosDropdown(e);
-                      }}
-                      sx={{
-                        height: 32,
-                        px: 1.5,
-                        display: "flex",
-                        alignItems: "center",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "6px",
-                        cursor: "pointer",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        color: "#64748b",
-                        minWidth: 160,
-                        userSelect: "none",
-                        "&:hover": { backgroundColor: "#f8fafc" },
+                  <FormControl sx={tableInputStyle}>
+                    <Select
+                      multiple
+                      displayEmpty
+                      value={selectedCompareScenarios}
+                      onChange={handleCompareScenarioChange}
+                      input={<OutlinedInput />}
+                      sx={{ fontSize: "13px" }}
+                      MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
+                      renderValue={(selected) => {
+                        if (!selected.length) return "Compare Scenarios";
+                        if (selected.length === compareScenarioOptions.length)
+                          return "All Scenarios";
+                        return selected.join(", ");
                       }}
                     >
-                      Compare Scenarios ▼
-                    </Box>
-                    {showScenariosDropdown && (
-                      <Box
-                        onClick={(e) => e.stopPropagation()}
-                        sx={{
-                          position: "absolute",
-                          top: 36,
-                          right: 0,
-                          backgroundColor: "white",
-                          border: "1px solid #e2e8f0",
-                          borderRadius: "8px",
-                          boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
-                          zIndex: 200,
-                          p: 1,
-                          minWidth: 200,
-                          maxHeight: 260,
-                          overflowY: "auto",
-                        }}
-                      >
-                        {compareScenarioOptions.map((s) => (
-                          <Box
-                            key={s}
-                            component="label"
-                            sx={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 1,
-                              px: 1,
-                              py: 0.75,
-                              cursor: "pointer",
-                              borderRadius: "4px",
-                              "&:hover": { backgroundColor: "#f8fafc" },
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              value={s}
-                              checked={selectedCompareScenarios.includes(s)}
-                              onChange={() => handleScenarioSelectionChange(s)}
+                      {compareScenarioOptions.map((option) => {
+                        const isActive = option === currentlyAppliedScenario;
+                        return (
+                          <MenuItem key={option} value={option} disabled={isActive}>
+                            <Checkbox
+                              size="small"
+                              checked={selectedCompareScenarios.includes(option)}
+                              disabled={isActive}
                             />
-                            <Typography
-                              sx={{
-                                fontSize: "13px",
-                                fontWeight: 500,
-                                color: "#1e293b",
-                              }}
-                            >
-                              {s}
-                            </Typography>
-                          </Box>
-                        ))}
-                      </Box>
-                    )}
-                  </Box>
+                            <ListItemText
+                              primary={isActive ? `${option} (Active)` : option}
+                            />
+                          </MenuItem>
+                        );
+                      })}
+                    </Select>
+                  </FormControl>
                 )}
               </Box>
             </Box>
+              );
+            })()}
 
             {/* ── TABLE ── */}
             <Box
@@ -3898,7 +4051,6 @@ export default function PBCModelInput() {
                 backgroundColor: "white",
                 maxHeight: 500,
                 overflow: "auto",
-                borderRadius: "0 0 12px 12px",
               }}
             >
               <Box
@@ -3906,7 +4058,7 @@ export default function PBCModelInput() {
                 sx={{
                   width: "100%",
                   borderCollapse: "collapse",
-                  fontSize: "12px",
+                  fontSize: "14px",
                 }}
               >
                 {/* THEAD */}
@@ -3920,14 +4072,15 @@ export default function PBCModelInput() {
                         top: 0,
                         zIndex: 3,
                         backgroundColor: "#f8fafc",
-                        color: "#0f172a",
+                        color: "#64748b",
                         fontWeight: 700,
-                        fontSize: "13px",
+                        fontSize: "14px",
                         textAlign: "left",
                         p: "12px 16px",
                         minWidth: 220,
-                        borderRight: "1px solid #e2e8f0",
-                        borderBottom: "1px solid #e2e8f0",
+                        maxWidth: 220,
+                        borderRight: "2px solid #e2e8f0",
+                        borderBottom: "2px solid #e2e8f0",
                       }}
                     >
                       Scenario
@@ -3941,14 +4094,15 @@ export default function PBCModelInput() {
                           top: 0,
                           zIndex: 2,
                           backgroundColor: "#f8fafc",
-                          color: "#475569",
+                          color: "#64748b",
                           fontWeight: 700,
-                          fontSize: "12px",
+                          fontSize: "14px",
                           textAlign: "center",
                           p: "12px 8px",
-                          minWidth: 85,
+                          minWidth: 90,
                           whiteSpace: "nowrap",
-                          borderBottom: "1px solid #e2e8f0",
+                          borderRight: "1px solid #e2e8f0",
+                          borderBottom: "2px solid #e2e8f0",
                         }}
                       >
                         {formatColumnLabel(col)}
@@ -4013,7 +4167,7 @@ export default function PBCModelInput() {
                             />
                             <Typography
                               sx={{
-                                fontSize: "13px",
+                                fontSize: "14px",
                                 fontWeight: 700,
                                 color: "#0f172a",
                               }}
@@ -4031,7 +4185,7 @@ export default function PBCModelInput() {
                               sx={{
                                 p: "10px 8px",
                                 textAlign: "center",
-                                fontSize: "13px",
+                                fontSize: "14px",
                                 fontWeight: 700,
                                 backgroundColor: isF ? "#ffffff" : "#f8fafc",
                                 color: "#0f172a",
@@ -4095,7 +4249,7 @@ export default function PBCModelInput() {
                                 />
                                 <Typography
                                   sx={{
-                                    fontSize: "13px",
+                                    fontSize: "14px",
                                     fontWeight: 600,
                                     color: "#0f172a",
                                   }}
@@ -4125,7 +4279,7 @@ export default function PBCModelInput() {
                                   sx={{
                                     p: "10px 8px",
                                     textAlign: "center",
-                                    fontSize: "13px",
+                                    fontSize: "14px",
                                     fontWeight: 400,
                                     backgroundColor: isF
                                       ? "#ffffff"
@@ -4146,12 +4300,16 @@ export default function PBCModelInput() {
                     <>
                       {groupedTableHierarchy
                         .filter((group) => {
-                          // On non-total_market tabs: always show all rows.
+                          // Product/Payer Distribution and the two cross tabs
+                          // are already scoped to selectedCompareScenarios
+                          // upstream, in taggedTableRows — only total_market
+                          // (whose rows always include every scenario) needs
+                          // filtering here.
                           if (activeTab !== "total_market") return true;
-                          // On total_market: only filter when the user has
-                          // explicitly toggled the Compare Scenarios checkboxes.
-                          // Before that, show every row so all scenarios are
-                          // visible on initial load and after apply-filter.
+                          // Only filter once the user has explicitly toggled
+                          // the Compare Scenarios checkboxes. Before that,
+                          // show every scenario so they're all visible on
+                          // initial load / apply-filter.
                           if (!userHasCustomizedCompare) return true;
                           if (!selectedCompareScenarios.length) return true;
                           return (
@@ -4178,14 +4336,26 @@ export default function PBCModelInput() {
 
                           const targetParentLabel = (
                             group.brandName || ""
-                          ).toLowerCase();
+                          )
+                            .split(" (")[0]
+                            .trim()
+                            .toLowerCase();
+
+                          // group.brandName is always the scenario-tagged
+                          // display label now (e.g. "PayerA (Base Case)") —
+                          // edits must use the clean/original name, same as
+                          // HIV strips "(scenario)" back off before saving.
+                          const cleanBrandName =
+                            group.mainRow?.cleanHierarchy || (group.brandName || "").split(" (")[0];
 
                           let isAppliedParent = false;
 
-                          if (activeTab === "prod_dist") {
-                            isAppliedParent = targetParentLabel === currentBrand;
-                          } else if (activeTab === "payer_dist") {
-                            isAppliedParent = targetParentLabel === currentPayer;
+                          if (activeTab === "prod_dist" || activeTab === "payer_dist") {
+                            // Parent rows are scenario names now (grouped
+                            // for collapsing) — highlight the applied
+                            // scenario's group; entity matching happens at
+                            // the child level below.
+                            isAppliedParent = !group.isScenarioOverlay;
                           } else if (activeTab === "payer_prod") {
                             isAppliedParent = targetParentLabel === currentPayer;
                           } else if (activeTab === "prod_payer") {
@@ -4205,6 +4375,7 @@ export default function PBCModelInput() {
                             if (!tableEditing) return false;
                             if (totalMarketViewMode !== "monthly") return false;
                             if (isTotalRow) return false;
+                            if (group.isScenarioOverlay) return false;
                             if (activeTab === "total_market") {
                               return isSelected && !hasChildren;
                             }
@@ -4250,20 +4421,24 @@ export default function PBCModelInput() {
                                     position: "sticky",
                                     left: 0,
                                     zIndex: 1,
+                                    minWidth: 220,
+                                    maxWidth: 220,
 
                                     backgroundColor: isAppliedParent
                                       ? "#fffbeb"
                                       : (isSelected && activeTab === "total_market")
                                         ? "#fffbeb"
-                                        : hasChildren
-                                          ? "#f8fafc"
-                                          : "white",
+                                        : isTotalRow
+                                          ? "#f1f5f9"
+                                          : hasChildren
+                                            ? "#f8fafc"
+                                            : "white",
 
-                                    borderRight: "1px solid #e2e8f0",
+                                    borderRight: "2px solid #e2e8f0",
 
-                                    borderBottom: hasChildren
-                                      ? "1px solid #cbd5e1"
-                                      : "1px solid #f1f5f9",
+                                    borderBottom: isTotalRow
+                                      ? "2px solid #e2e8f0"
+                                      : "1px solid #e2e8f0",
 
                                     p: "10px 16px",
                                   }}
@@ -4299,8 +4474,13 @@ export default function PBCModelInput() {
                                       <Typography
                                         component="span"
                                         sx={{
-                                          fontSize: "10px",
-                                          width: "12px",
+                                          fontSize: "9px",
+                                          fontWeight: 700,
+                                          width: "14px",
+                                          flexShrink: 0,
+                                          color: (isAppliedParent || (isSelected && activeTab === "total_market"))
+                                            ? "#f59e0b"
+                                            : "#64748b",
                                         }}
                                       >
                                         {isExpanded ? "▼" : "▶"}
@@ -4309,13 +4489,21 @@ export default function PBCModelInput() {
 
                                     <Typography
                                       sx={{
-                                        fontSize: "13px",
-                                        fontWeight: hasChildren ? 700 : (isSelected && activeTab === "total_market") ? 700 : 400,
+                                        fontSize: "14px",
+                                        fontWeight: isTotalRow
+                                          ? 800
+                                          : hasChildren
+                                            ? 700
+                                            : (isSelected && activeTab === "total_market")
+                                              ? 700
+                                              : 500,
                                         color: isAppliedParent
                                           ? "#f59e0b"
                                           : (isSelected && activeTab === "total_market")
                                             ? "#f59e0b"
-                                            : "#0f172a",
+                                            : isTotalRow
+                                              ? "#1e293b"
+                                              : "#334155",
                                       }}
                                     >
                                       {group.brandName}
@@ -4327,7 +4515,6 @@ export default function PBCModelInput() {
                                 {displayColumns.map((col) => {
                                   const val = getColumnValue(group.mainRow, col);
                                   const isF = isForecastColumn(col);
-                                  const isLastCol = col === displayColumns[displayColumns.length - 1];
                                   const isEditableCell = isEditEligible;
 
                                   return (
@@ -4338,17 +4525,18 @@ export default function PBCModelInput() {
                                       sx={{
                                         p: isEditableCell ? '4px 3px' : '10px 8px',
                                         textAlign: 'center',
-                                        fontSize: '13px',
-                                        fontWeight: hasChildren ? 700 : 400,
+                                        fontSize: '14px',
+                                        minWidth: 90,
+                                        fontWeight: isTotalRow ? 800 : hasChildren ? 700 : 500,
                                         backgroundColor: isEditableCell
                                           ? isF ? '#eff6ff' : '#f8fafc'
                                           : (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
                                             ? '#fffbeb'
-                                            : isF ? '#ffffff' : '#eef2f7',
+                                            : isF ? '#ffffff' : '#F1F5F9',
                                         color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
                                           ? '#f59e0b'
-                                          : '#1e3a5f',
-                                        borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                          : '#334155',
+                                        borderRight: '1px solid #e2e8f0',
                                       }}
                                     >
                                       {isEditableCell ? (
@@ -4358,7 +4546,7 @@ export default function PBCModelInput() {
                                             : String(Math.round(Number(val)))}
                                           onChange={(e) => {
                                             if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                              handleCellChange(group.brandName, col, e.target.value);
+                                              handleCellChange(cleanBrandName, col, e.target.value);
                                             }
                                           }}
                                           style={{
@@ -4385,14 +4573,28 @@ export default function PBCModelInput() {
 
                           {showChildren &&
                             group.children.map((childRow, idx) => {
-                              const childLabel = (childRow.cleanLabel || "").toLowerCase();
+                              // childRow.cleanLabel is always scenario-tagged now
+                              // (e.g. "ProductB (Base Case)") — strip it before
+                              // matching against the focused payer/product.
+                              const childLabel = (childRow.cleanLabel || "")
+                                .split(" (")[0]
+                                .trim()
+                                .toLowerCase();
                               let isAppliedChild = false;
-                              if (activeTab === "payer_prod") {
-                                // Only highlight the child if its parent payer is also selected
-                                isAppliedChild = isAppliedParent && currentBrand && childLabel === currentBrand;
-                              } else if (activeTab === "prod_payer") {
-                                // Only highlight the child if its parent product is also selected
-                                isAppliedChild = isAppliedParent && currentPayer && childLabel === currentPayer;
+                              if (!group.isScenarioOverlay) {
+                                if (activeTab === "prod_dist") {
+                                  isAppliedChild = !!currentBrand && childLabel === currentBrand;
+                                } else if (activeTab === "payer_dist") {
+                                  isAppliedChild = !!currentPayer && childLabel === currentPayer;
+                                } else if (currentBrand || currentPayer) {
+                                  // Payer-Product / Product-Payer: children
+                                  // are full "Payer - Product" combo rows —
+                                  // match against whichever of payer/product
+                                  // is currently focused.
+                                  const matchesBrand = !currentBrand || childLabel.includes(currentBrand);
+                                  const matchesPayer = !currentPayer || childLabel.includes(currentPayer);
+                                  isAppliedChild = matchesBrand && matchesPayer;
+                                }
                               }
                               const isHighlightedChild = isAppliedChild;
 
@@ -4405,17 +4607,19 @@ export default function PBCModelInput() {
                                           position: "sticky",
                                           left: 0,
                                           zIndex: 1,
+                                          minWidth: 220,
+                                          maxWidth: 220,
                                           backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
-                                          borderRight: "1px solid #e2e8f0",
-                                          pl: "40px",
+                                          borderRight: "2px solid #e2e8f0",
+                                          pl: "32px",
                                           p: "10px 16px",
                                         }}
                                       >
                                         <Typography
                                           sx={{
-                                            fontSize: "13px",
+                                            fontSize: "14px",
                                             fontWeight: 500,
-                                            color: isHighlightedChild ? "#f59e0b" : "#0f172a",
+                                            color: isHighlightedChild ? "#f59e0b" : "#334155",
                                           }}
                                         >
                                           {childRow.cleanLabel}
@@ -4426,12 +4630,12 @@ export default function PBCModelInput() {
                                       {displayColumns.map((col) => {
                                         const isFChild = isForecastColumn(col);
                                         const childVal = childRow?.monthly_data?.[col];
-                                        const isLastCol = col === displayColumns[displayColumns.length - 1];
                                         const isEditableChild =
                                           tableEditing &&
                                           totalMarketViewMode === "monthly" &&
                                           activeTab !== "total_market" &&
-                                          !isTotalRow;
+                                          !isTotalRow &&
+                                          !group.isScenarioOverlay;
 
                                         return (
                                           <Box
@@ -4440,12 +4644,14 @@ export default function PBCModelInput() {
                                             sx={{
                                               p: isEditableChild ? '4px 3px' : '10px 8px',
                                               textAlign: 'center',
-                                              fontSize: '13px',
+                                              fontSize: '14px',
+                                              minWidth: 90,
+                                              fontWeight: 500,
                                               backgroundColor: isEditableChild
                                                 ? isFChild ? '#eff6ff' : '#f8fafc'
-                                                : isHighlightedChild && isFChild ? '#fffbeb' : isFChild ? '#ffffff' : '#eef2f7',
-                                              color: !isEditableChild && isHighlightedChild && isFChild ? '#f59e0b' : '#1e3a5f',
-                                              borderRight: isLastCol ? '1px solid #e2e8f0' : 'none',
+                                                : isHighlightedChild && isFChild ? '#fffbeb' : isFChild ? '#ffffff' : '#F1F5F9',
+                                              color: !isEditableChild && isHighlightedChild && isFChild ? '#f59e0b' : '#334155',
+                                              borderRight: '1px solid #e2e8f0',
                                             }}
                                           >
                                             {isEditableChild ? (
@@ -4455,7 +4661,7 @@ export default function PBCModelInput() {
                                                   : String(Math.round(Number(childVal)))}
                                                 onChange={(e) => {
                                                   if (/^-?\d*\.?\d*$/.test(e.target.value)) {
-                                                    handleCellChange(childRow.hierarchy, col, e.target.value);
+                                                    handleCellChange(childRow.cleanHierarchy || childRow.hierarchy, col, e.target.value);
                                                   }
                                                 }}
                                                 style={{
@@ -4545,7 +4751,7 @@ export default function PBCModelInput() {
                                   />
                                   <Typography
                                     sx={{
-                                      fontSize: "13px",
+                                      fontSize: "14px",
                                       fontWeight: isSelected ? 700 : 600,
                                       color: isSelected ? "#f59e0b" : "#0f172a",
                                     }}
@@ -4563,7 +4769,7 @@ export default function PBCModelInput() {
                                     sx={{
                                       p: "10px 8px",
                                       textAlign: "center",
-                                      fontSize: "13px",
+                                      fontSize: "14px",
                                       backgroundColor: isF ? "#ffffff" : "#f8fafc",
                                       color: "#94a3b8",
                                       borderBottom: "1px solid #f1f5f9",
