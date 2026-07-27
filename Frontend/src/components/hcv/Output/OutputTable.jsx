@@ -45,6 +45,11 @@ const formatCellValue = (value, isShare) => {
 const SELECTED_COLOR = "#F59E0B"; // Amber — matches the chart's highlight color
 const SELECTED_BG = "#FFF7ED";
 
+// Sticky label column width. Wide enough for the longest labels we see,
+// e.g. "Commercial (test-1 Scenario)" nested one level deep with the
+// expand arrow and indentation in front of it.
+const LABEL_COLUMN_WIDTH = 300;
+
 // rows: [{ key, label, metricLabel, values, rowType: 'total'|'group'|'child'|'leaf', children? }]
 export default function OutputTable({
     pivotLabel = "Total Volume Base",
@@ -54,6 +59,7 @@ export default function OutputTable({
     selectedPayer,
     selectedProduct,
     forecastStartIndex,
+    isHierarchical = false,
 }) {
     const [expandedKeys, setExpandedKeys] = useState({});
 
@@ -100,13 +106,14 @@ export default function OutputTable({
     };
 
     // ancestorMatched: whether this row's parent group was itself highlighted.
-    // Called with `true` for every top-level row (rows.map below) — flat
-    // tables (Payer/Product Distribution) have no real parent to check, and
-    // hierarchy roots' own group-level self-match is what actually gates
-    // them. Only recursive calls into row.children pass the parent's real
-    // isSelected, so a leaf like "ASGA" only lights up inside the specific
+    // Only matters for genuine hierarchy tables (Payer-Product / Product-Payer),
+    // where a leaf like "ASGA" should only light up inside the specific
     // selected payer's group, not under every payer's ASGA row — mirrors
     // ModelInput.jsx's isAppliedParent / isAppliedChild cross-check.
+    // Flat tables (Total Market Volume, Payer/Product Distribution) get their
+    // rows grouped under a synthetic "Grand Total" parent purely so they can
+    // be collapsed — that parent is never itself a matchable payer/product,
+    // so its children must be free to self-match on their own.
     const renderRow = (row, ancestorMatched = false) => {
         const hasChildren = Array.isArray(row.children) && row.children.length > 0;
         const isExpanded = expandedKeys[row.key] ?? true;
@@ -116,7 +123,11 @@ export default function OutputTable({
         const isChild = row.rowType === "child";
 
         const matchesHere = selfMatches(row);
-        const isSelected = isGroup ? matchesHere : ancestorMatched && matchesHere;
+        const isSelected = isGroup
+            ? matchesHere
+            : isHierarchical
+                ? ancestorMatched && matchesHere
+                : matchesHere;
 
         const rowBg = isSelected
             ? SELECTED_BG
@@ -142,8 +153,8 @@ export default function OutputTable({
                             left: 0,
                             zIndex: 2,
                             backgroundColor: rowBg,
-                            minWidth: 220,
-                            maxWidth: 220,
+                            minWidth: LABEL_COLUMN_WIDTH,
+                            maxWidth: LABEL_COLUMN_WIDTH,
                             fontWeight: isTotal || isSelected ? 700 : 400,
                             color: labelColor,
                             borderRight: "2px solid #E2E8F0",
@@ -277,8 +288,8 @@ export default function OutputTable({
                                         fontWeight: 700,
                                         fontSize: 14,
                                         color: "#64748b",
-                                        minWidth: 220,
-                                        maxWidth: 220,
+                                        minWidth: LABEL_COLUMN_WIDTH,
+                                        maxWidth: LABEL_COLUMN_WIDTH,
                                         borderRight: "2px solid #E2E8F0",
                                         borderBottom: "2px solid #E2E8F0",
                                     }}
