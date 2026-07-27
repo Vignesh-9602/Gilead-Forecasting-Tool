@@ -79,6 +79,111 @@ def load_filter_state(cur, ta_name: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Impact curve configuration rows — persist each tab's configured events
+#
+# Requires this table (self-created on first save, no migration needed):
+#   CREATE TABLE raw_liver.market_events_impact_rows (
+#       ta_name       TEXT NOT NULL,
+#       scenario_name TEXT NOT NULL,  -- 'BASE' or a real saved scenario name
+#       tab           TEXT NOT NULL,  -- 'payer_event' | 'product_event' | 'overall_event'
+#       rows          JSONB NOT NULL DEFAULT '[]',
+#       updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#       PRIMARY KEY (ta_name, scenario_name, tab)
+#   );
+#
+# Scoped per scenario (not just per ta_name/tab) because run_calculation now
+# auto-saves its computed result into whichever named scenario is selected
+# (see run_market_events_calculation) -- two different scenarios can have
+# genuinely different event configurations for the same tab, and each must
+# keep its own rows so reopening a scenario shows the events that actually
+# produced its saved numbers, not whichever scenario was run most recently.
+# ---------------------------------------------------------------------------
+
+def _ensure_impact_rows_table(cur) -> None:
+    """
+    Idempotent/cheap -- called before every read and write below so a fresh
+    DB (or the first-ever save for this feature) never hits a mid-transaction
+    "relation does not exist" error, which would poison the caller's whole
+    transaction rather than just this one query.
+    """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS raw_liver.market_events_impact_rows (
+            ta_name       TEXT NOT NULL,
+            scenario_name TEXT NOT NULL,
+            tab           TEXT NOT NULL,
+            rows          JSONB NOT NULL DEFAULT '[]',
+            updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ta_name, scenario_name, tab)
+        )
+    """)
+
+    # One-time fix-up for a table created by an earlier version of this
+    # feature (2-column key: ta_name, tab, no scenario_name) -- CREATE TABLE
+    # IF NOT EXISTS above is a no-op against an already-existing table even
+    # with an incompatible old schema, so a leftover old table would
+    # otherwise keep failing every query below with "column scenario_name
+    # does not exist" forever. Gated on the column check so the DROP/ADD
+    # CONSTRAINT dance (which briefly removes the uniqueness guarantee) only
+    # ever runs once, not on every call.
+    cur.execute("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'raw_liver'
+          AND table_name = 'market_events_impact_rows'
+          AND column_name = 'scenario_name'
+    """)
+    if cur.fetchone() is not None:
+        return
+
+    cur.execute("""
+        ALTER TABLE raw_liver.market_events_impact_rows
+        ADD COLUMN scenario_name TEXT NOT NULL DEFAULT 'BASE'
+    """)
+    cur.execute("""
+        ALTER TABLE raw_liver.market_events_impact_rows
+        DROP CONSTRAINT IF EXISTS market_events_impact_rows_pkey
+    """)
+    cur.execute("""
+        ALTER TABLE raw_liver.market_events_impact_rows
+        ADD CONSTRAINT market_events_impact_rows_pkey
+        PRIMARY KEY (ta_name, scenario_name, tab)
+    """)
+
+
+def save_impact_rows(cur, ta_name: str, scenario_name: str, tab: str, rows: list) -> None:
+    """
+    Persist the full set of configured event rows for one
+    (ta_name, scenario_name, tab) -- whole-array replace, not per-event
+    upsert: the frontend always resends the complete rows list for whichever
+    tab it just ran (see run_market_events_calculation), never a single row
+    to add/delete, so there is no per-row identity to key on here.
+    """
+    _ensure_impact_rows_table(cur)
+    cur.execute("""
+        INSERT INTO raw_liver.market_events_impact_rows
+            (ta_name, scenario_name, tab, rows, updated_at)
+        VALUES (%s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+        ON CONFLICT (ta_name, scenario_name, tab) DO UPDATE SET
+            rows       = EXCLUDED.rows,
+            updated_at = CURRENT_TIMESTAMP
+    """, (ta_name, scenario_name, tab, json.dumps(rows)))
+
+
+def load_impact_rows(cur, ta_name: str, scenario_name: str, tab: str) -> list:
+    """
+    Return the persisted event rows for one (ta_name, scenario_name, tab).
+    Returns [] if nothing has been saved yet for this tab under this scenario.
+    """
+    _ensure_impact_rows_table(cur)
+    cur.execute("""
+        SELECT rows
+        FROM raw_liver.market_events_impact_rows
+        WHERE ta_name = %s AND scenario_name = %s AND tab = %s
+    """, (ta_name, scenario_name, tab))
+    row = cur.fetchone()
+    return row[0] if row else []
+
+
+# ---------------------------------------------------------------------------
 # Global config — read date ranges from liver_configurations
 # (brand column = product in market events context)
 # ---------------------------------------------------------------------------

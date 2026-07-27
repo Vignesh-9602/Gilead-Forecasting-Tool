@@ -919,8 +919,24 @@ export default function PBCModelInput() {
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
           const firstRow = rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
-          const vals = parseValues(firstRow.values, false);
+          let vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
+
+          // Align scenario values to the chart month axis (months = active scenario's
+          // months for the current date filter). A saved scenario may have been
+          // persisted with a wider or narrower date window, so its values array can be
+          // a different length. Without alignment, value[i] is plotted at chart
+          // position i regardless of the actual month, causing values to appear to
+          // "change" whenever the date filter shifts the month axis.
+          const scenarioMonths = metricObj?.monthly?.chart?.months || [];
+          if (scenarioMonths.length > 0 && months.length > 0 && scenarioMonths.length !== months.length) {
+            const monthToVal = {};
+            scenarioMonths.forEach((m, i) => {
+              monthToVal[(m || "").substring(0, 7)] = vals[i];
+            });
+            vals = months.map((m) => monthToVal[(m || "").substring(0, 7)] ?? null);
+          }
+
           scenarioRows.push({
             hierarchy: scenarioName,
             label: scenarioName,
@@ -936,6 +952,7 @@ export default function PBCModelInput() {
 
           // Build yearly scenario rows — only for scenarios that have yearly data.
           const yearlyScenarioRows = [];
+          const yearlyChartMonthsRef = tmvTab.yearlyChart?.months || [];
           allScenarioNames.forEach((scenarioName) => {
             const scenarioData = data.scenarios[scenarioName];
             const tmv = scenarioData?.market_analysis?.total_market_volume;
@@ -946,8 +963,19 @@ export default function PBCModelInput() {
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
             const firstYearlyRow = yearlyRows[0];
             if (!firstYearlyRow) return;
-            const yearlyVals = parseValues(firstYearlyRow.values, false);
+            let yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
+
+            // Align yearly values to the active scenario's yearly month axis
+            const scenarioYearlyMonths = metricObj?.yearly?.chart?.months || [];
+            if (scenarioYearlyMonths.length > 0 && yearlyChartMonthsRef.length > 0 && scenarioYearlyMonths.length !== yearlyChartMonthsRef.length) {
+              const yearToVal = {};
+              scenarioYearlyMonths.forEach((m, i) => {
+                yearToVal[(m || "").substring(0, 4)] = yearlyVals[i];
+              });
+              yearlyVals = yearlyChartMonthsRef.map((m) => yearToVal[(m || "").substring(0, 4)] ?? null);
+            }
+
             yearlyScenarioRows.push({
               hierarchy: scenarioName,
               label: scenarioName,
@@ -956,9 +984,6 @@ export default function PBCModelInput() {
               children: [],
             });
           });
-
-          // Yearly chart months (for building yearly table headers)
-          const yearlyChartMonths = tmvTab.yearlyChart?.months || [];
 
           // Chart shows one line per scenario so the Compare Scenarios
           // dropdown can render multiple scenarios at once. Filtering to
@@ -990,7 +1015,7 @@ export default function PBCModelInput() {
             // yearly view also shows every scenario, not just the active one.
             yearlyTable: yearlyScenarioRows.length
               ? {
-                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonthsRef }),
                 rows: yearlyScenarioRows,
               }
               : tmvTab.yearlyTable,
@@ -1072,11 +1097,16 @@ export default function PBCModelInput() {
     const series = (tab.chart?.series || [])
       .filter((s) => {
         const lbl = (s.label || "").toLowerCase();
-        return (
-          !lbl.includes("total") &&
-          !lbl.includes("market volume") &&
-          !lbl.includes("market share")
-        );
+        if (
+          lbl.includes("total") ||
+          lbl.includes("market volume") ||
+          lbl.includes("market share")
+        ) return false;
+        // Scenario-labeled series (TMV compare): only show if checked in the dropdown
+        if (compareScenarioOptions.includes(s.label)) {
+          return selectedCompareScenarios.includes(s.label);
+        }
+        return true;
       })
       .map((s) => ({
         label: s.label || "",
@@ -1870,53 +1900,11 @@ export default function PBCModelInput() {
   // repopulates from-date, to-date, available scenarios, the projection
   // factors, and the chart/table directly from the backend response —
   // matching the same response shape used on initial load.
-  const refreshLiverFilters = async (payerVal, productVal) => {
-    if (!isHCV) return;
-    try {
-      setLoading(true);
-      const response = await getLiverFilters({
-        ta: therapyArea || "HCV",
-        payer: payerVal || undefined,
-        brand: productVal || undefined,
-      });
-      const resData = response?.data || {};
-      const sf = resData?.selected_filter || {};
-
-      // Refresh FROM/TO DATE options for this payer/product combination.
-      if (
-        Array.isArray(resData?.available_months) &&
-        resData.available_months.length
-      ) {
-        setAvailableDates(resData.available_months);
-      }
-      // Keep the Payer/Product dropdown lists in sync too.
-      if (Array.isArray(resData?.payers) && resData.payers.length) {
-        setPayerOptions(resData.payers);
-      }
-      if (Array.isArray(resData?.products) && resData.products.length) {
-        setProductOptions(resData.products);
-      }
-
-      // Update FROM/TO DATE values from the backend's resolved selection.
-      if (sf.start_date) setFromDate(sf.start_date);
-      if (sf.end_date) setToDate(sf.end_date);
-
-      // Sync payer/product to whatever the backend resolved (in case it
-      // snapped to a valid combination), falling back to what was picked.
-      setPayerFilter(sf.payer || payerVal || "");
-      setProductFilter(sf.product || productVal || "");
-
-      // NOTE: chart/table and factors are intentionally NOT updated here.
-      // The user must click "Apply Filter" to reload the data for the new
-      // payer/product selection. This avoids an extra apply-filters API
-      // call on every dropdown change.
-    } catch (error) {
-      console.error("Failed to refresh liver filters", error);
-      showSnackbar("Failed to load filter data", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
+  // NOTE: Payer/Product filter changes are pure local state — no API call
+  // fires until the user explicitly clicks "Apply Filter". (Previously a
+  // refreshLiverFilters() call fired on every dropdown change to keep the
+  // From/To Date options in sync with the new payer/product; removed since
+  // that's still an API call happening before Apply Filter is clicked.)
 
   // Resolves the model to use from a backend active_model value.
   // Rules:
@@ -2009,7 +1997,8 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        const response = await applyLiverFilters(buildLiverBasePayload());
+        const _p = buildLiverBasePayload();
+        const response = await applyLiverFilters(_p);
         const data = response?.data || {};
         setAppliedLot(lot);
         setAppliedBrand(productFilter || brand);
@@ -3157,7 +3146,6 @@ export default function PBCModelInput() {
                   onChange={(e) => {
                     const val = e.target.value;
                     setPayerFilter(val);
-                    refreshLiverFilters(val, productFilter);
                   }}
                   displayEmpty
                   renderValue={(sel) => {
@@ -3213,7 +3201,6 @@ export default function PBCModelInput() {
                   onChange={(e) => {
                     const val = e.target.value;
                     setProductFilter(val);
-                    refreshLiverFilters(payerFilter, val);
                   }}
                   displayEmpty
                   renderValue={(sel) => {

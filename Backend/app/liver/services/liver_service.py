@@ -1686,7 +1686,7 @@ def _load_config(cur, ta: str, payer: str = None, brand: str = None) -> dict:
 # Get filters
 # ---------------------------------------------------------------------------
 
-def get_liver_filters(ta: str = "HCV", payer: str = None, brand: str = None) -> dict:
+def get_liver_filters(ta: str = "HCV") -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -1737,17 +1737,14 @@ def get_liver_filters(ta: str = "HCV", payer: str = None, brand: str = None) -> 
                                        avail_end_year,   avail_end_month)
         date_labels = [_month_label(y, m) for y, m in all_months]
 
-        default_payer = payer or (payers[0] if payers else None)
-        default_brand = brand or (products[0] if products else None)
-
         return {
             "ta_name":          ta,
             "payers":           payers,
             "products":         products,
             "available_months": date_labels,
             "selected_filter": {
-                "payer":      default_payer,
-                "product":    default_brand,
+                "payer":      payers[0] if payers else None,
+                "product":    products[0] if products else None,
                 "start_date": from_date,
                 "end_date":   to_date,
             },
@@ -1805,12 +1802,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             all_scenario_names.remove("Base")
         available_scenarios = ["Base"] + all_scenario_names
 
-        saved_factors_raw = None
+        saved_market_analysis = None
+        saved_factors_raw     = None
 
-        # Load factors for the active scenario from DB (non-Base only).
+        # For non-Base scenarios load both factors AND the saved chart_data.
+        # apply_liver_filters shows saved values (the scenario's committed state);
+        # recalculate_liver is the action that recomputes with new factor inputs.
         if active_scenario != "Base":
             cur.execute(
-                "SELECT factors FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
+                "SELECT factors, chart_data FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
                 (active_scenario,),
             )
             row = cur.fetchone()
@@ -1820,23 +1820,33 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     factors = LiverFactors(**saved_factors_raw)
                 except Exception:
                     factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
+                saved_cd = row[1] if row[1] else {}
+                if isinstance(saved_cd, dict) and "market_analysis" in saved_cd:
+                    saved_market_analysis = saved_cd["market_analysis"]
             else:
                 factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
         else:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
-        # Always freshly compute market_analysis using the resolved factors.
-        # For non-Base scenarios, factors are loaded from DB (scenario's saved
-        # parameters); for Base, they are estimated from the data.
-        # This ensures payer/product filter changes are always reflected in the
-        # chart — previously non-Base returned saved data unchanged.
-        market_analysis, tab1_ets = _build_market_analysis_both_granularities(
-            cur, payload.ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, factors,
-            sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
-            scenario_name=payload.scenario,
-        )
-        market_analysis = _recompute_all_market_shares_nested(market_analysis)
+        if saved_market_analysis:
+            # Non-Base with saved chart data: return committed values unchanged.
+            saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
+            market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
+            _ets_raw = (saved_factors_raw or {}).get("ets", {})
+            tab1_ets = EtsParams(
+                alpha=float(_ets_raw.get("alpha", 0.30)),
+                beta=float(_ets_raw.get("beta", 0.20)),
+                gamma=float(_ets_raw.get("gamma", 0.98)),
+            )
+        else:
+            # Base or non-Base with no saved chart data: freshly compute.
+            market_analysis, tab1_ets = _build_market_analysis_both_granularities(
+                cur, payload.ta, from_year, from_month,
+                train_end_year, train_end_month, forecast_periods, factors,
+                sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                scenario_name=payload.scenario,
+            )
+            market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
         if active_scenario != "Base" and saved_factors_raw:
@@ -1930,12 +1940,17 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             )
 
         def _inactive_stub(sc_name):
-            if sc_name == "Base":
-                return {"market_analysis": base_full_ma}
-            # Load directly from stored chart_data — never rebuild from factors
+            # Always prefer DB-persisted data — it is stable regardless of the
+            # current date filter. For Base this means the snapshot written when
+            # Base was last computed; for other scenarios it is their saved state.
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
-            return {"market_analysis": raw_ma}
+            if raw_ma:
+                return {"market_analysis": raw_ma}
+            # Fallback for Base when it has never been persisted yet
+            if sc_name == "Base":
+                return {"market_analysis": base_full_ma}
+            return {"market_analysis": {}}
 
         scenarios = {
             sc: (
