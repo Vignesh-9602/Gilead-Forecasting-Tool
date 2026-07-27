@@ -71,6 +71,82 @@ def refresh_engine(payload):
 
     return market_analysis
 
+def is_overall_label(label):
+    if not isinstance(label, str):
+        return False
+
+    normalized = label.strip().lower()
+
+    return (
+        normalized == "overall"
+        or normalized.startswith("overall(")
+        or normalized.startswith("overall (")
+    )
+
+
+def normalize_rows(rows):
+
+    for row in rows or []:
+
+        if is_overall_label(row.get("label")):
+            row["label"] = "Overall"
+
+        normalize_rows(
+            row.get("children", [])
+        )
+
+
+def normalize_series(series_rows):
+
+    for series in series_rows or []:
+
+        if is_overall_label(series.get("label")):
+            series["label"] = "Overall"
+
+        normalize_series(
+            series.get("children", [])
+        )
+
+
+def normalize_overall_labels(market_analysis):
+
+    if not isinstance(market_analysis, dict):
+        return market_analysis
+
+    for section in market_analysis.values():
+
+        if not isinstance(section, dict):
+            continue
+
+        for metric in section.values():
+
+            if not isinstance(metric, dict):
+                continue
+
+            for period_name in ("monthly", "yearly"):
+
+                period = metric.get(period_name)
+
+                if not isinstance(period, dict):
+                    continue
+
+                table_rows = (
+                    period
+                    .get("table", {})
+                    .get("rows", [])
+                )
+
+                chart_series = (
+                    period
+                    .get("chart", {})
+                    .get("series", [])
+                )
+
+                normalize_rows(table_rows)
+                normalize_series(chart_series)
+
+    return market_analysis
+
 def recompute_from_total_market_volume(
     market_analysis,
     selected_filter,
@@ -86,7 +162,7 @@ def recompute_from_total_market_volume(
     print("After apply:",
       market_analysis["total_market_volume"]["market_volume"]["monthly"]["table"]["rows"][0]["values"][0])
 
-    build_total_market_volume(market_analysis,selected_filter)
+    build_total_market_volume_refresh(market_analysis,selected_filter)
 
     print("After build_total_market_volume:",
         market_analysis["total_market_volume"]["market_volume"]["monthly"]["table"]["rows"][0]["values"][0])
@@ -466,7 +542,7 @@ def recompute_from_product_market(
 
 #     return market_analysis
 
-def build_total_market_volume(market_analysis,selected_filter):
+def build_total_market_volume_refresh(market_analysis,selected_filter):
 
     # ==========================================================
     # Monthly Volume
@@ -910,196 +986,109 @@ def rebuild_market_product_volume(market_analysis):
 
     print("\n--- Rebuilding Market → Product Volume ---")
 
-    volume_rows = (
-        market_analysis["market_product"]
-        ["market_volume"]["monthly"]["table"]["rows"]
-    )
-
-    share_rows = (
-        market_analysis["market_product"]
-        ["market_share"]["monthly"]["table"]["rows"]
-    )
-
     market_rows = (
         market_analysis["market_distribution"]
-        ["market_volume"]["monthly"]["table"]["rows"]
+        ["market_volume"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
     )
 
-    product_rows = (
+    product_share_rows = (
         market_analysis["product_distribution"]
-        ["market_volume"]["monthly"]["table"]["rows"]
+        ["market_share"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
     )
 
-    retail_parent = volume_rows[0]
-    non_parent = volume_rows[1]
+    market_product_rows = (
+        market_analysis["market_product"]
+        ["market_volume"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
+    )
 
-    retail_total = market_rows[1]["values"]
-    non_total = market_rows[2]["values"]
+    retail_row = find_row(
+        market_rows,
+        "Retail",
+    )
 
-    months = len(retail_total)
-    product_count = len(retail_parent["children"])
+    non_retail_row = find_row(
+        market_rows,
+        "Non-retail",
+    )
 
-    # =====================================================
-    # STEP 1
-    # Initial Retail allocation using existing shares
-    # =====================================================
+    if retail_row is None:
+        raise ValueError(
+            "Retail row is missing from market distribution."
+        )
 
-    for p in range(product_count):
+    if non_retail_row is None:
+        raise ValueError(
+            "Non-retail row is missing from market distribution."
+        )
 
-        retail_values = retail_parent["children"][p]["values"]
-        retail_share = share_rows[0]["children"][p]["values"]
+    market_values_map = {
+        "Retail": retail_row["values"],
+        "Non-retail": non_retail_row["values"],
+    }
 
-        for m in range(months):
+    product_share_map = {
+        row.get("label"): row.get("values", [])
+        for row in product_share_rows
+        if row.get("label") != "Overall"
+    }
 
-            retail_values[m] = round(
-                retail_total[m]
-                * retail_share[m]
+    print("Market-product row labels:")
+
+    for row in market_product_rows:
+        print(row.get("label"))
+
+    for row in market_product_rows:
+
+        label = row.get("label", "")
+
+        if " - " not in label:
+            continue
+
+        market_name, product_name = label.split(
+            " - ",
+            1,
+        )
+
+        market_values = market_values_map.get(
+            market_name
+        )
+
+        product_shares = product_share_map.get(
+            product_name
+        )
+
+        if market_values is None:
+            continue
+
+        if product_shares is None:
+            continue
+
+        row_values = row.get("values", [])
+
+        month_count = min(
+            len(market_values),
+            len(product_shares),
+            len(row_values),
+        )
+
+        for month_index in range(month_count):
+
+            row_values[month_index] = round(
+                market_values[month_index]
+                * product_shares[month_index]
                 / 100
             )
 
-    # =====================================================
-    # STEP 2
-    # Initial Non-retail from Product totals
-    # =====================================================
-
-    for p in range(product_count):
-
-        product_total = product_rows[p + 1]["values"]
-
-        retail_values = retail_parent["children"][p]["values"]
-        non_values = non_parent["children"][p]["values"]
-
-        for m in range(months):
-
-            non_values[m] = (
-                product_total[m]
-                - retail_values[m]
-            )
-
-    # =====================================================
-    # STEP 3
-    # Normalize Non-retail column
-    # =====================================================
-
-    for m in range(months):
-
-        current_total = sum(
-            child["values"][m]
-            for child in non_parent["children"]
-        )
-
-        if current_total == 0:
-            continue
-
-        factor = non_total[m] / current_total
-
-        for child in non_parent["children"]:
-
-            child["values"][m] = round(
-                child["values"][m] * factor
-            )
-
-        # ---------------------------------------------
-        # Reconcile Non-retail rounding
-        # ---------------------------------------------
-
-        actual_total = sum(
-            child["values"][m]
-            for child in non_parent["children"]
-        )
-
-        diff = non_total[m] - actual_total
-
-        non_parent["children"][-1]["values"][m] += diff
-
-    # =====================================================
-    # STEP 4
-    # Recompute Retail from Product totals
-    # =====================================================
-
-    for p in range(product_count):
-
-        product_total = product_rows[p + 1]["values"]
-
-        retail_values = retail_parent["children"][p]["values"]
-        non_values = non_parent["children"][p]["values"]
-
-        for m in range(months):
-
-            retail_values[m] = (
-                product_total[m]
-                - non_values[m]
-            )
-
-    # =====================================================
-    # STEP 5
-    # Reconcile Retail rounding
-    # =====================================================
-
-    for m in range(months):
-
-        actual_total = sum(
-            child["values"][m]
-            for child in retail_parent["children"]
-        )
-
-        diff = retail_total[m] - actual_total
-
-        retail_parent["children"][-1]["values"][m] += diff
-
-    # =====================================================
-    # STEP 6
-    # Final Parent Totals
-    # =====================================================
-
-    retail_parent["values"] = retail_total.copy()
-    non_parent["values"] = non_total.copy()
-
-    # =====================================================
-    # STEP 7
-    # Final Validation
-    # =====================================================
-
-    print("\nValidation")
-
-    for m in range(months):
-
-        retail_sum = sum(
-            child["values"][m]
-            for child in retail_parent["children"]
-        )
-
-        non_sum = sum(
-            child["values"][m]
-            for child in non_parent["children"]
-        )
-
-        product_sum = 0
-
-        for p in range(product_count):
-
-            total = (
-                retail_parent["children"][p]["values"][m]
-                + non_parent["children"][p]["values"][m]
-            )
-
-            expected = product_rows[p + 1]["values"][m]
-
-            if total != expected:
-                print(
-                    f"Month {m+1}: "
-                    f"{product_rows[p+1]['label']} "
-                    f"{total} != {expected}"
-                )
-
-            product_sum += expected
-
-        print(
-            f"Month {m+1}: "
-            f"Retail={retail_sum}/{retail_total[m]} | "
-            f"NonRetail={non_sum}/{non_total[m]} | "
-            f"Overall={product_sum}"
-        )
+    return market_analysis
 
 def rebuild_market_product_share(market_analysis):
 
@@ -1298,14 +1287,35 @@ def rebuild_product_market_share(market_analysis):
         for child in row["children"]:
             print("   ", child["label"], child["values"][:5])
 
+def find_row(rows, label):
+    return next(
+        (
+            row
+            for row in rows
+            if row.get("label") == label
+        ),
+        None,
+    )
+
+
+def get_edited_labels(edited_rows):
+    labels = set()
+
+    for row in edited_rows or []:
+        if isinstance(row, str):
+            labels.add(row)
+        elif isinstance(row, dict) and row.get("label"):
+            labels.add(row["label"])
+
+    return labels
+
 def rebuild_market_distribution_from_market_volume_edit(
     market_analysis,
     edited_rows,
 ):
-
     print("\n--- Rebuilding Market Distribution (Volume Edit) ---")
 
-    edited_rows = set(edited_rows or [])
+    edited_labels = get_edited_labels(edited_rows)
 
     volume_rows = (
         market_analysis["market_distribution"]
@@ -1323,39 +1333,76 @@ def rebuild_market_distribution_from_market_volume_edit(
         ["rows"]
     )
 
-    overall = volume_rows[0]["values"]
-    retail = volume_rows[1]["values"]
-    non_retail = volume_rows[2]["values"]
+    overall_volume_row = find_row(volume_rows, "Overall")
+    retail_volume_row = find_row(volume_rows, "Retail")
+    non_retail_volume_row = find_row(volume_rows, "Non-retail")
 
-    children_volume = volume_rows[2]["children"]
-    children_share = share_rows[2]["children"]
+    non_retail_share_row = find_row(share_rows, "Non-retail")
+
+    if not overall_volume_row:
+        raise ValueError(
+            "Overall row is missing from market volume rows."
+        )
+
+    if not retail_volume_row:
+        raise ValueError(
+            "Retail row is missing from market volume rows."
+        )
+
+    if not non_retail_volume_row:
+        raise ValueError(
+            "Non-retail row is missing from market volume rows."
+        )
+
+    if not non_retail_share_row:
+        raise ValueError(
+            "Non-retail row is missing from market share rows."
+        )
+
+    overall = overall_volume_row["values"]
+    retail = retail_volume_row["values"]
+    non_retail = non_retail_volume_row["values"]
+
+    children_volume = non_retail_volume_row.get("children", [])
+    children_share = non_retail_share_row.get("children", [])
 
     # --------------------------------------------------
     # Retail edited
     # --------------------------------------------------
 
-    if "Retail" in edited_rows:
+    if "Retail" in edited_labels:
 
-        for i in range(len(overall)):
-            non_retail[i] = overall[i] - retail[i]
+        for month_index in range(len(overall)):
+            non_retail[month_index] = (
+                overall[month_index]
+                - retail[month_index]
+            )
 
     # --------------------------------------------------
     # Non-retail edited
     # --------------------------------------------------
 
-    elif "Non-retail" in edited_rows:
+    elif "Non-retail" in edited_labels:
 
-        for i in range(len(overall)):
-            retail[i] = overall[i] - non_retail[i]
+        for month_index in range(len(overall)):
+            retail[month_index] = (
+                overall[month_index]
+                - non_retail[month_index]
+            )
 
     # --------------------------------------------------
     # Non-retail child edited
     # --------------------------------------------------
 
-    elif any(
-        row in edited_rows
-        for row in ["Kaiser", "IQVIA", "ADAP", "Federal"]
+    elif edited_labels.intersection(
+        {"Kaiser", "IQVIA", "ADAP", "Federal"}
     ):
+
+        if not children_volume:
+            raise ValueError(
+                "Non-retail children are missing from "
+                "market volume rows."
+            )
 
         for month_index in range(len(overall)):
 
@@ -1370,21 +1417,35 @@ def rebuild_market_distribution_from_market_volume_edit(
             )
 
     # --------------------------------------------------
-    # Rebuild children ONLY if parent changed
+    # Rebuild children only if parent changed
     # --------------------------------------------------
 
-    if "Retail" in edited_rows or "Non-retail" in edited_rows:
+    if (
+        "Retail" in edited_labels
+        or "Non-retail" in edited_labels
+    ):
 
-        for child_index in range(len(children_volume)):
+        share_by_label = {
+            child.get("label"): child
+            for child in children_share
+        }
 
-            child_values = children_volume[child_index]["values"]
-            child_share = children_share[child_index]["values"]
+        for child_volume in children_volume:
+
+            child_label = child_volume.get("label")
+            child_share_row = share_by_label.get(child_label)
+
+            if not child_share_row:
+                continue
+
+            child_values = child_volume["values"]
+            child_shares = child_share_row["values"]
 
             for month_index in range(len(non_retail)):
 
                 child_values[month_index] = round(
                     non_retail[month_index]
-                    * child_share[month_index]
+                    * child_shares[month_index]
                     / 100
                 )
 
@@ -1398,46 +1459,70 @@ def rebuild_market_distribution_from_market_share_edit(
     market_analysis,
     edited_rows,
 ):
-
     print("\n--- Rebuilding Market Distribution (Share Edit) ---")
 
-    edited_rows = set(edited_rows or [])
+    edited_labels = get_edited_labels(edited_rows)
 
     volume_rows = (
         market_analysis["market_distribution"]
-        ["market_volume"]["monthly"]["table"]["rows"]
+        ["market_volume"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
     )
 
     share_rows = (
         market_analysis["market_distribution"]
-        ["market_share"]["monthly"]["table"]["rows"]
+        ["market_share"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
     )
 
-    overall = volume_rows[0]["values"]
+    overall_volume_row = find_row(volume_rows, "Overall")
+    retail_volume_row = find_row(volume_rows, "Retail")
+    non_retail_volume_row = find_row(volume_rows, "Non-retail")
 
-    retail_volume = volume_rows[1]["values"]
-    non_retail_volume = volume_rows[2]["values"]
+    retail_share_row = find_row(share_rows, "Retail")
+    non_retail_share_row = find_row(share_rows, "Non-retail")
 
-    retail_share = share_rows[1]["values"]
-    non_retail_share = share_rows[2]["values"]
+    required_rows = {
+        "Overall market volume": overall_volume_row,
+        "Retail market volume": retail_volume_row,
+        "Non-retail market volume": non_retail_volume_row,
+        "Retail market share": retail_share_row,
+        "Non-retail market share": non_retail_share_row,
+    }
+
+    for row_name, row in required_rows.items():
+        if row is None:
+            raise ValueError(f"{row_name} row is missing.")
+
+    overall = overall_volume_row["values"]
+
+    retail_volume = retail_volume_row["values"]
+    non_retail_volume = non_retail_volume_row["values"]
+
+    retail_share = retail_share_row["values"]
+    non_retail_share = non_retail_share_row["values"]
 
     # --------------------------------------------------
     # Parent shares
     # --------------------------------------------------
 
-    if "Retail" in edited_rows:
+    if "Retail" in edited_labels:
 
-        for i in range(len(overall)):
-            non_retail_share[i] = round(
-                100 - retail_share[i],
+        for month_index in range(len(overall)):
+            non_retail_share[month_index] = round(
+                100 - retail_share[month_index],
                 2,
             )
 
-    elif "Non-retail" in edited_rows:
+    elif "Non-retail" in edited_labels:
 
-        for i in range(len(overall)):
-            retail_share[i] = round(
-                100 - non_retail_share[i],
+        for month_index in range(len(overall)):
+            retail_share[month_index] = round(
+                100 - non_retail_share[month_index],
                 2,
             )
 
@@ -1445,37 +1530,60 @@ def rebuild_market_distribution_from_market_share_edit(
     # Parent volumes
     # --------------------------------------------------
 
-    for i in range(len(overall)):
+    for month_index in range(len(overall)):
 
-        retail_volume[i] = round(
-            overall[i] * retail_share[i] / 100
+        retail_volume[month_index] = round(
+            overall[month_index]
+            * retail_share[month_index]
+            / 100
         )
 
-        non_retail_volume[i] = (
-            overall[i] - retail_volume[i]
+        non_retail_volume[month_index] = (
+            overall[month_index]
+            - retail_volume[month_index]
         )
 
     # --------------------------------------------------
     # Rebuild Non-retail children volumes
     # --------------------------------------------------
 
-    non_children_volume = volume_rows[2]["children"]
-    non_children_share = share_rows[2]["children"]
+    children_volume = non_retail_volume_row.get(
+        "children",
+        [],
+    )
 
-    for child_index in range(len(non_children_volume)):
+    children_share = non_retail_share_row.get(
+        "children",
+        [],
+    )
 
-        child_values = non_children_volume[child_index]["values"]
-        child_share = non_children_share[child_index]["values"]
+    share_by_label = {
+        child.get("label"): child
+        for child in children_share
+    }
+
+    for child_volume in children_volume:
+
+        child_label = child_volume.get("label")
+        child_share_row = share_by_label.get(child_label)
+
+        if not child_share_row:
+            continue
+
+        child_values = child_volume["values"]
+        child_shares = child_share_row["values"]
 
         for month_index in range(len(overall)):
 
             child_values[month_index] = round(
                 non_retail_volume[month_index]
-                * child_share[month_index]
+                * child_shares[month_index]
                 / 100
             )
 
-    rebuild_market_distribution_share(market_analysis)
+    rebuild_market_distribution_share(
+        market_analysis
+    )
 
     return market_analysis
 

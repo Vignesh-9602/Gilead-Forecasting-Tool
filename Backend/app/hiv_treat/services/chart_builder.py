@@ -1,5 +1,13 @@
 def build_chart_from_table(table, existing_chart=None):
 
+    print(
+        "CHART INPUT LABELS:",
+        [
+            row.get("label")
+            for row in table.get("rows", [])
+        ],
+    )
+
     chart = {}
 
     forecast_start_index = None

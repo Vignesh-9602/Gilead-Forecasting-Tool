@@ -725,7 +725,7 @@ def _parent_volume_for_group(base_map, target_key, total_vals, n):
     if product == "ALL":
         return list(total_vals)
  
-    market_share_vals = _full_series(base_map, (market, "ALL", "ALL", "market_share"), n)
+    market_share_vals = _full_series(base_map, (market, None, "ALL", "market_share"), n)
     if market_share_vals is None:
         print(f"WARNING: missing base market_share for parent volume, market={market}")
         return list(total_vals)
@@ -745,39 +745,29 @@ def _parent_volume_for_group(base_map, target_key, total_vals, n):
 # =========================================================
  
 def _resolve_recalc_groups(selected_tab, selected_filter, base_map):
+    """Decides which target row(s) + siblings are in scope for the given
+    tab and selected_filter."""
     tab = (selected_tab or "total_market_volume").lower()
     sel_market = selected_filter.market
     sel_product = selected_filter.product
     groups = []
-
+ 
     if tab == "total_market_volume":
         return groups
-
-    if tab == "market_distribution":
-        target_key = (sel_market, "ALL", "ALL", "market_share")
+ 
+    if tab in ("market_distribution", "product_market"):
+        target_key = (sel_market, None, "ALL", "market_share")
         if target_key not in base_map:
             return groups
         siblings = [
             k for k in base_map
             if k[3] == "market_share" and k[2] == "ALL"
-            and k[1] == "ALL" and k[0] != sel_market
+            and k[1] is None and k[0] != sel_market
         ]
         groups.append((target_key, siblings))
         return groups
-
-    if tab == "product_distribution":
-        target_key = ("ALL", "ALL", sel_product, "market_share")
-        if target_key not in base_map:
-            return groups
-        siblings = [
-            k for k in base_map
-            if k[3] == "market_share" and k[0] == "ALL"
-            and k[1] == "ALL" and k[2] not in ("ALL", sel_product)
-        ]
-        groups.append((target_key, siblings))
-        return groups
-
-    if tab == "market_product":
+ 
+    if tab in ("product_distribution", "market_product"):
         matching_rows = [
             k for k in base_map
             if k[3] == "market_share" and k[0] == sel_market and k[2] == sel_product
@@ -796,32 +786,9 @@ def _resolve_recalc_groups(selected_tab, selected_filter, base_map):
             ]
             groups.append((target_key, siblings))
         return groups
-
-    if tab == "product_market":
-        matching_rows = [
-            k for k in base_map
-            if k[3] == "market_share" and k[2] == sel_product and k[0] != "ALL"
-        ]
-        if not matching_rows:
-            return groups
-        sel_rows = [k for k in matching_rows if k[0] == sel_market]
-        if not sel_rows:
-            return groups
-        target_key = sel_rows[0]
-        siblings = [k for k in matching_rows if k[0] != sel_market]
-        groups.append((target_key, siblings))
-        return groups
-
+ 
     return groups
-
-def _canon_source(s):
-    """Collapse all 'no source subdivision' sentinels to one canonical
-    value. Only affects market-level aggregate rows (source_of_market
-    NULL or '') -- real sources like 'Kaiser' or the Retail-only
-    placeholder 'Unknown' pass through untouched."""
-    if s is None or s == "":
-        return "ALL"
-    return s
+ 
  
 def _renormalize_siblings(target_new_fv, base_map, sibling_keys):
     """Rescales siblings so the group always sums to 100% at every
@@ -916,22 +883,25 @@ def _compute_target_new_share(
     else:  # "market_share"
         try:
             if model_type == "moving_average":
+
                 new_fc = process_moving_average_forecast(
                     series_months=months,
-                    series_values=base_share_full,
+                    series_values=target_vol_full,
                     train_start_date=train_start,
                     train_end_date=train_end,
                     forecast_periods=fp,
                     window=growth.get("window", 3),
-                    metric="market_share",
+                    metric="market_volume",
                     multiplier=multiplier,
                     multiplier_horizon=multiplier_horizon
                 )
+
             else:
+
                 new_fc = process_forecast(
-                    months, base_share_full, train_start, train_end, fp,
+                    months, target_vol_full, train_start, train_end, fp,
                     model_type=model_type,
-                    metric="market_share",
+                    metric="market_volume",
                     alpha=alpha,
                     beta=beta,
                     gamma=gamma,
@@ -945,7 +915,7 @@ def _compute_target_new_share(
         except Exception as e:
             print(f"Forecast failed (share-mode) target={target_key} error={e}")
             return base_share_full[-len(fv):] if fv else []
-
+ 
         return new_fc.get("forecast_values") or []
  
  
@@ -954,14 +924,31 @@ def _compute_target_new_share(
 # =========================================================
  
 def _augment_with_source_aliases(overrides, base_map):
+    """
+    Model_Input_Service.py's builders hardcode `source=None` when querying
+    product-level market_share rows for "flat" markets (e.g. `if mkt ==
+    "Retail": fetch_forecast_scenario(cur, ta, mkt, None, prod, ...)`),
+    even though the DB stores a non-null placeholder in source_of_market
+    for those rows (observed: "Unknown" for Retail's product rows). The
+    real SQL wildcards when the source param is None, so it finds these
+    rows fine -- but our exact-key override dict does not, unless we add
+    an explicit alias keyed with source=None.
+ 
+    A source is "real" (hierarchical, e.g. Kaiser under Non-retail,
+    drillable from market_distribution) if it has its own
+    (market, source, 'ALL', metric) row. If not, it's a flat-market
+    placeholder and gets a source=None alias so MIS's None-based lookup
+    hits our (possibly recalculated) value instead of silently falling
+    back to the unmodified DB row.
+    """
     augmented = dict(overrides)
     for key in base_map.keys():
         market, source, product, metric = key
-        if metric != "market_share" or source == "ALL":
+        if source is None or metric != "market_share":
             continue
         if (market, source, "ALL", metric) in base_map:
             continue  # real hierarchical source (e.g. Kaiser) -- no alias needed
-        alias_key = (market, "ALL", product, metric)
+        alias_key = (market, None, product, metric)
         if key in overrides:
             augmented[alias_key] = overrides[key]
     return augmented
@@ -1022,9 +1009,8 @@ def recalculate(payload: RecalculateRequest):
  
             base_map = {}
             for market, source, product, metric_col, forecast_data in rows:
-                key = (market, _canon_source(source), product, metric_col)
-                base_map[key] = forecast_data
-
+                base_map[(market, source, product, metric_col)] = forecast_data
+ 
             overrides = dict(base_map)
  
             model_type = (payload.model_type or "ets").lower()
@@ -1191,7 +1177,7 @@ def recalculate(payload: RecalculateRequest):
             orig_fetch = MIS.fetch_forecast_scenario
  
             def fetch_with_override(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in):
-                k = (market_in, _canon_source(source_in), product_in, metric_in)
+                k = (market_in, source_in, product_in, metric_in)
                 if k in overrides:
                     return overrides[k]
                 return orig_fetch(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in)
@@ -1266,8 +1252,10 @@ def recalculate(payload: RecalculateRequest):
     
 
 
-from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response
+from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response,normalize_overall_labels
 from app.hiv_treat.routes.refresh_models import RefreshEditsRequest
+from types import SimpleNamespace
+from copy import deepcopy
 
 
 @router.post("/refresh-edits")
@@ -1280,33 +1268,155 @@ def refresh_edits(payload: RefreshEditsRequest):
     print("Metric :", payload.selected_metric)
     print("==============================")
 
-    market_analysis = refresh_engine(payload)
-
-    conn = get_connection()
-    cur = conn.cursor()
-
     try:
-        factors = build_factors(
-            cur,
-            payload.ta_name,
-            payload.scenario_name,
+        # Recompute only the active scenario.
+        refreshed_market_analysis = refresh_engine(
+            payload
         )
 
-        available_scenarios = get_scenarios(
-            cur,
-            payload.ta_name,
+        # Normalize both table and chart labels.
+        refreshed_market_analysis = normalize_overall_labels(
+            refreshed_market_analysis
         )
 
-    finally:
-        cur.close()
-        conn.close()
+        with get_connection() as conn, conn.cursor() as cur:
 
-    return build_refresh_response(
-        payload=payload,
-        market_analysis=market_analysis,
-        factors=factors,
-        available_scenarios=available_scenarios,
-    )
+            cur.execute(
+                """
+                SELECT config
+                FROM raw_hiv_treat.forecast_configurations
+                WHERE config->>'ta_name' = %s
+                """,
+                (payload.ta_name,),
+            )
+
+            row = cur.fetchone()
+            config = row[0] if row else {}
+
+            selected_filter = payload.selected_filter
+
+            if isinstance(selected_filter, dict):
+
+                filter_object = SimpleNamespace(
+                    start_date=selected_filter.get(
+                        "start_date"
+                    ),
+                    end_date=selected_filter.get(
+                        "end_date"
+                    ),
+                    market=selected_filter.get(
+                        "market",
+                        selected_filter.get(
+                            "markets",
+                            [],
+                        ),
+                    ),
+                    product=selected_filter.get(
+                        "product",
+                        selected_filter.get(
+                            "products",
+                            [],
+                        ),
+                    ),
+                )
+
+            else:
+                filter_object = selected_filter
+
+            apply_payload = SimpleNamespace(
+                ta_name=payload.ta_name,
+                scenario_name=payload.scenario_name,
+                selected_filter=filter_object,
+            )
+
+            # Load all saved scenarios.
+            response = build_apply_scenario_response(
+                cur,
+                apply_payload,
+                config,
+            )
+
+            active_scenario = payload.scenario_name
+
+            if active_scenario not in response["scenarios"]:
+                raise ValueError(
+                    f"Active scenario '{active_scenario}' "
+                    "was not found."
+                )
+
+            # Replace only the active scenario with the
+            # recalculated result.
+            response["scenarios"][active_scenario][
+                "market_analysis"
+            ] = deepcopy(
+                refreshed_market_analysis
+            )
+
+            # Normalize table and chart labels for all scenarios.
+            for scenario_name, scenario_data in (
+                response["scenarios"].items()
+            ):
+
+                scenario_market_analysis = (
+                    scenario_data.get(
+                        "market_analysis"
+                    )
+                )
+
+                if scenario_market_analysis is None:
+                    continue
+
+                scenario_data["market_analysis"] = (
+                    normalize_overall_labels(
+                        scenario_market_analysis
+                    )
+                )
+
+            response["active_scenario"] = (
+                active_scenario
+            )
+
+            for scenario_name, scenario_data in response["scenarios"].items():
+
+                analysis = scenario_data["market_analysis"]
+
+                rows = (
+                    analysis["total_market_volume"]
+                    ["market_volume"]
+                    ["monthly"]
+                    ["table"]
+                    ["rows"]
+                )
+
+                series = (
+                    analysis["total_market_volume"]
+                    ["market_volume"]
+                    ["monthly"]
+                    ["chart"]
+                    ["series"]
+                )
+
+                print(
+                    f"{scenario_name} table label:",
+                    rows[0].get("label"),
+                )
+
+                print(
+                    f"{scenario_name} chart label:",
+                    series[0].get("label"),
+                )
+
+            return response
+
+    except Exception as e:
+        import traceback
+
+        print(traceback.format_exc())
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
 
 
 def scenario_exists(cur, ta, scenario_name):
