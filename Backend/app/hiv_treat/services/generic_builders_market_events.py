@@ -525,7 +525,7 @@ def build_product_event(
             "value": "product_level",
         },
         {
-            "label": "Market-Product Level",
+            "label": "Channel-Product Level",
             "value": "market_product_level",
         },
     ]
@@ -1013,7 +1013,7 @@ def build_market_event(
             "value": "market_level",
         },
         {
-            "label": "Product-Market Level",
+            "label": "Product-Channel Level",
             "value": "product_market_level",
         },
     ]
