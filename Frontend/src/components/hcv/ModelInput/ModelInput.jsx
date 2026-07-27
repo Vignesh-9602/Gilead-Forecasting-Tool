@@ -215,13 +215,48 @@ const ForecastChart = ({
           tabObj.payer_share ||
           Object.values(tabObj)[0];
         const rawChart = metricObj?.monthly?.chart || metricObj?.chart;
-        if (!rawChart?.series?.length) return [];
-        return rawChart.series.map((s) => {
+        let seriesList = rawChart?.series;
+        let seriesMonths = rawChart?.months || [];
+        let seriesFsi = rawChart?.forecast_start_index != null ? rawChart.forecast_start_index : 0;
+
+        // Some tab/scenario combinations don't populate chart.series even
+        // though the table's own row data is present and correct (the
+        // table pulls from table.rows, not chart.series) — reconstruct an
+        // equivalent series list from table.rows in that case, rather than
+        // silently showing nothing for this scenario.
+        if (!seriesList?.length) {
+          const rawTable = metricObj?.monthly?.table || metricObj?.table;
+          const tableRows = rawTable?.rows || [];
+          if (tableRows.length) {
+            seriesMonths = seriesMonths.length ? seriesMonths : rawTable?.headers || [];
+            seriesList = [];
+            tableRows.forEach((r) => {
+              const parentLabel = r.label || r.hierarchy || "";
+              if (r.children?.length) {
+                r.children.forEach((c) => {
+                  seriesList.push({
+                    label: `${parentLabel} - ${c.label || ""}`,
+                    history: (c.values || []).slice(0, seriesFsi),
+                    forecast: (c.values || []).slice(seriesFsi),
+                  });
+                });
+              } else if (parentLabel) {
+                const vals = r.values || r.total || [];
+                seriesList.push({
+                  label: parentLabel,
+                  history: vals.slice(0, seriesFsi),
+                  forecast: vals.slice(seriesFsi),
+                });
+              }
+            });
+          }
+        }
+
+        if (!seriesList?.length) return [];
+        return seriesList.map((s) => {
           const rawTrain = toNums(s.history || s.train_values);
           const rawForecast = toNums(s.forecast || s.forecast_values);
-          const rawMonths = rawChart.months || [];
-          const rawFsi = rawChart.forecast_start_index != null ? rawChart.forecast_start_index : 0;
-          const clipped = clipToFilterRange(rawMonths, rawFsi, rawTrain, rawForecast);
+          const clipped = clipToFilterRange(seriesMonths, seriesFsi, rawTrain, rawForecast);
           return {
             label: s.label || "",
             train_values: clipped.train,
@@ -238,6 +273,7 @@ const ForecastChart = ({
       : null;
     filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
   }
+
 
   // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
   // by index into the SCENARIO_COLORS palette; the other tabs color by
@@ -440,6 +476,11 @@ export default function PBCModelInput() {
   // changing the dropdown alone doesn't visually shift which row is amber.
   const [appliedPayerFilter, setAppliedPayerFilter] = useState("");
   const [appliedProductFilter, setAppliedProductFilter] = useState("");
+  // Same pattern for From/To Date — the chart clips comparison scenarios
+  // to this range, so it must only change on Apply Filter, not while the
+  // user is still picking dates.
+  const [appliedFromDate, setAppliedFromDate] = useState("");
+  const [appliedToDate, setAppliedToDate] = useState("");
   // Save Scenario modal
   const [saveScenarioDialogOpen, setSaveScenarioDialogOpen] = useState(false);
   const [newScenarioName, setNewScenarioName] = useState("");
@@ -1611,6 +1652,8 @@ export default function PBCModelInput() {
         // shows on first load without waiting for an explicit Apply click.
         setAppliedPayerFilter(localPayer);
         setAppliedProductFilter(localProduct);
+        setAppliedFromDate(localFrom);
+        setAppliedToDate(localTo);
 
         const defaultMetricOptions = [
           { label: "Market Volume", value: "market_volume" },
@@ -1765,6 +1808,8 @@ export default function PBCModelInput() {
       setAppliedBrand(df.product || "");
       setAppliedPayerFilter(df.payer || "");
       setAppliedProductFilter(df.product_filter || "");
+      setAppliedFromDate(df.from_date || "");
+      setAppliedToDate(df.to_date || "");
       const factors = data?.factors || {};
       let am = factors?.active_model || "ets";
       am = resolveModelForTab(am);
@@ -1864,6 +1909,8 @@ export default function PBCModelInput() {
         setAppliedBrand(productFilter || brand);
         setAppliedPayerFilter(payerFilter);
         setAppliedProductFilter(productFilter);
+        setAppliedFromDate(fromDate);
+        setAppliedToDate(toDate);
         const dataActiveScenario = data?.active_scenario || scenarioSelector;
         const dataScenarioObj =
           (data?.scenarios && data.scenarios[dataActiveScenario]) || null;
@@ -1928,6 +1975,8 @@ export default function PBCModelInput() {
         setAppliedBrand(productFilter || brand);
         setAppliedPayerFilter(payerFilter);
         setAppliedProductFilter(productFilter);
+        setAppliedFromDate(fromDate);
+        setAppliedToDate(toDate);
         const dataActiveScenario = data?.active_scenario || scenarioSelector;
         const dataScenarioObj =
           (data?.scenarios && data.scenarios[dataActiveScenario]) || null;
@@ -3784,8 +3833,8 @@ export default function PBCModelInput() {
                 compareScenarioOptions={compareScenarioOptions}
                 rawScenariosData={liverRawData?.scenarios}
                 activeMetricKey={toApiMetricKey(metric)}
-                filterFromYM={resolveFromDate()}
-                filterToYM={toYearMonth(toDate)}
+                filterFromYM={appliedFromDate ? toYearMonth(appliedFromDate) : ""}
+                filterToYM={appliedToDate ? toYearMonth(appliedToDate) : ""}
               />
             </AccordionDetails>
           </Accordion>
