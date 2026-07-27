@@ -34,7 +34,7 @@ const formatMonthLabel = (value) => {
     return `${monthAbbr}-${year.slice(-2)}`;
 };
 
-export default function OutputChart({ chartData, activeTab, selectedPayer, selectedProduct }) {
+export default function OutputChart({ chartData, activeTab, selectedPayers = [], selectedProducts = [] }) {
 
     // if (!chartData) return null;
 
@@ -52,31 +52,34 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
         series: allSeries,
     } = chartData;
 
-    // Every tab except Total Market Volume should only chart the payer
-    // and/or product currently selected in the filter panel — but keep
-    // every scenario for that entity (e.g. "Commercial (BASE)" and
-    // "Commercial (test-1)" both stay). We don't know for certain whether
-    // this tab's series labels carry just the payer name, just the product
-    // name, or both combined, so match by substring rather than exact
-    // equality and prefer the most precise match available:
-    //   1. label contains BOTH the selected payer and product (combo match)
-    //   2. label contains just whichever one applies to this tab
+    // Every tab except Total Market Volume should only chart the
+    // payer(s)/product(s) currently selected in the filter panel — but
+    // keep every scenario for those entities (e.g. "Commercial (BASE)"
+    // and "Commercial (test-1)" both stay). We don't know for certain
+    // whether this tab's series labels carry just the payer name, just
+    // the product name, or both combined, so match by substring rather
+    // than exact equality and prefer the most precise match available:
+    //   1. label contains a selected payer AND a selected product (combo)
+    //   2. label contains just whichever applies to this tab
     //   3. last resort: show everything rather than an empty chart
     const containsTerm = (label, term) =>
         !!term && !!label && label.toLowerCase().includes(term.toLowerCase());
 
+    const containsAny = (label, terms) =>
+        Array.isArray(terms) && terms.some((term) => containsTerm(label, term));
+
     const series = (() => {
         if (activeTab === "total_market_volume") return allSeries;
 
-        const payerMatches = allSeries.filter((item) => containsTerm(item.label, selectedPayer));
-        const productMatches = allSeries.filter((item) => containsTerm(item.label, selectedProduct));
+        const payerMatches = allSeries.filter((item) => containsAny(item.label, selectedPayers));
+        const productMatches = allSeries.filter((item) => containsAny(item.label, selectedProducts));
         const comboMatches = allSeries.filter(
-            (item) => containsTerm(item.label, selectedPayer) && containsTerm(item.label, selectedProduct)
+            (item) => containsAny(item.label, selectedPayers) && containsAny(item.label, selectedProducts)
         );
 
         if (comboMatches.length > 0) return comboMatches;
-        if (selectedPayer && payerMatches.length > 0) return payerMatches;
-        if (selectedProduct && productMatches.length > 0) return productMatches;
+        if (selectedPayers.length > 0 && payerMatches.length > 0) return payerMatches;
+        if (selectedProducts.length > 0 && productMatches.length > 0) return productMatches;
 
         return allSeries;
     })();

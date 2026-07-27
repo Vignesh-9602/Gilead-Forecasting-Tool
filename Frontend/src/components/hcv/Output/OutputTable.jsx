@@ -56,8 +56,8 @@ export default function OutputTable({
     headers = [],
     rows = [],
     metric = "market_volume",
-    selectedPayer,
-    selectedProduct,
+    selectedPayers = [],
+    selectedProducts = [],
     forecastStartIndex,
     isHierarchical = false,
 }) {
@@ -91,17 +91,17 @@ export default function OutputTable({
         }));
     };
 
-    // Does this row's own label match the currently selected payer or product?
-    // Flat-table rows carry a trailing "(BASE Scenario)" suffix (e.g.
-    // "Cash (BASE Scenario)"), so compare against the base name only —
-    // hierarchy rows are already bare names ("Cash", "ASGA") and pass
-    // through this split unchanged.
+    // Does this row's own label match any of the currently selected payers
+    // or products? Flat-table rows carry a trailing "(BASE Scenario)"
+    // suffix (e.g. "Cash (BASE Scenario)"), so compare against the base
+    // name only — hierarchy rows are already bare names ("Cash", "ASGA")
+    // and pass through this split unchanged.
     const selfMatches = (row) => {
         if (!row.label) return false;
         const baseLabel = row.label.split(" (")[0].trim().toLowerCase();
         return (
-            baseLabel === selectedPayer?.toLowerCase() ||
-            baseLabel === selectedProduct?.toLowerCase()
+            selectedPayers.some((payer) => payer.toLowerCase() === baseLabel) ||
+            selectedProducts.some((product) => product.toLowerCase() === baseLabel)
         );
     };
 

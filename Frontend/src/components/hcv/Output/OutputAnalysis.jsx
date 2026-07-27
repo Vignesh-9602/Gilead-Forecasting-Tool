@@ -72,7 +72,7 @@ const transformTableRows = (rows = [], parentKey = "row") =>
         };
     });
 
-export default function OutputAnalysis({ outputAnalysis, selectedPayer, selectedProduct }) {
+export default function OutputAnalysis({ outputAnalysis, selectedPayers, selectedProducts }) {
     const [activeTab, setActiveTab] = useState("total_market_volume");
     const [selectedMetric, setSelectedMetric] = useState("payer_volume");
     const [viewMode, setViewMode] = useState("monthly");
@@ -113,8 +113,8 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayer, selected
                     <OutputChart
                         chartData={currentData.chart}
                         activeTab={activeTab}
-                        selectedPayer={selectedPayer}
-                        selectedProduct={selectedProduct}
+                        selectedPayers={selectedPayers}
+                        selectedProducts={selectedProducts}
                     />
                     <Box
                         sx={{
@@ -184,8 +184,8 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayer, selected
                         headers={tableHeaders}
                         rows={tableRows}
                         metric={selectedMetric}
-                        selectedPayer={selectedPayer}
-                        selectedProduct={selectedProduct}
+                        selectedPayers={selectedPayers}
+                        selectedProducts={selectedProducts}
                         forecastStartIndex={currentData?.chart?.forecast_start_index}
                         isHierarchical={isHierarchicalTable}
                     />
