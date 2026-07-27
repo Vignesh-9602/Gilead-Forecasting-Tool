@@ -274,6 +274,36 @@ const ForecastChart = ({
     filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
   }
 
+  // When a specific product/payer is focused via the page filters, narrow
+  // the chart down to ONLY that entity's comparison across the selected
+  // scenarios — hiding every other, unrelated entity's line. Doesn't apply
+  // to Total Market Volume, which has no product/payer dimension.
+  const isFilterFocusMode = !isTotalMarket && (!!currentBrand || !!currentPayer);
+  if (isFilterFocusMode) {
+    filteredSeries = filteredSeries.filter((s) => {
+      const label = (s.label || "").toLowerCase();
+      if (activeTab === "prod_dist") return currentBrand && label === currentBrand;
+      if (activeTab === "payer_dist") return currentPayer && label === currentPayer;
+      if (activeTab === "payer_prod" || activeTab === "prod_payer") {
+        return (
+          (!currentPayer || label.includes(currentPayer)) &&
+          (!currentBrand || label.includes(currentBrand))
+        );
+      }
+      return true;
+    });
+  }
+
+  // Stable per-scenario color map for filter-focus mode: built from the
+  // full scenario list (not the narrowed filteredSeries), so a given
+  // scenario keeps the same color regardless of which product/payer is
+  // currently focused.
+  const focusModeScenarioColorMap = {};
+  (compareScenarioOptions.length ? compareScenarioOptions : scenarioNamesToShow).forEach(
+    (name, i) => {
+      focusModeScenarioColorMap[name] = SCENARIO_COLORS[i % SCENARIO_COLORS.length];
+    },
+  );
 
   // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
   // by index into the SCENARIO_COLORS palette; the other tabs color by
@@ -348,8 +378,18 @@ const ForecastChart = ({
     const width = isSelectedTrace ? 3.5 : 1.5;
 
     // Selected trace stays amber; every other trace uses HIV's identity/
-    // index-based color scheme above.
-    const color = isSelectedTrace ? "#f59e0b" : getSeriesColor(s, idx);
+    // index-based color scheme above. In filter-focus mode, every visible
+    // trace already matches the focused product/payer (everything else was
+    // filtered out above) — color each one by its own scenario instead, so
+    // the different scenarios being compared are distinguishable, while
+    // still keeping the applied scenario's line amber.
+    const color = isFilterFocusMode
+      ? isSelectedTrace
+        ? "#f59e0b"
+        : focusModeScenarioColorMap[s.scenario] || SCENARIO_COLORS[idx % SCENARIO_COLORS.length]
+      : isSelectedTrace
+        ? "#f59e0b"
+        : getSeriesColor(s, idx);
 
     // Suffix the scenario name onto the legend label when overlaying more
     // than one scenario, so e.g. "Biktarvy (Base Case)" vs "Biktarvy (High
@@ -4684,14 +4724,18 @@ export default function PBCModelInput() {
                                   isAppliedChild = !!currentBrand && childLabel === currentBrand;
                                 } else if (activeTab === "payer_dist") {
                                   isAppliedChild = !!currentPayer && childLabel === currentPayer;
-                                } else if (currentBrand || currentPayer) {
-                                  // Payer-Product / Product-Payer: children
-                                  // are full "Payer - Product" combo rows —
-                                  // match against whichever of payer/product
-                                  // is currently focused.
-                                  const matchesBrand = !currentBrand || childLabel.includes(currentBrand);
-                                  const matchesPayer = !currentPayer || childLabel.includes(currentPayer);
-                                  isAppliedChild = matchesBrand && matchesPayer;
+                                } else if (activeTab === "payer_prod") {
+                                  // Parent = Payer (already matched via
+                                  // isAppliedParent), child = Product — the
+                                  // payer isn't part of the child's own
+                                  // label anymore, so only check the
+                                  // product here.
+                                  isAppliedChild =
+                                    isAppliedParent && !!currentBrand && childLabel === currentBrand;
+                                } else if (activeTab === "prod_payer") {
+                                  // Parent = Product, child = Payer.
+                                  isAppliedChild =
+                                    isAppliedParent && !!currentPayer && childLabel === currentPayer;
                                 }
                               }
                               const isHighlightedChild = isAppliedChild;
