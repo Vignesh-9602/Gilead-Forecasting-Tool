@@ -1502,10 +1502,12 @@ def refresh_edits(payload: RefreshEditsRequest):
                     )
                 )
 
-                # Product-Channel:
-                # filter chart by selected product.
+                
+
+                # Channel-Product:
+                # filter chart by selected market.
                 scenario_market_analysis = (
-                    filter_product_market_chart(
+                    filter_market_product_chart(
                         market_analysis=(
                             scenario_market_analysis
                         ),
@@ -1513,10 +1515,10 @@ def refresh_edits(payload: RefreshEditsRequest):
                     )
                 )
 
-                # Channel-Product:
-                # filter chart by selected market.
+                # Product-Channel:
+                # filter chart by selected product.
                 scenario_market_analysis = (
-                    filter_market_product_chart(
+                    filter_product_market_chart(
                         market_analysis=(
                             scenario_market_analysis
                         ),

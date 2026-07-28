@@ -1,13 +1,13 @@
 from __future__ import annotations
 from typing import List, Literal, Optional
-from pydantic import BaseModel, Field , model_validator
+from pydantic import BaseModel, Field , model_validator , field_validator
 
 
 
 class SelectedFilter(BaseModel):
     scenario_name: str
-    markets: List[str]
-    products: List[str]
+    markets: str
+    products: str
     start_date: str
     end_date: str
 
@@ -24,15 +24,67 @@ class EditSelectedFilter(BaseModel):
     scenario_name: str
     start_date: str
     end_date: str
-    markets: list[str] = Field(default_factory=list)
-    products: list[str] = Field(default_factory=list)
+
+    markets: str | None = None
+    products: str | None = None
+
+    @field_validator(
+        "markets",
+        "products",
+        mode="before",
+    )
+    @classmethod
+    def normalize_single_filter(cls, value):
+        """
+        Supports both formats:
+
+            "Retail"
+            ["Retail"]
+
+        Converts empty values and "ALL" to None.
+        """
+
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple, set)):
+            cleaned_values = [
+                str(item).strip()
+                for item in value
+                if item
+                and str(item).strip().lower() != "all"
+            ]
+
+            if not cleaned_values:
+                return None
+
+            if len(cleaned_values) > 1:
+                raise ValueError(
+                    "Only one value can be selected."
+                )
+
+            return cleaned_values[0]
+
+        normalized_value = str(value).strip()
+
+        if (
+            not normalized_value
+            or normalized_value.lower() == "all"
+        ):
+            return None
+
+        return normalized_value
 
 
 class EditedTableRow(BaseModel):
     label: str
     editable: bool = True
-    values: list[float] = Field(default_factory=list)
-    children: list["EditedTableRow"] = Field(default_factory=list)
+    values: list[float] = Field(
+        default_factory=list
+    )
+    children: list["EditedTableRow"] = Field(
+        default_factory=list
+    )
 
 
 class EditSaveRequest(BaseModel):
@@ -56,8 +108,13 @@ class EditSaveRequest(BaseModel):
         "market_product_level",
     ]
 
-    edited_rows: list[str] = Field(default_factory=list)
-    edited_table_rows: list[EditedTableRow]
+    edited_rows: list[str] = Field(
+        default_factory=list
+    )
+
+    edited_table_rows: list[EditedTableRow] = Field(
+        default_factory=list
+    )
 
     @model_validator(mode="after")
     def validate_request(self):
@@ -72,13 +129,52 @@ class EditSaveRequest(BaseModel):
             },
         }
 
-        allowed = allowed_views[self.selected_tab]
+        allowed = allowed_views[
+            self.selected_tab
+        ]
 
         if self.selected_table_view not in allowed:
             raise ValueError(
                 f"{self.selected_table_view!r} is invalid for "
                 f"{self.selected_tab!r}. "
                 f"Allowed values: {sorted(allowed)}"
+            )
+
+        selected_market = (
+            self.selected_filter.markets
+        )
+
+        selected_product = (
+            self.selected_filter.products
+        )
+
+        # Product-Market view requires a selected product.
+        if (
+            self.selected_tab == "market_event"
+            and self.selected_table_view
+            == "product_market_level"
+            and not selected_product
+        ):
+            raise ValueError(
+                "products is required for "
+                "product_market_level."
+            )
+
+        # Market-Product view requires a selected market.
+        if (
+            self.selected_tab == "product_event"
+            and self.selected_table_view
+            == "market_product_level"
+            and not selected_market
+        ):
+            raise ValueError(
+                "markets is required for "
+                "market_product_level."
+            )
+
+        if not self.edited_table_rows:
+            raise ValueError(
+                "edited_table_rows cannot be empty."
             )
 
         return self
