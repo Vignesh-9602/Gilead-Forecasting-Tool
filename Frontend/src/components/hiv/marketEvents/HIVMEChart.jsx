@@ -45,15 +45,12 @@ export default function HIVImpactCurveChart({
         : years || [];
 
     const historyX =
-        labels.slice(
-            0,
-            forecast_start_index
-        );
+        labels.slice(0, forecast_start_index);
 
     const forecastX =
-        labels.slice(
-            forecast_start_index - 1
-        );
+        forecast_start_index === 0
+            ? labels
+            : labels.slice(forecast_start_index - 1);
 
     const traces = [];
 
@@ -83,11 +80,32 @@ export default function HIVImpactCurveChart({
         const color =
             COLORS[index % COLORS.length];
 
+        // History line
+        if (item.history?.length) {
+            traces.push({
+                x: historyX,
+                y: item.history,
+                mode: "lines",
+                name: item.label,
+                line: {
+                    color,
+                    width: 3,
+                },
+            });
+        }
+
+        // Forecast line
         traces.push({
 
-            x: historyX,
+            x: forecastX,
 
-            y: item.history,
+            y:
+                forecast_start_index === 0
+                    ? item.forecast
+                    : [
+                        item.history[item.history.length - 1],
+                        ...item.forecast,
+                    ],
 
             mode: "lines",
 
@@ -96,32 +114,10 @@ export default function HIVImpactCurveChart({
             line: {
                 color,
                 width: 3,
-            }
-
-        });
-
-        traces.push({
-
-            x: forecastX,
-
-            y: [
-                item.history[
-                item.history.length - 1
-                ],
-                ...item.forecast,
-            ],
-
-            mode: "lines",
-
-            name: `${item.label} Forecast`,
-
-            line: {
-                color,
-                width: 3,
                 dash: "dot",
             },
 
-            showlegend: false,
+            showlegend: !item.history?.length,
 
         });
 

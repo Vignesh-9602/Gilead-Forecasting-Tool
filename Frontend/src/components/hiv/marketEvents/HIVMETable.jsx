@@ -25,6 +25,9 @@ import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import dayjs from "dayjs";
 
+import DownloadIcon from "@mui/icons-material/Download";
+
+
 export default function HIVImpactCurveTable({
     tableData,
     metricFilters,
@@ -42,6 +45,7 @@ export default function HIVImpactCurveTable({
     setEditedFields,
     selectedMarket,
     selectedProduct,
+    onDownload,
 }) {
 
     const [editable, setEditable] = useState(false);
@@ -752,6 +756,18 @@ export default function HIVImpactCurveTable({
                             </Select>
                         </FormControl>
                     )}
+
+                    <Tooltip title="Download Table">
+                        <IconButton
+                            onClick={onDownload}
+                            sx={{
+                                // color: "#1976d2",
+                                mr: 1,
+                            }}
+                        >
+                            <DownloadIcon />
+                        </IconButton>
+                    </Tooltip>
 
                     <Box
                         sx={{
