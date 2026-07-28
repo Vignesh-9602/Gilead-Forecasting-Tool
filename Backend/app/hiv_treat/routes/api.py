@@ -873,25 +873,25 @@ def _renormalize_siblings(target_new_fv, base_map, sibling_keys):
     """Rescales siblings so the group always sums to 100% at every
     forecast time index."""
     n = len(target_new_fv)
-    target_clipped = [max(0.0, min(100.0, v)) for v in target_new_fv]
- 
+    target_clipped = [round(max(0.0, min(100.0, v)), 2) for v in target_new_fv]
+
     base_sibling_fv = {}
     for sk in sibling_keys:
         _, _, fv = _series_from_data(base_map[sk])
         fv = fv + [fv[-1] if fv else 0.0] * (n - len(fv))
         base_sibling_fv[sk] = fv[:n]
- 
+
     new_sibling_fv = {sk: [0.0] * n for sk in sibling_keys}
- 
+
     for i in range(n):
         remaining = 100.0 - target_clipped[i]
         base_sum = sum(base_sibling_fv[sk][i] for sk in sibling_keys)
         for sk in sibling_keys:
             if base_sum > 0:
-                new_sibling_fv[sk][i] = remaining * (base_sibling_fv[sk][i] / base_sum)
+                new_sibling_fv[sk][i] = round(remaining * (base_sibling_fv[sk][i] / base_sum), 2)
             else:
-                new_sibling_fv[sk][i] = remaining / len(sibling_keys) if sibling_keys else 0.0
- 
+                new_sibling_fv[sk][i] = round(remaining / len(sibling_keys) if sibling_keys else 0.0, 2)
+
     return target_clipped, new_sibling_fv
  
  
