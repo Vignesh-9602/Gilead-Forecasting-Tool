@@ -997,10 +997,19 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
         if vol_children:
             vol_row["children"] = vol_children
             norm = normalize_shares_to_100(share_children_vals, n)
-            share_row["children"] = [
-                {"label": share_children_labels[i], "values": norm[i]}
-                for i in range(len(norm))
-            ]
+            if vol_children:
+                vol_children_display = [
+                    [round(vol[t] * norm[c][t] / 100) for t in range(n)]
+                    for c in range(len(norm))
+                ]
+                vol_row["children"] = [
+                    {"label": share_children_labels[c], "values": vol_children_display[c]}
+                    for c in range(len(norm))
+                ]
+                share_row["children"] = [
+                    {"label": share_children_labels[i], "values": norm[i]}
+                    for i in range(len(norm))
+                ]
 
         market_vol_rows.append(vol_row)
         market_share_rows.append(share_row)
@@ -1354,8 +1363,13 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         prod_labels_in_mkt = [p for p in products if p in mp_vol[mkt]]
         norm_shares        = normalize_shares_to_100(prod_vols_in_mkt, n) if prod_vols_in_mkt else []
 
+        vol_children_display = [
+            [round(mkt_vol[t] * norm_shares[c][t] / 100) for t in range(n)]
+            for c in range(len(prod_labels_in_mkt))
+        ]
+
         vol_children   = [{"label": prod_labels_in_mkt[c],
-                           "values": round_volume(prod_vols_in_mkt[c])}
+                           "values": vol_children_display[c]}
                           for c in range(len(prod_labels_in_mkt))]
         share_children = [{"label": prod_labels_in_mkt[c], "values": norm_shares[c]}
                           for c in range(len(prod_labels_in_mkt))]
@@ -1373,7 +1387,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
             "label":          mkt,
             "monthly_values": mkt_vol,
             "children": [
-                {"label": prod_labels_in_mkt[c], "monthly_values": prod_vols_in_mkt[c]}
+                {"label": prod_labels_in_mkt[c], "monthly_values": vol_children_display[c]}
                 for c in range(len(prod_labels_in_mkt))
             ]
         })
@@ -1547,10 +1561,15 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         labels      = [mkt for mkt in markets if mkt in pm_vol[prod]]
         norm_shares = normalize_shares_to_100(mkt_vols, n) if mkt_vols else []
 
-        vol_children   = [{"label": labels[i], "values": round_volume(mkt_vols[i])}
-                          for i in range(len(labels))]
-        share_children = [{"label": labels[i], "values": norm_shares[i]}
-                          for i in range(len(labels))]
+        vol_children_display = [
+            [round(prod_total[t] * norm_shares[c][t] / 100) for t in range(n)]
+            for c in range(len(labels))
+        ]
+
+        vol_children   = [{"label": labels[c], "values": vol_children_display[c]}
+                          for c in range(len(labels))]
+        share_children = [{"label": labels[c], "values": norm_shares[c]}
+                          for c in range(len(labels))]
 
         vol_row   = {"label": prod, "values": round_volume(prod_total), "children": vol_children}
         share_row = {"label": prod, "values": [100.0] * n,              "children": share_children}
