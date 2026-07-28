@@ -112,12 +112,17 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
  
         for row in md_share.get("table", {}).get("rows", []):
             mkt = row.get("label")
-            if mkt in (None, "Overall") or "children" not in row:
+            if mkt is None or mkt == "Overall":
                 continue
-            for child in row["children"]:
+
+            # market-level row itself — now written for EVERY market, not just selected
+            data = _chart_row_to_forecast_data(months, fsi, row["values"])
+            _upsert_row(cur, ta, scenario, user_id, mkt, None, "ALL", "market_share", data)
+
+            for child in row.get("children", []):
                 src = child["label"]
-                data = _chart_row_to_forecast_data(months, fsi, child["values"])
-                _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", data)
+                child_data = _chart_row_to_forecast_data(months, fsi, child["values"])
+                _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", child_data)
  
     # ---- market_product: market -> product shares ----------------------------
     mp_share = ma.get("market_product", {}).get("market_share", {}).get("monthly", {})
@@ -233,46 +238,48 @@ def fetch_forecast(cur, ta, market, source, product, metric):
 
 
 def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
-    """
-    source=None means "don't filter by source_of_market at all" -- i.e. pull
-    the parent/ALL-level row regardless of whatever value is actually stored
-    there (some legacy Base rows have source_of_market='Unknown' instead of
-    'ALL'). When an explicit source IS given, match it exactly (still
-    normalizing '' to 'ALL' for legacy empty-string rows).
-    """
     is_base = scenario.upper() == "BASE"
 
     if is_base:
         cur.execute("""
-            SELECT forecast_data
+            SELECT COALESCE(NULLIF(source_of_market, ''), 'ALL') AS norm_source, forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
-              AND (
-                    %s IS NULL
-                    OR COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
-                  )
               AND product = %s
               AND metric = %s
               AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
-        """, (ta, market, source, source, product, metric))
+        """, (ta, market, product, metric))
     else:
         cur.execute("""
-            SELECT forecast_data
+            SELECT COALESCE(NULLIF(source_of_market, ''), 'ALL') AS norm_source, forecast_data
             FROM raw_hiv_treat.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
-              AND (
-                    %s IS NULL
-                    OR COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
-                  )
               AND product = %s
               AND metric = %s
               AND scenario_name = %s
-        """, (ta, market, source, source, product, metric, scenario))
+        """, (ta, market, product, metric, scenario))
 
-    row = cur.fetchone()
-    return row[0] if row else None
+    rows = cur.fetchall()
+    if not rows:
+        return None
+
+    if source is not None:
+        norm_wanted = source if source else "ALL"
+        for norm_src, data in rows:
+            if norm_src == norm_wanted:
+                return data
+        return None
+
+    # source is None -> caller wants the true market-level "ALL" row;
+    # prefer it deterministically over stray placeholder rows (e.g. "Unknown")
+    all_rows = [d for s, d in rows if s == "ALL"]
+    if all_rows:
+        return all_rows[0]
+
+    fallback = sorted(rows, key=lambda r: r[0])
+    return fallback[0][1]
 
 
 def fetch_forecast_scenario_with_fallback(cur, ta, market, source, product, metric, scenario):
