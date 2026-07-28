@@ -50,14 +50,11 @@ def get_market_events_scenarios(cur) -> list:
 # ---------------------------------------------------------------------------
 
 def save_filter_state(cur, ta_name: str, selected_filter: dict) -> None:
-    """
-    Save (or overwrite) the user's last selected filter for a given TA.
-    Called every time the user clicks Apply Filter.
-    """
+    """Upsert the last applied filter for the market-events screen."""
     cur.execute("""
-        INSERT INTO raw_liver.market_events_filter_state (ta_name, selected_filter)
-        VALUES (%s, %s::jsonb)
-        ON CONFLICT (ta_name)
+        INSERT INTO raw_liver.filter_state (ta_name, screen, selected_filter)
+        VALUES (%s, 'market_events', %s::jsonb)
+        ON CONFLICT (ta_name, screen)
         DO UPDATE SET
             selected_filter = EXCLUDED.selected_filter,
             updated_at      = CURRENT_TIMESTAMP
@@ -65,14 +62,11 @@ def save_filter_state(cur, ta_name: str, selected_filter: dict) -> None:
 
 
 def load_filter_state(cur, ta_name: str) -> dict | None:
-    """
-    Load the user's last saved filter for a given TA.
-    Returns None if the user has never applied a filter for this TA.
-    """
+    """Return the last saved filter for the market-events screen, or None."""
     cur.execute("""
         SELECT selected_filter
-        FROM raw_liver.market_events_filter_state
-        WHERE ta_name = %s
+        FROM raw_liver.filter_state
+        WHERE ta_name = %s AND screen = 'market_events'
     """, (ta_name,))
     row = cur.fetchone()
     return row[0] if row else None
