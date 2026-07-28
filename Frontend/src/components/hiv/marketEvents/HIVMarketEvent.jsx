@@ -44,6 +44,13 @@ import HIVImpactCurveTable from "./HIVMETable";
 import { getHIVMarketEventFilters, applyHIVMarketEventFilter, runHIVMarketEventCalculation, editHIVImpactCurveTable } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
+import DownloadIcon from "@mui/icons-material/Download";
+// import IconButton from "@mui/material/IconButton";
+import Tooltip from "@mui/material/Tooltip";
+
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
+
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
     fieldYearPlaceholder: () => "YYYY",
@@ -66,8 +73,11 @@ export default function HIVMarketEvent() {
 
     const [scenarioName, setScenarioName] = useState("");
 
-    const [selectedMarkets, setSelectedMarkets] = useState([]);
-    const [selectedProducts, setSelectedProducts] = useState([]);
+    // const [selectedMarkets, setSelectedMarkets] = useState([]);
+    // const [selectedProducts, setSelectedProducts] = useState([]);
+
+    const [selectedMarkets, setSelectedMarkets] = useState("");
+    const [selectedProducts, setSelectedProducts] = useState("");
 
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
@@ -932,6 +942,256 @@ export default function HIVMarketEvent() {
                 "",
             ];
 
+    const formatExcelValue = (value) => {
+
+        if (
+            value === null ||
+            value === undefined ||
+            value === ""
+        ) {
+            return "";
+        }
+
+        return selectedMetric === "market_share"
+            ? Number(value) / 100
+            : Number(value);
+
+    };
+
+    const applyRowStyle = (row, bold = false) => {
+
+        row.eachCell((cell) => {
+
+            cell.border = {
+                top: { style: "thin" },
+                left: { style: "thin" },
+                bottom: { style: "thin" },
+                right: { style: "thin" },
+            };
+
+            cell.alignment = {
+                vertical: "middle",
+                horizontal: "center",
+            };
+
+            if (bold) {
+                cell.font = {
+                    bold: true,
+                };
+            }
+
+        });
+
+    };
+
+    const addCommonHeader = (worksheet) => {
+
+        worksheet.addRow([
+            "Therapy Area",
+            therapyArea,
+        ]);
+
+        worksheet.addRow([
+            "Scenario",
+            scenarioName,
+        ]);
+
+        worksheet.addRow([
+            "Metric",
+            selectedMetric === "market_share"
+                ? "Market Share"
+                : "Market Volume",
+        ]);
+
+        worksheet.addRow([
+            "View",
+            selectedView === "monthly"
+                ? "Monthly"
+                : "Yearly",
+        ]);
+
+        worksheet.addRow([
+            "Level",
+            currentMetricData?.view_options?.find(
+                item => item.value === effectiveTableView
+            )?.label || ""
+        ]);
+
+        worksheet.addRow([]);
+
+    };
+
+    const createSheet = (
+        worksheet,
+        table
+    ) => {
+
+        const headers =
+            selectedView === "monthly"
+                ? table.headers.map(month =>
+                    dayjs(month).format("MMM-YY")
+                )
+                : table.headers;
+
+        const headerRow =
+            worksheet.addRow([
+                "Category",
+                ...headers,
+            ]);
+
+        applyRowStyle(headerRow, true);
+
+        if (table.type === "flat") {
+
+            table.rows.forEach((row) => {
+
+                const excelRow =
+                    worksheet.addRow([
+
+                        row.label,
+
+                        ...(row.values || []).map(
+                            formatExcelValue
+                        ),
+
+                    ]);
+
+                applyRowStyle(
+                    excelRow,
+                    row.label === "Overall"
+                );
+
+            });
+
+        } else {
+
+            table.rows.forEach((parent) => {
+
+                const parentRow =
+                    worksheet.addRow([
+
+                        parent.label,
+
+                        ...(parent.values || []).map(
+                            formatExcelValue
+                        ),
+
+                    ]);
+
+                applyRowStyle(parentRow, true);
+
+                parent.children?.forEach(
+                    (child) => {
+
+                        const childRow =
+                            worksheet.addRow([
+
+                                "    " + child.label,
+
+                                ...(child.values || []).map(
+                                    formatExcelValue
+                                ),
+
+                            ]);
+
+                        applyRowStyle(childRow);
+
+                    }
+                );
+
+            });
+
+        }
+
+        worksheet.columns.forEach((column) => {
+
+            column.width = 18;
+
+        });
+
+        if (selectedMetric === "market_share") {
+
+            worksheet.eachRow((row, index) => {
+
+                if (index <= 7) return;
+
+                row.eachCell((cell, col) => {
+
+                    if (col > 1) {
+
+                        cell.numFmt = "0.00%";
+
+                    }
+
+                });
+
+            });
+
+        }
+
+    };
+
+    const handleDownloadExcel = async () => {
+
+        const table =
+            currentDisplay?.table;
+
+        if (!table?.rows?.length)
+            return;
+
+        const workbook =
+            new ExcelJS.Workbook();
+
+        const sheetName = (() => {
+
+            switch (activeTab) {
+
+                case "overall_event":
+                    return "Overall Event";
+
+                case "market_event":
+
+                    return effectiveTableView === "market_level"
+                        ? "Channel Event"
+                        : "Product-Channel Event";
+
+                case "product_event":
+
+                    return effectiveTableView === "product_level"
+                        ? "Product Event"
+                        : "Channel-Product Event";
+
+                default:
+                    return "Market Event";
+            }
+
+        })();
+
+        const worksheet =
+            workbook.addWorksheet(sheetName);
+
+        addCommonHeader(
+            worksheet
+        );
+
+        createSheet(
+            worksheet,
+            table
+        );
+
+        const buffer =
+            await workbook.xlsx.writeBuffer();
+
+        saveAs(
+
+            new Blob([buffer]),
+
+            `${sheetName}_${selectedMetric}_${selectedView}.xlsx`
+
+        );
+
+    };
+
 
 
     return (
@@ -1179,93 +1439,21 @@ export default function HIVMarketEvent() {
                         </Typography>
 
                         <FormControl sx={inputStyle}>
-
                             <Select
-                                multiple
                                 value={selectedMarkets}
-                                onChange={(e) => {
-
-                                    const value =
-                                        e.target.value;
-
-                                    if (
-                                        value.includes(
-                                            "SELECT_ALL"
-                                        )
-                                    ) {
-
-                                        if (
-                                            selectedMarkets.length ===
-                                            (availableMarkets || []).length
-                                        ) {
-
-                                            setSelectedMarkets([]);
-
-                                        } else {
-
-                                            setSelectedMarkets(
-                                                availableMarkets || []
-                                            );
-
-                                        }
-
-                                    } else {
-
-                                        setSelectedMarkets(
-                                            value
-                                        );
-
-                                    }
-
-                                }}
-                                renderValue={(selected) =>
-                                    selected.join(", ")
+                                onChange={(e) =>
+                                    setSelectedMarkets(e.target.value)
                                 }
                             >
-
-                                <MenuItem value="SELECT_ALL">
-
-                                    <Checkbox
-                                        checked={
-                                            selectedMarkets.length ===
-                                            (availableMarkets || []).length
-                                        }
-                                        indeterminate={
-                                            selectedMarkets.length > 0 &&
-                                            selectedMarkets.length <
-                                            (availableMarkets || []).length
-                                        }
-                                    />
-
-                                    <ListItemText
-                                        primary="Select All"
-                                    />
-
-                                </MenuItem>
-
                                 {(availableMarkets || []).map((item) => (
-
                                     <MenuItem
                                         key={item}
                                         value={item}
                                     >
-
-                                        <Checkbox
-                                            checked={selectedMarkets.includes(
-                                                item
-                                            )}
-                                        />
-
-                                        <ListItemText
-                                            primary={item}
-                                        />
-
+                                        {item}
                                     </MenuItem>
-
                                 ))}
-
                             </Select>
-
                         </FormControl>
 
                     </Box>
@@ -1279,98 +1467,21 @@ export default function HIVMarketEvent() {
                         </Typography>
 
                         <FormControl sx={inputStyle}>
-
                             <Select
-                                multiple
                                 value={selectedProducts}
-                                onChange={(e) => {
-
-                                    const value =
-                                        e.target.value;
-
-                                    if (
-                                        value.includes(
-                                            "SELECT_ALL"
-                                        )
-                                    ) {
-
-                                        if (
-                                            selectedProducts.length ===
-                                            (availableProducts || []).length
-                                        ) {
-
-                                            setSelectedProducts(
-                                                []
-                                            );
-
-                                        } else {
-
-                                            setSelectedProducts(
-                                                availableProducts || []
-                                            );
-
-                                        }
-
-                                    } else {
-
-                                        setSelectedProducts(
-                                            value
-                                        );
-
-                                    }
-
-                                }}
-                                renderValue={(selected) =>
-                                    selected.join(", ")
+                                onChange={(e) =>
+                                    setSelectedProducts(e.target.value)
                                 }
                             >
-
-                                <MenuItem value="SELECT_ALL">
-
-                                    <Checkbox
-
-                                        checked={
-                                            selectedProducts.length ===
-                                            (availableProducts || []).length
-                                        }
-                                        indeterminate={
-                                            selectedProducts.length >
-                                            0 &&
-                                            selectedProducts.length <
-                                            (availableProducts || []).length
-                                        }
-
-                                    />
-
-                                    <ListItemText
-                                        primary="Select All"
-                                    />
-
-                                </MenuItem>
-
                                 {(availableProducts || []).map((item) => (
-
                                     <MenuItem
                                         key={item}
                                         value={item}
                                     >
-
-                                        <Checkbox
-                                            checked={selectedProducts.includes(
-                                                item
-                                            )}
-                                        />
-
-                                        <ListItemText
-                                            primary={item}
-                                        />
-
+                                        {item}
                                     </MenuItem>
-
                                 ))}
-
                             </Select>
-
                         </FormControl>
 
                     </Box>
@@ -2850,6 +2961,7 @@ export default function HIVMarketEvent() {
                     setEditedFields={setEditedFields}
                     selectedMarket={selectedMarkets?.[0]}
                     selectedProduct={selectedProducts?.[0]}
+                    onDownload={handleDownloadExcel}
                 />
 
                 <Menu
