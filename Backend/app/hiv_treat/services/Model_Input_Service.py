@@ -56,7 +56,7 @@ def get_markets(cur, ta):
     cur.execute("""
         SELECT DISTINCT market
         FROM raw_hiv_treat.forecast_outputs
-        WHERE ta_name = %s AND metric = 'market_share'
+        WHERE ta_name = %s AND metric = 'market_share' and market != 'ALL'
     """, (ta,))
     return [r[0] for r in cur.fetchall()]
 
