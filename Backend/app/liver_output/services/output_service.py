@@ -230,21 +230,32 @@ def _scenario_cube(cur, ta: str, scenario_name: str, from_year: int, from_month:
     """
     Returns an {(year, month): {product: {payer: volume}}} cube for one scenario.
 
-    'Base'/'BASE' is always computed fresh from transaction_data. Any other name
-    is looked up in raw_liver.liver_scenarios (shared with the Liver Model Input
-    and Market Events screens) and its saved chart_data is reshaped into this
-    same cube format.
+    Every scenario name — including 'Base'/'BASE' — is looked up first in
+    raw_liver.liver_scenarios (shared with the Liver Model Input and Market
+    Events screens) and its saved chart_data is reshaped into this cube format.
+    Model Input persists its own live Base computation there as a normal saved
+    scenario every time it runs, so reading it back here (instead of
+    recomputing independently) is what keeps this screen's Base numbers from
+    drifting apart from Model Input's and Market Events' — three independent
+    re-implementations of ETS forecasting will never agree to the last unit,
+    a single shared computation always will. Market Events adopted this same
+    fix (see apply_market_events_filters's comment) for the same reason.
+
+    Only if no 'Base' scenario has ever been saved yet (e.g. Model Input has
+    never been opened for this TA) do we fall back to computing it live from
+    transaction_data — matching Market Events' _compute_base_event_tabs fallback.
     """
+    chart_data = get_scenario_chart_data(cur, scenario_name)
+    if chart_data is not None:
+        return _cube_from_saved_scenario(chart_data, scenario_name, payers, products)
+
     if _is_base(scenario_name):
         raw_rows = get_volume_by_product_payer(
             cur, ta, from_year, from_month, to_year, to_month, payers=payers, products=products
         )
         return organize_raw_data(raw_rows)
 
-    chart_data = get_scenario_chart_data(cur, scenario_name)
-    if chart_data is None:
-        raise ValueError(f"Scenario '{scenario_name}' was not found.")
-    return _cube_from_saved_scenario(chart_data, scenario_name, payers, products)
+    raise ValueError(f"Scenario '{scenario_name}' was not found.")
 
 
 def _round_preserving_sum(values: list, target: int) -> list:
@@ -534,6 +545,23 @@ def _slice_aggregates(aggregates: dict, offset: int) -> dict:
     }
 
 
+def _compute_aggregates(cur, ta: str, scenario_names: list,
+                         train_from_year: int, train_from_month: int, to_year: int, to_month: int,
+                         wide_month_tuples: list, wide_forecast_start_index: int, display_offset: int,
+                         payers: list, products: list) -> dict:
+    """Build one scenario -> aggregates dict (see _build_scenario_aggregates), for a given payer/product scope."""
+    result = {}
+    for scenario in scenario_names:
+        cube = _scenario_cube(
+            cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, payers, products
+        )
+        wide_aggregates = _build_scenario_aggregates(
+            cube, wide_month_tuples, wide_forecast_start_index, payers, products
+        )
+        result[scenario] = _slice_aggregates(wide_aggregates, display_offset)
+    return result
+
+
 def apply_output_filters(payload) -> dict:
     """
     Called when the user clicks Apply Filter.
@@ -588,47 +616,52 @@ def apply_output_filters(payload) -> dict:
         display_offset          = len(wide_month_tuples) - len(month_tuples)
         wide_forecast_start_index = forecast_start_index + display_offset
 
-        # Every tab is computed over the FULL master payer/product list, not the
-        # selected filter — matching Model Input, where Tab 1's TMV query passes
-        # no payer filter at all, and Tabs 2/3's flat chart+table (_fmt_flat) and
-        # Tabs 4/5's hierarchy TABLE (_fmt_hier) always include every entity
-        # regardless of any selection. The selected filter only narrows Tabs 4/5's
-        # CHART (_fmt_hier's chart_parent_filter/chart_child_filter) — never any
-        # table, and never Tabs 1-3 at all.
+        # Two different scopes are needed:
+        # - GLOBAL (all master payers/products): Tab 1's total (always the whole
+        #   market, unfiltered — matching Model Input's Tab 1 TMV query, which
+        #   passes no payer filter) and Tabs 4/5's TABLE (always the full
+        #   breakdown, confirmed separately).
+        # - SELECTED (the user's chosen payers/products): Tabs 2/3, which DO
+        #   change with the filter — payer_distribution shows only selected
+        #   payers, product_distribution shows only selected products, each
+        #   summed only over the other selected dimension too.
+        # Tabs 4/5's CHART narrows to selected-parent-with-all-its-children,
+        # computed from the GLOBAL aggregates (already confirmed separately).
         all_payers   = get_payers(cur)
         all_products = get_products(cur)
 
-        aggregates = {}
-        for scenario in scenario_names:
-            cube = _scenario_cube(
-                cur, ta, scenario, train_from_year, train_from_month, to_year, to_month, all_payers, all_products
-            )
-            wide_aggregates = _build_scenario_aggregates(
-                cube, wide_month_tuples, wide_forecast_start_index, all_payers, all_products
-            )
-            aggregates[scenario] = _slice_aggregates(wide_aggregates, display_offset)
+        common_agg_args = (
+            train_from_year, train_from_month, to_year, to_month,
+            wide_month_tuples, wide_forecast_start_index, display_offset,
+        )
+        global_aggregates = _compute_aggregates(
+            cur, ta, scenario_names, *common_agg_args, all_payers, all_products
+        )
+        selected_aggregates = _compute_aggregates(
+            cur, ta, scenario_names, *common_agg_args, payers, products
+        )
 
         common_args = (month_tuples, month_keys, forecast_start_index, year_labels, yearly_fsi)
         selected_payers   = set(payers)
         selected_products = set(products)
 
         output_tabs = {
-            "total_market_volume": _build_distribution_tab(aggregates, scenario_names, *common_args),
+            "total_market_volume": _build_distribution_tab(global_aggregates, scenario_names, *common_args),
             "payer_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=all_payers, agg_key="by_payer"
+                selected_aggregates, scenario_names, *common_args, entities=payers, agg_key="by_payer"
             ),
             "product_distribution": _build_distribution_tab(
-                aggregates, scenario_names, *common_args, entities=all_products, agg_key="by_product"
+                selected_aggregates, scenario_names, *common_args, entities=products, agg_key="by_product"
             ),
             "product_payer": _build_hierarchy_tab(
-                aggregates, scenario_names, *common_args,
-                parents=all_products, children=all_payers, parent_agg_key="by_product",
+                selected_aggregates, scenario_names, *common_args,
+                parents=products, children=payers, parent_agg_key="by_product",
                 cell_key=lambda p, c: (p, c),
                 chart_parents=selected_products,
             ),
             "payer_product": _build_hierarchy_tab(
-                aggregates, scenario_names, *common_args,
-                parents=all_payers, children=all_products, parent_agg_key="by_payer",
+                selected_aggregates, scenario_names, *common_args,
+                parents=payers, children=products, parent_agg_key="by_payer",
                 cell_key=lambda p, c: (c, p),
                 chart_parents=selected_payers,
             ),

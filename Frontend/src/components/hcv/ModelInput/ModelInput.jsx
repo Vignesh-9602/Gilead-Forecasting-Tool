@@ -274,6 +274,36 @@ const ForecastChart = ({
     filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
   }
 
+  // When a specific product/payer is focused via the page filters, narrow
+  // the chart down to ONLY that entity's comparison across the selected
+  // scenarios — hiding every other, unrelated entity's line. Doesn't apply
+  // to Total Market Volume, which has no product/payer dimension.
+  const isFilterFocusMode = !isTotalMarket && (!!currentBrand || !!currentPayer);
+  if (isFilterFocusMode) {
+    filteredSeries = filteredSeries.filter((s) => {
+      const label = (s.label || "").toLowerCase();
+      if (activeTab === "prod_dist") return currentBrand && label === currentBrand;
+      if (activeTab === "payer_dist") return currentPayer && label === currentPayer;
+      if (activeTab === "payer_prod" || activeTab === "prod_payer") {
+        return (
+          (!currentPayer || label.includes(currentPayer)) &&
+          (!currentBrand || label.includes(currentBrand))
+        );
+      }
+      return true;
+    });
+  }
+
+  // Stable per-scenario color map for filter-focus mode: built from the
+  // full scenario list (not the narrowed filteredSeries), so a given
+  // scenario keeps the same color regardless of which product/payer is
+  // currently focused.
+  const focusModeScenarioColorMap = {};
+  (compareScenarioOptions.length ? compareScenarioOptions : scenarioNamesToShow).forEach(
+    (name, i) => {
+      focusModeScenarioColorMap[name] = SCENARIO_COLORS[i % SCENARIO_COLORS.length];
+    },
+  );
 
   // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
   // by index into the SCENARIO_COLORS palette; the other tabs color by
@@ -348,8 +378,18 @@ const ForecastChart = ({
     const width = isSelectedTrace ? 3.5 : 1.5;
 
     // Selected trace stays amber; every other trace uses HIV's identity/
-    // index-based color scheme above.
-    const color = isSelectedTrace ? "#f59e0b" : getSeriesColor(s, idx);
+    // index-based color scheme above. In filter-focus mode, every visible
+    // trace already matches the focused product/payer (everything else was
+    // filtered out above) — color each one by its own scenario instead, so
+    // the different scenarios being compared are distinguishable, while
+    // still keeping the applied scenario's line amber.
+    const color = isFilterFocusMode
+      ? isSelectedTrace
+        ? "#f59e0b"
+        : focusModeScenarioColorMap[s.scenario] || SCENARIO_COLORS[idx % SCENARIO_COLORS.length]
+      : isSelectedTrace
+        ? "#f59e0b"
+        : getSeriesColor(s, idx);
 
     // Suffix the scenario name onto the legend label when overlaying more
     // than one scenario, so e.g. "Biktarvy (Base Case)" vs "Biktarvy (High
@@ -879,8 +919,24 @@ export default function PBCModelInput() {
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
           const firstRow = rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
-          const vals = parseValues(firstRow.values, false);
+          let vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
+
+          // Align scenario values to the chart month axis (months = active scenario's
+          // months for the current date filter). A saved scenario may have been
+          // persisted with a wider or narrower date window, so its values array can be
+          // a different length. Without alignment, value[i] is plotted at chart
+          // position i regardless of the actual month, causing values to appear to
+          // "change" whenever the date filter shifts the month axis.
+          const scenarioMonths = metricObj?.monthly?.chart?.months || [];
+          if (scenarioMonths.length > 0 && months.length > 0 && scenarioMonths.length !== months.length) {
+            const monthToVal = {};
+            scenarioMonths.forEach((m, i) => {
+              monthToVal[(m || "").substring(0, 7)] = vals[i];
+            });
+            vals = months.map((m) => monthToVal[(m || "").substring(0, 7)] ?? null);
+          }
+
           scenarioRows.push({
             hierarchy: scenarioName,
             label: scenarioName,
@@ -896,6 +952,7 @@ export default function PBCModelInput() {
 
           // Build yearly scenario rows — only for scenarios that have yearly data.
           const yearlyScenarioRows = [];
+          const yearlyChartMonthsRef = tmvTab.yearlyChart?.months || [];
           allScenarioNames.forEach((scenarioName) => {
             const scenarioData = data.scenarios[scenarioName];
             const tmv = scenarioData?.market_analysis?.total_market_volume;
@@ -906,8 +963,19 @@ export default function PBCModelInput() {
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
             const firstYearlyRow = yearlyRows[0];
             if (!firstYearlyRow) return;
-            const yearlyVals = parseValues(firstYearlyRow.values, false);
+            let yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
+
+            // Align yearly values to the active scenario's yearly month axis
+            const scenarioYearlyMonths = metricObj?.yearly?.chart?.months || [];
+            if (scenarioYearlyMonths.length > 0 && yearlyChartMonthsRef.length > 0 && scenarioYearlyMonths.length !== yearlyChartMonthsRef.length) {
+              const yearToVal = {};
+              scenarioYearlyMonths.forEach((m, i) => {
+                yearToVal[(m || "").substring(0, 4)] = yearlyVals[i];
+              });
+              yearlyVals = yearlyChartMonthsRef.map((m) => yearToVal[(m || "").substring(0, 4)] ?? null);
+            }
+
             yearlyScenarioRows.push({
               hierarchy: scenarioName,
               label: scenarioName,
@@ -916,9 +984,6 @@ export default function PBCModelInput() {
               children: [],
             });
           });
-
-          // Yearly chart months (for building yearly table headers)
-          const yearlyChartMonths = tmvTab.yearlyChart?.months || [];
 
           // Chart shows one line per scenario so the Compare Scenarios
           // dropdown can render multiple scenarios at once. Filtering to
@@ -950,7 +1015,7 @@ export default function PBCModelInput() {
             // yearly view also shows every scenario, not just the active one.
             yearlyTable: yearlyScenarioRows.length
               ? {
-                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonthsRef }),
                 rows: yearlyScenarioRows,
               }
               : tmvTab.yearlyTable,
@@ -1032,11 +1097,16 @@ export default function PBCModelInput() {
     const series = (tab.chart?.series || [])
       .filter((s) => {
         const lbl = (s.label || "").toLowerCase();
-        return (
-          !lbl.includes("total") &&
-          !lbl.includes("market volume") &&
-          !lbl.includes("market share")
-        );
+        if (
+          lbl.includes("total") ||
+          lbl.includes("market volume") ||
+          lbl.includes("market share")
+        ) return false;
+        // Scenario-labeled series (TMV compare): only show if checked in the dropdown
+        if (compareScenarioOptions.includes(s.label)) {
+          return selectedCompareScenarios.includes(s.label);
+        }
+        return true;
       })
       .map((s) => ({
         label: s.label || "",
@@ -1629,8 +1699,8 @@ export default function PBCModelInput() {
         if (availMonths.length) setAvailableDates(availMonths);
 
         const sfInitial = filtersData?.selected_filter || {};
-        // Priority for defaults: explicit saved global config first, then
-        // whatever the filters endpoint resolved as its own default.
+        // Saved filter (sfInitial) takes priority: it reflects the user's last
+        // explicit apply. Fall back to config dates only when there is no saved state.
         if (!localPayer)
           localPayer =
             sfInitial.payer ||
@@ -1639,10 +1709,19 @@ export default function PBCModelInput() {
           localProduct =
             sfInitial.product ||
             (norm.products?.length ? getFirstOption(norm.products) : "");
-        if (!cfg?.train_start_date && sfInitial.start_date)
-          localFrom = sfInitial.start_date;
-        if (!cfg?.forecast_periods && !cfg?.train_end_date && sfInitial.end_date)
-          localTo = sfInitial.end_date;
+        // Saved filter overrides config: the user's last explicit apply is the source of truth.
+        // fromDate must match an availableDates entry exactly (Mon-YY format) for safeFrom to work.
+        if (sfInitial.start_date) {
+          const sfStartParsed = parseDateString(sfInitial.start_date);
+          const matchedFrom = sfStartParsed.isValid()
+            ? availMonths.find((d) => {
+                const pd = parseDateString(d);
+                return pd.isValid() && pd.year() === sfStartParsed.year() && pd.month() === sfStartParsed.month();
+              })
+            : null;
+          localFrom = matchedFrom || sfInitial.start_date;
+        }
+        if (sfInitial.end_date) localTo = sfInitial.end_date;
 
         setFromDate(localFrom);
         setToDate(localTo);
@@ -1673,8 +1752,9 @@ export default function PBCModelInput() {
             brand: localProduct ? [localProduct] : [],
             product: localProduct || "",
             metric: metric || defaultMetricOptions[0].value,
-            from_date: cfg?.train_start_date || localFrom || "",
-            scenario_name: "Base",
+            from_date: toYearMonth(localFrom || cfg?.train_start_date || ""),
+            to_date: sfInitial.end_date || undefined,
+            scenario: sfInitial.scenario || "Base",
           };
           const applyResp = await applyLiverFilters(applyPayload);
           const data = applyResp?.data || {};
@@ -1700,9 +1780,19 @@ export default function PBCModelInput() {
             data?.active_scenario || availScenarios[0] || "Base";
           setScenarioSelector(activeScenarioKey);
 
-          // Dates resolved by the backend for this payer/product/scenario
+          // Dates resolved by the backend — normalise start_date to Mon-YY format
+          // so it matches an availableDates entry and safeFrom resolves correctly.
           const sf = data?.selected_filter || {};
-          if (sf.start_date) setFromDate(sf.start_date);
+          if (sf.start_date) {
+            const sfP = parseDateString(sf.start_date);
+            const matchedSfFrom = sfP.isValid()
+              ? availMonths.find((d) => {
+                  const pd = parseDateString(d);
+                  return pd.isValid() && pd.year() === sfP.year() && pd.month() === sfP.month();
+                })
+              : null;
+            setFromDate(matchedSfFrom || sf.start_date);
+          }
           if (sf.end_date) setToDate(sf.end_date);
 
           const applyScenarioObj =
@@ -1830,53 +1920,11 @@ export default function PBCModelInput() {
   // repopulates from-date, to-date, available scenarios, the projection
   // factors, and the chart/table directly from the backend response —
   // matching the same response shape used on initial load.
-  const refreshLiverFilters = async (payerVal, productVal) => {
-    if (!isHCV) return;
-    try {
-      setLoading(true);
-      const response = await getLiverFilters({
-        ta: therapyArea || "HCV",
-        payer: payerVal || undefined,
-        brand: productVal || undefined,
-      });
-      const resData = response?.data || {};
-      const sf = resData?.selected_filter || {};
-
-      // Refresh FROM/TO DATE options for this payer/product combination.
-      if (
-        Array.isArray(resData?.available_months) &&
-        resData.available_months.length
-      ) {
-        setAvailableDates(resData.available_months);
-      }
-      // Keep the Payer/Product dropdown lists in sync too.
-      if (Array.isArray(resData?.payers) && resData.payers.length) {
-        setPayerOptions(resData.payers);
-      }
-      if (Array.isArray(resData?.products) && resData.products.length) {
-        setProductOptions(resData.products);
-      }
-
-      // Update FROM/TO DATE values from the backend's resolved selection.
-      if (sf.start_date) setFromDate(sf.start_date);
-      if (sf.end_date) setToDate(sf.end_date);
-
-      // Sync payer/product to whatever the backend resolved (in case it
-      // snapped to a valid combination), falling back to what was picked.
-      setPayerFilter(sf.payer || payerVal || "");
-      setProductFilter(sf.product || productVal || "");
-
-      // NOTE: chart/table and factors are intentionally NOT updated here.
-      // The user must click "Apply Filter" to reload the data for the new
-      // payer/product selection. This avoids an extra apply-filters API
-      // call on every dropdown change.
-    } catch (error) {
-      console.error("Failed to refresh liver filters", error);
-      showSnackbar("Failed to load filter data", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
+  // NOTE: Payer/Product filter changes are pure local state — no API call
+  // fires until the user explicitly clicks "Apply Filter". (Previously a
+  // refreshLiverFilters() call fired on every dropdown change to keep the
+  // From/To Date options in sync with the new payer/product; removed since
+  // that's still an API call happening before Apply Filter is clicked.)
 
   // Resolves the model to use from a backend active_model value.
   // Rules:
@@ -1969,7 +2017,8 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        const response = await applyLiverFilters(buildLiverBasePayload());
+        const _p = buildLiverBasePayload();
+        const response = await applyLiverFilters(_p);
         const data = response?.data || {};
         setAppliedLot(lot);
         setAppliedBrand(productFilter || brand);
@@ -3117,7 +3166,6 @@ export default function PBCModelInput() {
                   onChange={(e) => {
                     const val = e.target.value;
                     setPayerFilter(val);
-                    refreshLiverFilters(val, productFilter);
                   }}
                   displayEmpty
                   renderValue={(sel) => {
@@ -3173,7 +3221,6 @@ export default function PBCModelInput() {
                   onChange={(e) => {
                     const val = e.target.value;
                     setProductFilter(val);
-                    refreshLiverFilters(payerFilter, val);
                   }}
                   displayEmpty
                   renderValue={(sel) => {
@@ -4684,14 +4731,18 @@ export default function PBCModelInput() {
                                   isAppliedChild = !!currentBrand && childLabel === currentBrand;
                                 } else if (activeTab === "payer_dist") {
                                   isAppliedChild = !!currentPayer && childLabel === currentPayer;
-                                } else if (currentBrand || currentPayer) {
-                                  // Payer-Product / Product-Payer: children
-                                  // are full "Payer - Product" combo rows —
-                                  // match against whichever of payer/product
-                                  // is currently focused.
-                                  const matchesBrand = !currentBrand || childLabel.includes(currentBrand);
-                                  const matchesPayer = !currentPayer || childLabel.includes(currentPayer);
-                                  isAppliedChild = matchesBrand && matchesPayer;
+                                } else if (activeTab === "payer_prod") {
+                                  // Parent = Payer (already matched via
+                                  // isAppliedParent), child = Product — the
+                                  // payer isn't part of the child's own
+                                  // label anymore, so only check the
+                                  // product here.
+                                  isAppliedChild =
+                                    isAppliedParent && !!currentBrand && childLabel === currentBrand;
+                                } else if (activeTab === "prod_payer") {
+                                  // Parent = Product, child = Payer.
+                                  isAppliedChild =
+                                    isAppliedParent && !!currentPayer && childLabel === currentPayer;
                                 }
                               }
                               const isHighlightedChild = isAppliedChild;

@@ -54,6 +54,8 @@ from app.liver.repository.liver_repo import (
     get_product_wise_payer_yearly,
     save_scenario,
     scenario_exists,
+    save_filter_state,
+    load_filter_state,
 )
 
 
@@ -1663,22 +1665,45 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
 def _load_config(cur, ta: str, payer: str = None, brand: str = None) -> dict:
     """
     Returns config dict for the given (ta, payer, brand).
-    Falls back to 5 years of data + 12-month forecast if no config saved.
+    Falls back to any saved config for the TA, then to 5-year defaults.
     """
-    row = get_liver_config_by_payer_brand(cur, ta, payer, brand)
-    if row:
-        return row[0]
+    # Exact match (only attempted when both are non-None; NULL = NULL is always
+    # false in SQL so passing None would never match any row).
+    if payer is not None and brand is not None:
+        row = get_liver_config_by_payer_brand(cur, ta, payer, brand)
+        if row:
+            return row[0]
 
-    # Fallback: 5 years back from max available date, 12-month forecast
+    # Second chance: any config saved for this TA (pick the one with the
+    # furthest forecast end so forecast_periods is never accidentally truncated).
+    all_cfgs = get_liver_configs_for_ta(cur, ta)
+    if all_cfgs:
+        best_cfg, best_end = None, -1
+        for row in all_cfgs:
+            cfg = row[2] if isinstance(row[2], dict) else {}
+            te  = cfg.get("train_end_date", "")
+            fp  = int(cfg.get("forecast_periods", 0))
+            try:
+                te_y, te_m = _parse_ym(te)
+                end_ym = te_y * 12 + te_m + fp
+                if end_ym > best_end:
+                    best_end = end_ym
+                    best_cfg = cfg
+            except Exception:
+                pass
+        if best_cfg:
+            return best_cfg
+
+    # Last resort: 5 years back from max available date, 24-month forecast
     _, _, max_year, max_month = get_transaction_date_range(cur)
     max_dt   = date_type(max_year, max_month, 1)
-    start_dt = _add_months(max_dt, -60)   # 5 years back
+    start_dt = _add_months(max_dt, -60)
     return {
         "ta_name":           ta,
         "train_start_date":  start_dt.isoformat(),
         "train_end_date":    max_dt.isoformat(),
         "model_granularity": "monthly",
-        "forecast_periods":  12,
+        "forecast_periods":  24,
     }
 
 
@@ -1686,7 +1711,7 @@ def _load_config(cur, ta: str, payer: str = None, brand: str = None) -> dict:
 # Get filters
 # ---------------------------------------------------------------------------
 
-def get_liver_filters(ta: str = "HCV", payer: str = None, brand: str = None) -> dict:
+def get_liver_filters(ta: str = "HCV") -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
@@ -1737,20 +1762,25 @@ def get_liver_filters(ta: str = "HCV", payer: str = None, brand: str = None) -> 
                                        avail_end_year,   avail_end_month)
         date_labels = [_month_label(y, m) for y, m in all_months]
 
-        default_payer = payer or (payers[0] if payers else None)
-        default_brand = brand or (products[0] if products else None)
+        # Load last saved filter state for this TA; fall back to defaults
+        try:
+            saved_filter = load_filter_state(cur, ta)
+        except Exception as _lfe:
+            print(f"[get_liver_filters] load_filter_state skipped: {_lfe}")
+            saved_filter = None
+        selected_filter = saved_filter if saved_filter else {
+            "payer":      payers[0] if payers else None,
+            "product":    products[0] if products else None,
+            "start_date": from_date,
+            "end_date":   to_date,
+        }
 
         return {
             "ta_name":          ta,
             "payers":           payers,
             "products":         products,
             "available_months": date_labels,
-            "selected_filter": {
-                "payer":      default_payer,
-                "product":    default_brand,
-                "start_date": from_date,
-                "end_date":   to_date,
-            },
+            "selected_filter":  selected_filter,
         }
     finally:
         cur.close()
@@ -1805,12 +1835,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             all_scenario_names.remove("Base")
         available_scenarios = ["Base"] + all_scenario_names
 
-        saved_factors_raw = None
+        saved_market_analysis = None
+        saved_factors_raw     = None
 
-        # Load factors for the active scenario from DB (non-Base only).
+        # For non-Base scenarios load both factors AND the saved chart_data.
+        # apply_liver_filters shows saved values (the scenario's committed state);
+        # recalculate_liver is the action that recomputes with new factor inputs.
         if active_scenario != "Base":
             cur.execute(
-                "SELECT factors FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
+                "SELECT factors, chart_data FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
                 (active_scenario,),
             )
             row = cur.fetchone()
@@ -1820,23 +1853,33 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     factors = LiverFactors(**saved_factors_raw)
                 except Exception:
                     factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
+                saved_cd = row[1] if row[1] else {}
+                if isinstance(saved_cd, dict) and "market_analysis" in saved_cd:
+                    saved_market_analysis = saved_cd["market_analysis"]
             else:
                 factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
         else:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
-        # Always freshly compute market_analysis using the resolved factors.
-        # For non-Base scenarios, factors are loaded from DB (scenario's saved
-        # parameters); for Base, they are estimated from the data.
-        # This ensures payer/product filter changes are always reflected in the
-        # chart — previously non-Base returned saved data unchanged.
-        market_analysis, tab1_ets = _build_market_analysis_both_granularities(
-            cur, payload.ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, factors,
-            sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
-            scenario_name=payload.scenario,
-        )
-        market_analysis = _recompute_all_market_shares_nested(market_analysis)
+        if saved_market_analysis:
+            # Non-Base with saved chart data: return committed values unchanged.
+            saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
+            market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
+            _ets_raw = (saved_factors_raw or {}).get("ets", {})
+            tab1_ets = EtsParams(
+                alpha=float(_ets_raw.get("alpha", 0.30)),
+                beta=float(_ets_raw.get("beta", 0.20)),
+                gamma=float(_ets_raw.get("gamma", 0.98)),
+            )
+        else:
+            # Base or non-Base with no saved chart data: freshly compute.
+            market_analysis, tab1_ets = _build_market_analysis_both_granularities(
+                cur, payload.ta, from_year, from_month,
+                train_end_year, train_end_month, forecast_periods, factors,
+                sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                scenario_name=payload.scenario,
+            )
+            market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
         if active_scenario != "Base" and saved_factors_raw:
@@ -1872,22 +1915,39 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             # here, so it's always safe to overwrite with the freshest
             # computation.
             #
-            # Deliberately recomputed at the config's OWN train_start_date/
-            # forecast_periods rather than persisting `market_analysis` as-is:
-            # that one is scoped to whatever narrower from/to date the user
-            # currently has applied in Model Input's own display filter
-            # (payload.from_date/to_date). If the persisted snapshot only
-            # covered that narrow window, Market Events could never show/
-            # filter back to months outside it -- e.g. Model Input's display
-            # starts Aug-2020 while the model actually trained from Apr-2020,
-            # so Market Events would be stuck unable to reach Apr-2020 no
-            # matter what date range it was asked for. The persisted copy
-            # should always span the model's full range, independent of
-            # whatever narrower window the user's display happens to show.
+            # Deliberately recomputed at the TRUE earliest transaction month
+            # for this TA (not the config's train_start_date, and not
+            # whatever narrower from/to date the user currently has applied
+            # in Model Input's own display filter). Two distinct reasons:
+            #
+            # 1. `market_analysis` as originally computed above is scoped to
+            #    payload.from_date/to_date -- if the persisted snapshot only
+            #    covered that narrow window, Market Events could never show/
+            #    filter back to months outside it.
+            #
+            # 2. Using the config's train_start_date itself (an earlier
+            #    version of this fix) was ALSO wrong: _build_all_tabs_both_metrics
+            #    only includes real pre-training data when the from_year it's
+            #    given is EARLIER than the config's own training start --
+            #    see its "_min_from_year = min(from_year, _wide_from_year)"
+            #    comment. Passing the training start itself as from_year makes
+            #    that min() collapse to the training start, so every month
+            #    genuinely before it (e.g. real transaction_data from Apr-2020
+            #    when training was configured to start Sep-2022) came back as
+            #    0 instead of its real historical value, even though that data
+            #    exists and the function already supports showing it. Training
+            #    start is a MODEL-FITTING boundary (where ETS parameters get
+            #    estimated from), not a "data before this doesn't count"
+            #    boundary -- the persisted Base snapshot should carry every
+            #    actual historical month regardless of it.
             #
             # Best-effort: a failure here must not break the live Model Input response.
             try:
-                wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
+                _txn_months = get_transaction_distinct_months(cur, payload.ta)
+                if _txn_months:
+                    wide_from_year, wide_from_month = _txn_months[0]
+                else:
+                    wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
                 wide_forecast_periods = int(cfg["forecast_periods"])
                 persist_ma, _ = _build_market_analysis_both_granularities(
                     cur, payload.ta, wide_from_year, wide_from_month,
@@ -1900,13 +1960,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     date_type(train_end_year, train_end_month, 1), wide_forecast_periods
                 ).isoformat()
 
+                wide_start_date = date_type(wide_from_year, wide_from_month, 1).isoformat()
+
                 save_scenario(
                     cur,
                     scenario_name="Base",
                     ta=payload.ta,
                     payer=_first(payload.payer) or "",
                     product=_first(payload.brand) or "",
-                    from_date=cfg["train_start_date"],
+                    from_date=wide_start_date,
                     to_date=wide_end_date,
                     chart_data={"market_analysis": persist_ma},
                     factors=response_factors,
@@ -1930,12 +1992,17 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             )
 
         def _inactive_stub(sc_name):
-            if sc_name == "Base":
-                return {"market_analysis": base_full_ma}
-            # Load directly from stored chart_data — never rebuild from factors
+            # Always prefer DB-persisted data — it is stable regardless of the
+            # current date filter. For Base this means the snapshot written when
+            # Base was last computed; for other scenarios it is their saved state.
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
-            return {"market_analysis": raw_ma}
+            if raw_ma:
+                return {"market_analysis": raw_ma}
+            # Fallback for Base when it has never been persisted yet
+            if sc_name == "Base":
+                return {"market_analysis": base_full_ma}
+            return {"market_analysis": {}}
 
         scenarios = {
             sc: (
@@ -1975,14 +2042,23 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         _avail_all = _generate_months(_av_sy, _av_sm, _av_ey, _av_em)
         available_months = [_month_label(y, m) for y, m in _avail_all]
 
+        filter_to_save = {
+            "payer":      _first(payload.payer),
+            "product":    _first(payload.brand),
+            "start_date": payload.from_date,
+            "end_date":   end_date,
+            "scenario":   active_scenario,
+        }
+        try:
+            save_filter_state(cur, payload.ta, filter_to_save)
+            conn.commit()
+        except Exception as _fe:
+            conn.rollback()
+            print(f"[apply_liver_filters] filter state save skipped: {_fe}")
+
         return {
             "ta_name":            payload.ta,
-            "selected_filter": {
-                "payer":      _first(payload.payer),
-                "product":    _first(payload.brand),
-                "start_date": payload.from_date,
-                "end_date":   end_date,
-            },
+            "selected_filter":    filter_to_save,
             "available_months":   available_months,
             "available_scenarios": available_scenarios,
             "active_scenario":     active_scenario,
@@ -2340,15 +2416,20 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
 
         factors = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
 
+        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        store_ma   = wide.get("market_analysis") or payload.market_analysis
+        store_from = wide.get("_wide_start") or flt.start_date
+        store_to   = wide.get("_wide_end")   or flt.end_date
+
         save_scenario(
             cur,
             scenario_name=name,
             ta=ta,
             payer=flt.payer or "",
             product=flt.product or "",
-            from_date=flt.start_date,
-            to_date=flt.end_date,
-            chart_data={"market_analysis": payload.market_analysis},
+            from_date=store_from,
+            to_date=store_to,
+            chart_data={"market_analysis": store_ma},
             factors=factors,
         )
 
@@ -2478,6 +2559,55 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     }
 
 
+def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
+    """
+    Recompute market_analysis for the FULL available date range (first TA
+    transaction month → config forecast end) using the saved factors.
+
+    This ensures the stored chart_data is not limited to whatever narrower
+    display window was active when the user clicked Save — pre-config-start
+    historical months are included so the compare view can show them later.
+
+    Returns {"market_analysis": <wide_ma>} on success, or {} on failure so
+    the caller can fall back to storing the payload's market_analysis as-is.
+    """
+    try:
+        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+        wide_forecast_periods = int(cfg["forecast_periods"])
+        granularity = cfg.get("model_granularity", "monthly")
+
+        txn_months = get_transaction_distinct_months(cur, ta)
+        if txn_months:
+            wide_from_year, wide_from_month = txn_months[0]
+        else:
+            wide_from_year, wide_from_month = _parse_ym(cfg.get("train_start_date", flt.start_date))
+
+        try:
+            factors = LiverFactors(**factors_dict)
+        except Exception:
+            factors = _estimate_default_factors(
+                cur, ta, wide_from_year, wide_from_month,
+                train_end_year, train_end_month, granularity,
+            )
+
+        wide_ma, _ = _build_market_analysis_both_granularities(
+            cur, ta, wide_from_year, wide_from_month,
+            train_end_year, train_end_month, wide_forecast_periods, factors,
+            sel_payer=flt.payer or None, sel_product=flt.product or None,
+            force_tab1_ets=False,
+            scenario_name=ta,
+        )
+        wide_ma = _recompute_all_market_shares_nested(wide_ma)
+        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
+        wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
+                                  wide_forecast_periods).isoformat()
+        return {"market_analysis": wide_ma, "_wide_start": wide_start, "_wide_end": wide_end}
+    except Exception as _e:
+        print(f"[liver] wide chart_data recompute skipped: {_e}")
+        return {}
+
+
 def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
     """POST /liver/save — create a new scenario. Rejects if name == 'Base' or already exists."""
     name = payload.scenario_name.strip()
@@ -2494,15 +2624,20 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
         if scenario_exists(cur, name):
             raise ValueError(f"Scenario '{name}' already exists. Use PUT /liver/save to update it.")
 
+        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        store_ma   = wide.get("market_analysis") or payload.market_analysis
+        store_from = wide.get("_wide_start") or flt.start_date
+        store_to   = wide.get("_wide_end")   or flt.end_date
+
         save_scenario(
             cur,
             scenario_name=name,
             ta=ta,
             payer=flt.payer or "",
             product=flt.product or "",
-            from_date=flt.start_date,
-            to_date=flt.end_date,
-            chart_data={"market_analysis": payload.market_analysis},
+            from_date=store_from,
+            to_date=store_to,
+            chart_data={"market_analysis": store_ma},
             factors=factors,
         )
         conn.commit()
@@ -2513,7 +2648,7 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
 
 
 def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
-    """PUT /liver/save — update an existing scenario. Rejects if name == 'Base' or doesn't exist."""
+    """PUT /liver/update-scenario — update an existing scenario. Rejects if name == 'Base' or doesn't exist."""
     name = payload.scenario_name.strip()
     if name.lower() == "base":
         raise ValueError("The Base scenario cannot be updated.")
@@ -2528,15 +2663,20 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
         if not scenario_exists(cur, name):
             raise ValueError(f"Scenario '{name}' does not exist. Use POST /liver/save to create it.")
 
+        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        store_ma   = wide.get("market_analysis") or payload.market_analysis
+        store_from = wide.get("_wide_start") or flt.start_date
+        store_to   = wide.get("_wide_end")   or flt.end_date
+
         save_scenario(
             cur,
             scenario_name=name,
             ta=ta,
             payer=flt.payer or "",
             product=flt.product or "",
-            from_date=flt.start_date,
-            to_date=flt.end_date,
-            chart_data={"market_analysis": payload.market_analysis},
+            from_date=store_from,
+            to_date=store_to,
+            chart_data={"market_analysis": store_ma},
             factors=factors,
         )
         conn.commit()

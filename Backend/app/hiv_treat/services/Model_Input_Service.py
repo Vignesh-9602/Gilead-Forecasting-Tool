@@ -56,7 +56,7 @@ def get_markets(cur, ta):
     cur.execute("""
         SELECT DISTINCT market
         FROM raw_hiv_treat.forecast_outputs
-        WHERE ta_name = %s AND metric = 'market_share'
+        WHERE ta_name = %s AND metric = 'market_share' and market != 'ALL'
     """, (ta,))
     return [r[0] for r in cur.fetchall()]
 
@@ -707,7 +707,7 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
     }
 
 
-def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, start, end):
+def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, start, end,selected_market):
     """
     Market distribution — volume and share split across markets.
 
@@ -756,12 +756,13 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
         h, f        = split_series(vol_display, split_idx)
         sh, sf      = split_series(share, split_idx)
 
-        vol_chart_series.append({"label": mkt, "history": h, "forecast": f})
-        share_chart_series.append({"label": mkt, "history": sh, "forecast": sf})
+        if mkt == selected_market:
+            vol_chart_series.append({"label": mkt, "history": h, "forecast": f})
+            share_chart_series.append({"label": mkt, "history": sh, "forecast": sf})
 
-        mv_series_data.append({"label": mkt, "monthly_values": vol})
-        ms_series_data.append({"label": mkt,
-                                "child_vols": vol, "parent_vols": total_vals})
+            mv_series_data.append({"label": mkt, "monthly_values": vol})
+            ms_series_data.append({"label": mkt,
+                                    "child_vols": vol, "parent_vols": total_vals})
 
         # Sources
         sources               = get_sources(cur, ta, mkt)
@@ -794,10 +795,19 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
         if vol_children:
             vol_row["children"] = vol_children
             norm = normalize_shares_to_100(share_children_vals, n)
-            share_row["children"] = [
-                {"label": share_children_labels[i], "values": norm[i]}
-                for i in range(len(norm))
-            ]
+            if vol_children:
+                vol_children_display = [
+                    [round(vol[t] * norm[c][t] / 100) for t in range(n)]
+                    for c in range(len(norm))
+                ]
+                vol_row["children"] = [
+                    {"label": share_children_labels[c], "values": vol_children_display[c]}
+                    for c in range(len(norm))
+                ]
+                share_row["children"] = [
+                    {"label": share_children_labels[i], "values": norm[i]}
+                    for i in range(len(norm))
+                ]
 
         market_vol_rows.append(vol_row)
         market_share_rows.append(share_row)
@@ -836,7 +846,13 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
                 ms_chart, ms_table, months, split_idx,
                 ms_series_data, ms_table_rows, "hierarchy"
             )
-        }
+        },
+        "_selected": {
+            "months": months,
+            "split_idx": split_idx,
+            "volume": market_totals.get(selected_market, [0.0] * n),
+            "parent_volume": total_vals,
+        },
     }
 def fetch_forecast_scenario_with_fallback(cur, ta, market, source, product, metric, scenario):
     """
@@ -856,40 +872,98 @@ def fetch_forecast_scenario_with_fallback(cur, ta, market, source, product, metr
 
     return None
 
-def build_product_distribution(cur, ta, scenario, markets, total_vals, months, split_idx, start, end):
+def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
     """
-    Product distribution — volume and share split across products.
+    Like normalize_shares_to_100, but any product with a directly-saved
+    override share (pinned_shares[label] is not None at index t) keeps
+    that exact value. The remaining ("free") products are normalized
+    proportionally by volume to fill whatever share is left over
+    (100 - sum of pinned shares at that index), so all siblings still
+    sum to 100 at every time index.
+ 
+    pinned_shares: dict label -> list[float] | None
+    """
+    num = len(labels)
+    normalized = [[0.0] * n for _ in range(num)]
+ 
+    for t in range(n):
+        pinned_total = 0.0
+        free_indices = []
+        for c in range(num):
+            pin = pinned_shares.get(labels[c])
+            if pin is not None and t < len(pin):
+                normalized[c][t] = pin[t]
+                pinned_total += pin[t]
+            else:
+                free_indices.append(c)
+ 
+        remaining = max(0.0, 100.0 - pinned_total)
+        free_total_vol = sum(
+            children_values_list[c][t] if t < len(children_values_list[c]) else 0
+            for c in free_indices
+        )
+        for c in free_indices:
+            val = children_values_list[c][t] if t < len(children_values_list[c]) else 0
+            if free_total_vol > 0:
+                normalized[c][t] = round((val / free_total_vol) * remaining, 2)
+            else:
+                normalized[c][t] = 0.0
+ 
+    return normalized
 
-    prod_vol_map accumulates RAW floats throughout.
-    Monthly display rounds at output; yearly sums raws then rounds once.
-    Yearly share = sum(prod_raw_in_year) / sum(total_raw_in_year) * 100.
+def build_product_distribution(cur, ta, scenario, markets, total_vals, months, split_idx, start, end,selected_product):
+    """
+    Product distribution -- volume and share split across products,
+    blended across every market/source.
+ 
+    For any product with a directly-saved override (i.e. the user edited
+    that product's row on the "Product Distribution" tab and it was saved
+    via the ("ALL","ALL",product,"market_share") key), that saved share
+    is pinned exactly and used as-is instead of being recomputed from the
+    market/source breakdown. Every other product is still derived live
+    from market_distribution + market_product, exactly as before, and the
+    remaining (100 - pinned%) is distributed across them proportionally.
     """
     products  = get_products(cur, ta)
     n         = len(total_vals)
     all_years = get_ordered_years(months)
-
-    # Accumulate raw floats
-    prod_vol_map = {p: [0.0] * n for p in products}
-
+ 
+    prod_vol_map      = {p: [0.0] * n for p in products}
+    override_share_map = {p: None for p in products}
+ 
+    # --- 1) Pull any saved overrides first ------------------------------------
+    for prod in products:
+        override_d = fetch_forecast_scenario_with_fallback(
+            cur, ta, "ALL", None, prod, "market_share", scenario)
+        if not override_d:
+            continue
+        s = build_series(override_d, start, end)
+        share = (s["values"] + [0.0] * n)[:n]
+        override_share_map[prod] = share
+        prod_vol_map[prod] = build_volume_from_share(total_vals, share)
+ 
+    # --- 2) Recompute every non-overridden product from market/source shares --
     for mkt in markets:
         mkt_d = fetch_forecast_scenario(cur, ta, mkt, None, "ALL", "market_share", scenario)
         if not mkt_d:
             continue
-
+ 
         mkt_series = build_series(mkt_d, start, end)
         mkt_vol    = build_volume_from_share(total_vals, mkt_series["values"])  # raw
-
+ 
         for prod in products:
-
+            if override_share_map[prod] is not None:
+                continue  # pinned -- don't overwrite with the computed blend
+ 
             if mkt == "Retail":
-                d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
+                d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
                     continue
                 s        = build_series(d, start, end)
                 prod_vol = build_volume_from_share(mkt_vol, s["values"])        # raw
                 for i in range(min(len(prod_vol), n)):
                     prod_vol_map[prod][i] += prod_vol[i]
-
+ 
             else:
                 sources = get_sources(cur, ta, mkt)
                 for src in sources:
@@ -899,32 +973,32 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
                         continue
                     src_series = build_series(src_d, start, end)
                     src_vol    = build_volume_from_share(mkt_vol, src_series["values"])
-
+ 
                     prod_d = fetch_forecast_scenario_with_fallback(
                         cur, ta, mkt, src, prod, "market_share", scenario)
                     if not prod_d:
                         continue
                     prod_series = build_series(prod_d, start, end)
                     prod_vol    = build_volume_from_share(src_vol, prod_series["values"])
-
+ 
                     for i in range(min(len(prod_vol), n)):
                         prod_vol_map[prod][i] += prod_vol[i]
-
+ 
     prod_labels = list(prod_vol_map.keys())
     raw_vols    = [prod_vol_map[p] for p in prod_labels]
-    norm_shares = normalize_shares_to_100(raw_vols, n)
-
-    # Monthly display rows (round here, display only)
+    norm_shares = normalize_shares_with_pins(raw_vols, prod_labels, override_share_map, n)
+ 
+    # ---------------------------------------------------------------- display
     overall_vol_row   = {"label": "Overall", "values": round_volume(total_vals)}
     overall_share_row = {"label": "Overall", "values": [100.0] * n}
-
+ 
     mv_chart = {
         "months": months, "forecast_start_index": split_idx,
         "series": [
             {"label": p,
              "history":  split_series(round_volume(prod_vol_map[p]), split_idx)[0],
              "forecast": split_series(round_volume(prod_vol_map[p]), split_idx)[1]}
-            for p in prod_labels
+            for p in prod_labels if p == selected_product
         ]
     }
     mv_table = {
@@ -934,14 +1008,14 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             for p in prod_labels
         ]
     }
-
+ 
     ms_chart = {
         "months": months, "forecast_start_index": split_idx,
         "series": [
             {"label": p,
              "history":  split_series(norm_shares[i], split_idx)[0],
              "forecast": split_series(norm_shares[i], split_idx)[1]}
-            for i, p in enumerate(prod_labels)
+            for i, p in enumerate(prod_labels) if p == selected_product
         ]
     }
     ms_table = {
@@ -951,24 +1025,24 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             for i, p in enumerate(prod_labels)
         ]
     }
-
-    # Yearly descriptors — pass raw floats
-    mv_series_data = [{"label": p, "monthly_values": prod_vol_map[p]} for p in prod_labels]
+ 
+    mv_series_data = [{"label": p, "monthly_values": prod_vol_map[p]}
+                       for p in prod_labels if p == selected_product]
     mv_table_rows  = (
         [{"label": "Overall", "monthly_values": total_vals}] +
         [{"label": p, "monthly_values": prod_vol_map[p]} for p in prod_labels]
     )
-
+ 
     ms_series_data = [
         {"label": p, "child_vols": prod_vol_map[p], "parent_vols": total_vals}
-        for p in prod_labels
+        for p in prod_labels if p == selected_product
     ]
     ms_table_rows = (
         [{"label": "Overall", "fixed_values": [100.0] * len(all_years)}] +
         [{"label": p, "child_vols": prod_vol_map[p], "parent_vols": total_vals}
          for p in prod_labels]
     )
-
+ 
     return {
         "market_volume": {
             "unit": "count",
@@ -988,7 +1062,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
 
 
 def build_market_product(cur, ta, scenario, markets, products, total_vals, months,
-                         split_idx, start, end, selected_market):
+                         split_idx, start, end, selected_market,selected_product):
     """
     Market -> Product breakdown.
 
@@ -1070,7 +1144,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         mkt_vol = market_totals[mkt]
 
         for prod in products:
-            if prod not in mp_vol[mkt]:
+            if prod not in mp_vol[mkt] or prod != selected_product:
                 continue
             vol          = mp_vol[mkt][prod]
             vol_display  = round_volume(vol)
@@ -1085,6 +1159,8 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         norm_shares        = normalize_shares_to_100(prod_vols_in_mkt, n) if prod_vols_in_mkt else []
 
         for c, prod in enumerate(prod_labels_in_mkt):
+            if prod != selected_product:
+                continue
             sh, sf = split_series(norm_shares[c], split_idx)
             share_chart_series.append({"label": f"{mkt} - {prod}", "market": mkt, "product": prod,
                                        "history": sh, "forecast": sf})
@@ -1105,12 +1181,16 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         prod_vols_in_mkt   = [mp_vol[mkt][p] for p in products if p in mp_vol[mkt]]
         prod_labels_in_mkt = [p for p in products if p in mp_vol[mkt]]
         norm_shares        = normalize_shares_to_100(prod_vols_in_mkt, n) if prod_vols_in_mkt else []
+        vol_children_display = [
+                    [round(mkt_vol[t] * norm_shares[c][t] / 100) for t in range(n)]
+                    for c in range(len(prod_labels_in_mkt))
+                ]
 
         vol_children   = [{"label": prod_labels_in_mkt[c],
-                           "values": round_volume(prod_vols_in_mkt[c])}
-                          for c in range(len(prod_labels_in_mkt))]
+                        "values": vol_children_display[c]}
+                        for c in range(len(prod_labels_in_mkt))]
         share_children = [{"label": prod_labels_in_mkt[c], "values": norm_shares[c]}
-                          for c in range(len(prod_labels_in_mkt))]
+                        for c in range(len(prod_labels_in_mkt))]
 
         vol_row   = {"label": mkt, "values": round_volume(mkt_vol)}
         share_row = {"label": mkt, "values": [100.0] * n}
@@ -1125,7 +1205,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
             "label":          mkt,
             "monthly_values": mkt_vol,
             "children": [
-                {"label": prod_labels_in_mkt[c], "monthly_values": prod_vols_in_mkt[c]}
+                {"label": prod_labels_in_mkt[c], "monthly_values": vol_children_display[c]}
                 for c in range(len(prod_labels_in_mkt))
             ]
         })
@@ -1161,12 +1241,18 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
                 ms_chart, ms_table, months, split_idx,
                 ms_series_data, ms_table_rows, "hierarchy"
             )
+        },
+        "_selected": {
+            "months": months,
+            "split_idx": split_idx,
+            "volume": mp_vol.get(selected_market, {}).get(selected_product, [0.0] * n),
+            "parent_volume": market_totals.get(selected_market, total_vals),
         }
     }
 
 
 def build_product_market(cur, ta, scenario, markets, products, total_vals, months,
-                         split_idx, start, end, selected_product):
+                         split_idx, start, end, selected_product,selected_market):
     """
     Product -> Market breakdown.
 
@@ -1258,7 +1344,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         prod_total = product_totals[prod]
 
         for mkt in markets:
-            if mkt not in pm_vol[prod]:
+            if mkt not in pm_vol[prod] or mkt != selected_market:
                 continue
             vol         = pm_vol[prod][mkt]
             vol_display = round_volume(vol)
@@ -1273,6 +1359,8 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         norm_shares = normalize_shares_to_100(mkt_vols, n) if mkt_vols else []
 
         for i, mkt in enumerate(labels):
+            if mkt != selected_market:
+                continue
             sh, sf = split_series(norm_shares[i], split_idx)
             share_chart_series.append({"label": f"{prod} - {mkt}", "product": prod, "market": mkt,
                                        "history": sh, "forecast": sf})
@@ -1294,10 +1382,15 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         labels      = [mkt for mkt in markets if mkt in pm_vol[prod]]
         norm_shares = normalize_shares_to_100(mkt_vols, n) if mkt_vols else []
 
-        vol_children   = [{"label": labels[i], "values": round_volume(mkt_vols[i])}
-                          for i in range(len(labels))]
-        share_children = [{"label": labels[i], "values": norm_shares[i]}
-                          for i in range(len(labels))]
+        vol_children_display = [
+            [round(prod_total[t] * norm_shares[c][t] / 100) for t in range(n)]
+            for c in range(len(labels))
+        ]
+
+        vol_children   = [{"label": labels[c], "values": vol_children_display[c]}
+                          for c in range(len(labels))]
+        share_children = [{"label": labels[c], "values": norm_shares[c]}
+                          for c in range(len(labels))]
 
         vol_row   = {"label": prod, "values": round_volume(prod_total), "children": vol_children}
         share_row = {"label": prod, "values": [100.0] * n,              "children": share_children}
@@ -1345,6 +1438,12 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
                 ms_chart, ms_table, months, split_idx,
                 ms_series_data, ms_table_rows, "hierarchy"
             )
+        },
+        "_selected": {
+            "months": months,
+            "split_idx": split_idx,
+            "volume": pm_vol.get(selected_product, {}).get(selected_market, [0.0] * n),
+            "parent_volume": product_totals.get(selected_product, total_vals),
         }
     }
 
@@ -1365,21 +1464,62 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
     products = get_products(cur, ta)
 
     return {
-        "total_market_volume": build_total_market_volume(
-            total_vals, months, split_idx,scenario),
+        "total_market_volume": build_total_market_volume(total_vals, months, split_idx, scenario),
         "market_distribution": build_market_distribution(
-            cur, ta, scenario, total_vals, months, split_idx, start, end),
+            cur, ta, scenario, total_vals, months, split_idx, start, end, selected_market),
         "product_distribution": build_product_distribution(
-            cur, ta, scenario, markets, total_vals, months, split_idx, start, end),
+            cur, ta, scenario, markets, total_vals, months, split_idx, start, end, selected_product),
         "market_product": build_market_product(
             cur, ta, scenario, markets, products, total_vals, months,
-            split_idx, start, end, selected_market),
+            split_idx, start, end, selected_market, selected_product),
         "product_market": build_product_market(
             cur, ta, scenario, markets, products, total_vals, months,
-            split_idx, start, end, selected_product)
+            split_idx, start, end, selected_product, selected_market)
     }
 
+def build_comparison_volume_chart(entries):
+    months, split_idx = entries[0]["months"], entries[0]["split_idx"]
+    series = []
+    for e in entries:
+        disp = round_volume(e["volume"])
+        h, f = split_series(disp, split_idx)
+        series.append({"label": e["label"], "history": h, "forecast": f})
+    return {"months": months, "forecast_start_index": split_idx, "series": series}
 
+
+def build_comparison_volume_chart_yearly(entries):
+    months, split_idx = entries[0]["months"], entries[0]["split_idx"]
+    all_years = get_ordered_years(months)
+    y_split = yearly_forecast_start_index(months, split_idx)
+    series = []
+    for e in entries:
+        _, yvals = aggregate_yearly_volume(months, e["volume"])
+        yh, yf = split_series(yvals, y_split)
+        series.append({"label": e["label"], "history": yh, "forecast": yf})
+    return {"years": all_years, "forecast_start_index": y_split, "series": series}
+
+
+def build_comparison_share_chart(entries):
+    months, split_idx = entries[0]["months"], entries[0]["split_idx"]
+    series = []
+    for e in entries:
+        n = len(e["volume"])
+        vals = [safe_pct(e["volume"][i], e["parent_volume"][i]) for i in range(n)]
+        h, f = split_series(vals, split_idx)
+        series.append({"label": e["label"], "history": h, "forecast": f})
+    return {"months": months, "forecast_start_index": split_idx, "series": series}
+
+
+def build_comparison_share_chart_yearly(entries):
+    months, split_idx = entries[0]["months"], entries[0]["split_idx"]
+    all_years = get_ordered_years(months)
+    y_split = yearly_forecast_start_index(months, split_idx)
+    series = []
+    for e in entries:
+        _, yvals = aggregate_yearly_share_from_volumes(months, e["volume"], e["parent_volume"])
+        yh, yf = split_series(yvals, y_split)
+        series.append({"label": e["label"], "history": yh, "forecast": yf})
+    return {"years": all_years, "forecast_start_index": y_split, "series": series}
 # =========================================================
 # ================= MAIN FUNCTION ==========================
 # =========================================================
@@ -1502,6 +1642,49 @@ def build_apply_scenario_response(
             "market_analysis": market_analysis,
         }
 
+    breakdown_keys = [
+        "market_distribution",
+        "product_distribution",
+        "market_product",
+        "product_market",
+    ]
+
+    comparison_charts = {}
+
+    for bk in breakdown_keys:
+
+        vol_entries = []
+        share_entries = []
+
+        for scenario in available_scenarios:
+            ma = scenarios_block[scenario]["market_analysis"].get(bk, {})
+            sel = ma.get("_selected")
+            if not sel:
+                continue
+
+            vol_entries.append({"label": scenario, **sel})
+            share_entries.append({"label": scenario, **sel})
+
+        # clean up the internal marker regardless of whether
+        # we had enough data to build a comparison chart
+        for scenario in available_scenarios:
+            ma = scenarios_block[scenario]["market_analysis"].get(bk, {})
+            ma.pop("_selected", None)
+
+        if not vol_entries:
+            continue
+
+        comparison_charts[bk] = {
+            "market_volume": {
+                "monthly": build_comparison_volume_chart(vol_entries),
+                "yearly": build_comparison_volume_chart_yearly(vol_entries),
+            },
+            "market_share": {
+                "monthly": build_comparison_share_chart(share_entries),
+                "yearly": build_comparison_share_chart_yearly(share_entries),
+            },
+        }
+
     return {
         "ta_name": ta,
         "selected_filter": {
@@ -1515,4 +1698,5 @@ def build_apply_scenario_response(
         ),
         "active_scenario": active_scenario,
         "scenarios": scenarios_block,
+        "comparison_charts": comparison_charts,
     }

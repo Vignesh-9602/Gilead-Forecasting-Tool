@@ -764,6 +764,30 @@ export default function HIVMarketEvent() {
     const isBaseScenarioError = (error) =>
         /cannot save as ['"]?base['"]?/i.test(getSaveErrorMessage(error) || "");
 
+    // Simple message-only modal, reused for things like the "Run Calculation
+    // can't run on Base" block — no input needed, just an acknowledgement.
+    const [infoDialog, setInfoDialog] = useState({
+        open: false,
+        title: "",
+        message: "",
+    });
+
+    const openInfoDialog = (title, message) => {
+        setInfoDialog({ open: true, title, message });
+    };
+
+    const closeInfoDialog = () => {
+        setInfoDialog({ open: false, title: "", message: "" });
+    };
+
+    const RUN_CALCULATION_BASE_MESSAGE =
+        "Run Calculation cannot be run on the Base scenario. Please select or create a scenario first.";
+
+    const isRunCalculationBaseError = (error) =>
+        /run calculation cannot be run on the base scenario/i.test(
+            getSaveErrorMessage(error) || "",
+        );
+
     // Resolved/rejected once the Save-As dialog is submitted or dismissed,
     // so the table's "Save" button can just `await` this whole flow.
     const saveScenarioResolverRef = useRef(null);
@@ -922,6 +946,11 @@ export default function HIVMarketEvent() {
     };
 
     const handleRunCalculation = async () => {
+        if (scenarioName.trim().toLowerCase() === "base") {
+            openInfoDialog("Run Calculation", RUN_CALCULATION_BASE_MESSAGE);
+            return;
+        }
+
         const payload = {
             ta_name: "HCV",
             selected_filter: {
@@ -948,6 +977,12 @@ export default function HIVMarketEvent() {
             applyEventTabsApiResponse(apiData, payload.selected_filter);
         } catch (error) {
             skipEventRowsResetRef.current = false;
+
+            if (isRunCalculationBaseError(error)) {
+                openInfoDialog("Run Calculation", RUN_CALCULATION_BASE_MESSAGE);
+                return;
+            }
+
             console.error("Failed to run liver market event calculation", error);
         }
     };
@@ -3162,6 +3197,63 @@ export default function HIVMarketEvent() {
                             }}
                         >
                             {saveScenarioDialog.submitting ? "Saving..." : "Save"}
+                        </Button>
+                    </DialogActions>
+                </Dialog>
+
+                <Dialog
+                    open={infoDialog.open}
+                    onClose={closeInfoDialog}
+                    PaperProps={{
+                        sx: {
+                            width: "380px",
+                            maxWidth: "90vw",
+                            borderRadius: "12px",
+                        },
+                    }}
+                >
+                    <DialogTitle
+                        sx={{
+                            fontWeight: 700,
+                            fontSize: "16px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            pr: 1,
+                        }}
+                    >
+                        {infoDialog.title || "Notice"}
+
+                        <IconButton
+                            size="small"
+                            onClick={closeInfoDialog}
+                        >
+                            <CloseIcon fontSize="small" />
+                        </IconButton>
+                    </DialogTitle>
+
+                    <DialogContent>
+                        <Typography
+                            sx={{
+                                fontSize: "13px",
+                                color: "#334155",
+                            }}
+                        >
+                            {infoDialog.message}
+                        </Typography>
+                    </DialogContent>
+
+                    <DialogActions sx={{ px: 3, pb: 3 }}>
+                        <Button
+                            variant="contained"
+                            onClick={closeInfoDialog}
+                            sx={{
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                backgroundColor: "#4F46E5",
+                            }}
+                        >
+                            OK
                         </Button>
                     </DialogActions>
                 </Dialog>

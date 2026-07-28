@@ -34,7 +34,7 @@ const formatMonthLabel = (value) => {
     return `${monthAbbr}-${year.slice(-2)}`;
 };
 
-export default function OutputChart({ chartData, activeTab, selectedPayer, selectedProduct }) {
+export default function OutputChart({ chartData, activeTab, selectedPayers = [], selectedProducts = [] }) {
 
     // if (!chartData) return null;
 
@@ -49,8 +49,40 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
 
     const {
         forecast_start_index,
-        series,
+        series: allSeries,
     } = chartData;
+
+    // Every tab except Total Market Volume should only chart the
+    // payer(s)/product(s) currently selected in the filter panel — but
+    // keep every scenario for those entities (e.g. "Commercial (BASE)"
+    // and "Commercial (test-1)" both stay). We don't know for certain
+    // whether this tab's series labels carry just the payer name, just
+    // the product name, or both combined, so match by substring rather
+    // than exact equality and prefer the most precise match available:
+    //   1. label contains a selected payer AND a selected product (combo)
+    //   2. label contains just whichever applies to this tab
+    //   3. last resort: show everything rather than an empty chart
+    const containsTerm = (label, term) =>
+        !!term && !!label && label.toLowerCase().includes(term.toLowerCase());
+
+    const containsAny = (label, terms) =>
+        Array.isArray(terms) && terms.some((term) => containsTerm(label, term));
+
+    const series = (() => {
+        if (activeTab === "total_market_volume") return allSeries;
+
+        const payerMatches = allSeries.filter((item) => containsAny(item.label, selectedPayers));
+        const productMatches = allSeries.filter((item) => containsAny(item.label, selectedProducts));
+        const comboMatches = allSeries.filter(
+            (item) => containsAny(item.label, selectedPayers) && containsAny(item.label, selectedProducts)
+        );
+
+        if (comboMatches.length > 0) return comboMatches;
+        if (selectedPayers.length > 0 && payerMatches.length > 0) return payerMatches;
+        if (selectedProducts.length > 0 && productMatches.length > 0) return productMatches;
+
+        return allSeries;
+    })();
 
     // const colors = [
     //     "#2563EB",
@@ -63,10 +95,6 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
     //     "#4F46E5",
     // ];
 
-    const ACTIVE_COLOR = "#F59E0B";   // Yellow
-    const FADED_COLOR = "#D1D5DB";    // Gray
-    const DEFAULT_COLOR = "#2563EB";  // Blue
-
     const SCENARIO_COLORS = [
         "#2563EB", // Blue
         "#F59E0B", // Orange
@@ -78,94 +106,36 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
         "#4F46E5", // Indigo
     ];
 
-    const PAYER_COLORS = {
-        "Cash": "#2563EB",
-        "Commercial": "#F59E0B",
-        "Medicaid": "#16A34A",
-        "Medicare": "#9333EA",
+    // Series labels end in "(Scenario Name)" — e.g. "Commercial (BASE)" or
+    // just "BASE" on the Total Market Volume tab (no parens at all). Pull
+    // out whatever's in the trailing parens as the scenario name, falling
+    // back to the full label when there's nothing to extract.
+    const getScenarioName = (label) => {
+        const match = label?.match(/\(([^)]+)\)\s*$/);
+        return match ? match[1] : label;
     };
 
-    const PRODUCT_COLORS = {
-        "ASGA": "#2563EB",
-        "GILD": "#F59E0B",
-        "Other": "#16A34A",
-    };
+    // Build a stable scenario -> color map from the series currently being
+    // charted, in the order each scenario first appears, so every line for
+    // a given scenario (across every payer/product it might represent)
+    // gets the same color, and different scenarios are always visually
+    // distinct — this matters most now that filtering narrows most tabs
+    // down to a single payer/product, where scenario is the only thing
+    // left to tell lines apart.
+    const scenarioColorMap = {};
+    let nextColorIndex = 0;
 
-    const getSeriesColor = (item, index) => {
+    series.forEach((item) => {
+        const scenario = getScenarioName(item.label);
 
-        const label = item.label || "";
-
-        switch (activeTab) {
-
-            case "total_market_volume":
-                return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
-
-            case "payer_distribution": {
-
-                if (label.startsWith("Cash"))
-                    return PAYER_COLORS["Cash"];
-
-                if (label.startsWith("Commercial"))
-                    return PAYER_COLORS["Commercial"];
-
-                if (label.startsWith("Medicaid"))
-                    return PAYER_COLORS["Medicaid"];
-
-                if (label.startsWith("Medicare"))
-                    return PAYER_COLORS["Medicare"];
-
-                return "#64748B";
-            }
-
-            case "product_distribution": {
-
-                if (label.startsWith("ASGA"))
-                    return PRODUCT_COLORS.ASGA;
-
-                if (label.startsWith("GILD"))
-                    return PRODUCT_COLORS.GILD;
-
-                if (label.startsWith("Other"))
-                    return PRODUCT_COLORS.Other;
-
-                return "#64748B";
-            }
-
-            case "payer_product": {
-
-                if (label.includes("ASGA"))
-                    return PRODUCT_COLORS.ASGA;
-
-                if (label.includes("GILD"))
-                    return PRODUCT_COLORS.GILD;
-
-                if (label.includes("Other"))
-                    return PRODUCT_COLORS.Other;
-
-                return "#64748B";
-            }
-
-            case "product_payer": {
-
-                if (label.includes("Cash"))
-                    return PAYER_COLORS["Cash"];
-
-                if (label.includes("Commercial"))
-                    return PAYER_COLORS["Commercial"];
-
-                if (label.includes("Medicaid"))
-                    return PAYER_COLORS["Medicaid"];
-
-                if (label.includes("Medicare"))
-                    return PAYER_COLORS["Medicare"];
-
-                return "#64748B";
-            }
-
-            default:
-                return "#2563EB";
+        if (!(scenario in scenarioColorMap)) {
+            scenarioColorMap[scenario] = SCENARIO_COLORS[nextColorIndex % SCENARIO_COLORS.length];
+            nextColorIndex += 1;
         }
-    };
+    });
+
+    const getSeriesColor = (item) =>
+        scenarioColorMap[getScenarioName(item.label)] || "#64748B";
 
     const traces = series.flatMap((item, index) => {
 
@@ -234,7 +204,7 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
         //         width = 3;
         // }
 
-        const color = getSeriesColor(item, index);
+        const color = getSeriesColor(item);
         const width = 3;
 
         return [
@@ -306,6 +276,9 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
 
     });
 
+    if (!series.length)
+        return null;
+
     const allValues = series.flatMap((item) => [
 
         ...item.history,
@@ -314,9 +287,9 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
 
     ]);
 
-    const maxValue = Math.max(...allValues);
+    const maxValue = allValues.length ? Math.max(...allValues) : 0;
 
-    const minValue = Math.min(...allValues);
+    const minValue = allValues.length ? Math.min(...allValues) : 0;
 
     return (
         <Accordion
@@ -365,6 +338,12 @@ export default function OutputChart({ chartData, activeTab, selectedPayer, selec
                                 r: 30,
                                 t: 20,
                                 b: 70,
+                            },
+
+                            // Plotly truncates hover trace names to 15
+                            // characters by default; -1 shows the full name.
+                            hoverlabel: {
+                                namelength: -1,
                             },
 
                             // hovermode: "x unified",
