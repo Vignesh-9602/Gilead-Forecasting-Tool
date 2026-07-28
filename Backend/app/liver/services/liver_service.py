@@ -1882,22 +1882,39 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             # here, so it's always safe to overwrite with the freshest
             # computation.
             #
-            # Deliberately recomputed at the config's OWN train_start_date/
-            # forecast_periods rather than persisting `market_analysis` as-is:
-            # that one is scoped to whatever narrower from/to date the user
-            # currently has applied in Model Input's own display filter
-            # (payload.from_date/to_date). If the persisted snapshot only
-            # covered that narrow window, Market Events could never show/
-            # filter back to months outside it -- e.g. Model Input's display
-            # starts Aug-2020 while the model actually trained from Apr-2020,
-            # so Market Events would be stuck unable to reach Apr-2020 no
-            # matter what date range it was asked for. The persisted copy
-            # should always span the model's full range, independent of
-            # whatever narrower window the user's display happens to show.
+            # Deliberately recomputed at the TRUE earliest transaction month
+            # for this TA (not the config's train_start_date, and not
+            # whatever narrower from/to date the user currently has applied
+            # in Model Input's own display filter). Two distinct reasons:
+            #
+            # 1. `market_analysis` as originally computed above is scoped to
+            #    payload.from_date/to_date -- if the persisted snapshot only
+            #    covered that narrow window, Market Events could never show/
+            #    filter back to months outside it.
+            #
+            # 2. Using the config's train_start_date itself (an earlier
+            #    version of this fix) was ALSO wrong: _build_all_tabs_both_metrics
+            #    only includes real pre-training data when the from_year it's
+            #    given is EARLIER than the config's own training start --
+            #    see its "_min_from_year = min(from_year, _wide_from_year)"
+            #    comment. Passing the training start itself as from_year makes
+            #    that min() collapse to the training start, so every month
+            #    genuinely before it (e.g. real transaction_data from Apr-2020
+            #    when training was configured to start Sep-2022) came back as
+            #    0 instead of its real historical value, even though that data
+            #    exists and the function already supports showing it. Training
+            #    start is a MODEL-FITTING boundary (where ETS parameters get
+            #    estimated from), not a "data before this doesn't count"
+            #    boundary -- the persisted Base snapshot should carry every
+            #    actual historical month regardless of it.
             #
             # Best-effort: a failure here must not break the live Model Input response.
             try:
-                wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
+                _txn_months = get_transaction_distinct_months(cur, payload.ta)
+                if _txn_months:
+                    wide_from_year, wide_from_month = _txn_months[0]
+                else:
+                    wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
                 wide_forecast_periods = int(cfg["forecast_periods"])
                 persist_ma, _ = _build_market_analysis_both_granularities(
                     cur, payload.ta, wide_from_year, wide_from_month,
@@ -1910,13 +1927,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     date_type(train_end_year, train_end_month, 1), wide_forecast_periods
                 ).isoformat()
 
+                wide_start_date = date_type(wide_from_year, wide_from_month, 1).isoformat()
+
                 save_scenario(
                     cur,
                     scenario_name="Base",
                     ta=payload.ta,
                     payer=_first(payload.payer) or "",
                     product=_first(payload.brand) or "",
-                    from_date=cfg["train_start_date"],
+                    from_date=wide_start_date,
                     to_date=wide_end_date,
                     chart_data={"market_analysis": persist_ma},
                     factors=response_factors,
