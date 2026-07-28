@@ -1252,7 +1252,7 @@ def recalculate(payload: RecalculateRequest):
     
 
 
-from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response,normalize_overall_labels
+from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response,normalize_overall_labels,filter_market_distribution_chart,filter_product_distribution_chart,filter_market_product_chart,filter_product_market_chart
 from app.hiv_treat.routes.refresh_models import RefreshEditsRequest
 from types import SimpleNamespace
 from copy import deepcopy
@@ -1266,21 +1266,15 @@ def refresh_edits(payload: RefreshEditsRequest):
     print("Scenario :", payload.scenario_name)
     print("Tab :", payload.selected_tab)
     print("Metric :", payload.selected_metric)
+    print("Edited rows :", payload.edited_rows)
     print("==============================")
 
     try:
-        # Recompute only the active scenario.
-        refreshed_market_analysis = refresh_engine(
-            payload
-        )
-
-        # Normalize both table and chart labels.
-        refreshed_market_analysis = normalize_overall_labels(
-            refreshed_market_analysis
-        )
-
         with get_connection() as conn, conn.cursor() as cur:
 
+            # --------------------------------------------------
+            # 1. Load forecasting configuration
+            # --------------------------------------------------
             cur.execute(
                 """
                 SELECT config
@@ -1293,10 +1287,12 @@ def refresh_edits(payload: RefreshEditsRequest):
             row = cur.fetchone()
             config = row[0] if row else {}
 
+            # --------------------------------------------------
+            # 2. Normalize selected_filter
+            # --------------------------------------------------
             selected_filter = payload.selected_filter
 
             if isinstance(selected_filter, dict):
-
                 filter_object = SimpleNamespace(
                     start_date=selected_filter.get(
                         "start_date"
@@ -1319,7 +1315,6 @@ def refresh_edits(payload: RefreshEditsRequest):
                         ),
                     ),
                 )
-
             else:
                 filter_object = selected_filter
 
@@ -1329,7 +1324,9 @@ def refresh_edits(payload: RefreshEditsRequest):
                 selected_filter=filter_object,
             )
 
-            # Load all saved scenarios.
+            # --------------------------------------------------
+            # 3. Load all saved scenarios
+            # --------------------------------------------------
             response = build_apply_scenario_response(
                 cur,
                 apply_payload,
@@ -1344,69 +1341,180 @@ def refresh_edits(payload: RefreshEditsRequest):
                     "was not found."
                 )
 
-            # Replace only the active scenario with the
-            # recalculated result.
+            # --------------------------------------------------
+            # 4. Capture original active scenario
+            # --------------------------------------------------
+            original_market_analysis = deepcopy(
+                response["scenarios"][active_scenario][
+                    "market_analysis"
+                ]
+            )
+
+            # --------------------------------------------------
+            # 5. Recompute only the active scenario
+            # --------------------------------------------------
+            refreshed_market_analysis = refresh_engine(
+                payload=payload,
+                original_market_analysis=(
+                    original_market_analysis
+                ),
+            )
+
+            refreshed_market_analysis = (
+                normalize_overall_labels(
+                    refreshed_market_analysis
+                )
+            )
+
+            # --------------------------------------------------
+            # 6. Replace only the active scenario
+            # --------------------------------------------------
             response["scenarios"][active_scenario][
                 "market_analysis"
             ] = deepcopy(
                 refreshed_market_analysis
             )
 
-            # Normalize table and chart labels for all scenarios.
+            # --------------------------------------------------
+            # 7. Normalize and filter every scenario
+            # --------------------------------------------------
             for scenario_name, scenario_data in (
                 response["scenarios"].items()
             ):
-
-                scenario_market_analysis = (
-                    scenario_data.get(
-                        "market_analysis"
-                    )
+                scenario_market_analysis = scenario_data.get(
+                    "market_analysis"
                 )
 
                 if scenario_market_analysis is None:
                     continue
 
-                scenario_data["market_analysis"] = (
+                scenario_market_analysis = (
                     normalize_overall_labels(
                         scenario_market_analysis
                     )
+                )
+
+                # Market Distribution:
+                # filter chart by selected market.
+                scenario_market_analysis = (
+                    filter_market_distribution_chart(
+                        market_analysis=(
+                            scenario_market_analysis
+                        ),
+                        selected_filter=filter_object,
+                    )
+                )
+
+                # Product Distribution:
+                # filter chart by selected product.
+                scenario_market_analysis = (
+                    filter_product_distribution_chart(
+                        market_analysis=(
+                            scenario_market_analysis
+                        ),
+                        selected_filter=filter_object,
+                    )
+                )
+
+                # Product-Channel:
+                # filter chart by selected product.
+                scenario_market_analysis = (
+                    filter_product_market_chart(
+                        market_analysis=(
+                            scenario_market_analysis
+                        ),
+                        selected_filter=filter_object,
+                    )
+                )
+
+                # Channel-Product:
+                # filter chart by selected market.
+                scenario_market_analysis = (
+                    filter_market_product_chart(
+                        market_analysis=(
+                            scenario_market_analysis
+                        ),
+                        selected_filter=filter_object,
+                    )
+                )
+
+                
+
+                scenario_data["market_analysis"] = (
+                    scenario_market_analysis
                 )
 
             response["active_scenario"] = (
                 active_scenario
             )
 
-            for scenario_name, scenario_data in response["scenarios"].items():
-
-                analysis = scenario_data["market_analysis"]
-
-                rows = (
-                    analysis["total_market_volume"]
-                    ["market_volume"]
-                    ["monthly"]
-                    ["table"]
-                    ["rows"]
+            # --------------------------------------------------
+            # 8. Debug monthly and yearly chart series
+            # --------------------------------------------------
+            for scenario_name, scenario_data in (
+                response["scenarios"].items()
+            ):
+                analysis = scenario_data.get(
+                    "market_analysis"
                 )
 
-                series = (
-                    analysis["total_market_volume"]
-                    ["market_volume"]
-                    ["monthly"]
-                    ["chart"]
-                    ["series"]
-                )
+                if not analysis:
+                    continue
 
-                print(
-                    f"{scenario_name} table label:",
-                    rows[0].get("label"),
-                )
+                debug_sections = [
+                    (
+                        "Market Distribution",
+                        "market_distribution",
+                    ),
+                    (
+                        "Product Distribution",
+                        "product_distribution",
+                    ),
+                    (
+                        "Channel-Product",
+                        "market_product",
+                    ),
+                    (
+                        "Product-Channel",
+                        "product_market",
+                    ),
+                ]
 
-                print(
-                    f"{scenario_name} chart label:",
-                    series[0].get("label"),
-                )
+                for display_name, section_name in (
+                    debug_sections
+                ):
+                    for metric_name in (
+                        "market_volume",
+                        "market_share",
+                    ):
+                        for period_name in (
+                            "monthly",
+                            "yearly",
+                        ):
+                            series = (
+                                analysis
+                                .get(section_name, {})
+                                .get(metric_name, {})
+                                .get(period_name, {})
+                                .get("chart", {})
+                                .get("series", [])
+                            )
+
+                            print(
+                                f"{scenario_name} "
+                                f"{display_name} "
+                                f"{metric_name} "
+                                f"{period_name}:",
+                                [
+                                    item.get("label")
+                                    for item in series
+                                ],
+                            )
 
             return response
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         import traceback
