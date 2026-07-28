@@ -83,17 +83,11 @@ def _upsert_row(
 
 
 def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
-    """
-    Persists the frontend's market_analysis payload:
-      - total_market_volume         -> ("ALL","ALL","ALL","market_volume")   [ONLY volume row saved]
-      - market_distribution shares  -> market-level shares (Retail, Non-retail, ...)
-      - market_distribution children -> source-level shares (e.g. Non-retail/Kaiser/ALL)
-      - market_product children     -> per-product shares for EVERY market, aggregated
-                                        across sources (source=None placeholder)
-    Everything else (other market_volume blocks) is intentionally not saved.
-    """
+
     if hasattr(factors, "model_dump"):
         factors = factors.model_dump()
+ 
+    # ---- total_market_volume ------------------------------------------------
     tmv = ma.get("total_market_volume", {}).get("market_volume", {}).get("monthly", {})
     if tmv:
         chart = tmv["chart"]
@@ -101,7 +95,8 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
         values = row["history"] + row["forecast"]
         data = _chart_row_to_forecast_data(chart["months"], chart["forecast_start_index"], values)
         _upsert_row(cur, ta, scenario, user_id, "ALL", "ALL", "ALL", "market_volume", data, factors_col=factors)
-
+ 
+    # ---- market_distribution: market-level + source-level shares ------------
     md_share = ma.get("market_distribution", {}).get("market_share", {}).get("monthly", {})
     if md_share:
         chart = md_share["chart"]
@@ -109,16 +104,12 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
         for series in chart["series"]:
             mkt = series["label"]
             if mkt == "Overall":
-                # "Overall" is the total row (always 100%), not a real market
-                # segment. Saving it here pollutes get_markets() and causes
-                # a phantom "Overall" market to appear in every downstream
-                # distribution build (market_distribution, product_distribution,
-                # market_product, product_market).
+                # not a real market segment -- see original comment
                 continue
             values = series["history"] + series["forecast"]
             data = _chart_row_to_forecast_data(months, fsi, values)
             _upsert_row(cur, ta, scenario, user_id, mkt, None, "ALL", "market_share", data)
-
+ 
         for row in md_share.get("table", {}).get("rows", []):
             mkt = row.get("label")
             if mkt in (None, "Overall") or "children" not in row:
@@ -127,7 +118,8 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 src = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
                 _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", data)
-
+ 
+    # ---- market_product: market -> product shares ----------------------------
     mp_share = ma.get("market_product", {}).get("market_share", {}).get("monthly", {})
     if mp_share:
         mp_chart = mp_share["chart"]
@@ -140,6 +132,40 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 prod = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
                 _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
+ 
+    # ---- product_market: product -> market shares  [NEW] --------------------
+    # Same (market, "ALL", product) tuple as market_product above -- these two
+    # tabs describe the same underlying numbers from two different pivots.
+    # Saving it here too means an edit made on "Product -> Market" specifically
+    # (rather than "Market -> Product") is no longer dropped.
+    pm_share = ma.get("product_market", {}).get("market_share", {}).get("monthly", {})
+    if pm_share:
+        pm_chart = pm_share["chart"]
+        fsi, months = pm_chart["forecast_start_index"], pm_chart["months"]
+        for row in pm_share.get("table", {}).get("rows", []):
+            prod = row.get("label")
+            if prod is None:
+                continue
+            for child in row.get("children", []):
+                mkt = child["label"]
+                data = _chart_row_to_forecast_data(months, fsi, child["values"])
+                _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
+ 
+    # ---- product_distribution: global blended product share  [NEW] ----------
+    # No per-market key exists for this one -- it's a blend across every
+    # market/source. Stored against a dedicated market="ALL" row, which is
+    # distinct from every other market_share row (always keyed to a real
+    # market name).
+    pd_share = ma.get("product_distribution", {}).get("market_share", {}).get("monthly", {})
+    if pd_share:
+        pd_chart = pd_share["chart"]
+        fsi, months = pd_chart["forecast_start_index"], pd_chart["months"]
+        for row in pd_share.get("table", {}).get("rows", []):
+            prod = row.get("label")
+            if prod in (None, "Overall"):
+                continue
+            data = _chart_row_to_forecast_data(months, fsi, row["values"])
+            _upsert_row(cur, ta, scenario, user_id, "ALL", "ALL", prod, "market_share", data)
 
 
 # =========================================================
@@ -1003,46 +1029,98 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
             )
         }
     }
-
+def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
+    """
+    Like normalize_shares_to_100, but any product with a directly-saved
+    override share (pinned_shares[label] is not None at index t) keeps
+    that exact value. The remaining ("free") products are normalized
+    proportionally by volume to fill whatever share is left over
+    (100 - sum of pinned shares at that index), so all siblings still
+    sum to 100 at every time index.
+ 
+    pinned_shares: dict label -> list[float] | None
+    """
+    num = len(labels)
+    normalized = [[0.0] * n for _ in range(num)]
+ 
+    for t in range(n):
+        pinned_total = 0.0
+        free_indices = []
+        for c in range(num):
+            pin = pinned_shares.get(labels[c])
+            if pin is not None and t < len(pin):
+                normalized[c][t] = pin[t]
+                pinned_total += pin[t]
+            else:
+                free_indices.append(c)
+ 
+        remaining = max(0.0, 100.0 - pinned_total)
+        free_total_vol = sum(
+            children_values_list[c][t] if t < len(children_values_list[c]) else 0
+            for c in free_indices
+        )
+        for c in free_indices:
+            val = children_values_list[c][t] if t < len(children_values_list[c]) else 0
+            if free_total_vol > 0:
+                normalized[c][t] = round((val / free_total_vol) * remaining, 2)
+            else:
+                normalized[c][t] = 0.0
+ 
+    return normalized
 
 def build_product_distribution(cur, ta, scenario, markets, total_vals, months, split_idx, start, end):
     """
-    Product distribution — volume and share split across products.
-
-    prod_vol_map accumulates RAW floats throughout.
-    Monthly display rounds at output; yearly sums raws then rounds once.
-    Yearly share = sum(prod_raw_in_year) / sum(total_raw_in_year) * 100.
-
-    Non-Retail markets are broken down by source, so each source's row
-    is fetched with fallback-to-BASE (see fetch_forecast_scenario_with_fallback)
-    since non-BASE scenarios don't always have every source x product row saved.
+    Product distribution -- volume and share split across products,
+    blended across every market/source.
+ 
+    For any product with a directly-saved override (i.e. the user edited
+    that product's row on the "Product Distribution" tab and it was saved
+    via the ("ALL","ALL",product,"market_share") key), that saved share
+    is pinned exactly and used as-is instead of being recomputed from the
+    market/source breakdown. Every other product is still derived live
+    from market_distribution + market_product, exactly as before, and the
+    remaining (100 - pinned%) is distributed across them proportionally.
     """
     products  = get_products(cur, ta)
     n         = len(total_vals)
     all_years = get_ordered_years(months)
-
-    # Accumulate raw floats
-    prod_vol_map = {p: [0.0] * n for p in products}
-
+ 
+    prod_vol_map      = {p: [0.0] * n for p in products}
+    override_share_map = {p: None for p in products}
+ 
+    # --- 1) Pull any saved overrides first ------------------------------------
+    for prod in products:
+        override_d = fetch_forecast_scenario_with_fallback(
+            cur, ta, "ALL", None, prod, "market_share", scenario)
+        if not override_d:
+            continue
+        s = build_series(override_d, start, end)
+        share = (s["values"] + [0.0] * n)[:n]
+        override_share_map[prod] = share
+        prod_vol_map[prod] = build_volume_from_share(total_vals, share)
+ 
+    # --- 2) Recompute every non-overridden product from market/source shares --
     for mkt in markets:
         mkt_d = fetch_forecast_scenario(cur, ta, mkt, None, "ALL", "market_share", scenario)
         if not mkt_d:
             continue
-
+ 
         mkt_series = build_series(mkt_d, start, end)
         mkt_vol    = build_volume_from_share(total_vals, mkt_series["values"])  # raw
-
+ 
         for prod in products:
-
+            if override_share_map[prod] is not None:
+                continue  # pinned -- don't overwrite with the computed blend
+ 
             if mkt == "Retail":
-                d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
+                d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
                     continue
                 s        = build_series(d, start, end)
                 prod_vol = build_volume_from_share(mkt_vol, s["values"])        # raw
                 for i in range(min(len(prod_vol), n)):
                     prod_vol_map[prod][i] += prod_vol[i]
-
+ 
             else:
                 sources = get_sources(cur, ta, mkt)
                 for src in sources:
@@ -1052,25 +1130,25 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
                         continue
                     src_series = build_series(src_d, start, end)
                     src_vol    = build_volume_from_share(mkt_vol, src_series["values"])
-
+ 
                     prod_d = fetch_forecast_scenario_with_fallback(
                         cur, ta, mkt, src, prod, "market_share", scenario)
                     if not prod_d:
                         continue
                     prod_series = build_series(prod_d, start, end)
                     prod_vol    = build_volume_from_share(src_vol, prod_series["values"])
-
+ 
                     for i in range(min(len(prod_vol), n)):
                         prod_vol_map[prod][i] += prod_vol[i]
-
+ 
     prod_labels = list(prod_vol_map.keys())
     raw_vols    = [prod_vol_map[p] for p in prod_labels]
-    norm_shares = normalize_shares_to_100(raw_vols, n)
-
-    # Monthly display rows (round here, display only)
+    norm_shares = normalize_shares_with_pins(raw_vols, prod_labels, override_share_map, n)
+ 
+    # ---------------------------------------------------------------- display
     overall_vol_row   = {"label": "Overall", "values": round_volume(total_vals)}
     overall_share_row = {"label": "Overall", "values": [100.0] * n}
-
+ 
     mv_chart = {
         "months": months, "forecast_start_index": split_idx,
         "series": [
@@ -1087,7 +1165,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             for p in prod_labels
         ]
     }
-
+ 
     ms_chart = {
         "months": months, "forecast_start_index": split_idx,
         "series": [
@@ -1104,14 +1182,13 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
             for i, p in enumerate(prod_labels)
         ]
     }
-
-    # Yearly descriptors — pass raw floats
+ 
     mv_series_data = [{"label": p, "monthly_values": prod_vol_map[p]} for p in prod_labels]
     mv_table_rows  = (
         [{"label": "Overall", "monthly_values": total_vals}] +
         [{"label": p, "monthly_values": prod_vol_map[p]} for p in prod_labels]
     )
-
+ 
     ms_series_data = [
         {"label": p, "child_vols": prod_vol_map[p], "parent_vols": total_vals}
         for p in prod_labels
@@ -1121,7 +1198,7 @@ def build_product_distribution(cur, ta, scenario, markets, total_vals, months, s
         [{"label": p, "child_vols": prod_vol_map[p], "parent_vols": total_vals}
          for p in prod_labels]
     )
-
+ 
     return {
         "market_volume": {
             "unit": "count",
@@ -1174,7 +1251,7 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
         for prod in products:
 
             if mkt == "Retail":
-                d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
+                d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
                     continue
                 s       = build_series(d, start, end)
@@ -1345,7 +1422,7 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         for mkt in markets:
 
             if mkt == "Retail":
-                d = fetch_forecast_scenario(cur, ta, mkt, None, prod, "market_share", scenario)
+                d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
                 if not d:
                     continue
                 s = build_series(d, start, end)

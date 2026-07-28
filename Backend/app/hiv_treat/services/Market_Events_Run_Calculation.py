@@ -747,18 +747,7 @@ def _rebalance_market_products(
             #
             # Refresh ALL row after redistribution.
             #
-            if (
-                all_row is not None
-                and i < len(all_row["forecast"])
-            ):
-                total = selected_rows[market]["forecast"][i]
-
-                for row in rows:
-                    total += row["forecast"][i]
-
-                all_row["forecast"][i] = round(total, 4)
-
-                share_cache[(market, "ALL")] = all_row
+           
 
     #
     # Push updated sibling rows back into cache.
@@ -769,40 +758,7 @@ def _rebalance_market_products(
 
 
 def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[str]]) -> CacheType:
-    """For each event: compute its curve, fetch every touched entity once
-    (cached so repeats stack instead of overwriting), add curve onto the
-    forecast.
 
-    The cache is keyed by (market, product) -- see _cell_key -- so a
-    same-named product/market touched under two different contexts can
-    never collide.
-
-    Reconciliation is deferred until every event's curve has been applied
-    (two-phase: apply, then reconcile), instead of running after each
-    individual event. Reconciling immediately after each event means a
-    later event's rebalance pass fights the earlier one over the same
-    cells, redistributing against a half-updated grid instead of the
-    combined effect of all events. Reconciliation work for the same
-    market (product_event) or same product (market_event) is also merged
-    across events so the balance pass runs once per cell, not once per
-    event:
-      - product_event: touched products must still sum to 100% within the
-        market -- see _reconcile_product_event_market. The selected
-        (pinned) product in each event is tracked separately from the
-        touched set, so reconciliation never redistributes residual onto
-        a row that was just SET to an exact target.
-      - market_event: only the selected product should move between
-        markets; every other product's total across the affected markets
-        must be preserved, not just each market's row total -- see
-        _rebalance_market_products.
-      - overall_event: single "Overall" row, nothing to reconcile.
-
-    `entities` (the full product/market universe) is fetched once by the
-    caller and passed in, and a grid_fetch_cache is shared across every
-    reconciliation call this run -- both avoid re-hitting the DB for data
-    that's already been read once this call.
-
-    Returns {metric: {(market, product): series}}."""
     cache: CacheType = {metric: {} for metric in METRICS}
     all_products = entities["products"]
     grid_fetch_cache: GridFetchCache = {}
@@ -814,6 +770,35 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
 
     for event in events:
         contexts = event.contexts if event.event_scope != EventScope.OVERALL_EVENT else [None]
+        if event.event_scope == EventScope.MARKET_EVENT:
+            all_label_names = [event.selected_entity] + [
+                e.name for e in (event.impacted_entities or [])
+            ]
+            all_keys = {label: (label, "ALL") for label in all_label_names}
+
+            if any(k not in cache["market_share"] for k in all_keys.values()):
+                for row in fetch_baseline(event, "market_share"):
+                    cache["market_share"].setdefault((row["market"], row["product"]), row)
+
+            baseline_pct_all = 0.0
+            selected_row_all = cache["market_share"].get(all_keys[event.selected_entity])
+            if selected_row_all is not None:
+                start_month = event.start_date.strftime("%Y-%m-%d")
+                idx = {m: i for i, m in enumerate(selected_row_all["months"])}.get(start_month)
+                if idx is not None:
+                    combined = selected_row_all["history"] + selected_row_all["forecast"]
+                    if idx < len(combined):
+                        baseline_pct_all = combined[idx]
+
+            result_all = compute_event_forecast(event, baseline_pct=baseline_pct_all)
+            bounds = CLAMP_BOUNDS["market_share"]
+            for label, curve in _entity_curves(result_all).items():
+                key = all_keys.get(label)
+                if key is None or key not in cache["market_share"]:
+                    continue
+                mode = "set" if label == event.selected_entity else "add"
+                cache["market_share"][key], _ = _apply_curve_to_series(
+                    cache["market_share"][key], result_all.months, curve, bounds, mode=mode)
 
         for context in contexts:
             event_touched_forecast = False
@@ -1882,16 +1867,7 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
                             date_range: Tuple[Optional[str], Optional[str]] = (None, None),
                             selected_filter: Optional[dict] = None
                             ) -> Tuple[Dict, Optional[str]]:
-    """Shared by build_metrics_views (active tab, overlays cache onto grid)
-    and build_latest_metrics_views (other tabs, plain fresh DB read).
-    `entities` is the full product/market universe, not selected_filter --
-    filter only clips the display range, applied last.
 
-    `selected_filter` drives which (market, product) cells the hierarchy
-    CHART shows this run -- see _selected_filter_cells. This is computed
-    identically regardless of which tab is being actively edited, so the
-    chart's scope stays stable across runs instead of depending on which
-    events happen to be configured."""
     parent_field, child_field = TAB_HIERARCHY[tab]
     markets = entities.get("markets", [])
     products = entities.get("products", [])
@@ -1936,6 +1912,11 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
         label_field="market", market=markets, products=["ALL"],
         source_of_market="ALL",
     )
+    if cache is not None:
+        market_share_all = [
+            cache["market_share"].get((row["market"], row["product"]), row)
+            for row in market_share_all
+        ]
 
     print("\n========== Market Share ALL ==========")
     for row in market_share_all:
@@ -2324,7 +2305,12 @@ def persist_events_to_db(
     for metric, by_cell in cache.items():
         for series in by_cell.values():
             if not series.get("synthesized"):
-                updates.append((metric, series["market"], series["product"], "ALL", series["forecast"]))
+                # CHANGED: was hardcoded "ALL", now uses the row's real source_of_market
+                updates.append((
+                    metric, series["market"], series["product"],
+                    series.get("source_of_market") or "ALL",
+                    series["forecast"],
+                ))
             else:
                 updates.extend(_distribute_synthesized_write(metric, series))
     if not updates:
