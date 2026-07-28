@@ -2,6 +2,20 @@ from app.hiv_treat.services.response_builder_market_events import *
 
 from copy import deepcopy
 
+def round_table_values(table, decimals=0):
+    def round_rows(rows):
+        for row in rows:
+            if "values" in row:
+                row["values"] = [
+                    round(v, decimals) if isinstance(v, (int, float)) else v
+                    for v in row["values"]
+                ]
+
+            if "children" in row:
+                round_rows(row["children"])
+
+    round_rows(table["rows"])
+    return table
 
 def exclude_overall_from_chart(table):
     """
@@ -609,6 +623,16 @@ def build_product_event(
         hierarchy=True,
     )
 
+    product_level_volume_monthly = round_table_values(
+        product_level_volume_monthly,
+        decimals=0,
+    )
+
+    market_product_volume_monthly = round_table_values(
+        market_product_volume_monthly,
+        decimals=0,
+    )
+
     # =====================================================
     # Internal monthly chart tables
     # =====================================================
@@ -656,6 +680,16 @@ def build_product_event(
     market_product_volume_yearly = build_yearly_table(
         market_product_volume_monthly,
         aggregation="sum",
+    )
+
+    product_level_volume_yearly = round_table_values(
+        product_level_volume_yearly,
+        decimals=0,
+    )
+
+    market_product_volume_yearly = round_table_values(
+        market_product_volume_yearly,
+        decimals=0,
     )
 
     # =====================================================
@@ -1168,6 +1202,13 @@ def build_market_event(
     # =====================================================
     # Response
     # =====================================================
+
+    # Round Market Volume tables
+    market_level_volume_monthly = round_table_values(market_level_volume_monthly)
+    product_market_volume_monthly = round_table_values(product_market_volume_monthly)
+
+    product_level_volume_yearly = round_table_values(product_level_volume_yearly)
+    product_market_volume_yearly = round_table_values(product_market_volume_yearly)
 
     return {
         "impact_curve_configuration":

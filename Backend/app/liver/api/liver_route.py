@@ -61,14 +61,14 @@ def liver_save_configuration(payload: SaveLiverConfigRequest):
 # ---------------------------------------------------------------------------
 
 @router.get("/filters", response_model=LiverFiltersResponse)
-def liver_filters(ta: str = "HCV", payer: str = "Medicaid", brand: str = "GILD"):
+def liver_filters(ta: str = "HCV"):
     """
-    Called on page load and whenever payer/brand selection changes.
-    Returns from_date and to_date from the saved config for the given (ta, payer, brand).
-    Falls back to 5-year default if no config saved for that combination.
+    Called on page load. Returns available_months, payers, products, and the
+    last saved selected_filter for this TA. Payer/brand params removed —
+    all computation uses config dates, not filter params.
     """
     try:
-        return get_liver_filters(ta, payer, brand)
+        return get_liver_filters(ta)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

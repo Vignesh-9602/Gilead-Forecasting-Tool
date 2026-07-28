@@ -632,22 +632,83 @@ def get_model_input_filters(ta_name: str ):
         raise HTTPException(500, str(e))
     
 
+def _build_lookup_map(cur, ta):
+    cur.execute("""
+        SELECT market, source_of_market, product, metric, scenario_name, forecast_data
+        FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+    """, (ta,))
+    lookup = {}
+    for market, source, product, metric, scenario_name, forecast_data in cur.fetchall():
+        norm_src = _norm_source(source)
+        key = (market, product, metric, scenario_name)
+        lookup.setdefault(key, []).append((norm_src, forecast_data))
+    return lookup
+ 
+ 
+def _scenario_matches(row_scenario_name, requested_scenario):
+    if requested_scenario.upper() == "BASE":
+        return row_scenario_name is None or row_scenario_name.upper() == "BASE"
+    return row_scenario_name == requested_scenario
+ 
+ 
+def _resolve_from_lookup(lookup, market, source, product, metric, scenario):
+    """
+    source is not None -> exact match on normalized source, or None if absent.
+    source is None      -> prefer the true market-level row (norm source is
+                            None, i.e. 'ALL'); only if no such row exists
+                            fall back to any other row for that key (e.g.
+                            Retail's 'Unknown' placeholder), chosen
+                            deterministically rather than by incidental
+                            dict/row order.
+    """
+    norm_wanted = _norm_source(source)
+    candidates = []
+    for (m, p, met, sc_name), entries in lookup.items():
+        if m != market or p != product or met != metric:
+            continue
+        if not _scenario_matches(sc_name, scenario):
+            continue
+        candidates.extend(entries)
+ 
+    if not candidates:
+        return None
+ 
+    if norm_wanted is not None:
+        for src, data in candidates:
+            if src == norm_wanted:
+                return data
+        return None
+ 
+    all_rows = [d for s, d in candidates if s is None]
+    if all_rows:
+        return all_rows[0]
+ 
+    fallback = sorted(candidates, key=lambda sd: (sd[0] is None, sd[0] or ""))
+    return fallback[0][1]
+ 
+ 
+# =========================================================
+# ================= ENDPOINT ================================
+# =========================================================
+ 
 @router.post("/applyfilter")
 def apply_filter(payload: ApplyScenarioRequest):
-
+ 
     ta = payload.ta_name
-
+ 
     try:
         with get_connection() as conn, conn.cursor() as cur:
-
+ 
             cur.execute("""
                 SELECT config
                 FROM raw_hiv_treat.forecast_configurations
                 WHERE config->>'ta_name' = %s
             """, (ta,))
-
+ 
             row = cur.fetchone()
             config = row[0] if row else {}
+ 
             save_user_configuration(
                 cur=cur,
                 user_id="system",
@@ -657,10 +718,28 @@ def apply_filter(payload: ApplyScenarioRequest):
                 start_date=payload.selected_filter.start_date,
                 end_date=payload.selected_filter.end_date
             )
-
             conn.commit()
-            return build_apply_scenario_response(cur, payload, config)
-
+ 
+            # Bulk-fetch once, then serve every fetch_forecast_scenario()
+            # call MIS makes internally from this in-memory, deterministic
+            # lookup -- same monkeypatch pattern /recalculate already uses.
+            lookup = _build_lookup_map(cur, ta)
+            orig_fetch = MIS.fetch_forecast_scenario
+ 
+            def fetch_deterministic(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in):
+                data = _resolve_from_lookup(lookup, market_in, source_in, product_in, metric_in, scenario_in)
+                if data is not None:
+                    return data
+                # Fall back to the real query for anything not covered
+                # (e.g. edge cases outside this TA's bulk fetch).
+                return orig_fetch(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in)
+ 
+            MIS.fetch_forecast_scenario = fetch_deterministic
+            try:
+                return build_apply_scenario_response(cur, payload, config)
+            finally:
+                MIS.fetch_forecast_scenario = orig_fetch
+ 
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -794,25 +873,25 @@ def _renormalize_siblings(target_new_fv, base_map, sibling_keys):
     """Rescales siblings so the group always sums to 100% at every
     forecast time index."""
     n = len(target_new_fv)
-    target_clipped = [max(0.0, min(100.0, v)) for v in target_new_fv]
- 
+    target_clipped = [round(max(0.0, min(100.0, v)), 2) for v in target_new_fv]
+
     base_sibling_fv = {}
     for sk in sibling_keys:
         _, _, fv = _series_from_data(base_map[sk])
         fv = fv + [fv[-1] if fv else 0.0] * (n - len(fv))
         base_sibling_fv[sk] = fv[:n]
- 
+
     new_sibling_fv = {sk: [0.0] * n for sk in sibling_keys}
- 
+
     for i in range(n):
         remaining = 100.0 - target_clipped[i]
         base_sum = sum(base_sibling_fv[sk][i] for sk in sibling_keys)
         for sk in sibling_keys:
             if base_sum > 0:
-                new_sibling_fv[sk][i] = remaining * (base_sibling_fv[sk][i] / base_sum)
+                new_sibling_fv[sk][i] = round(remaining * (base_sibling_fv[sk][i] / base_sum), 2)
             else:
-                new_sibling_fv[sk][i] = remaining / len(sibling_keys) if sibling_keys else 0.0
- 
+                new_sibling_fv[sk][i] = round(remaining / len(sibling_keys) if sibling_keys else 0.0, 2)
+
     return target_clipped, new_sibling_fv
  
  
@@ -883,10 +962,9 @@ def _compute_target_new_share(
     else:  # "market_share"
         try:
             if model_type == "moving_average":
-
                 new_fc = process_moving_average_forecast(
                     series_months=months,
-                    series_values=target_vol_full,
+                    series_values=base_share_full,      # fixed
                     train_start_date=train_start,
                     train_end_date=train_end,
                     forecast_periods=fp,
@@ -895,11 +973,9 @@ def _compute_target_new_share(
                     multiplier=multiplier,
                     multiplier_horizon=multiplier_horizon
                 )
-
             else:
-
                 new_fc = process_forecast(
-                    months, target_vol_full, train_start, train_end, fp,
+                    months, base_share_full, train_start, train_end, fp,   # fixed
                     model_type=model_type,
                     metric="market_volume",
                     alpha=alpha,
@@ -915,8 +991,8 @@ def _compute_target_new_share(
         except Exception as e:
             print(f"Forecast failed (share-mode) target={target_key} error={e}")
             return base_share_full[-len(fv):] if fv else []
- 
-        return new_fc.get("forecast_values") or []
+
+        return [round(v, 2) for v in (new_fc.get("forecast_values") or [])]
  
  
 # =========================================================
@@ -957,7 +1033,17 @@ def _augment_with_source_aliases(overrides, base_map):
 # =========================================================
 # ================= ENDPOINT ==================================
 # =========================================================
- 
+def _norm_source(s):
+    """Canonical sentinel for 'no source level' is None.
+    Some scenarios store this as NULL, others as the literal string 'ALL'
+    (or ''). Collapse all of them to None here, once, so every downstream
+    lookup (base_map, overrides, sibling resolution, alias logic) only
+    ever has to deal with one convention."""
+    if s is None:
+        return None
+    if str(s).strip().upper() in ("", "ALL"):
+        return None
+    return s
 @router.post("/recalculate")
 def recalculate(payload: RecalculateRequest):
     """
@@ -1009,8 +1095,8 @@ def recalculate(payload: RecalculateRequest):
  
             base_map = {}
             for market, source, product, metric_col, forecast_data in rows:
-                base_map[(market, source, product, metric_col)] = forecast_data
- 
+                base_map[(market, _norm_source(source), product, metric_col)] = forecast_data
+
             overrides = dict(base_map)
  
             model_type = (payload.model_type or "ets").lower()
@@ -1177,7 +1263,7 @@ def recalculate(payload: RecalculateRequest):
             orig_fetch = MIS.fetch_forecast_scenario
  
             def fetch_with_override(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in):
-                k = (market_in, source_in, product_in, metric_in)
+                k = (market_in, _norm_source(source_in), product_in, metric_in)
                 if k in overrides:
                     return overrides[k]
                 return orig_fetch(cur_in, ta_in, market_in, source_in, product_in, metric_in, scenario_in)

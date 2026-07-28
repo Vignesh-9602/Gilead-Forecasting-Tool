@@ -20,6 +20,7 @@ from app.liver_market_events.repository.market_events_repo import (
     save_market_events_scenario,
     load_market_analysis,
     save_market_analysis,
+    load_impact_rows,
 )
 from app.liver_market_events.helpers.date_helpers import (
     parse_year_month,
@@ -247,13 +248,17 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
             cur, sf.scenario_name, ta, sf.model_dump(), forecast_start_date
         )
 
+        # Each tab keeps its own independently-configured event rows,
+        # persisted per (ta_name, tab) -- see save_impact_rows in
+        # run_market_events_calculation (run_calculation_service.py), which is
+        # the only place rows are written.
         payer_event_config = {
             "products":            products,
             "payers":              payers,
             "impact_payers":       payers,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "payer_event"),
         }
         product_event_config = {
             "products":            products,
@@ -261,7 +266,7 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
             "impact_products":     products,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "product_event"),
         }
         overall_event_config = {
             "products":            products,
@@ -269,7 +274,7 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
             "impact_payers":       ["Overall"],
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "overall_event"),
         }
 
         event_tabs = _merge_config_with_saved_data(
@@ -1773,13 +1778,15 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
             payload.edited_label,
         )
 
+        # See apply_market_events_filters above: each tab's rows are persisted
+        # independently per (ta_name, tab).
         payer_event_config = {
             "products":            products,
             "payers":              payers,
             "impact_payers":       payers,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "payer_event"),
         }
         product_event_config = {
             "products":            products,
@@ -1787,7 +1794,7 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
             "impact_products":     products,
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "product_event"),
         }
         overall_event_config = {
             "products":            products,
@@ -1795,7 +1802,7 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
             "impact_payers":       ["Overall"],
             "forecast_start_date": forecast_start_date,
             "curve_types":         CURVE_TYPES,
-            "rows":                [],
+            "rows":                load_impact_rows(cur, ta, sf.scenario_name, "overall_event"),
         }
 
         event_tabs = _merge_config_with_saved_data(
@@ -2317,6 +2324,63 @@ def _load_saved_event_tabs(cur, scenario_name: str, ta: str,
 # Save scenario
 # ---------------------------------------------------------------------------
 
+def _persist_market_events_result(cur, conn, scenario_name: str, event_tabs: dict) -> dict:
+    """
+    Shared by save_market_events (manual Save Scenario) and
+    run_market_events_calculation (auto-save after Run Calculation, see
+    run_calculation_service.py) -- persist event_tabs' computed volumes into
+    an EXISTING scenario's market_events snapshot, then best-effort sync
+    those same volumes into the scenario's market_analysis (Model Input's own
+    data) so both screens reflect the same event-adjusted numbers.
+
+    Raises ValueError if volume extraction fails, or if the scenario doesn't
+    exist (scenarios can only be created in the model input module).
+
+    Returns the extracted volume_snapshot.
+    """
+    volume_snapshot = _extract_volume_snapshot(event_tabs)
+
+    if not volume_snapshot.get("months"):
+        oe    = event_tabs.get("overall_event", {})
+        mv    = oe.get("metrics_views", {})
+        pv    = mv.get("payer_volume", {})
+        mo    = pv.get("monthly", {})
+        ol    = mo.get("overall_level", {})
+        tbl   = ol.get("table", {})
+        raise ValueError(
+            f"event_tabs volume extraction failed. "
+            f"overall_event keys={list(oe.keys())} | "
+            f"metrics_views keys={list(mv.keys())} | "
+            f"payer_volume keys={list(pv.keys())} | "
+            f"monthly keys={list(mo.keys())} | "
+            f"overall_level keys={list(ol.keys())} | "
+            f"table keys={list(tbl.keys())}"
+        )
+
+    rows_updated = save_market_events_scenario(cur, scenario_name, volume_snapshot)
+    if rows_updated == 0:
+        raise ValueError(
+            f"Scenario '{scenario_name}' does not exist. "
+            "Scenarios can only be created in the model input module."
+        )
+    # Commit snapshot immediately — market_analysis sync must never roll this back.
+    conn.commit()
+
+    # Best-effort: sync volumes into market_analysis in a separate transaction.
+    try:
+        existing_ma = load_market_analysis(cur, scenario_name)
+        if existing_ma:
+            updated_ma = _update_market_analysis_volumes(existing_ma, volume_snapshot)
+            _recompute_ma_shares_inplace(updated_ma)
+            save_market_analysis(cur, scenario_name, updated_ma)
+            conn.commit()
+    except Exception as _sync_err:
+        conn.rollback()
+        print(f"[market_events] market_analysis sync skipped: {_sync_err}")
+
+    return volume_snapshot
+
+
 def save_market_events(payload: SaveMarketEventsRequest) -> dict:
     """
     POST /save-scenario — persist the current event_tabs into an existing scenario row.
@@ -2330,45 +2394,7 @@ def save_market_events(payload: SaveMarketEventsRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        volume_snapshot = _extract_volume_snapshot(payload.event_tabs)
-
-        if not volume_snapshot.get("months"):
-            oe    = payload.event_tabs.get("overall_event", {})
-            mv    = oe.get("metrics_views", {})
-            pv    = mv.get("payer_volume", {})
-            mo    = pv.get("monthly", {})
-            ol    = mo.get("overall_level", {})
-            tbl   = ol.get("table", {})
-            raise ValueError(
-                f"event_tabs volume extraction failed. "
-                f"overall_event keys={list(oe.keys())} | "
-                f"metrics_views keys={list(mv.keys())} | "
-                f"payer_volume keys={list(pv.keys())} | "
-                f"monthly keys={list(mo.keys())} | "
-                f"overall_level keys={list(ol.keys())} | "
-                f"table keys={list(tbl.keys())}"
-            )
-
-        rows_updated = save_market_events_scenario(cur, name, volume_snapshot)
-        if rows_updated == 0:
-            raise ValueError(
-                f"Scenario '{name}' does not exist. "
-                "Scenarios can only be created in the model input module."
-            )
-        # Commit snapshot immediately — market_analysis sync must never roll this back.
-        conn.commit()
-
-        # Best-effort: sync volumes into market_analysis in a separate transaction.
-        try:
-            existing_ma = load_market_analysis(cur, name)
-            if existing_ma:
-                updated_ma = _update_market_analysis_volumes(existing_ma, volume_snapshot)
-                _recompute_ma_shares_inplace(updated_ma)
-                save_market_analysis(cur, name, updated_ma)
-                conn.commit()
-        except Exception as _sync_err:
-            conn.rollback()
-            print(f"[market_events] market_analysis sync skipped: {_sync_err}")
+        _persist_market_events_result(cur, conn, name, payload.event_tabs)
 
         all_scenarios = get_scenarios(cur)
         if "Base" not in all_scenarios:

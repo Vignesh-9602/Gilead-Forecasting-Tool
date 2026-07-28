@@ -47,6 +47,7 @@ class LiverSelectedFilter(BaseModel):
     product: Optional[str] = None
     start_date: str
     end_date: str
+    scenario: Optional[str] = None
 
 
 class LiverFiltersResponse(BaseModel):
