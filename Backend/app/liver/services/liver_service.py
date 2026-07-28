@@ -54,6 +54,8 @@ from app.liver.repository.liver_repo import (
     get_product_wise_payer_yearly,
     save_scenario,
     scenario_exists,
+    save_filter_state,
+    load_filter_state,
 )
 
 
@@ -1760,17 +1762,25 @@ def get_liver_filters(ta: str = "HCV") -> dict:
                                        avail_end_year,   avail_end_month)
         date_labels = [_month_label(y, m) for y, m in all_months]
 
+        # Load last saved filter state for this TA; fall back to defaults
+        try:
+            saved_filter = load_filter_state(cur, ta)
+        except Exception as _lfe:
+            print(f"[get_liver_filters] load_filter_state skipped: {_lfe}")
+            saved_filter = None
+        selected_filter = saved_filter if saved_filter else {
+            "payer":      payers[0] if payers else None,
+            "product":    products[0] if products else None,
+            "start_date": from_date,
+            "end_date":   to_date,
+        }
+
         return {
             "ta_name":          ta,
             "payers":           payers,
             "products":         products,
             "available_months": date_labels,
-            "selected_filter": {
-                "payer":      payers[0] if payers else None,
-                "product":    products[0] if products else None,
-                "start_date": from_date,
-                "end_date":   to_date,
-            },
+            "selected_filter":  selected_filter,
         }
     finally:
         cur.close()
@@ -2032,14 +2042,23 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         _avail_all = _generate_months(_av_sy, _av_sm, _av_ey, _av_em)
         available_months = [_month_label(y, m) for y, m in _avail_all]
 
+        filter_to_save = {
+            "payer":      _first(payload.payer),
+            "product":    _first(payload.brand),
+            "start_date": payload.from_date,
+            "end_date":   end_date,
+            "scenario":   active_scenario,
+        }
+        try:
+            save_filter_state(cur, payload.ta, filter_to_save)
+            conn.commit()
+        except Exception as _fe:
+            conn.rollback()
+            print(f"[apply_liver_filters] filter state save skipped: {_fe}")
+
         return {
             "ta_name":            payload.ta,
-            "selected_filter": {
-                "payer":      _first(payload.payer),
-                "product":    _first(payload.brand),
-                "start_date": payload.from_date,
-                "end_date":   end_date,
-            },
+            "selected_filter":    filter_to_save,
             "available_months":   available_months,
             "available_scenarios": available_scenarios,
             "active_scenario":     active_scenario,

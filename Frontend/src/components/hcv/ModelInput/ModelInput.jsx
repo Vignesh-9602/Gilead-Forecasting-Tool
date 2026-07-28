@@ -1699,8 +1699,8 @@ export default function PBCModelInput() {
         if (availMonths.length) setAvailableDates(availMonths);
 
         const sfInitial = filtersData?.selected_filter || {};
-        // Priority for defaults: explicit saved global config first, then
-        // whatever the filters endpoint resolved as its own default.
+        // Saved filter (sfInitial) takes priority: it reflects the user's last
+        // explicit apply. Fall back to config dates only when there is no saved state.
         if (!localPayer)
           localPayer =
             sfInitial.payer ||
@@ -1709,10 +1709,19 @@ export default function PBCModelInput() {
           localProduct =
             sfInitial.product ||
             (norm.products?.length ? getFirstOption(norm.products) : "");
-        if (!cfg?.train_start_date && sfInitial.start_date)
-          localFrom = sfInitial.start_date;
-        if (!cfg?.forecast_periods && !cfg?.train_end_date && sfInitial.end_date)
-          localTo = sfInitial.end_date;
+        // Saved filter overrides config: the user's last explicit apply is the source of truth.
+        // fromDate must match an availableDates entry exactly (Mon-YY format) for safeFrom to work.
+        if (sfInitial.start_date) {
+          const sfStartParsed = parseDateString(sfInitial.start_date);
+          const matchedFrom = sfStartParsed.isValid()
+            ? availMonths.find((d) => {
+                const pd = parseDateString(d);
+                return pd.isValid() && pd.year() === sfStartParsed.year() && pd.month() === sfStartParsed.month();
+              })
+            : null;
+          localFrom = matchedFrom || sfInitial.start_date;
+        }
+        if (sfInitial.end_date) localTo = sfInitial.end_date;
 
         setFromDate(localFrom);
         setToDate(localTo);
@@ -1743,8 +1752,9 @@ export default function PBCModelInput() {
             brand: localProduct ? [localProduct] : [],
             product: localProduct || "",
             metric: metric || defaultMetricOptions[0].value,
-            from_date: cfg?.train_start_date || localFrom || "",
-            scenario_name: "Base",
+            from_date: toYearMonth(localFrom || cfg?.train_start_date || ""),
+            to_date: sfInitial.end_date || undefined,
+            scenario: sfInitial.scenario || "Base",
           };
           const applyResp = await applyLiverFilters(applyPayload);
           const data = applyResp?.data || {};
@@ -1770,9 +1780,19 @@ export default function PBCModelInput() {
             data?.active_scenario || availScenarios[0] || "Base";
           setScenarioSelector(activeScenarioKey);
 
-          // Dates resolved by the backend for this payer/product/scenario
+          // Dates resolved by the backend — normalise start_date to Mon-YY format
+          // so it matches an availableDates entry and safeFrom resolves correctly.
           const sf = data?.selected_filter || {};
-          if (sf.start_date) setFromDate(sf.start_date);
+          if (sf.start_date) {
+            const sfP = parseDateString(sf.start_date);
+            const matchedSfFrom = sfP.isValid()
+              ? availMonths.find((d) => {
+                  const pd = parseDateString(d);
+                  return pd.isValid() && pd.year() === sfP.year() && pd.month() === sfP.month();
+                })
+              : null;
+            setFromDate(matchedSfFrom || sf.start_date);
+          }
           if (sf.end_date) setToDate(sf.end_date);
 
           const applyScenarioObj =

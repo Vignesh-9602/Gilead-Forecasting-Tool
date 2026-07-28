@@ -28,6 +28,41 @@ def get_liver_config_by_payer_brand(cur, ta_name: str, payer: str, brand: str):
     return cur.fetchone()
 
 
+# ---------------------------------------------------------------------------
+# Filter state — unified table shared by all screens
+#
+# CREATE TABLE raw_liver.filter_state (
+#     ta_name         TEXT      NOT NULL,
+#     screen          TEXT      NOT NULL,
+#     selected_filter JSONB     NOT NULL,
+#     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#     PRIMARY KEY (ta_name, screen)
+# );
+# ---------------------------------------------------------------------------
+
+def save_filter_state(cur, ta_name: str, selected_filter: dict) -> None:
+    """Upsert the last applied filter for the model-input screen."""
+    cur.execute("""
+        INSERT INTO raw_liver.filter_state (ta_name, screen, selected_filter)
+        VALUES (%s, 'model_input', %s::jsonb)
+        ON CONFLICT (ta_name, screen)
+        DO UPDATE SET
+            selected_filter = EXCLUDED.selected_filter,
+            updated_at      = CURRENT_TIMESTAMP
+    """, (ta_name, json.dumps(selected_filter)))
+
+
+def load_filter_state(cur, ta_name: str) -> dict | None:
+    """Return the last saved filter for the model-input screen, or None."""
+    cur.execute("""
+        SELECT selected_filter
+        FROM raw_liver.filter_state
+        WHERE ta_name = %s AND screen = 'model_input'
+    """, (ta_name,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def upsert_liver_config(cur, ta_name: str, payer: str, brand: str, config: dict):
     """Upsert one (ta_name, payer, brand) row with the given config."""
     cur.execute("""
