@@ -1,10 +1,10 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse, UploadCurveResponse
 from app.services.Persistency_service import apply_persistency_curve_service, apply_persistency_service, calculate_apply_persistency_service, delete_persistency_curve_service, get_persistency_curve_config_service, get_persistency_curve_names_service, get_persistency_filters_service, save_avg_vials_per_dose_service
 from app.services.Vial_Calculator_functions import apply_compliance_configuration_service, apply_edit_row_values_service, get_compliance_configuration_service, save_demand_adjustments_service, update_inventory_stock_service
-
+from app.services.Upload_Curve import UploadFile,process_curve_upload
 
 
 router = APIRouter(prefix="/api/persistency", tags=["Vial_Calculator"])
@@ -195,3 +195,14 @@ def update_inventory_stock_api(
             status_code=500,
             detail=f"Error while updating inventory stock percentage: {str(e)}"
         )
+    
+@router.post("/upload-curve", response_model=UploadCurveResponse)
+async def upload_curve(
+    file: UploadFile = File(..., description="Persistency curve Excel (.xlsx) file"),
+    ta_name: str = Form(..., description="Therapeutic Area name"),
+):
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx files are supported.")
+ 
+    result = await process_curve_upload(file, ta_name)
+    return result

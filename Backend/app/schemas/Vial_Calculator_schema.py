@@ -375,3 +375,38 @@ class InventoryStockUpdateResponse(BaseModel):
     brand: str
     months: List[str]
     inventory_table: InventoryTable
+"""
+Pydantic schemas for the Persistency Curve Upload API.
+"""
+
+from typing import List
+from pydantic import BaseModel, Field
+
+
+class CurveListItemUpdate(BaseModel):
+    curve_name: str
+
+
+class CurvePreviewUpdate(BaseModel):
+    curve_name: str
+    months: List[str]
+    values: List[float]
+
+
+class UploadCurveResponse(BaseModel):
+    message: str
+    curve_list: List[CurveListItemUpdate]
+    curve_preview: CurvePreviewUpdate
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+
+class CurveValuesJSON(BaseModel):
+    """
+    Shape of the JSONB column `curve_values` stored in
+    raw.persistency_curve_master.
+    """
+    months: List[str] = Field(..., description="Ordered month labels, e.g. M1, M2 ...")
+    values: List[float] = Field(..., description="Persistency values aligned with `months`")
