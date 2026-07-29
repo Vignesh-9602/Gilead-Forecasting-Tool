@@ -1290,6 +1290,7 @@ def get_persistency_curve_config_service(curve_name: str):
                 # "k_factor": None,    # not currently stored - see note below
             },
             "curve_preview": {
+                "curve_name": curve_name,
                 "months": months,
                 "values": values,
             }
