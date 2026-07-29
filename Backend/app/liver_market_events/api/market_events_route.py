@@ -5,12 +5,18 @@ from app.liver_market_events.schemas.market_events_schema import (
     RefreshRequest,
     RunCalculationRequest,
     SaveMarketEventsRequest,
+    CreateProductRequest,
+    UpdateProductRequest,
 )
 from app.liver_market_events.services.market_events_service import (
     get_market_events_filters,
     apply_market_events_filters,
     refresh_market_events,
     save_market_events,
+    get_manage_products,
+    create_market_events_product,
+    update_market_events_product,
+    delete_market_events_product,
 )
 from app.liver_market_events.services.run_calculation_service import (
     run_market_events_calculation,
@@ -101,6 +107,61 @@ def market_events_save_scenario(payload: SaveMarketEventsRequest):
     """
     try:
         return save_market_events(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/products")
+def manage_products():
+    """
+    Called when the Manage Products modal opens.
+
+    Returns every product (active and inactive) with its audit columns
+    (Date Added / Added By / Modified By) for the management table.
+    """
+    try:
+        return get_manage_products()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/products")
+def create_product_route(payload: CreateProductRequest):
+    """
+    Called when the user clicks Save on the Add Product form.
+
+    Creates a new row in product_master, immediately visible in every
+    product dropdown across Market Events, Model Input, and Output (they
+    all read the same table).
+    """
+    try:
+        return create_market_events_product(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/products/{product_name}")
+def update_product_route(product_name: str, payload: UpdateProductRequest):
+    """Called when the user edits a product's name via the pencil icon."""
+    try:
+        return update_market_events_product(product_name, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/products/{product_name}")
+def delete_product_route(product_name: str):
+    """Called when the user clicks the trash icon. Hard-deletes the row."""
+    try:
+        return delete_market_events_product(product_name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

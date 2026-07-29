@@ -116,3 +116,36 @@ class SaveMarketEventsRequest(BaseModel):
     scenario_name: str
     selected_filter: SelectedFilter
     event_tabs: dict
+
+
+# ---------------------------------------------------------------------------
+# Manage Products
+# ---------------------------------------------------------------------------
+
+class ProductInfo(BaseModel):
+    """One row in the Manage Products table."""
+    product_name: str
+    active_flag: str
+    added_by: Optional[str] = None
+    added_at: Optional[str] = None
+    modified_by: Optional[str] = None
+    modified_at: Optional[str] = None
+
+
+class ManageProductsResponse(BaseModel):
+    """Response for GET /api/liver-market-events/products."""
+    products: List[ProductInfo]
+
+
+class CreateProductRequest(BaseModel):
+    """Request body for POST /api/liver-market-events/products."""
+    product_name: str
+    # added_by is hardcoded to "admin" server-side for now (see
+    # create_market_events_product) -- no real user/auth concept exists yet
+    # in this app, so there's nothing meaningful for the client to send here.
+
+
+class UpdateProductRequest(BaseModel):
+    """Request body for PUT /api/liver-market-events/products/{product_name}."""
+    new_product_name: str
+    # modified_by hardcoded to "admin" server-side for now, same reason.
