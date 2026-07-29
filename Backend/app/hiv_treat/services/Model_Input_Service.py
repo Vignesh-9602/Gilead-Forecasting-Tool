@@ -707,14 +707,16 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
     }
 
 
-def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, start, end,selected_market):
+def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, start, end, selected_market):
     """
     Market distribution — volume and share split across markets.
 
     total_vals: raw floats.
     All market volumes are raw floats throughout; rounded only for monthly display.
     Yearly share = sum(mkt_raw_in_year) / sum(total_raw_in_year) * 100.
-    Source children share = sum(src_raw_in_year) / sum(mkt_raw_in_year) * 100.
+    Source children share = sum(src_raw_in_year) / sum(total_raw_in_year) * 100
+        (share of the OVERALL total, so siblings sum to their parent market's
+        own share of total — e.g. Kaiser% + IQVIA% + ADAP% + Federal% == Non-retail%).
     """
     markets   = get_markets(cur, ta)
     n         = len(total_vals)
@@ -764,13 +766,12 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
             ms_series_data.append({"label": mkt,
                                     "child_vols": vol, "parent_vols": total_vals})
 
+        # ------------------------------------------------------------
         # Sources
+        # ------------------------------------------------------------
         sources               = get_sources(cur, ta, mkt)
-        vol_children          = []
         share_children_vals   = []
         share_children_labels = []
-        mv_child_rows         = []
-        ms_child_rows         = []
 
         for src in sources:
             sd = fetch_forecast_scenario(cur, ta, mkt, src, "ALL", "market_share", scenario)
@@ -781,33 +782,42 @@ def build_market_distribution(cur, ta, scenario, total_vals, months, split_idx, 
             src_share = ss["values"]
             src_vol   = build_volume_from_share(vol, src_share)   # raw floats
 
-            vol_children.append({"label": src, "values": round_volume(src_vol)})
             share_children_vals.append(src_vol)
             share_children_labels.append(src)
-
-            mv_child_rows.append({"label": src, "monthly_values": src_vol})
-            ms_child_rows.append({"label": src,
-                                   "child_vols": src_vol, "parent_vols": vol})
 
         vol_row   = {"label": mkt, "values": vol_display}
         share_row = {"label": mkt, "values": share}
 
-        if vol_children:
-            vol_row["children"] = vol_children
+        mv_child_rows = []
+        ms_child_rows = []
+
+        if share_children_vals:
+            # Force siblings' volumes to sum exactly to the market's raw volume
             norm = normalize_shares_to_100(share_children_vals, n)
-            if vol_children:
-                vol_children_display = [
-                    [round(vol[t] * norm[c][t] / 100) for t in range(n)]
-                    for c in range(len(norm))
-                ]
-                vol_row["children"] = [
-                    {"label": share_children_labels[c], "values": vol_children_display[c]}
-                    for c in range(len(norm))
-                ]
-                share_row["children"] = [
-                    {"label": share_children_labels[i], "values": norm[i]}
-                    for i in range(len(norm))
-                ]
+            child_raw = [
+                [vol[t] * norm[c][t] / 100 for t in range(n)]
+                for c in range(len(norm))
+            ]
+
+            vol_row["children"] = [
+                {"label": share_children_labels[c], "values": round_volume(child_raw[c])}
+                for c in range(len(norm))
+            ]
+
+            # Share of TOTAL market (not just share within this segment),
+            # so sibling shares sum to the parent market's own share of total.
+            share_row["children"] = [
+                {"label": share_children_labels[c],
+                 "values": [safe_pct(child_raw[c][t], total_vals[t]) for t in range(n)]}
+                for c in range(len(norm))
+            ]
+
+            for c in range(len(norm)):
+                mv_child_rows.append({"label": share_children_labels[c],
+                                       "monthly_values": child_raw[c]})
+                ms_child_rows.append({"label": share_children_labels[c],
+                                       "child_vols": child_raw[c],
+                                       "parent_vols": total_vals})
 
         market_vol_rows.append(vol_row)
         market_share_rows.append(share_row)
