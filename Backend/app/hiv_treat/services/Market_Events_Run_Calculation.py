@@ -253,7 +253,10 @@ def _weighted_blend_series(product_rows: List[dict], weight_rows_by_channel: Dic
 def _aggregate_by_cell(rows: List[dict], metric: str, scenario_name: str, ta_name: str) -> List[dict]:
     """Collapse per-channel rows into one series per (market, product) cell.
     market_volume sums; market_share blends by channel weight (or averages
-    as a last resort). Synthesized cells have no single backing DB row, so
+    as a last resort). product == "ALL" cells are never blended -- same
+    rule as fetch_forecast_scenario: the canonical source_of_market="ALL"
+    row IS the total, any other rows sharing this key are per-channel
+    internal figures. Synthesized cells have no single backing DB row, so
     persist_events_to_db() skips writing them back."""
     grouped: Dict[Tuple[str, str], List[dict]] = {}
     for r in rows:
@@ -263,6 +266,15 @@ def _aggregate_by_cell(rows: List[dict], metric: str, scenario_name: str, ta_nam
     for (market, product), group_rows in grouped.items():
         if len(group_rows) == 1:
             aggregated.append(group_rows[0])
+            continue
+
+        if product == "ALL":
+            canonical = next(
+                (r for r in group_rows
+                 if not r.get("source_of_market") or r["source_of_market"] == "ALL"),
+                group_rows[0],
+            )
+            aggregated.append(canonical)
             continue
 
         if metric == "market_volume":
@@ -280,9 +292,6 @@ def _aggregate_by_cell(rows: List[dict], metric: str, scenario_name: str, ta_nam
             "market": market,
             "product": product,
             "synthesized": True,
-            # Needed so persist_events_to_db can write a rebalanced
-            # synthesized cell back onto its real underlying rows instead
-            # of silently dropping it (see _distribute_synthesized_write).
             "source_rows": group_rows,
             "_baseline_forecast": list(combined["forecast"]),
             **combined,
@@ -319,26 +328,39 @@ def fetch_baseline(event: EventInput, metric: str):
             e.name for e in (event.impacted_entities or [])
         ]
 
-        #
-        # IMPORTANT:
-        # Fetch BOTH the selected product and the ALL row.
-        #
+        # Product-context cells may genuinely be split across channels --
+        # still need source_of_market=None + per-cell aggregation.
         raw = fetch_series(
             event.scenario_name,
             event.ta_name,
             metric,
             label_field="market",
             market=markets,
-            products=list(event.contexts) + ["ALL"],
+            products=list(event.contexts),
             source_of_market=None,
         )
+        aggregated = _aggregate_by_cell(
+            raw, metric, event.scenario_name, event.ta_name,
+        )
 
-        return _aggregate_by_cell(
-            raw,
-            metric,
+        # (market, "ALL") canonical total row -- fetched at
+        # source_of_market="ALL" ONLY, same rule as
+        # fetch_forecast_scenario's "prefer the true market-level ALL
+        # row" logic. Per-channel "ALL" rows (ADAP, Federal, IQVIA,
+        # Kaiser...) are each channel's own internal share-of-channel
+        # figure -- they are weights, not pieces of this cell, and must
+        # never be blended/averaged into it.
+        all_rows = fetch_series(
             event.scenario_name,
             event.ta_name,
+            metric,
+            label_field="market",
+            market=markets,
+            products=["ALL"],
+            source_of_market="ALL",
         )
+
+        return aggregated + all_rows
 
     # OVERALL_EVENT -- portfolio row is always genuinely 'ALL'
     return _fetch_overall_series(
@@ -682,19 +704,19 @@ def _rebalance_market_products(
             # Market share must always total 100%
             market_total = 100.0
             # target_remaining = market_total - selected_value
-            if i in (0, 1):
-                print("\n==============================")
-                print(f"Market: {market}")
-                print(f"Forecast Month Index: {i}")
+            # if i in (0, 1):
+            #     print("\n==============================")
+            #     print(f"Market: {market}")
+            #     print(f"Forecast Month Index: {i}")
 
-                print("Selected Product:", selected_product)
-                print("Selected Value:", selected_value)
+            #     print("Selected Product:", selected_product)
+            #     print("Selected Value:", selected_value)
 
-                print("\nSibling Values BEFORE:")
-                for r in rows:
-                    print(r["product"], r["forecast"][i])
+            #     print("\nSibling Values BEFORE:")
+            #     for r in rows:
+            #         print(r["product"], r["forecast"][i])
 
-                print("Market Total BEFORE:", market_total)
+            #     print("Market Total BEFORE:", market_total)
             target_remaining = market_total - selected_value
 
             rows = [
@@ -741,9 +763,9 @@ def _rebalance_market_products(
                     + sum(r["forecast"][i] for r in rows)
                 )
 
-                print("Final Market Total:", final_total)
+                # print("Final Market Total:", final_total)
 
-                print("Final Market Total:", final_total)
+                # print("Final Market Total:", final_total)
             #
             # Refresh ALL row after redistribution.
             #
@@ -756,11 +778,76 @@ def _rebalance_market_products(
         for row in rows:
             share_cache[(row["market"], row["product"])] = row
 
+def _reconcile_market_event_product(
+    cache: CacheType,
+    scenario_name: str,
+    ta_name: str,
+    product: str,
+    touched_markets: List[str],
+    has_explicit_redistribution: bool,
+    selected_markets: Set[str],
+    all_markets: List[str],
+    grid_fetch_cache: GridFetchCache,
+) -> None:
+    """market_event's counterpart to _reconcile_product_event_market: holds
+    one product fixed and rebalances across ITS markets (e.g. Retail vs
+    Non-retail) so they keep summing to 100%, instead of rebalancing
+    sibling products within one market."""
+    share_cache = cache["market_share"]
+    bounds = CLAMP_BOUNDS["market_share"]
+
+    touched_rows = [
+        share_cache[(market, product)]
+        for market in touched_markets
+        if (market, product) in share_cache
+    ]
+    if not touched_rows:
+        return
+
+    touched_set = {r["market"] for r in touched_rows}
+    sibling_rows = [
+        row for row in _grid_with_cache_overlay(
+            scenario_name, ta_name, share_cache, all_markets, [product], grid_fetch_cache)
+        if row["market"] not in touched_set
+    ]
+
+    n_forecast = len(touched_rows[0]["forecast"])
+    for i in range(n_forecast):
+        touched_total = sum(r["forecast"][i] for r in touched_rows if i < len(r["forecast"]))
+        sibling_total = sum(r["forecast"][i] for r in sibling_rows if i < len(r["forecast"]))
+        residual = 100.0 - touched_total - sibling_total
+        if abs(residual) <= 1e-6:
+            continue
+
+        if has_explicit_redistribution:
+            targets = [r for r in touched_rows if r["market"] not in selected_markets]
+            if not targets:
+                targets = sibling_rows
+        else:
+            targets = sibling_rows
+
+        weight_total = sum(r["forecast"][i] for r in targets if i < len(r["forecast"]))
+        if weight_total <= 0:
+            continue
+
+        for row in targets:
+            if i >= len(row["forecast"]):
+                continue
+            weight_pct = row["forecast"][i] / weight_total
+            new_value = round(row["forecast"][i] + residual * weight_pct, 4)
+            if bounds is not None:
+                new_value = max(bounds[0], min(bounds[1], new_value))
+            row["forecast"][i] = new_value
+
+    if not has_explicit_redistribution:
+        for row in sibling_rows:
+            share_cache[(row["market"], row["product"])] = row
 
 def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[str]]) -> CacheType:
 
     cache: CacheType = {metric: {} for metric in METRICS}
     all_products = entities["products"]
+    all_markets = entities["markets"]
     grid_fetch_cache: GridFetchCache = {}
 
     # (scenario_name, ta_name, market) -> accumulated touched products / flag
@@ -829,6 +916,13 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
 
             result = compute_event_forecast(event, baseline_pct=baseline_pct)
             curves = _entity_curves(result)
+            print("\n================ CURVES =================")
+            print("Selected:", result.selected_entity)
+            print("Selected Curve:", result.selected_curve)
+
+            print("Impacted Curves:")
+            for name, curve in (result.impacted_curves or {}).items():
+                print(name, curve)
 
             for metric in METRICS:
                 needs_fetch = any(key not in cache[metric] for key in keys_by_label.values())
@@ -854,6 +948,12 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                             cache[metric][key], result.months, curve)
                     else:
                         mode = "set" if (metric == "market_share" and label == selected_label) else "add"
+
+                        print("\n================ APPLY CURVE ================")
+                        print("Metric :", metric)
+                        print("Label  :", label)
+                        print("Mode   :", mode)
+                        print("Curve  :", curve)
                         cache[metric][key], applied = _apply_curve_to_series(
                             cache[metric][key], result.months, curve, bounds, mode=mode)
                     event_touched_forecast = event_touched_forecast or applied
@@ -871,9 +971,15 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                 entry["has_explicit_redistribution"] |= bool(event.impacted_entities)
                 entry["selected_products"].add(event.selected_entity)
             elif event.event_scope == EventScope.MARKET_EVENT:
+                # context is fixed (= product) for this pass through the loop, so no
+                # inner loop over market_label is needed — curves.keys() already IS
+                # every touched market (selected + impacted) for this product.
                 work_key = (event.scenario_name, event.ta_name, context)
-                entry = market_event_work.setdefault(work_key, {"markets": set()})
-                entry["markets"].update(curves.keys())
+                entry = market_event_work.setdefault(work_key, {
+                    "touched_markets": set(), "has_explicit_redistribution": False, "selected_markets": set()})
+                entry["touched_markets"].update(curves.keys())
+                entry["has_explicit_redistribution"] |= bool(event.impacted_entities)
+                entry["selected_markets"].add(event.selected_entity)
 
     # Reconcile once every event's curve has landed in the cache.
     for (scenario_name, ta_name, market), entry in product_event_work.items():
@@ -886,11 +992,12 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
             grid_fetch_cache=grid_fetch_cache,
         )
     for (scenario_name, ta_name, product), entry in market_event_work.items():
-        _rebalance_market_products(
-            cache, scenario_name, ta_name,
-            selected_product=product,
-            markets=list(entry["markets"]),
-            all_products=all_products,
+        _reconcile_market_event_product(
+            cache, scenario_name, ta_name, product,
+            touched_markets=list(entry["touched_markets"]),
+            has_explicit_redistribution=entry["has_explicit_redistribution"],
+            selected_markets=entry["selected_markets"],
+            all_markets=all_markets,
             grid_fetch_cache=grid_fetch_cache,
         )
 
@@ -938,9 +1045,9 @@ def _derive_volume_grid(
     if not overall_volume or not share_grid:
         return []
     overall = overall_volume[0]
-    print("\n========== _derive_volume_grid ==========")
-    print("Overall Volume History:", overall["history"])
-    print("Overall Volume Forecast:", overall["forecast"])
+    # print("\n========== _derive_volume_grid ==========")
+    # print("Overall Volume History:", overall["history"])
+    # print("Overall Volume Forecast:", overall["forecast"])
     overall_month_index = {m: i for i, m in enumerate(overall["months"])}
     market_share_lookup = {}
 
@@ -950,7 +1057,11 @@ def _derive_volume_grid(
             "forecast_start_index": row["forecast_start_index"],
             "values": row["history"] + row["forecast"],
         }
+    # print("\n========== Market Share Lookup ==========")
 
+    # for market, info in market_share_lookup.items():
+    #     print(f"\n{market}")
+    #     print(info["values"])
     def _total_at(month: str) -> Optional[float]:
         oi = overall_month_index.get(month)
         if oi is None:
@@ -962,8 +1073,8 @@ def _derive_volume_grid(
 
     derived = []
     for cell in share_grid:
-        print(f"\nMarket={cell['market']} Product={cell['product']}")
-        print("Share:", cell["history"] + cell["forecast"])
+        # print(f"\nMarket={cell['market']} Product={cell['product']}")
+        # print("Share:", cell["history"] + cell["forecast"])
         combined_share = cell["history"] + cell["forecast"]
         values = []
         for month, share_pct in zip(cell["months"], combined_share):
@@ -975,21 +1086,39 @@ def _derive_volume_grid(
 
                 market_share = market_share_info["values"][market_idx]
 
+                # print("\n--------------------------------")
+                # print("Market :", cell["market"])
+                # print("Product:", cell["product"])
+                # print("Month  :", month)
+
+                # print("Market Share ALL :", market_share)
+                # print("Overall Volume   :", total)
+
                 market_volume = total * market_share / 100
+
+                # print("Computed Market Volume:", market_volume)
 
                 volume = round(
                     market_volume * share_pct / 100,
                     2,
                 )
 
-                print(
-                    f"Month={month} "
-                    f"MarketShare={market_share:.2f}% "
-                    f"ProductShare={share_pct:.2f}% "
-                    f"Overall={total:.2f} "
-                    f"MarketVolume={market_volume:.2f} "
-                    f"ProductVolume={volume:.2f}"
+                # print("Product Share :", share_pct)
+                # print("Product Volume:", volume)
+
+                volume = round(
+                    market_volume * share_pct / 100,
+                    2,
                 )
+
+                # print(
+                #     f"Month={month} "
+                #     f"MarketShare={market_share:.2f}% "
+                #     f"ProductShare={share_pct:.2f}% "
+                #     f"Overall={total:.2f} "
+                #     f"MarketVolume={market_volume:.2f} "
+                #     f"ProductVolume={volume:.2f}"
+                # )
 
                 values.append(volume)
             else:
@@ -1000,15 +1129,15 @@ def _derive_volume_grid(
             "months": cell["months"], "forecast_start_index": fsi,
             "history": values[:fsi], "forecast": values[fsi:],
         })
-    print("\n========== Derived Market Totals ==========")
+    # print("\n========== Derived Market Totals ==========")
 
     market_totals = _group_series_by_field(derived, "market")
 
-    for m in market_totals:
-        print(
-            m["label"],
-            m["history"] + m["forecast"]
-        )
+    # for m in market_totals:
+    #     print(
+    #         m["label"],
+    #         m["history"] + m["forecast"]
+    #     )
 
     print("\n========== Derived Product Totals ==========")
 
@@ -1149,21 +1278,21 @@ def _monthly_parent_child_view(
                 else [None] * len(parent_totals)
             )
 
-            print("\n==============================")
-            print("Metric :", metric)
-            print("Parent :", label)
-            print("Parent Field :", parent_field)
-            print("Child Field  :", child_field)
+            # print("\n==============================")
+            # print("Metric :", metric)
+            # print("Parent :", label)
+            # print("Parent Field :", parent_field)
+            # print("Child Field  :", child_field)
 
-            print("\nVolume Children:")
-            for r in volume_children:
-                print(
-                    f"{r[parent_field]} | {r[child_field]}",
-                    r["history"] + r["forecast"]
-                )
+            # print("\nVolume Children:")
+            # for r in volume_children:
+            #     print(
+            #         f"{r[parent_field]} | {r[child_field]}",
+            #         r["history"] + r["forecast"]
+            #     )
 
-            print("\nParent Totals:", parent_totals)
-            print("Overall Totals:", overall_totals)
+            # print("\nParent Totals:", parent_totals)
+            # print("Overall Totals:", overall_totals)
 
             parent_shares = [
                 round(pv / ov * 100, 2) if ov else 0.0
@@ -1173,7 +1302,7 @@ def _monthly_parent_child_view(
             parent_forecast = parent_shares[fsi:]
             parent_values = parent_shares
 
-            print("Parent Shares:", parent_shares)
+            # print("Parent Shares:", parent_shares)
 
             children = []
             for child in volume_children:
@@ -1183,11 +1312,11 @@ def _monthly_parent_child_view(
                     for cv, ov in zip(child_volumes, overall_totals)
                 ]
 
-                print(
-                    f"\nChild: {child[child_field]}",
-                    "\nVolumes:", child_volumes,
-                    "\nShares :", shares
-                )
+                # print(
+                #     f"\nChild: {child[child_field]}",
+                #     "\nVolumes:", child_volumes,
+                #     "\nShares :", shares
+                # )
 
                 children.append({
                     "label": child[child_field],
@@ -1247,8 +1376,8 @@ def _monthly_parent_child_view(
 
 def _group_series_by_field(grid: List[dict], field: str) -> List[dict]:
 
-    print("\n========== _group_series_by_field ==========")
-    print("Grouping by:", field)
+    # print("\n========== _group_series_by_field ==========")
+    # print("Grouping by:", field)
 
     grouped: Dict[str, List[dict]] = {}
 
@@ -1288,7 +1417,19 @@ def _group_series_by_field(grid: List[dict], field: str) -> List[dict]:
         )
 
     return result
+def _monthly_flat_view_from_canonical_rows(rows: List[dict]) -> Tuple[dict, List[dict]]:
 
+    if not rows:
+        return {"months": [], "forecast_start_index": 0, "series": []}, []
+    months = rows[0]["months"]
+    fsi = rows[0]["forecast_start_index"]
+    chart = {
+        "months": months,
+        "forecast_start_index": fsi,
+        "series": [{"label": r["market"], "history": r["history"], "forecast": r["forecast"]} for r in rows],
+    }
+    flat_rows = [{"label": r["market"], "values": r["history"] + r["forecast"]} for r in rows]
+    return chart, flat_rows
 
 def _monthly_flat_view(
     grid: List[dict],
@@ -1302,8 +1443,8 @@ def _monthly_flat_view(
     hierarchy chart (grouped by parent_field), not just the same rows
     re-labeled without children, so it needs its own chart.
     Returns (monthly_chart, flat_rows)."""
-    print("\n========== _monthly_flat_view ==========")
-    print("Child field:", child_field)
+    # print("\n========== _monthly_flat_view ==========")
+    # print("Child field:", child_field)
 
     months = grid[0]["months"]
     fsi = grid[0]["forecast_start_index"]
@@ -1325,15 +1466,15 @@ def _monthly_flat_view(
 
             shares = []
 
-            print(f"\nProcessing {g['label']}")
+            # print(f"\nProcessing {g['label']}")
 
             for v, total in zip(values, overall):
                 share = round((v / total) * 100, 2) if total else 0.0
                 shares.append(share)
 
-            print("Volume :", values)
-            print("Overall:", overall)
-            print("Share  :", shares)
+            # print("Volume :", values)
+            # print("Overall:", overall)
+            # print("Share  :", shares)
 
             child_series.append({
                 "label": g["label"],
@@ -1618,7 +1759,8 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
                                   agg: str, overall_series: Optional[dict] = None,
                                   volume_grid: Optional[List[dict]] = None,
                                   overall_volume_series: Optional[dict] = None,
-                                  scope_cells: Optional[Set[Tuple[str, str]]] = None) -> dict:
+                                  scope_cells: Optional[Set[Tuple[str, str]]] = None,
+                                  market_share_all: Optional[List[dict]] = None) -> dict:   # <-- new param
     
     levels = TAB_VIEW_LEVELS[tab]
     view_options = [
@@ -1630,7 +1772,7 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         empty_chart = {"months": [], "forecast_start_index": 0, "series": []}
         empty_side = {
             "view_options": view_options,
-            "selected_view": levels["hierarchy_key"],
+            "selected_view": levels["flat_key"],
             levels["flat_key"]: {
                 "chart": empty_chart,
                 "table": {"type": "flat", "headers": [], "forecast_start_index": 0,
@@ -1691,11 +1833,14 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         monthly_parent_chart = _scoped_cells_chart(grid, scope_cells, parent_field, child_field)
 
     if metric == "market_share":
-        monthly_child_chart, flat_rows = _monthly_flat_view(
-            volume_grid,
-            child_field,
-            overall_volume_series,
-        )
+        if tab == "market_event" and market_share_all:
+            monthly_child_chart, flat_rows = _monthly_flat_view_from_canonical_rows(market_share_all)
+        else:
+            monthly_child_chart, flat_rows = _monthly_flat_view(
+                volume_grid,
+                child_field,
+                overall_volume_series,
+            )
     else:
         monthly_child_chart, flat_rows = _monthly_flat_view(
             grid,
@@ -1725,8 +1870,11 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     if metric == "market_share":
         parent_yearly, yearly_hierarchy_rows = _yearly_parent_child_view(
             volume_grid, parent_field, child_field, overall_volume_series)
-        child_yearly = (_to_yearly_share_from_volume(volume_grid, child_field, overall_volume_series)
-                        if volume_grid else {"years": [], "forecast_start_index": 0, "series": []})
+        if tab == "market_event" and market_share_all:
+            child_yearly = _to_yearly_chart(market_share_all, YEARLY_AGG["market_share"])
+        else:
+            child_yearly = (_to_yearly_share_from_volume(volume_grid, child_field, overall_volume_series)
+                            if volume_grid else {"years": [], "forecast_start_index": 0, "series": []})
     else:
         parent_series = _group_series_by_field(grid, parent_field)
         parent_yearly = _to_yearly_chart(parent_series, agg)
@@ -1794,13 +1942,13 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     return {
         "monthly": {
             "view_options": view_options,
-            "selected_view": levels["hierarchy_key"],
+            "selected_view": levels["flat_key"],
             levels["flat_key"]: {"chart": monthly_child_chart, "table": monthly_flat_table},
             levels["hierarchy_key"]: {"chart": monthly_parent_chart, "table": monthly_hierarchy_table},
         },
         "yearly": {
             "view_options": view_options,
-            "selected_view": levels["hierarchy_key"],
+            "selected_view": levels["flat_key"],
             levels["flat_key"]: {"chart": child_yearly, "table": yearly_flat_table},
             levels["hierarchy_key"]: {"chart": parent_yearly, "table": yearly_hierarchy_table},
         },
@@ -1899,14 +2047,7 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
         }
 
     overall_volume_rows = _fetch_overall_series(scenario_name, ta_name, "market_volume")
-    # Direct fetch of the single pre-aggregated (market, "", ALL) row per
-    # market -- NOT fetch_grid, which fetches every channel row
-    # (source_of_market=None) and blends them. That blend is correct for
-    # per-product cells split across channels, but wrong here: this is
-    # supposed to be the one row that already IS the market's true total
-    # share of the whole portfolio. Blending it with per-channel rows
-    # (which sum to ~100% WITHIN the market, not the portfolio) silently
-    # replaces the true total with an average of the wrong numbers.
+
     market_share_all = fetch_series(
         scenario_name, ta_name, "market_share",
         label_field="market", market=markets, products=["ALL"],
@@ -1918,15 +2059,15 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             for row in market_share_all
         ]
 
-    print("\n========== Market Share ALL ==========")
-    for row in market_share_all:
-        print(
-            row["market"],
-            row["product"],
-            row["history"] + row["forecast"]
-        )
-    print("\n========== Overall_volume_rows ==========")
-    print(overall_volume_rows)
+    # print("\n========== Market Share ALL ==========")
+    # for row in market_share_all:
+    #     print(
+    #         row["market"],
+    #         row["product"],
+    #         row["history"] + row["forecast"]
+    #     )
+    # print("\n========== Overall_volume_rows ==========")
+    # print(overall_volume_rows)
     volume_grid = _derive_volume_grid(
             share_grid,
             market_share_all,
@@ -1935,6 +2076,7 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
 
     share_grid = _clip_series_list(share_grid, start_date, end_date)
     volume_grid = _clip_series_list(volume_grid, start_date, end_date)
+    market_share_all_clipped = _clip_series_list(market_share_all, start_date, end_date)
     if overall_share is not None:
         overall_share = _clip_series_to_range(overall_share, start_date, end_date)
     overall_volume_rows = _clip_series_list(overall_volume_rows, start_date, end_date)
@@ -1944,7 +2086,8 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
         "market_share": build_hierarchical_dual_view(
             tab, "market_share", share_grid, parent_field, child_field, YEARLY_AGG["market_share"],
             overall_series=overall_share, volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series, scope_cells=scope_cells),
+            overall_volume_series=overall_volume_series, scope_cells=scope_cells,
+            market_share_all=market_share_all_clipped),                                    # <-- new
         "market_volume": build_hierarchical_dual_view(
             tab, "market_volume", volume_grid, parent_field, child_field, YEARLY_AGG["market_volume"],
             overall_series=overall_volume_series, volume_grid=volume_grid,
