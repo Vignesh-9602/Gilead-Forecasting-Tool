@@ -126,9 +126,9 @@ class PersistencyCurveDetails(BaseModel):
     start_value: Optional[float] = None
     end_value: Optional[float] = None
  
-    method: Optional[str] = None
+    # method: Optional[str] = None
  
-    k_factor: Optional[float] = None
+    # k_factor: Optional[float] = None
  
  
 class PersistencyCurvePreview(BaseModel):
@@ -144,10 +144,12 @@ class PersistencyCurveListItem(BaseModel):
     curve_name: str
     method: str
 
+class PersistencyCurveListItemUpdate(BaseModel):
+    curve_name: str
 
 class DeletePersistencyCurveResponse(BaseModel):
     message: str
-    curve_list: List[PersistencyCurveListItem]
+    curve_list: List[PersistencyCurveListItemUpdate]
 
 class PersistencyCurvePeriod(BaseModel):
     curve_name: str
