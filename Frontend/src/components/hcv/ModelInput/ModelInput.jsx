@@ -919,8 +919,24 @@ export default function PBCModelInput() {
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
           const firstRow = rawRows[0];
           if (!firstRow) return; // empty table — skip this scenario
-          const vals = parseValues(firstRow.values, false);
+          let vals = parseValues(firstRow.values, false);
           if (!vals.length) return; // no actual values — skip
+
+          // Align scenario values to the chart month axis (months = active scenario's
+          // months for the current date filter). A saved scenario may have been
+          // persisted with a wider or narrower date window, so its values array can be
+          // a different length. Without alignment, value[i] is plotted at chart
+          // position i regardless of the actual month, causing values to appear to
+          // "change" whenever the date filter shifts the month axis.
+          const scenarioMonths = metricObj?.monthly?.chart?.months || [];
+          if (scenarioMonths.length > 0 && months.length > 0 && scenarioMonths.length !== months.length) {
+            const monthToVal = {};
+            scenarioMonths.forEach((m, i) => {
+              monthToVal[(m || "").substring(0, 7)] = vals[i];
+            });
+            vals = months.map((m) => monthToVal[(m || "").substring(0, 7)] ?? null);
+          }
+
           scenarioRows.push({
             hierarchy: scenarioName,
             label: scenarioName,
@@ -936,6 +952,7 @@ export default function PBCModelInput() {
 
           // Build yearly scenario rows — only for scenarios that have yearly data.
           const yearlyScenarioRows = [];
+          const yearlyChartMonthsRef = tmvTab.yearlyChart?.months || [];
           allScenarioNames.forEach((scenarioName) => {
             const scenarioData = data.scenarios[scenarioName];
             const tmv = scenarioData?.market_analysis?.total_market_volume;
@@ -946,8 +963,19 @@ export default function PBCModelInput() {
             const yearlyRows = metricObj?.yearly?.table?.rows || [];
             const firstYearlyRow = yearlyRows[0];
             if (!firstYearlyRow) return;
-            const yearlyVals = parseValues(firstYearlyRow.values, false);
+            let yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
+
+            // Align yearly values to the active scenario's yearly month axis
+            const scenarioYearlyMonths = metricObj?.yearly?.chart?.months || [];
+            if (scenarioYearlyMonths.length > 0 && yearlyChartMonthsRef.length > 0 && scenarioYearlyMonths.length !== yearlyChartMonthsRef.length) {
+              const yearToVal = {};
+              scenarioYearlyMonths.forEach((m, i) => {
+                yearToVal[(m || "").substring(0, 4)] = yearlyVals[i];
+              });
+              yearlyVals = yearlyChartMonthsRef.map((m) => yearToVal[(m || "").substring(0, 4)] ?? null);
+            }
+
             yearlyScenarioRows.push({
               hierarchy: scenarioName,
               label: scenarioName,
@@ -956,9 +984,6 @@ export default function PBCModelInput() {
               children: [],
             });
           });
-
-          // Yearly chart months (for building yearly table headers)
-          const yearlyChartMonths = tmvTab.yearlyChart?.months || [];
 
           // Chart shows one line per scenario so the Compare Scenarios
           // dropdown can render multiple scenarios at once. Filtering to
@@ -990,7 +1015,7 @@ export default function PBCModelInput() {
             // yearly view also shows every scenario, not just the active one.
             yearlyTable: yearlyScenarioRows.length
               ? {
-                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonths }),
+                ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonthsRef }),
                 rows: yearlyScenarioRows,
               }
               : tmvTab.yearlyTable,
@@ -1072,11 +1097,16 @@ export default function PBCModelInput() {
     const series = (tab.chart?.series || [])
       .filter((s) => {
         const lbl = (s.label || "").toLowerCase();
-        return (
-          !lbl.includes("total") &&
-          !lbl.includes("market volume") &&
-          !lbl.includes("market share")
-        );
+        if (
+          lbl.includes("total") ||
+          lbl.includes("market volume") ||
+          lbl.includes("market share")
+        ) return false;
+        // Scenario-labeled series (TMV compare): only show if checked in the dropdown
+        if (compareScenarioOptions.includes(s.label)) {
+          return selectedCompareScenarios.includes(s.label);
+        }
+        return true;
       })
       .map((s) => ({
         label: s.label || "",
@@ -1669,8 +1699,8 @@ export default function PBCModelInput() {
         if (availMonths.length) setAvailableDates(availMonths);
 
         const sfInitial = filtersData?.selected_filter || {};
-        // Priority for defaults: explicit saved global config first, then
-        // whatever the filters endpoint resolved as its own default.
+        // Saved filter (sfInitial) takes priority: it reflects the user's last
+        // explicit apply. Fall back to config dates only when there is no saved state.
         if (!localPayer)
           localPayer =
             sfInitial.payer ||
@@ -1679,10 +1709,19 @@ export default function PBCModelInput() {
           localProduct =
             sfInitial.product ||
             (norm.products?.length ? getFirstOption(norm.products) : "");
-        if (!cfg?.train_start_date && sfInitial.start_date)
-          localFrom = sfInitial.start_date;
-        if (!cfg?.forecast_periods && !cfg?.train_end_date && sfInitial.end_date)
-          localTo = sfInitial.end_date;
+        // Saved filter overrides config: the user's last explicit apply is the source of truth.
+        // fromDate must match an availableDates entry exactly (Mon-YY format) for safeFrom to work.
+        if (sfInitial.start_date) {
+          const sfStartParsed = parseDateString(sfInitial.start_date);
+          const matchedFrom = sfStartParsed.isValid()
+            ? availMonths.find((d) => {
+                const pd = parseDateString(d);
+                return pd.isValid() && pd.year() === sfStartParsed.year() && pd.month() === sfStartParsed.month();
+              })
+            : null;
+          localFrom = matchedFrom || sfInitial.start_date;
+        }
+        if (sfInitial.end_date) localTo = sfInitial.end_date;
 
         setFromDate(localFrom);
         setToDate(localTo);
@@ -1713,8 +1752,9 @@ export default function PBCModelInput() {
             brand: localProduct ? [localProduct] : [],
             product: localProduct || "",
             metric: metric || defaultMetricOptions[0].value,
-            from_date: cfg?.train_start_date || localFrom || "",
-            scenario_name: "Base",
+            from_date: toYearMonth(localFrom || cfg?.train_start_date || ""),
+            to_date: sfInitial.end_date || undefined,
+            scenario: sfInitial.scenario || "Base",
           };
           const applyResp = await applyLiverFilters(applyPayload);
           const data = applyResp?.data || {};
@@ -1740,9 +1780,19 @@ export default function PBCModelInput() {
             data?.active_scenario || availScenarios[0] || "Base";
           setScenarioSelector(activeScenarioKey);
 
-          // Dates resolved by the backend for this payer/product/scenario
+          // Dates resolved by the backend — normalise start_date to Mon-YY format
+          // so it matches an availableDates entry and safeFrom resolves correctly.
           const sf = data?.selected_filter || {};
-          if (sf.start_date) setFromDate(sf.start_date);
+          if (sf.start_date) {
+            const sfP = parseDateString(sf.start_date);
+            const matchedSfFrom = sfP.isValid()
+              ? availMonths.find((d) => {
+                  const pd = parseDateString(d);
+                  return pd.isValid() && pd.year() === sfP.year() && pd.month() === sfP.month();
+                })
+              : null;
+            setFromDate(matchedSfFrom || sf.start_date);
+          }
           if (sf.end_date) setToDate(sf.end_date);
 
           const applyScenarioObj =
@@ -1967,7 +2017,8 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        const response = await applyLiverFilters(buildLiverBasePayload());
+        const _p = buildLiverBasePayload();
+        const response = await applyLiverFilters(_p);
         const data = response?.data || {};
         setAppliedLot(lot);
         setAppliedBrand(productFilter || brand);
