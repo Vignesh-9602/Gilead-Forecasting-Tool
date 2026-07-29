@@ -107,33 +107,35 @@ class PersistencyCalculateApplyResponse(BaseModel):
     curve_preview: PersistencyCurvePreview
     curve_list: List[PersistencyCurveListItem]
 
+class PersistencyCurveListItemUpdate(BaseModel):
+    curve_name: str
 
 class PersistencyCurveNamesResponse(BaseModel):
-    curve_list: List[PersistencyCurveListItem]
+    curve_list: List[PersistencyCurveListItemUpdate]
 
 
 class PersistencyCurveDetails(BaseModel):
-
+ 
     curve_name: str
-
+ 
     ta_name: str
-
-    start_month: int
-    end_month: int
-
-    start_value: float
-    end_value: float
-
-    method: str
-
-    k_factor: float
-
-
+ 
+    start_month: Optional[str] = None
+    end_month: Optional[str] = None
+ 
+    start_value: Optional[float] = None
+    end_value: Optional[float] = None
+ 
+    method: Optional[str] = None
+ 
+    k_factor: Optional[float] = None
+ 
+ 
 class PersistencyCurvePreview(BaseModel):
     months: List[str]
     values: List[float]
-
-
+ 
+ 
 class PersistencyCurveConfigResponse(BaseModel):
     curve_details: PersistencyCurveDetails
     curve_preview: PersistencyCurvePreview
