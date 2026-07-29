@@ -1,4 +1,115 @@
 from app.hiv_treat.services.chart_builder import *
+import re
+from copy import deepcopy
+
+def round_market_volume_table(table):
+    for row in table.get("rows", []):
+        row["values"] = [
+            round(float(value), 0)
+            if value is not None
+            else None
+            for value in row.get("values", [])
+        ]
+
+        for child in row.get("children", []):
+            child["values"] = [
+                round(float(value), 0)
+                if value is not None
+                else None
+                for value in child.get("values", [])
+            ]
+
+    return table
+
+def round_all_market_volume_tables(
+    market_analysis,
+):
+    sections = [
+        "market_distribution",
+        "product_distribution",
+        "market_product",
+        "product_market",
+    ]
+
+    for section_name in sections:
+        section = market_analysis.get(section_name)
+
+        if not section:
+            continue
+
+        market_volume = section.get("market_volume")
+
+        if not market_volume:
+            continue
+
+        monthly = market_volume.get("monthly")
+
+        if not monthly:
+            continue
+
+        table = monthly.get("table")
+
+        if not table:
+            continue
+
+        round_market_volume_table(table)
+
+    return market_analysis
+
+
+def get_changed_indexes(
+    original_values,
+    submitted_values,
+    tolerance=1e-9,
+):
+    if len(original_values) != len(submitted_values):
+        raise ValueError(
+            "Original and submitted value lengths do not match."
+        )
+
+    changed_indexes = []
+
+    for index, (original, submitted) in enumerate(
+        zip(original_values, submitted_values)
+    ):
+        if original is None and submitted is None:
+            continue
+
+        if original is None or submitted is None:
+            changed_indexes.append(index)
+            continue
+
+        if abs(float(original) - float(submitted)) > tolerance:
+            changed_indexes.append(index)
+
+    return changed_indexes
+
+
+def normalize_label(label):
+    if label is None:
+        return ""
+
+    label = str(label).strip()
+
+    # Removes suffixes such as:
+    # Non-retail (Base) -> Non-retail
+    # IQVIA (Base)      -> IQVIA
+    label = re.sub(
+        r"\s*\([^)]*\)\s*$",
+        "",
+        label,
+    )
+
+    return label.strip().lower()
+
+def find_row_label(rows, label):
+    target = normalize_label(label)
+
+    for row in rows:
+        if normalize_label(row.get("label")) == target:
+            return row
+
+    return None
 
 def build_refresh_response(
     payload,
@@ -22,9 +133,13 @@ def build_refresh_response(
         },
     }
 
-def refresh_engine(payload):
-
-    market_analysis = payload.market_analysis
+def refresh_engine(
+    payload,
+    original_market_analysis=None,
+):
+    market_analysis = deepcopy(
+        payload.market_analysis
+    )
 
     if payload.selected_tab == "total_market_volume":
 
@@ -35,11 +150,20 @@ def refresh_engine(payload):
 
     elif payload.selected_tab == "market_distribution":
 
+        if original_market_analysis is None:
+            raise ValueError(
+                "original_market_analysis is required for "
+                "market_distribution edits."
+            )
+
         market_analysis = recompute_from_market_distribution(
-            market_analysis,
-            payload.selected_metric,
-            payload.edited_rows or [],
-            payload.selected_filter,
+            market_analysis=market_analysis,
+            original_market_analysis=(
+                original_market_analysis
+            ),
+            selected_metric=payload.selected_metric,
+            edited_rows=payload.edited_rows or [],
+            selected_filter=payload.selected_filter,
         )
 
     elif payload.selected_tab == "product_distribution":
@@ -50,7 +174,7 @@ def refresh_engine(payload):
             payload.edited_rows or [],
             payload.selected_filter,
         )
-    
+
     elif payload.selected_tab == "market_product":
 
         market_analysis = recompute_from_market_product(
@@ -59,7 +183,7 @@ def refresh_engine(payload):
             payload.edited_rows or [],
             payload.selected_filter,
         )
-    
+
     elif payload.selected_tab == "product_market":
 
         market_analysis = recompute_from_product_market(
@@ -67,6 +191,12 @@ def refresh_engine(payload):
             payload.selected_metric,
             payload.edited_rows or [],
             payload.selected_filter,
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported selected_tab: "
+            f"{payload.selected_tab}"
         )
 
     return market_analysis
@@ -210,37 +340,183 @@ def recompute_from_total_market_volume(
     return market_analysis
 
 #market distribution
+def filter_market_distribution_chart(
+    market_analysis,
+    selected_filter,
+):
+    if isinstance(selected_filter, dict):
+        selected_markets = selected_filter.get(
+            "markets",
+            selected_filter.get(
+                "market",
+                [],
+            ),
+        )
+    else:
+        selected_markets = getattr(
+            selected_filter,
+            "markets",
+            getattr(
+                selected_filter,
+                "market",
+                [],
+            ),
+        )
+
+    if isinstance(
+        selected_markets,
+        str,
+    ):
+        selected_markets = [
+            selected_markets
+        ]
+
+    selected_market_keys = {
+        normalize_chart_market_label(
+            market
+        )
+        for market in (
+            selected_markets or []
+        )
+        if market
+    }
+
+    if not selected_market_keys:
+        return market_analysis
+
+    section = market_analysis.get(
+        "market_distribution",
+        {},
+    )
+
+    for metric_data in section.values():
+        if not isinstance(
+            metric_data,
+            dict,
+        ):
+            continue
+
+        for period_name in (
+            "monthly",
+            "yearly",
+        ):
+            chart = (
+                metric_data
+                .get(period_name, {})
+                .get("chart", {})
+            )
+
+            series = chart.get(
+                "series",
+                [],
+            )
+
+            if not isinstance(
+                series,
+                list,
+            ):
+                continue
+
+            chart["series"] = [
+                item
+                for item in series
+                if normalize_chart_market_label(
+                    item.get(
+                        "label",
+                        item.get(
+                            "name",
+                            "",
+                        ),
+                    )
+                ) in selected_market_keys
+            ]
+
+    return market_analysis
+
+
+def normalize_chart_market_label(label):
+    """
+    Converts:
+        Non-retail
+        Non-retail (Base)
+        Non-retail (test)
+
+    into:
+        non-retail
+    """
+
+    label = str(label or "").strip()
+
+    label = re.sub(
+        r"\s*\([^)]*\)\s*$",
+        "",
+        label,
+    )
+
+    return label.strip().lower()
+
 def recompute_from_market_distribution(
     market_analysis,
+    original_market_analysis,
     selected_metric,
     edited_rows,
-    selected_filter
+    selected_filter,
 ):
+    """
+    Recompute market distribution and all dependent tabs.
+
+    Rules:
+        - Tables remain complete.
+        - Market Distribution chart is filtered by selected market.
+        - Product Distribution chart is filtered by selected product.
+        - Channel-Product chart is filtered by selected market.
+        - Product-Channel chart is filtered by selected product.
+    """
+
+    # ======================================================
+    # 1. Recompute edited Market Distribution values
+    # ======================================================
 
     if selected_metric == "market_volume":
-
         rebuild_market_distribution_from_market_volume_edit(
-            market_analysis,
-            edited_rows,
+            market_analysis=market_analysis,
+            original_market_analysis=original_market_analysis,
+            edited_rows=edited_rows,
         )
 
         rebuild_market_distribution_share(
             market_analysis,
         )
 
-    else:
-
+    elif selected_metric == "market_share":
         rebuild_market_distribution_from_market_share_edit(
-            market_analysis,
-            edited_rows,
+            market_analysis=market_analysis,
+            original_market_analysis=original_market_analysis,
+            edited_rows=edited_rows,
         )
 
-    # downstream tabs
-    build_product_distribution(
+        rebuild_market_distribution_volume(
+            market_analysis,
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported selected_metric: {selected_metric}"
+        )
+
+    # ======================================================
+    # 2. Recompute child source volumes
+    # ======================================================
+
+    rebuild_market_distribution_child_volumes(
         market_analysis,
     )
 
-    build_market_product(
+    # ======================================================
+    # 3. Recompute dependent monthly tables
+    # ======================================================
+
+    build_product_distribution(
         market_analysis,
     )
 
@@ -248,39 +524,222 @@ def recompute_from_market_distribution(
         market_analysis,
     )
 
+    build_market_product(
+        market_analysis,
+    )
+
+    
+
+    # ======================================================
+    # 4. Round monthly market-volume tables
+    # ======================================================
+
+    round_all_market_volume_tables(
+        market_analysis,
+    )
+
+    # ======================================================
+    # 5. Rebuild all monthly charts
+    #
+    # market_product and product_market must use their
+    # dedicated child-row chart builders inside this function.
+    # ======================================================
+
     rebuild_all_monthly_charts(
         market_analysis,
     )
 
+    # ======================================================
+    # 6. Rebuild all yearly tables and charts
+    # ======================================================
+
     rebuild_market_distribution_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
     rebuild_product_distribution_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
-    rebuild_product_market_yearly(
-    market_analysis,
-    selected_filter,
-    )
+    
 
     rebuild_market_product_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
+
+    import pprint
+
+    table = (
+        market_analysis["market_product"]
+        ["market_volume"]
+        ["yearly"]
+        ["table"]
+    )
+
+    print("========== YEARLY MARKET PRODUCT ==========")
+    pprint.pp(table)
+
+    rebuild_product_market_yearly(
+        market_analysis,
+        selected_filter,
+    )
+
+    # ======================================================
+    # 7. Apply chart filters last
+    #
+    # This must happen after both monthly and yearly chart
+    # rebuilding. Otherwise a yearly rebuild can overwrite
+    # the filtered series.
+    # ======================================================
+
+    filter_market_distribution_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+
+    filter_product_distribution_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+
+    
+
+    filter_market_product_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+
+    filter_product_market_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+    
 
     return market_analysis
 
 #product_distribution
+def filter_product_distribution_chart(
+    market_analysis,
+    selected_filter,
+):
+    """
+    Filter Product Distribution charts using selected products.
+
+    The tables remain complete.
+    """
+
+    if isinstance(selected_filter, dict):
+        selected_products = selected_filter.get(
+            "products",
+            selected_filter.get(
+                "product",
+                [],
+            ),
+        )
+    else:
+        selected_products = getattr(
+            selected_filter,
+            "products",
+            getattr(
+                selected_filter,
+                "product",
+                [],
+            ),
+        )
+
+    if isinstance(
+        selected_products,
+        str,
+    ):
+        selected_products = [
+            selected_products
+        ]
+
+    selected_product_keys = {
+        normalize_chart_product_label(
+            product
+        )
+        for product in (
+            selected_products or []
+        )
+        if product
+    }
+
+    if not selected_product_keys:
+        return market_analysis
+
+    section = market_analysis.get(
+        "product_distribution",
+        {},
+    )
+
+    for metric_data in section.values():
+        if not isinstance(
+            metric_data,
+            dict,
+        ):
+            continue
+
+        for period_name in (
+            "monthly",
+            "yearly",
+        ):
+            chart = (
+                metric_data
+                .get(period_name, {})
+                .get("chart", {})
+            )
+
+            series = chart.get(
+                "series",
+                [],
+            )
+
+            if not isinstance(
+                series,
+                list,
+            ):
+                continue
+
+            chart["series"] = [
+                item
+                for item in series
+                if normalize_chart_product_label(
+                    item.get(
+                        "label",
+                        item.get(
+                            "name",
+                            "",
+                        ),
+                    )
+                ) in selected_product_keys
+            ]
+
+    return market_analysis
+
+def normalize_chart_product_label(label):
+    """
+    Examples:
+        Biktarvy          -> biktarvy
+        Biktarvy (Base)   -> biktarvy
+        Biktarvy (test)   -> biktarvy
+    """
+
+    label = str(label or "").strip()
+
+    if "(" in label:
+        label = label.split("(", 1)[0]
+
+    return label.strip().lower()
 
 def recompute_from_product_distribution(
     market_analysis,
     selected_metric,
     edited_rows,
-    selected_filter
+    selected_filter,
 ):
     if selected_metric == "market_volume":
 
@@ -289,11 +748,16 @@ def recompute_from_product_distribution(
             edited_rows,
         )
 
-    else:
+    elif selected_metric == "market_share":
 
         rebuild_product_distribution_from_market_share_edit(
             market_analysis,
             edited_rows,
+        )
+
+    else:
+        raise ValueError(
+            f"Unsupported selected_metric: {selected_metric}"
         )
 
     build_market_product(
@@ -308,19 +772,33 @@ def recompute_from_product_distribution(
         market_analysis,
     )
 
+    # Keep the full product-distribution table, but filter
+    # the chart to the selected products.
+    filter_product_distribution_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+
     rebuild_product_distribution_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
     rebuild_product_market_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
     rebuild_market_product_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
+    )
+
+    # Yearly charts are rebuilt above, so filter again
+    # after yearly recomputation.
+    filter_product_distribution_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
     )
 
     return market_analysis
@@ -330,9 +808,8 @@ def recompute_from_market_product(
     market_analysis,
     selected_metric,
     edited_rows,
-    selected_filter
+    selected_filter,
 ):
-
     if selected_metric == "market_volume":
 
         rebuild_market_product_from_market_volume_edit(
@@ -344,7 +821,7 @@ def recompute_from_market_product(
             market_analysis,
         )
 
-    else:
+    elif selected_metric == "market_share":
 
         rebuild_market_product_from_market_share_edit(
             market_analysis,
@@ -355,21 +832,236 @@ def recompute_from_market_product(
             market_analysis,
         )
 
+    else:
+        raise ValueError(
+            f"Unsupported selected_metric: "
+            f"{selected_metric}"
+        )
+
+    # Rebuild monthly charts.
     rebuild_all_monthly_charts(
         market_analysis,
     )
 
+    # Rebuild yearly tables and charts.
     rebuild_market_product_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
     rebuild_product_market_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
+    )
+
+    # Apply filters only after all rebuilds.
+    filter_market_product_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
+    )
+
+    filter_product_market_chart(
+        market_analysis=market_analysis,
+        selected_filter=selected_filter,
     )
 
     return market_analysis
+
+def filter_market_product_chart(
+    market_analysis,
+    selected_filter,
+):
+    """
+    Filter Channel-Product charts.
+
+    Rules:
+        - Filter by selected market.
+        - Filter by selected products when products are provided.
+        - Apply to both monthly and yearly charts.
+        - Never modify table rows.
+    """
+
+    if isinstance(selected_filter, dict):
+        selected_markets = selected_filter.get(
+            "markets",
+            selected_filter.get("market", []),
+        )
+
+        selected_products = selected_filter.get(
+            "products",
+            selected_filter.get("product", []),
+        )
+    else:
+        selected_markets = getattr(
+            selected_filter,
+            "markets",
+            getattr(selected_filter, "market", []),
+        )
+
+        selected_products = getattr(
+            selected_filter,
+            "products",
+            getattr(selected_filter, "product", []),
+        )
+
+    if isinstance(selected_markets, str):
+        selected_markets = [selected_markets]
+
+    if isinstance(selected_products, str):
+        selected_products = [selected_products]
+
+    selected_market_keys = {
+        normalize_chart_market_label(market)
+        for market in (selected_markets or [])
+        if market
+    }
+
+    selected_product_keys = {
+        normalize_chart_product_label(product)
+        for product in (selected_products or [])
+        if product
+    }
+
+    market_product = market_analysis.get(
+        "market_product",
+        {},
+    )
+
+    for metric_data in market_product.values():
+        if not isinstance(metric_data, dict):
+            continue
+
+        for period_name in (
+            "monthly",
+            "yearly",
+        ):
+            chart = (
+                metric_data
+                .get(period_name, {})
+                .get("chart", {})
+            )
+
+            series = chart.get(
+                "series",
+                [],
+            )
+
+            if not isinstance(series, list):
+                continue
+
+            filtered_series = []
+
+            for item in series:
+                label = item.get(
+                    "label",
+                    item.get("name", ""),
+                )
+
+                market_key, product_key = (
+                    extract_market_product_keys(label)
+                )
+
+                market_matches = (
+                    not selected_market_keys
+                    or market_key in selected_market_keys
+                )
+
+                product_matches = (
+                    not selected_product_keys
+                    or product_key in selected_product_keys
+                )
+
+                if market_matches and product_matches:
+                    filtered_series.append(item)
+
+            chart["series"] = filtered_series
+
+    return market_analysis
+
+def extract_market_product_keys(
+    label,
+):
+    """
+    Converts:
+
+        Retail - Biktarvy
+        Retail - Biktarvy (Base)
+        Non-retail - Descovy (test)
+
+    into:
+
+        ("retail", "biktarvy")
+        ("retail", "biktarvy")
+        ("non-retail", "descovy")
+    """
+
+    label = str(label or "").strip()
+
+    if "(" in label:
+        label = label.split(
+            "(",
+            1,
+        )[0].strip()
+
+    if " - " not in label:
+        return "", ""
+
+    market_label, product_label = label.split(
+        " - ",
+        1,
+    )
+
+    return (
+        normalize_chart_market_label(
+            market_label
+        ),
+        normalize_chart_product_label(
+            product_label
+        ),
+    )
+
+def extract_market_from_market_product_label(
+    label,
+):
+    """
+    Converts:
+
+        Retail - Biktarvy
+        Retail - Descovy (Base)
+        Non-retail - Truvada (test)
+
+    into:
+
+        retail
+        retail
+        non-retail
+    """
+
+    label = str(label or "").strip()
+
+    # Remove scenario suffix.
+    if "(" in label:
+        label = label.split("(", 1)[0].strip()
+
+    if " - " not in label:
+        return ""
+
+    market, _ = label.split(
+        " - ",
+        1,
+    )
+
+    return normalize_chart_market_label(
+        market
+    )
+
+def normalize_chart_market_label(label):
+    label = str(label or "").strip()
+
+    if "(" in label:
+        label = label.split("(", 1)[0]
+
+    return label.strip().lower()
 
 #product_market
 def recompute_from_product_market(
@@ -654,84 +1346,93 @@ def build_market_distribution(market_analysis):
 
     return market_analysis
 
-def rebuild_market_distribution_volume(market_analysis):
+def rebuild_market_distribution_volume(
+    market_analysis,
+):
+    market_distribution = (
+        market_analysis["market_distribution"]
+    )
 
-    print("\n--- Rebuilding Market Distribution Volume ---")
-
-    # Total Market Volume
-    tmv_values = (
+    total_volume_rows = (
         market_analysis["total_market_volume"]
-        ["market_volume"]
-        ["monthly"]
-        ["table"]
-        ["rows"][0]["values"]
+        ["market_volume"]["monthly"]
+        ["table"]["rows"]
     )
 
-    # Market Distribution Volume
-    volume_rows = (
-        market_analysis["market_distribution"]
-        ["market_volume"]
-        ["monthly"]
-        ["table"]
-        ["rows"]
+    market_share_rows = (
+        market_distribution["market_share"]
+        ["monthly"]["table"]["rows"]
     )
 
-    # Market Distribution Share
-    share_rows = (
-        market_analysis["market_distribution"]
-        ["market_share"]
-        ["monthly"]
-        ["table"]
-        ["rows"]
+    market_volume_rows = (
+        market_distribution["market_volume"]
+        ["monthly"]["table"]["rows"]
     )
 
-    # -----------------------------
-    # Overall
-    # -----------------------------
-    volume_rows[0]["values"] = tmv_values.copy()
+    overall_row = find_row(
+        total_volume_rows,
+        "Overall",
+    )
 
-    # -----------------------------
-    # Retail & Non-retail
-    # -----------------------------
-    for row_index in [1, 2]:
+    if not overall_row and total_volume_rows:
+        overall_row = total_volume_rows[0]
 
-        for month_index in range(len(tmv_values)):
+    if not overall_row:
+        raise ValueError(
+            "Overall market volume row not found"
+        )
 
-            volume_rows[row_index]["values"][month_index] = round(
-                tmv_values[month_index]
-                * share_rows[row_index]["values"][month_index]
+    total_values = overall_row.get(
+        "values",
+        [],
+    )
+
+    for share_row in market_share_rows:
+
+        label = normalize_label(
+            share_row.get("label")
+        )
+
+        if label == "overall":
+            continue
+
+        volume_row = find_row(
+            market_volume_rows,
+            share_row.get("label"),
+        )
+
+        if not volume_row:
+            continue
+
+        share_values = share_row.get(
+            "values",
+            [],
+        )
+
+        recalculated_values = []
+
+        for total_value, share_value in zip(
+            total_values,
+            share_values,
+        ):
+            if (
+                total_value is None
+                or share_value is None
+            ):
+                recalculated_values.append(None)
+                continue
+
+            volume = (
+                float(total_value)
+                * float(share_value)
                 / 100
             )
 
-    # -----------------------------
-    # Non-retail Children
-    # -----------------------------
-    parent_volume = volume_rows[2]["values"]
+            recalculated_values.append(volume)
 
-    children_volume = volume_rows[2]["children"]
-    children_share = share_rows[2]["children"]
+        volume_row["values"] = recalculated_values
 
-    for child_index in range(len(children_volume)):
-
-        for month_index in range(len(parent_volume)):
-
-            children_volume[child_index]["values"][month_index] = round(
-                parent_volume[month_index]
-                * children_share[child_index]["values"][month_index]
-                / 100
-            )
-
-    # -----------------------------
-    # Testing
-    # -----------------------------
-    print("Overall :", volume_rows[0]["values"][:5])
-    print("Retail :", volume_rows[1]["values"][:5])
-    print("Non-retail :", volume_rows[2]["values"][:5])
-
-    print("Kaiser :", children_volume[0]["values"][:5])
-    print("IQVIA :", children_volume[1]["values"][:5])
-    print("ADAP :", children_volume[2]["values"][:5])
-    print("Federal :", children_volume[3]["values"][:5])
+    return market_analysis
 
 def rebuild_market_distribution_share(market_analysis):
 
@@ -1457,148 +2158,206 @@ def rebuild_market_distribution_from_market_volume_edit(
 
 def rebuild_market_distribution_from_market_share_edit(
     market_analysis,
+    original_market_analysis,
     edited_rows,
 ):
-    print("\n--- Rebuilding Market Distribution (Share Edit) ---")
-
-    edited_labels = get_edited_labels(edited_rows)
-
-    volume_rows = (
+    submitted_rows = (
         market_analysis["market_distribution"]
-        ["market_volume"]
-        ["monthly"]
-        ["table"]
-        ["rows"]
+        ["market_share"]["monthly"]
+        ["table"]["rows"]
     )
 
-    share_rows = (
-        market_analysis["market_distribution"]
-        ["market_share"]
-        ["monthly"]
-        ["table"]
-        ["rows"]
+    original_rows = (
+        original_market_analysis["market_distribution"]
+        ["market_share"]["monthly"]
+        ["table"]["rows"]
     )
 
-    overall_volume_row = find_row(volume_rows, "Overall")
-    retail_volume_row = find_row(volume_rows, "Retail")
-    non_retail_volume_row = find_row(volume_rows, "Non-retail")
+    submitted_overall = find_row_label(
+        submitted_rows,
+        "Overall",
+    )
 
-    retail_share_row = find_row(share_rows, "Retail")
-    non_retail_share_row = find_row(share_rows, "Non-retail")
+    original_overall = find_row_label(
+        original_rows,
+        "Overall",
+    )
 
-    required_rows = {
-        "Overall market volume": overall_volume_row,
-        "Retail market volume": retail_volume_row,
-        "Non-retail market volume": non_retail_volume_row,
-        "Retail market share": retail_share_row,
-        "Non-retail market share": non_retail_share_row,
-    }
-
-    for row_name, row in required_rows.items():
-        if row is None:
-            raise ValueError(f"{row_name} row is missing.")
-
-    overall = overall_volume_row["values"]
-
-    retail_volume = retail_volume_row["values"]
-    non_retail_volume = non_retail_volume_row["values"]
-
-    retail_share = retail_share_row["values"]
-    non_retail_share = non_retail_share_row["values"]
-
-    # --------------------------------------------------
-    # Parent shares
-    # --------------------------------------------------
-
-    if "Retail" in edited_labels:
-
-        for month_index in range(len(overall)):
-            non_retail_share[month_index] = round(
-                100 - retail_share[month_index],
-                2,
-            )
-
-    elif "Non-retail" in edited_labels:
-
-        for month_index in range(len(overall)):
-            retail_share[month_index] = round(
-                100 - non_retail_share[month_index],
-                2,
-            )
-
-    # --------------------------------------------------
-    # Parent volumes
-    # --------------------------------------------------
-
-    for month_index in range(len(overall)):
-
-        retail_volume[month_index] = round(
-            overall[month_index]
-            * retail_share[month_index]
-            / 100
+    if submitted_overall is None:
+        raise ValueError(
+            "Submitted Overall row was not found."
         )
 
-        non_retail_volume[month_index] = (
-            overall[month_index]
-            - retail_volume[month_index]
+    if original_overall is None:
+        raise ValueError(
+            "Original Overall row was not found."
         )
 
-    # --------------------------------------------------
-    # Rebuild Non-retail children volumes
-    # --------------------------------------------------
+    for edited_label in edited_rows:
 
-    children_volume = non_retail_volume_row.get(
-        "children",
-        [],
-    )
+        # --------------------------------------------------
+        # 1. Check whether the edited row is a top-level row
+        #    such as Retail or Non-retail.
+        # --------------------------------------------------
+        submitted_top_level = find_row_label(
+            submitted_rows,
+            edited_label,
+        )
 
-    children_share = non_retail_share_row.get(
-        "children",
-        [],
-    )
+        original_top_level = find_row_label(
+            original_rows,
+            edited_label,
+        )
 
-    share_by_label = {
-        child.get("label"): child
-        for child in children_share
-    }
+        if (
+            submitted_top_level is not None
+            and submitted_top_level is not submitted_overall
+        ):
+            if original_top_level is None:
+                raise ValueError(
+                    f"Original edited row not found: "
+                    f"{edited_label}"
+                )
 
-    for child_volume in children_volume:
+            changed_indexes = get_changed_indexes(
+                original_values=original_top_level.get(
+                    "values",
+                    [],
+                ),
+                submitted_values=submitted_top_level.get(
+                    "values",
+                    [],
+                ),
+            )
 
-        child_label = child_volume.get("label")
-        child_share_row = share_by_label.get(child_label)
+            if not changed_indexes:
+                continue
 
-        if not child_share_row:
+            market_rows = [
+                row
+                for row in submitted_rows
+                if str(
+                    row.get("label", "")
+                ).strip().lower()
+                in {
+                    "retail",
+                    "non-retail",
+                }
+            ]
+
+            logical_overall_parent = {
+                "label": submitted_overall.get(
+                    "label",
+                    "Overall",
+                ),
+                "values": submitted_overall.get(
+                    "values",
+                    [],
+                ),
+                "children": market_rows,
+            }
+
+            # 1. Keep the edited market fixed and recalculate
+            #    the other top-level market.
+            #
+            #    Non-retail = 90
+            #    Retail = 10
+            normalize_children_to_parent(
+                parent_row=logical_overall_parent,
+                edited_child=submitted_top_level,
+                edited_indexes=changed_indexes,
+            )
+
+            # 2. Scale the edited market's children so they
+            #    add up to the new market value.
+            #
+            #    IQVIA + Kaiser + ADAP + Federal = 90
+            normalize_all_children_to_parent(
+                parent_row=submitted_top_level,
+                edited_indexes=changed_indexes,
+            )
+
             continue
 
-        child_values = child_volume["values"]
-        child_shares = child_share_row["values"]
+        # --------------------------------------------------
+        # 2. Otherwise search inside market children.
+        #    Example: IQVIA, Kaiser, ADAP, Federal.
+        # --------------------------------------------------
+        submitted_parent = None
+        submitted_child = None
+        original_child = None
 
-        for month_index in range(len(overall)):
-
-            child_values[month_index] = round(
-                non_retail_volume[month_index]
-                * child_shares[month_index]
-                / 100
+        for parent_row in submitted_rows:
+            child = find_row_label(
+                parent_row.get("children", []),
+                edited_label,
             )
 
-    rebuild_market_distribution_share(
-        market_analysis
-    )
+            if child is not None:
+                submitted_parent = parent_row
+                submitted_child = child
+                break
+
+        for parent_row in original_rows:
+            child = find_row_label(
+                parent_row.get("children", []),
+                edited_label,
+            )
+
+            if child is not None:
+                original_child = child
+                break
+
+        if submitted_child is None:
+            raise ValueError(
+                f"Submitted edited row not found: "
+                f"{edited_label}"
+            )
+
+        if original_child is None:
+            raise ValueError(
+                f"Original edited row not found: "
+                f"{edited_label}"
+            )
+
+        changed_indexes = get_changed_indexes(
+            original_values=original_child.get(
+                "values",
+                [],
+            ),
+            submitted_values=submitted_child.get(
+                "values",
+                [],
+            ),
+        )
+
+        if not changed_indexes:
+            continue
+
+        normalize_children_to_parent(
+            parent_row=submitted_parent,
+            edited_child=submitted_child,
+            edited_indexes=changed_indexes,
+        )
 
     return market_analysis
 
 from app.hiv_treat.services.chart_builder import build_chart_from_table
 
 #charts rebuild
-def rebuild_all_monthly_charts(market_analysis):
-
-    for section_name, section in market_analysis.items():
-
+def rebuild_all_monthly_charts(
+    market_analysis,
+):
+    for section_name, section in (
+        market_analysis.items()
+    ):
         if not isinstance(section, dict):
             continue
 
-        for metric in ["market_volume", "market_share"]:
-
+        for metric in (
+            "market_volume",
+            "market_share",
+        ):
             if metric not in section:
                 continue
 
@@ -1612,14 +2371,676 @@ def rebuild_all_monthly_charts(market_analysis):
             if "table" not in monthly:
                 continue
 
-            existing_chart = monthly.get("chart", {})
+            existing_chart = monthly.get(
+                "chart",
+                {},
+            )
 
-            monthly["chart"] = build_chart_from_table(
-                monthly["table"],
-                existing_chart,
+            if section_name == "market_product":
+                monthly["chart"] = (
+                    build_market_product_chart_from_table(
+                        table=monthly["table"],
+                        existing_chart=existing_chart,
+                    )
+                )
+
+            elif section_name == "product_market":
+                monthly["chart"] = (
+                    build_product_market_chart_from_table(
+                        table=monthly["table"],
+                        existing_chart=existing_chart,
+                    )
+                )
+
+            else:
+                monthly["chart"] = build_chart_from_table(
+                    monthly["table"],
+                    existing_chart,
+                )
+
+    return market_analysis
+
+def build_market_product_chart_from_table(
+    table,
+    existing_chart,
+):
+    """
+    Builds Channel-Product chart series.
+
+    Table:
+        Retail
+            Biktarvy
+            Descovy
+            Truvada
+
+        Non-retail
+            Biktarvy
+            Descovy
+            Truvada
+
+    Chart:
+        Retail - Biktarvy
+        Retail - Descovy
+        Retail - Truvada
+        Non-retail - Biktarvy
+        Non-retail - Descovy
+        Non-retail - Truvada
+    """
+
+    forecast_start_index = existing_chart.get(
+        "forecast_start_index",
+        0,
+    )
+
+    series = []
+
+    for market_row in table.get("rows", []):
+        market_label = market_row.get(
+            "label",
+            "",
+        )
+
+        if normalize_row_label(
+            market_label
+        ) == "overall":
+            continue
+
+        for product_row in market_row.get(
+            "children",
+            [],
+        ):
+            product_label = product_row.get(
+                "label",
+                "",
+            )
+
+            values = product_row.get(
+                "values",
+                [],
+            )
+
+            history = values[
+                :forecast_start_index
+            ]
+
+            forecast = values[
+                forecast_start_index:
+            ]
+
+            series.append(
+                {
+                    "label": (
+                        f"{market_label} - "
+                        f"{product_label}"
+                    ),
+                    "history": history,
+                    "forecast": forecast,
+                }
+            )
+
+    return {
+        **existing_chart,
+        "series": series,
+    }
+
+def build_product_market_chart_from_table(
+    table,
+    existing_chart,
+):
+    """
+    Builds Product-Channel chart series.
+
+    Table:
+        Biktarvy
+            Retail
+            Non-retail
+
+    Chart:
+        Biktarvy - Retail
+        Biktarvy - Non-retail
+    """
+
+    forecast_start_index = existing_chart.get(
+        "forecast_start_index",
+        0,
+    )
+
+    series = []
+
+    for product_row in table.get("rows", []):
+        product_label = product_row.get(
+            "label",
+            "",
+        )
+
+        if normalize_row_label(
+            product_label
+        ) == "overall":
+            continue
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+            market_label = market_row.get(
+                "label",
+                "",
+            )
+
+            values = market_row.get(
+                "values",
+                [],
+            )
+
+            history = values[
+                :forecast_start_index
+            ]
+
+            forecast = values[
+                forecast_start_index:
+            ]
+
+            series.append(
+                {
+                    "label": (
+                        f"{product_label} - "
+                        f"{market_label}"
+                    ),
+                    "history": history,
+                    "forecast": forecast,
+                }
+            )
+
+    return {
+        **existing_chart,
+        "series": series,
+    }
+
+def rebuild_market_distribution_child_volumes(
+    market_analysis,
+):
+    """
+    Recalculate child/source volumes.
+
+    Child shares are stored as overall-market percentages.
+
+    Example:
+
+        Overall volume = 1000
+        Non-retail share = 80%
+        IQVIA share = 30%
+
+        Non-retail volume = 1000 * 80 / 100 = 800
+        IQVIA volume = 1000 * 30 / 100 = 300
+
+    Children must sum to the parent volume because their shares
+    sum to the parent share.
+    """
+
+    market_distribution = (
+        market_analysis["market_distribution"]
+    )
+
+    total_volume_rows = (
+        market_analysis["total_market_volume"]
+        ["market_volume"]["monthly"]
+        ["table"]["rows"]
+    )
+
+    volume_rows = (
+        market_distribution["market_volume"]
+        ["monthly"]["table"]["rows"]
+    )
+
+    share_rows = (
+        market_distribution["market_share"]
+        ["monthly"]["table"]["rows"]
+    )
+
+    overall_row = find_row(
+        total_volume_rows,
+        "Overall",
+    )
+
+    if not overall_row and total_volume_rows:
+        overall_row = total_volume_rows[0]
+
+    if not overall_row:
+        raise ValueError(
+            "Overall market volume row not found."
+        )
+
+    total_values = overall_row.get("values", [])
+
+    for volume_parent in volume_rows:
+        parent_label = normalize_label(
+            volume_parent.get("label")
+        )
+
+        if parent_label == "overall":
+            continue
+
+        volume_children = volume_parent.get(
+            "children",
+            [],
+        )
+
+        if not volume_children:
+            continue
+
+        share_parent = find_row_label(
+            share_rows,
+            volume_parent.get("label"),
+        )
+
+        if not share_parent:
+            continue
+
+        share_children = share_parent.get(
+            "children",
+            [],
+        )
+
+        for volume_child in volume_children:
+            share_child = find_row_label(
+                share_children,
+                volume_child.get("label"),
+            )
+
+            if not share_child:
+                continue
+
+            child_shares = share_child.get(
+                "values",
+                [],
+            )
+
+            recalculated_values = []
+
+            for total_value, child_share in zip(
+                total_values,
+                child_shares,
+            ):
+                if (
+                    total_value is None
+                    or child_share is None
+                ):
+                    recalculated_values.append(None)
+                    continue
+
+                child_volume = round(
+                    float(total_value)
+                    * float(child_share)
+                    / 100,
+                    0,
+                )
+
+                recalculated_values.append(
+                    child_volume
+                )
+
+            volume_child["values"] = (
+                recalculated_values
             )
 
     return market_analysis
+
+def rebuild_market_distribution_child_shares(
+    market_analysis,
+):
+    """
+    Convert child shares from parent-level percentages into
+    overall-market percentages.
+
+    Example:
+        Non-retail = 80%
+        IQVIA internal share = 21.27%
+
+        IQVIA overall share = 80 * 21.27 / 100
+    """
+
+    rows = (
+        market_analysis["market_distribution"]
+        ["market_share"]
+        ["monthly"]
+        ["table"]
+        ["rows"]
+    )
+
+    for parent_row in rows:
+        parent_label = normalize_label(
+            parent_row.get("label")
+        )
+
+        if parent_label == "overall":
+            continue
+
+        children = parent_row.get("children", [])
+
+        if not children:
+            continue
+
+        parent_values = parent_row.get("values", [])
+
+        for child in children:
+            # Preserve the source's original internal split.
+            internal_values = child.get(
+                "_internal_share_values"
+            )
+
+            if internal_values is None:
+                internal_values = list(
+                    child.get("values", [])
+                )
+
+                child["_internal_share_values"] = (
+                    internal_values
+                )
+
+            child["values"] = [
+                (
+                    float(parent_share)
+                    * float(internal_share)
+                    / 100
+                )
+                if (
+                    parent_share is not None
+                    and internal_share is not None
+                )
+                else None
+                for parent_share, internal_share in zip(
+                    parent_values,
+                    internal_values,
+                )
+            ]
+
+    return market_analysis
+
+def normalize_children_to_parent(
+    parent_row,
+    edited_child,
+    edited_indexes,
+):
+    """
+    Keeps the edited child fixed.
+
+    Redistributes the remaining parent share proportionally
+    across the other children only for the edited months.
+
+    All values are rounded to 2 decimal places.
+
+    For every edited month:
+        sum(children) == parent value
+    """
+
+    children = parent_row.get("children", [])
+    parent_values = parent_row.get("values", [])
+    edited_values = edited_child.get("values", [])
+
+    siblings = [
+        child
+        for child in children
+        if child is not edited_child
+    ]
+
+    if len(parent_values) != len(edited_values):
+        raise ValueError(
+            f"Parent and edited child value lengths do not match "
+            f"for {edited_child.get('label')}."
+        )
+
+    for index in edited_indexes:
+        if index < 0 or index >= len(parent_values):
+            raise ValueError(
+                f"Invalid edited index {index} for "
+                f"{edited_child.get('label')}."
+            )
+
+        parent_value = parent_values[index]
+        edited_value = edited_values[index]
+
+        if parent_value is None or edited_value is None:
+            continue
+
+        parent_value = round(float(parent_value), 2)
+        edited_value = round(float(edited_value), 2)
+
+        if edited_value < 0:
+            raise ValueError(
+                f"{edited_child.get('label')} cannot be negative."
+            )
+
+        if edited_value > parent_value:
+            raise ValueError(
+                f"{edited_child.get('label')} value "
+                f"{edited_value} cannot exceed parent "
+                f"{parent_row.get('label')} value "
+                f"{parent_value}."
+            )
+
+        # Keep the edited cell fixed.
+        edited_child["values"][index] = edited_value
+
+        remaining_value = round(
+            parent_value - edited_value,
+            2,
+        )
+
+        if not siblings:
+            if abs(remaining_value) > 0.01:
+                raise ValueError(
+                    f"{edited_child.get('label')} must equal "
+                    f"its parent value."
+                )
+
+            continue
+
+        sibling_total = sum(
+            float(
+                sibling.get("values", [])[index] or 0
+            )
+            for sibling in siblings
+        )
+
+        if sibling_total <= 0:
+            equal_value = round(
+                remaining_value / len(siblings),
+                2,
+            )
+
+            for sibling in siblings:
+                sibling["values"][index] = equal_value
+
+        else:
+            for sibling in siblings:
+                old_value = float(
+                    sibling.get("values", [])[index] or 0
+                )
+
+                recalculated_value = (
+                    old_value
+                    / sibling_total
+                    * remaining_value
+                )
+
+                sibling["values"][index] = round(
+                    recalculated_value,
+                    2,
+                )
+
+        # Correct rounding difference using the final sibling.
+        current_sibling_total = round(
+            sum(
+                float(sibling["values"][index])
+                for sibling in siblings
+            ),
+            2,
+        )
+
+        rounding_difference = round(
+            remaining_value - current_sibling_total,
+            2,
+        )
+
+        siblings[-1]["values"][index] = round(
+            float(siblings[-1]["values"][index])
+            + rounding_difference,
+            2,
+        )
+
+        # Final safety correction.
+        final_children_total = round(
+            float(edited_child["values"][index])
+            + sum(
+                float(sibling["values"][index])
+                for sibling in siblings
+            ),
+            2,
+        )
+
+        final_difference = round(
+            parent_value - final_children_total,
+            2,
+        )
+
+        if final_difference != 0:
+            siblings[-1]["values"][index] = round(
+                float(siblings[-1]["values"][index])
+                + final_difference,
+                2,
+            )
+
+    return parent_row
+
+def normalize_all_children_to_parent(
+    parent_row,
+    edited_indexes,
+):
+    """
+    Redistributes all children proportionally so their total
+    equals the parent value for the specified month indexes.
+
+    Example:
+        Old parent = 80
+        Children = [30, 20, 20, 10]
+
+        New parent = 90
+        Children = [33.75, 22.50, 22.50, 11.25]
+    """
+
+    children = parent_row.get("children", [])
+    parent_values = parent_row.get("values", [])
+
+    if not children:
+        return parent_row
+
+    for index in edited_indexes:
+        if index < 0 or index >= len(parent_values):
+            raise ValueError(
+                f"Invalid edited index {index} for "
+                f"{parent_row.get('label')}."
+            )
+
+        parent_value = parent_values[index]
+
+        if parent_value is None:
+            continue
+
+        parent_value = round(
+            float(parent_value),
+            2,
+        )
+
+        if parent_value < 0:
+            raise ValueError(
+                f"{parent_row.get('label')} cannot be negative."
+            )
+
+        child_total = 0.0
+
+        for child in children:
+            child_values = child.get("values", [])
+
+            if index >= len(child_values):
+                raise ValueError(
+                    f"Child value length does not match parent "
+                    f"for {child.get('label')}."
+                )
+
+            child_total += float(
+                child_values[index] or 0
+            )
+
+        # When all existing child values are zero,
+        # distribute the parent equally.
+        if child_total <= 0:
+            equal_value = round(
+                parent_value / len(children),
+                2,
+            )
+
+            for child in children:
+                child["values"][index] = equal_value
+
+        else:
+            for child in children:
+                old_value = float(
+                    child["values"][index] or 0
+                )
+
+                recalculated_value = (
+                    old_value
+                    / child_total
+                    * parent_value
+                )
+
+                child["values"][index] = round(
+                    recalculated_value,
+                    2,
+                )
+
+        # Correct rounding difference using the last child.
+        current_total = round(
+            sum(
+                float(child["values"][index])
+                for child in children
+            ),
+            2,
+        )
+
+        rounding_difference = round(
+            parent_value - current_total,
+            2,
+        )
+
+        children[-1]["values"][index] = round(
+            float(children[-1]["values"][index])
+            + rounding_difference,
+            2,
+        )
+
+        # Final validation.
+        final_total = round(
+            sum(
+                float(child["values"][index])
+                for child in children
+            ),
+            2,
+        )
+
+        if final_total != parent_value:
+            final_difference = round(
+                parent_value - final_total,
+                2,
+            )
+
+            children[-1]["values"][index] = round(
+                float(children[-1]["values"][index])
+                + final_difference,
+                2,
+            )
+
+    return parent_row
 
 #product distribution rebuild
 def rebuild_product_distribution_from_market_volume_edit(
@@ -2541,214 +3962,2387 @@ def rebuild_market_product_tab_from_product_market(
         market_analysis
     )
 
+from copy import deepcopy
+
+
 def rebuild_market_distribution_yearly(
     market_analysis,
     selected_filter,
 ):
+    """
+    Rebuilds yearly Market Distribution.
 
-    month_labels = get_month_labels(
-        selected_filter["start_date"],
-        len(
-            market_analysis["market_distribution"]
-            ["market_volume"]["monthly"]["table"]["rows"][0]["values"]
-        ),
+    Yearly volume:
+        Sum monthly volumes by year.
+
+    Yearly share:
+        Overall = 100
+
+        Retail / Non-retail:
+            yearly market volume
+            -------------------- × 100
+            yearly overall volume
+
+        Child sources:
+            yearly source volume
+            -------------------- × 100
+            yearly parent-market volume
+    """
+
+    if isinstance(selected_filter, dict):
+        start_date = selected_filter.get(
+            "start_date"
+        )
+    else:
+        start_date = getattr(
+            selected_filter,
+            "start_date",
+            None,
+        )
+
+    section = market_analysis.get(
+        "market_distribution",
+        {},
     )
 
-    # ==========================================================
-    # Yearly Market Volume
-    # ==========================================================
+    monthly_volume_table = (
+        section
+        .get("market_volume", {})
+        .get("monthly", {})
+        .get("table", {})
+    )
+
+    month_count = get_table_month_count(
+        monthly_volume_table
+    )
+
+    if month_count == 0:
+        return market_analysis
+
+    month_labels = get_month_labels(
+        start_date,
+        month_count,
+    )
+
+    # ======================================================
+    # 1. Yearly market volume
+    # ======================================================
 
     yearly_volume_table = build_yearly_table(
-        market_analysis["market_distribution"]["market_volume"]["monthly"]["table"],
+        monthly_volume_table,
         month_labels,
     )
 
-    market_analysis["market_distribution"]["market_volume"]["yearly"]["table"] = (
-        yearly_volume_table
+    volume_metric = section.setdefault(
+        "market_volume",
+        {},
     )
 
-    market_analysis["market_distribution"]["market_volume"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
+    volume_yearly = volume_metric.setdefault(
+        "yearly",
+        {},
+    )
+
+    existing_volume_chart = deepcopy(
+        volume_yearly.get(
+            "chart",
+            {},
+        )
+    )
+
+    volume_yearly["table"] = yearly_volume_table
+
+    volume_yearly["chart"] = (
+        rebuild_market_distribution_yearly_chart(
+            yearly_table=yearly_volume_table,
+            existing_chart=existing_volume_chart,
+        )
+    )
+
+    # ======================================================
+    # 2. Yearly market share from yearly volume
+    # ======================================================
+
+    yearly_share_table = (
+        build_market_distribution_yearly_share_table(
             yearly_volume_table
         )
     )
 
-    # ==========================================================
-    # Yearly Market Share
-    # ==========================================================
-
-    yearly_share_table = build_yearly_table(
-        market_analysis["market_distribution"]["market_share"]["monthly"]["table"],
-        month_labels,
+    share_metric = section.setdefault(
+        "market_share",
+        {},
     )
 
-    market_analysis["market_distribution"]["market_share"]["yearly"]["table"] = (
-        yearly_share_table
+    share_yearly = share_metric.setdefault(
+        "yearly",
+        {},
     )
 
-    market_analysis["market_distribution"]["market_share"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
-            yearly_share_table
+    existing_share_chart = deepcopy(
+        share_yearly.get(
+            "chart",
+            {},
+        )
+    )
+
+    share_yearly["table"] = yearly_share_table
+
+    share_yearly["chart"] = (
+        rebuild_market_distribution_yearly_chart(
+            yearly_table=yearly_share_table,
+            existing_chart=existing_share_chart,
         )
     )
 
     return market_analysis
+
+def build_market_distribution_yearly_share_table(
+    yearly_volume_table,
+):
+    """
+    Creates the yearly Market Distribution share hierarchy.
+
+    Example:
+
+        Overall = 100
+
+        Retail =
+            Retail volume / Overall volume × 100
+
+        Non-retail =
+            Non-retail volume / Overall volume × 100
+
+        IQVIA =
+            IQVIA volume / Non-retail volume × 100
+    """
+
+    volume_rows = yearly_volume_table.get(
+        "rows",
+        [],
+    )
+
+    if not volume_rows:
+        return {
+            "type": "hierarchy",
+            "rows": [],
+        }
+
+    overall_row = find_table_row(
+        volume_rows,
+        "Overall",
+    )
+
+    if overall_row is None:
+        raise ValueError(
+            "Overall row not found in yearly "
+            "Market Distribution volume table."
+        )
+
+    overall_values = list(
+        overall_row.get(
+            "values",
+            [],
+        )
+    )
+
+    year_count = len(overall_values)
+
+    share_rows = [
+        {
+            "label": "Overall",
+            "values": [
+                100.0
+                for _ in range(year_count)
+            ],
+            "children": [],
+        }
+    ]
+
+    for market_row in volume_rows:
+        market_label = str(
+            market_row.get(
+                "label",
+                "",
+            )
+        ).strip()
+
+        if normalize_chart_market_label(
+            market_label
+        ) == "overall":
+            continue
+
+        market_values = list(
+            market_row.get(
+                "values",
+                [],
+            )
+        )
+
+        market_share_values = calculate_percentage_values(
+            numerator_values=market_values,
+            denominator_values=overall_values,
+        )
+
+        market_share_row = {
+            "label": market_label,
+            "values": market_share_values,
+            "children": [],
+        }
+
+        for source_row in market_row.get(
+            "children",
+            [],
+        ):
+            source_label = str(
+                source_row.get(
+                    "label",
+                    "",
+                )
+            ).strip()
+
+            source_values = list(
+                source_row.get(
+                    "values",
+                    [],
+                )
+            )
+
+            source_share_values = (
+                calculate_percentage_values(
+                    numerator_values=source_values,
+                    denominator_values=market_values,
+                )
+            )
+
+            market_share_row["children"].append(
+                {
+                    "label": source_label,
+                    "values": source_share_values,
+                }
+            )
+
+        share_rows.append(
+            market_share_row
+        )
+
+    return {
+        "type": "hierarchy",
+        "rows": share_rows,
+    }
+
+def calculate_percentage_values(
+    numerator_values,
+    denominator_values,
+    decimals=2,
+):
+    result = []
+
+    value_count = max(
+        len(numerator_values),
+        len(denominator_values),
+    )
+
+    for index in range(value_count):
+        numerator = (
+            numerator_values[index]
+            if index < len(numerator_values)
+            else 0
+        )
+
+        denominator = (
+            denominator_values[index]
+            if index < len(denominator_values)
+            else 0
+        )
+
+        if denominator in (
+            None,
+            0,
+        ):
+            result.append(0.0)
+            continue
+
+        percentage = (
+            float(numerator)
+            / float(denominator)
+            * 100
+        )
+
+        result.append(
+            round(
+                percentage,
+                decimals,
+            )
+        )
+
+    return result
+
+
+def find_table_row(
+    rows,
+    target_label,
+):
+    target_key = normalize_chart_market_label(
+        target_label
+    )
+
+    for row in rows:
+        row_key = normalize_chart_market_label(
+            row.get(
+                "label",
+                "",
+            )
+        )
+
+        if row_key == target_key:
+            return row
+
+    return None
+
+def rebuild_market_distribution_yearly_chart(
+    yearly_table,
+    existing_chart,
+):
+    """
+    Updates Market Distribution yearly chart values while
+    preserving frontend chart metadata.
+
+    Chart series:
+        Overall
+        Retail
+        Non-retail
+
+    Child sources remain only in the table.
+    """
+
+    chart = deepcopy(
+        existing_chart or {}
+    )
+
+    calculated_series = {}
+
+    for row in yearly_table.get(
+        "rows",
+        [],
+    ):
+        row_label = str(
+            row.get(
+                "label",
+                "",
+            )
+        ).strip()
+
+        if not row_label:
+            continue
+
+        calculated_series[
+            normalize_chart_market_label(
+                row_label
+            )
+        ] = {
+            "label": row_label,
+            "values": list(
+                row.get(
+                    "values",
+                    [],
+                )
+            ),
+        }
+
+    existing_series = chart.get(
+        "series",
+        [],
+    )
+
+    rebuilt_series = []
+
+    for existing_item in existing_series:
+        if not isinstance(
+            existing_item,
+            dict,
+        ):
+            continue
+
+        existing_label = existing_item.get(
+            "label",
+            existing_item.get(
+                "name",
+                "",
+            ),
+        )
+
+        market_key = normalize_chart_market_label(
+            existing_label
+        )
+
+        calculated_item = calculated_series.get(
+            market_key
+        )
+
+        if calculated_item is None:
+            continue
+
+        rebuilt_item = deepcopy(
+            existing_item
+        )
+
+        update_chart_series_values(
+            series_item=rebuilt_item,
+            values=calculated_item["values"],
+        )
+
+        rebuilt_series.append(
+            rebuilt_item
+        )
+
+    # Fallback if the existing chart contains no series.
+    if not rebuilt_series:
+        for calculated_item in (
+            calculated_series.values()
+        ):
+            rebuilt_series.append(
+                {
+                    "label": calculated_item[
+                        "label"
+                    ],
+                    "values": calculated_item[
+                        "values"
+                    ],
+                }
+            )
+
+    chart["series"] = rebuilt_series
+
+    return chart
+
+from collections import OrderedDict
+from datetime import datetime
+
+def correct_children_to_parent(
+    children,
+    parent_values,
+):
+    """
+    Ensures rounded child values add up exactly to the parent
+    value for every yearly column.
+
+    The last child absorbs any rounding difference.
+    """
+
+    if not children:
+        return children
+
+    for index, parent_value in enumerate(parent_values):
+        parent_value = round(
+            float(parent_value or 0),
+            2,
+        )
+
+        current_total = 0.0
+
+        for child in children:
+            child_values = child.get("values", [])
+
+            if index >= len(child_values):
+                raise ValueError(
+                    f"Value length mismatch for child "
+                    f"'{child.get('label')}'."
+                )
+
+            current_total += float(
+                child_values[index] or 0
+            )
+
+        current_total = round(
+            current_total,
+            2,
+        )
+
+        difference = round(
+            parent_value - current_total,
+            2,
+        )
+
+        last_child = children[-1]
+
+        last_child["values"][index] = round(
+            float(
+                last_child["values"][index] or 0
+            )
+            + difference,
+            2,
+        )
+
+        # Final safety check.
+        final_total = round(
+            sum(
+                float(
+                    child["values"][index] or 0
+                )
+                for child in children
+            ),
+            2,
+        )
+
+        if final_total != parent_value:
+            final_difference = round(
+                parent_value - final_total,
+                2,
+            )
+
+            last_child["values"][index] = round(
+                float(
+                    last_child["values"][index] or 0
+                )
+                + final_difference,
+                2,
+            )
+
+    return children
+
+
+def group_month_indexes_by_year(
+    month_labels,
+):
+    """
+    Groups indexes by calendar year.
+
+    Supports labels such as:
+        Jan-24
+        2024-01-01
+        2024-01
+    """
+
+    year_groups = OrderedDict()
+
+    for index, month_label in enumerate(
+        month_labels
+    ):
+        year = extract_year_from_month_label(
+            month_label
+        )
+
+        year_groups.setdefault(
+            year,
+            [],
+        ).append(index)
+
+    return year_groups
+
+def extract_year_from_month_label(
+    month_label,
+):
+    if hasattr(month_label, "year"):
+        return str(
+            month_label.year
+        )
+
+    value = str(
+        month_label
+    ).strip()
+
+    for date_format in (
+        "%b-%y",
+        "%Y-%m-%d",
+        "%Y-%m",
+        "%b %Y",
+    ):
+        try:
+            parsed_date = datetime.strptime(
+                value,
+                date_format,
+            )
+
+            return str(
+                parsed_date.year
+            )
+
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"Unsupported month label: "
+        f"{month_label}"
+    )
+
+def aggregate_values_by_year(
+    values,
+    year_groups,
+):
+    yearly_values = []
+
+    for indexes in year_groups.values():
+        yearly_total = sum(
+            float(
+                values[index] or 0
+            )
+            for index in indexes
+            if index < len(values)
+        )
+
+        yearly_values.append(
+            yearly_total
+        )
+
+    return yearly_values
+
+def find_row_by_label(
+    rows,
+    label,
+):
+    target = normalize_row_label(
+        label
+    )
+
+    for row in rows:
+        if normalize_row_label(
+            row.get("label")
+        ) == target:
+            return row
+
+    return None
+
+def normalize_row_label(
+    label,
+):
+    label = str(
+        label or ""
+    ).strip()
+
+    if "(" in label:
+        label = label.split(
+            "(",
+            1,
+        )[0]
+
+    return label.strip().lower()
+
+from copy import deepcopy
+
 
 def rebuild_product_distribution_yearly(
     market_analysis,
     selected_filter,
 ):
+    """
+    Rebuild yearly Product Distribution.
 
-    month_labels = get_month_labels(
-        selected_filter["start_date"],
-        len(
-            market_analysis["product_distribution"]
-            ["market_volume"]["monthly"]["table"]["rows"][0]["values"]
-        ),
+    Rules:
+        - Yearly volume is the sum of monthly volume.
+        - Yearly share is calculated from yearly volume.
+        - Overall share is always 100.
+        - The complete table remains available.
+        - The existing chart structure is preserved.
+    """
+
+    if isinstance(selected_filter, dict):
+        start_date = selected_filter.get(
+            "start_date"
+        )
+    else:
+        start_date = getattr(
+            selected_filter,
+            "start_date",
+            None,
+        )
+
+    section = market_analysis.get(
+        "product_distribution",
+        {},
     )
 
-    # ==========================================================
-    # Yearly Market Volume
-    # ==========================================================
+    monthly_volume_table = (
+        section
+        .get("market_volume", {})
+        .get("monthly", {})
+        .get("table", {})
+    )
+
+    month_count = get_table_month_count(
+        monthly_volume_table
+    )
+
+    if month_count == 0:
+        return market_analysis
+
+    month_labels = get_month_labels(
+        start_date,
+        month_count,
+    )
+
+    # ======================================================
+    # 1. Yearly product volume
+    # ======================================================
 
     yearly_volume_table = build_yearly_table(
-        market_analysis["product_distribution"]["market_volume"]["monthly"]["table"],
+        monthly_volume_table,
         month_labels,
     )
 
-    market_analysis["product_distribution"]["market_volume"]["yearly"]["table"] = (
-        yearly_volume_table
+    volume_metric = section.setdefault(
+        "market_volume",
+        {},
     )
 
-    market_analysis["product_distribution"]["market_volume"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
+    volume_yearly = volume_metric.setdefault(
+        "yearly",
+        {},
+    )
+
+    existing_volume_chart = deepcopy(
+        volume_yearly.get(
+            "chart",
+            {},
+        )
+    )
+
+    volume_yearly["table"] = yearly_volume_table
+
+    volume_yearly["chart"] = (
+        rebuild_product_distribution_yearly_chart(
+            yearly_table=yearly_volume_table,
+            existing_chart=existing_volume_chart,
+        )
+    )
+
+    # ======================================================
+    # 2. Yearly product share from yearly volume
+    # ======================================================
+
+    yearly_share_table = (
+        build_product_distribution_yearly_share_table(
             yearly_volume_table
         )
     )
 
-    # ==========================================================
-    # Yearly Market Share
-    # ==========================================================
-
-    yearly_share_table = build_yearly_table(
-        market_analysis["product_distribution"]["market_share"]["monthly"]["table"],
-        month_labels,
+    share_metric = section.setdefault(
+        "market_share",
+        {},
     )
 
-    market_analysis["product_distribution"]["market_share"]["yearly"]["table"] = (
-        yearly_share_table
+    share_yearly = share_metric.setdefault(
+        "yearly",
+        {},
     )
 
-    market_analysis["product_distribution"]["market_share"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
-            yearly_share_table
+    existing_share_chart = deepcopy(
+        share_yearly.get(
+            "chart",
+            {},
+        )
+    )
+
+    share_yearly["table"] = yearly_share_table
+
+    share_yearly["chart"] = (
+        rebuild_product_distribution_yearly_chart(
+            yearly_table=yearly_share_table,
+            existing_chart=existing_share_chart,
         )
     )
 
     return market_analysis
+
+def build_product_distribution_yearly_share_table(
+    yearly_volume_table,
+):
+    """
+    Calculate yearly Product Distribution shares.
+
+    Overall = 100
+
+    Product share =
+        yearly product volume
+        --------------------- × 100
+        yearly overall volume
+    """
+
+    volume_rows = yearly_volume_table.get(
+        "rows",
+        [],
+    )
+
+    if not volume_rows:
+        return {
+            "type": yearly_volume_table.get(
+                "type",
+                "flat",
+            ),
+            "rows": [],
+        }
+
+    overall_row = find_row_by_normalized_label(
+        volume_rows,
+        "overall",
+    )
+
+    if overall_row is None:
+        raise ValueError(
+            "Overall row not found in yearly "
+            "Product Distribution volume table."
+        )
+
+    overall_values = list(
+        overall_row.get(
+            "values",
+            [],
+        )
+    )
+
+    yearly_share_rows = []
+
+    for row in volume_rows:
+        row_label = str(
+            row.get(
+                "label",
+                "",
+            )
+        ).strip()
+
+        row_key = normalize_chart_product_label(
+            row_label
+        )
+
+        if row_key == "overall":
+            yearly_share_rows.append(
+                {
+                    **row,
+                    "values": [
+                        100.0
+                        for _ in overall_values
+                    ],
+                }
+            )
+            continue
+
+        product_values = list(
+            row.get(
+                "values",
+                [],
+            )
+        )
+
+        share_values = calculate_percentage_values(
+            numerator_values=product_values,
+            denominator_values=overall_values,
+            decimals=2,
+        )
+
+        yearly_share_rows.append(
+            {
+                **row,
+                "values": share_values,
+            }
+        )
+
+    return {
+        **yearly_volume_table,
+        "rows": yearly_share_rows,
+    }
+
+def find_row_by_normalized_label(
+    rows,
+    target_label,
+):
+    target_key = str(
+        target_label or ""
+    ).strip().lower()
+
+    for row in rows:
+        row_key = normalize_chart_product_label(
+            row.get(
+                "label",
+                "",
+            )
+        )
+
+        if row_key == target_key:
+            return row
+
+    return None
+
+def rebuild_product_distribution_yearly_chart(
+    yearly_table,
+    existing_chart,
+):
+    """
+    Preserve existing Product Distribution chart metadata and
+    update only its yearly series values.
+    """
+
+    chart = deepcopy(
+        existing_chart or {}
+    )
+
+    calculated_series = {}
+
+    for row in yearly_table.get(
+        "rows",
+        [],
+    ):
+        label = str(
+            row.get(
+                "label",
+                "",
+            )
+        ).strip()
+
+        if not label:
+            continue
+
+        key = normalize_chart_product_label(
+            label
+        )
+
+        calculated_series[key] = {
+            "label": label,
+            "values": list(
+                row.get(
+                    "values",
+                    [],
+                )
+            ),
+        }
+
+    existing_series = chart.get(
+        "series",
+        [],
+    )
+
+    rebuilt_series = []
+
+    for existing_item in existing_series:
+        if not isinstance(
+            existing_item,
+            dict,
+        ):
+            continue
+
+        existing_label = existing_item.get(
+            "label",
+            existing_item.get(
+                "name",
+                "",
+            ),
+        )
+
+        series_key = normalize_chart_product_label(
+            existing_label
+        )
+
+        calculated_item = calculated_series.get(
+            series_key
+        )
+
+        if calculated_item is None:
+            continue
+
+        rebuilt_item = deepcopy(
+            existing_item
+        )
+
+        update_chart_series_values(
+            series_item=rebuilt_item,
+            values=calculated_item["values"],
+        )
+
+        rebuilt_series.append(
+            rebuilt_item
+        )
+
+    # Fallback when no existing series is available.
+    if not rebuilt_series:
+        for item in calculated_series.values():
+            rebuilt_series.append(
+                {
+                    "label": item["label"],
+                    "values": item["values"],
+                }
+            )
+
+    chart["series"] = rebuilt_series
+
+    return chart
+
+def correct_product_shares_to_100(
+    product_rows,
+):
+    """
+    Ensures product shares total exactly 100% for every year.
+
+    The last product absorbs the rounding difference.
+    """
+
+    if not product_rows:
+        return product_rows
+
+    number_of_years = len(
+        product_rows[0].get(
+            "values",
+            [],
+        )
+    )
+
+    for year_index in range(number_of_years):
+        current_total = round(
+            sum(
+                float(
+                    row["values"][year_index]
+                    or 0
+                )
+                for row in product_rows
+            ),
+            2,
+        )
+
+        difference = round(
+            100.0 - current_total,
+            2,
+        )
+
+        product_rows[-1][
+            "values"
+        ][year_index] = round(
+            float(
+                product_rows[-1]["values"][
+                    year_index
+                ] or 0
+            )
+            + difference,
+            2,
+        )
+
+    return product_rows
+
+def build_market_product_yearly_chart_from_table(
+    table,
+    existing_chart=None,
+):
+    """
+    Build yearly Channel-Product chart from hierarchical rows.
+
+    Output labels:
+        Retail - Biktarvy
+        Retail - Descovy
+        Retail - Truvada
+        Non-retail - Biktarvy
+        Non-retail - Descovy
+        Non-retail - Truvada
+    """
+
+    existing_chart = existing_chart or {}
+
+    existing_series = existing_chart.get(
+        "series",
+        [],
+    )
+
+    existing_series_map = {
+        normalize_market_product_series_label(
+            item.get("label", "")
+        ): item
+        for item in existing_series
+        if isinstance(item, dict)
+    }
+
+    rebuilt_series = []
+
+    for market_row in table.get("rows", []):
+        market_label = str(
+            market_row.get("label", "")
+        ).strip()
+
+        if normalize_chart_market_label(
+            market_label
+        ) == "overall":
+            continue
+
+        for product_row in market_row.get(
+            "children",
+            [],
+        ):
+            product_label = str(
+                product_row.get("label", "")
+            ).strip()
+
+            series_label = (
+                f"{market_label} - {product_label}"
+            )
+
+            values = list(
+                product_row.get("values", [])
+            )
+
+            series_key = (
+                normalize_market_product_series_label(
+                    series_label
+                )
+            )
+
+            previous_series = existing_series_map.get(
+                series_key,
+                {},
+            )
+
+            rebuilt_item = {
+                **previous_series,
+                "label": series_label,
+                "values": values,
+            }
+
+            rebuilt_series.append(
+                rebuilt_item
+            )
+
+    return {
+        **existing_chart,
+        "series": rebuilt_series,
+    }
+
+def build_product_market_yearly_chart_from_table(
+    yearly_table,
+):
+    """
+    Converts:
+
+        Biktarvy
+            Retail
+            Non-retail
+
+    into chart series:
+
+        Biktarvy - Retail
+        Biktarvy - Non-retail
+
+    The original yearly table is not modified.
+    """
+
+    chart_rows = []
+
+    for product_row in yearly_table.get(
+        "rows",
+        [],
+    ):
+        product_label = str(
+            product_row.get("label", "")
+        ).strip()
+
+        if not product_label:
+            continue
+
+        if normalize_chart_product_label(
+            product_label
+        ) == "overall":
+            continue
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+            market_label = str(
+                market_row.get("label", "")
+            ).strip()
+
+            if not market_label:
+                continue
+
+            chart_rows.append(
+                {
+                    "label": (
+                        f"{product_label} - "
+                        f"{market_label}"
+                    ),
+                    "values": list(
+                        market_row.get(
+                            "values",
+                            [],
+                        )
+                    ),
+                }
+            )
+
+    flattened_table = {
+        "type": "flat",
+        "rows": chart_rows,
+    }
+
+    return build_yearly_chart_from_table(
+        flattened_table
+    )
+
+def normalize_market_product_series_label(
+    label,
+):
+    label = str(label or "").strip()
+
+    if "(" in label:
+        label = label.split(
+            "(",
+            1,
+        )[0].strip()
+
+    return " ".join(
+        label.lower().split()
+    )
+
+
 
 def rebuild_market_product_yearly(
     market_analysis,
     selected_filter,
 ):
+    if isinstance(selected_filter, dict):
+        start_date = selected_filter.get("start_date")
+    else:
+        start_date = getattr(
+            selected_filter,
+            "start_date",
+            None,
+        )
 
-    month_labels = get_month_labels(
-        selected_filter["start_date"],
-        len(
-            market_analysis["market_product"]
-            ["market_volume"]["monthly"]["table"]["rows"][0]["values"]
-        ),
+    section = market_analysis.get(
+        "market_product",
+        {},
     )
 
-    # ==========================================================
-    # Yearly Market Volume
-    # ==========================================================
+    monthly_volume_table = (
+        section
+        .get("market_volume", {})
+        .get("monthly", {})
+        .get("table", {})
+    )
+
+    month_count = get_table_month_count(
+        monthly_volume_table
+    )
+
+    if month_count == 0:
+        return market_analysis
+
+    month_labels = get_month_labels(
+        start_date,
+        month_count,
+    )
+
+    # ======================================================
+    # 1. Yearly Market-Product volume
+    # ======================================================
 
     yearly_volume_table = build_yearly_table(
-        market_analysis["market_product"]["market_volume"]["monthly"]["table"],
+        monthly_volume_table,
         month_labels,
     )
 
-    market_analysis["market_product"]["market_volume"]["yearly"]["table"] = (
-        yearly_volume_table
+    volume_yearly = (
+        section
+        .setdefault("market_volume", {})
+        .setdefault("yearly", {})
     )
 
-    market_analysis["market_product"]["market_volume"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
+    existing_volume_chart = deepcopy(
+        volume_yearly.get("chart", {})
+    )
+
+    volume_yearly["table"] = yearly_volume_table
+
+    volume_yearly["chart"] = (
+        rebuild_market_product_yearly_chart(
+            yearly_table=yearly_volume_table,
+            existing_chart=existing_volume_chart,
+        )
+    )
+
+    # ======================================================
+    # 2. Yearly Market-Product share
+    #
+    # Do not sum monthly percentages.
+    # Calculate child share from yearly child volume.
+    # ======================================================
+
+    yearly_share_table = (
+        build_market_product_yearly_share_table(
             yearly_volume_table
         )
     )
 
-    # ==========================================================
-    # Yearly Market Share
-    # ==========================================================
-
-    yearly_share_table = build_yearly_table(
-        market_analysis["market_product"]["market_share"]["monthly"]["table"],
-        month_labels,
+    share_yearly = (
+        section
+        .setdefault("market_share", {})
+        .setdefault("yearly", {})
     )
 
-    market_analysis["market_product"]["market_share"]["yearly"]["table"] = (
-        yearly_share_table
+    existing_share_chart = deepcopy(
+        share_yearly.get("chart", {})
     )
 
-    market_analysis["market_product"]["market_share"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
-            yearly_share_table
+    share_yearly["table"] = yearly_share_table
+
+    share_yearly["chart"] = (
+        rebuild_market_product_yearly_chart(
+            yearly_table=yearly_share_table,
+            existing_chart=existing_share_chart,
         )
     )
 
     return market_analysis
+
+def build_market_product_yearly_share_table(
+    yearly_volume_table,
+):
+    """
+    Converts yearly Market-Product volume into share.
+
+    Example:
+
+        Retail = 100
+
+        Biktarvy =
+            Retail-Biktarvy yearly volume
+            ------------------------------ × 100
+            Retail yearly volume
+    """
+
+    share_rows = []
+
+    for market_row in yearly_volume_table.get(
+        "rows",
+        [],
+    ):
+        market_label = str(
+            market_row.get("label", "")
+        ).strip()
+
+        market_values = list(
+            market_row.get("values", [])
+        )
+
+        market_share_row = {
+            **market_row,
+            "label": market_label,
+            "values": [
+                100.0 if value not in (None, 0) else 0.0
+                for value in market_values
+            ],
+            "children": [],
+        }
+
+        for product_row in market_row.get(
+            "children",
+            [],
+        ):
+            product_values = list(
+                product_row.get("values", [])
+            )
+
+            product_share_values = (
+                calculate_percentage_values(
+                    numerator_values=product_values,
+                    denominator_values=market_values,
+                    decimals=2,
+                )
+            )
+
+            market_share_row["children"].append(
+                {
+                    **product_row,
+                    "values": product_share_values,
+                }
+            )
+
+        share_rows.append(
+            market_share_row
+        )
+
+    return {
+        **yearly_volume_table,
+        "type": "hierarchy",
+        "rows": share_rows,
+    }
+
+def rebuild_market_product_yearly_chart(
+    yearly_table,
+    existing_chart,
+):
+    """
+    Preserves the existing yearly Channel-Product chart schema.
+
+    Table:
+        Retail
+            Biktarvy
+            Descovy
+            Truvada
+
+    Chart:
+        Retail - Biktarvy
+        Retail - Descovy
+        Retail - Truvada
+    """
+
+    chart = deepcopy(
+        existing_chart or {}
+    )
+
+    calculated_series = {}
+
+    for market_row in yearly_table.get(
+        "rows",
+        [],
+    ):
+        market_label = str(
+            market_row.get("label", "")
+        ).strip()
+
+        if not market_label:
+            continue
+
+        if normalize_chart_market_label(
+            market_label
+        ) == "overall":
+            continue
+
+        for product_row in market_row.get(
+            "children",
+            [],
+        ):
+            product_label = str(
+                product_row.get("label", "")
+            ).strip()
+
+            if not product_label:
+                continue
+
+            series_label = (
+                f"{market_label} - {product_label}"
+            )
+
+            series_key = (
+                normalize_market_product_series_label(
+                    series_label
+                )
+            )
+
+            calculated_series[series_key] = {
+                "label": series_label,
+                "values": list(
+                    product_row.get(
+                        "values",
+                        [],
+                    )
+                ),
+            }
+
+    existing_series = chart.get(
+        "series",
+        [],
+    )
+
+    rebuilt_series = []
+
+    # Preserve every existing series field used by the frontend.
+    for existing_item in existing_series:
+        if not isinstance(existing_item, dict):
+            continue
+
+        existing_label = existing_item.get(
+            "label",
+            existing_item.get("name", ""),
+        )
+
+        series_key = (
+            normalize_market_product_series_label(
+                existing_label
+            )
+        )
+
+        calculated_item = calculated_series.get(
+            series_key
+        )
+
+        if calculated_item is None:
+            continue
+
+        rebuilt_item = deepcopy(
+            existing_item
+        )
+
+        update_chart_series_values(
+            series_item=rebuilt_item,
+            values=calculated_item["values"],
+        )
+
+        rebuilt_series.append(
+            rebuilt_item
+        )
+
+    # Fallback when no pre-existing chart series exists.
+    if not rebuilt_series:
+        for calculated_item in calculated_series.values():
+            rebuilt_series.append(
+                {
+                    "label": calculated_item["label"],
+                    "values": calculated_item["values"],
+                }
+            )
+
+    chart["series"] = rebuilt_series
+
+    return chart
+
+from copy import deepcopy
+
 
 def rebuild_product_market_yearly(
     market_analysis,
     selected_filter,
 ):
+    if isinstance(selected_filter, dict):
+        start_date = selected_filter.get("start_date")
+    else:
+        start_date = getattr(
+            selected_filter,
+            "start_date",
+            None,
+        )
 
-    month_labels = get_month_labels(
-        selected_filter["start_date"],
-        len(
-            market_analysis["product_market"]
-            ["market_volume"]["monthly"]["table"]["rows"][0]["values"]
-        ),
+    section = market_analysis.get(
+        "product_market",
+        {},
     )
 
-    # ==========================================================
-    # Yearly Market Volume
-    # ==========================================================
+    monthly_volume_table = (
+        section
+        .get("market_volume", {})
+        .get("monthly", {})
+        .get("table", {})
+    )
+
+    month_count = get_table_month_count(
+        monthly_volume_table
+    )
+
+    if month_count == 0:
+        return market_analysis
+
+    month_labels = get_month_labels(
+        start_date,
+        month_count,
+    )
+
+    # ======================================================
+    # 1. Yearly Product-Channel volume
+    # ======================================================
 
     yearly_volume_table = build_yearly_table(
-        market_analysis["product_market"]["market_volume"]["monthly"]["table"],
+        monthly_volume_table,
         month_labels,
     )
 
-    market_analysis["product_market"]["market_volume"]["yearly"]["table"] = (
-        yearly_volume_table
+    volume_yearly = (
+        section
+        .setdefault("market_volume", {})
+        .setdefault("yearly", {})
     )
 
-    market_analysis["product_market"]["market_volume"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
+    existing_volume_chart = deepcopy(
+        volume_yearly.get("chart", {})
+    )
+
+    volume_yearly["table"] = yearly_volume_table
+
+    volume_yearly["chart"] = (
+        rebuild_product_market_yearly_chart(
+            yearly_table=yearly_volume_table,
+            existing_chart=existing_volume_chart,
+        )
+    )
+
+    # ======================================================
+    # 2. Yearly Product-Channel share
+    #
+    # Do not aggregate monthly percentages.
+    # Derive yearly percentages from yearly volumes.
+    # ======================================================
+
+    yearly_share_table = (
+        build_product_market_yearly_share_table(
             yearly_volume_table
         )
     )
 
-    # ==========================================================
-    # Yearly Market Share
-    # ==========================================================
-
-    yearly_share_table = build_yearly_table(
-        market_analysis["product_market"]["market_share"]["monthly"]["table"],
-        month_labels,
+    share_yearly = (
+        section
+        .setdefault("market_share", {})
+        .setdefault("yearly", {})
     )
 
-    market_analysis["product_market"]["market_share"]["yearly"]["table"] = (
-        yearly_share_table
+    existing_share_chart = deepcopy(
+        share_yearly.get("chart", {})
     )
 
-    market_analysis["product_market"]["market_share"]["yearly"]["chart"] = (
-        build_yearly_chart_from_table(
-            yearly_share_table
+    share_yearly["table"] = yearly_share_table
+
+    share_yearly["chart"] = (
+        rebuild_product_market_yearly_chart(
+            yearly_table=yearly_share_table,
+            existing_chart=existing_share_chart,
         )
     )
 
     return market_analysis
+
+def build_product_market_yearly_share_table(
+    yearly_volume_table,
+):
+    """
+    Builds Product-Channel yearly shares from yearly volumes.
+
+    Example:
+
+        Biktarvy = 100%
+
+            Retail =
+                Biktarvy-Retail yearly volume
+                ------------------------------ × 100
+                Biktarvy total yearly volume
+
+            Non-retail =
+                Biktarvy-Non-retail yearly volume
+                ---------------------------------- × 100
+                Biktarvy total yearly volume
+    """
+
+    share_rows = []
+
+    for product_row in yearly_volume_table.get(
+        "rows",
+        [],
+    ):
+        product_label = str(
+            product_row.get("label", "")
+        ).strip()
+
+        product_values = list(
+            product_row.get("values", [])
+        )
+
+        product_share_row = {
+            **product_row,
+            "label": product_label,
+            "values": [
+                100.0 if value not in (None, 0) else 0.0
+                for value in product_values
+            ],
+            "children": [],
+        }
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+            market_values = list(
+                market_row.get("values", [])
+            )
+
+            market_share_values = (
+                calculate_percentage_values(
+                    numerator_values=market_values,
+                    denominator_values=product_values,
+                    decimals=2,
+                )
+            )
+
+            product_share_row["children"].append(
+                {
+                    **market_row,
+                    "values": market_share_values,
+                }
+            )
+
+        share_rows.append(
+            product_share_row
+        )
+
+    return {
+        **yearly_volume_table,
+        "type": "hierarchy",
+        "rows": share_rows,
+    }
+
+
+def rebuild_product_market_yearly_chart(
+    yearly_table,
+    existing_chart,
+):
+    """
+    Preserves the existing yearly chart structure and updates
+    the Product-Channel series values.
+
+    Table remains:
+
+        Biktarvy
+            Retail
+            Non-retail
+
+    Chart series remain:
+
+        Biktarvy - Retail
+        Biktarvy - Non-retail
+    """
+
+    chart = deepcopy(existing_chart or {})
+
+    calculated_values = {}
+
+    for product_row in yearly_table.get("rows", []):
+        product_label = str(
+            product_row.get("label", "")
+        ).strip()
+
+        if not product_label:
+            continue
+
+        if normalize_chart_product_label(
+            product_label
+        ) == "overall":
+            continue
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+            market_label = str(
+                market_row.get("label", "")
+            ).strip()
+
+            if not market_label:
+                continue
+
+            series_label = (
+                f"{product_label} - {market_label}"
+            )
+
+            series_key = normalize_product_market_series_label(
+                series_label
+            )
+
+            calculated_values[series_key] = list(
+                market_row.get("values", [])
+            )
+
+    existing_series = chart.get(
+        "series",
+        [],
+    )
+
+    rebuilt_series = []
+
+    # Preserve every field expected by the frontend.
+    for existing_item in existing_series:
+        if not isinstance(existing_item, dict):
+            continue
+
+        existing_label = existing_item.get(
+            "label",
+            existing_item.get("name", ""),
+        )
+
+        series_key = normalize_product_market_series_label(
+            existing_label
+        )
+
+        values = calculated_values.get(series_key)
+
+        if values is None:
+            continue
+
+        rebuilt_item = deepcopy(existing_item)
+
+        update_chart_series_values(
+            series_item=rebuilt_item,
+            values=values,
+        )
+
+        rebuilt_series.append(rebuilt_item)
+
+    # Fallback when the old chart has no existing series.
+    if not rebuilt_series:
+        for series_key, values in calculated_values.items():
+            rebuilt_series.append(
+                {
+                    "label": restore_product_market_label(
+                        series_key
+                    ),
+                    "values": values,
+                }
+            )
+
+    chart["series"] = rebuilt_series
+
+    return chart
+
+def normalize_product_market_series_label(label):
+    label = str(label or "").strip()
+
+    # Remove scenario suffix:
+    # Biktarvy - Retail (Base)
+    # becomes Biktarvy - Retail
+    if "(" in label:
+        label = label.split("(", 1)[0].strip()
+
+    return " ".join(
+        label.lower().split()
+    )
+
+
+def restore_product_market_label(normalized_label):
+    """
+    Fallback only. Normally the original label is preserved
+    from existing_chart.
+    """
+
+    if " - " not in normalized_label:
+        return normalized_label.title()
+
+    product, market = normalized_label.split(
+        " - ",
+        1,
+    )
+
+    return (
+        f"{product.title()} - "
+        f"{market.capitalize()}"
+    )
+
+def update_chart_series_values(
+    series_item,
+    values,
+):
+    """
+    Updates values without destroying the existing chart-series
+    schema.
+
+    Supports common chart structures:
+        values
+        data
+        historical_values / forecast_values
+        history / forecast
+    """
+
+    values = list(values or [])
+
+    if "values" in series_item:
+        series_item["values"] = values
+
+    if "data" in series_item:
+        series_item["data"] = values
+
+    # Some chart payloads divide actual and forecast data.
+    if (
+        "historical_values" in series_item
+        or "forecast_values" in series_item
+    ):
+        historical_count = len(
+            series_item.get(
+                "historical_values",
+                [],
+            )
+        )
+
+        if historical_count <= 0:
+            historical_count = max(
+                len(values) - 1,
+                0,
+            )
+
+        series_item["historical_values"] = (
+            values[:historical_count]
+        )
+
+        series_item["forecast_values"] = (
+            values[historical_count:]
+        )
+
+    if (
+        "history" in series_item
+        or "forecast" in series_item
+    ):
+        history_count = len(
+            series_item.get("history", [])
+        )
+
+        if history_count <= 0:
+            history_count = max(
+                len(values) - 1,
+                0,
+            )
+
+        series_item["history"] = (
+            values[:history_count]
+        )
+
+        series_item["forecast"] = (
+            values[history_count:]
+        )
+
+    # Fallback for simple chart schemas.
+    if not any(
+        key in series_item
+        for key in (
+            "values",
+            "data",
+            "historical_values",
+            "forecast_values",
+            "history",
+            "forecast",
+        )
+    ):
+        series_item["values"] = values
+
+def get_table_month_count(
+    table,
+):
+    for row in table.get(
+        "rows",
+        [],
+    ):
+        values = row.get(
+            "values",
+            [],
+        )
+
+        if values:
+            return len(values)
+
+        for child in row.get(
+            "children",
+            [],
+        ):
+            child_values = child.get(
+                "values",
+                [],
+            )
+
+            if child_values:
+                return len(child_values)
+
+    return 0
+
+def filter_product_market_chart(
+    market_analysis,
+    selected_filter,
+):
+    """
+    Filter Product-Channel charts by selected products and markets.
+
+    Example:
+        selected product = Biktarvy
+        selected market = Retail
+
+    Keeps:
+        Biktarvy - Retail
+
+    Tables remain unchanged.
+    """
+
+    # --------------------------------------------------
+    # Read filters from dict or Pydantic/object model
+    # --------------------------------------------------
+
+    if isinstance(selected_filter, dict):
+        selected_products = selected_filter.get(
+            "products",
+            selected_filter.get(
+                "product",
+                [],
+            ),
+        )
+
+        selected_markets = selected_filter.get(
+            "markets",
+            selected_filter.get(
+                "market",
+                [],
+            ),
+        )
+
+    else:
+        selected_products = getattr(
+            selected_filter,
+            "products",
+            getattr(
+                selected_filter,
+                "product",
+                [],
+            ),
+        )
+
+        selected_markets = getattr(
+            selected_filter,
+            "markets",
+            getattr(
+                selected_filter,
+                "market",
+                [],
+            ),
+        )
+
+    # --------------------------------------------------
+    # Normalize strings and lists
+    # --------------------------------------------------
+
+    if isinstance(selected_products, str):
+        selected_products = [selected_products]
+
+    if isinstance(selected_markets, str):
+        selected_markets = [selected_markets]
+
+    selected_product_keys = {
+        normalize_chart_product_label(product)
+        for product in (selected_products or [])
+        if product
+        and str(product).strip().lower() != "all"
+    }
+
+    selected_market_keys = {
+        normalize_chart_market_label(market)
+        for market in (selected_markets or [])
+        if market
+        and str(market).strip().lower() != "all"
+    }
+
+    # No filters means leave chart unchanged
+    if (
+        not selected_product_keys
+        and not selected_market_keys
+    ):
+        return market_analysis
+
+    product_market = market_analysis.get(
+        "product_market",
+        {},
+    )
+
+    # --------------------------------------------------
+    # Filter monthly and yearly chart series
+    # --------------------------------------------------
+
+    for metric_name in (
+        "market_volume",
+        "market_share",
+    ):
+        metric_data = product_market.get(
+            metric_name,
+            {},
+        )
+
+        if not isinstance(metric_data, dict):
+            continue
+
+        for period_name in (
+            "monthly",
+            "yearly",
+        ):
+            period_data = metric_data.get(
+                period_name,
+                {},
+            )
+
+            if not isinstance(period_data, dict):
+                continue
+
+            chart = period_data.get(
+                "chart",
+                {},
+            )
+
+            if not isinstance(chart, dict):
+                continue
+
+            series = chart.get(
+                "series",
+                [],
+            )
+
+            if not isinstance(series, list):
+                continue
+
+            filtered_series = []
+
+            for item in series:
+                if not isinstance(item, dict):
+                    continue
+
+                series_label = str(
+                    item.get(
+                        "label",
+                        item.get("name", ""),
+                    )
+                ).strip()
+
+                # Prefer explicit metadata when available
+                product_name = item.get(
+                    "product"
+                )
+
+                market_name = item.get(
+                    "market"
+                )
+
+                product_key = (
+                    normalize_chart_product_label(
+                        product_name
+                    )
+                    if product_name
+                    else extract_product_from_product_market_label(
+                        series_label
+                    )
+                )
+
+                market_key = (
+                    normalize_chart_market_label(
+                        market_name
+                    )
+                    if market_name
+                    else extract_market_from_product_market_label(
+                        series_label
+                    )
+                )
+
+                if (
+                    selected_product_keys
+                    and product_key
+                    not in selected_product_keys
+                ):
+                    continue
+
+                if (
+                    selected_market_keys
+                    and market_key
+                    not in selected_market_keys
+                ):
+                    continue
+
+                filtered_series.append(item)
+
+            chart["series"] = filtered_series
+
+    return market_analysis
+
+def extract_market_from_product_market_label(
+    label,
+):
+    """
+    Extract market from labels such as:
+
+        Biktarvy - Retail
+        Biktarvy - Non-retail
+        Biktarvy - Retail (Base)
+        Biktarvy-Retail(test)
+    """
+
+    clean_label = str(label).strip()
+
+    # Remove scenario suffix
+    if "(" in clean_label:
+        clean_label = clean_label.rsplit(
+            "(",
+            1,
+        )[0].strip()
+
+    if " - " in clean_label:
+        _, market = clean_label.split(
+            " - ",
+            1,
+        )
+
+    elif "-" in clean_label:
+        _, market = clean_label.split(
+            "-",
+            1,
+        )
+
+    else:
+        return ""
+
+    return normalize_chart_market_label(
+        market
+    )
+
+def extract_product_from_product_market_label(
+    label,
+):
+    """
+    Converts:
+
+        Biktarvy - Retail
+        Biktarvy - Non-retail (Base)
+        Descovy - Retail (test)
+
+    into:
+
+        biktarvy
+        biktarvy
+        descovy
+    """
+
+    label = str(label or "").strip()
+
+    if "(" in label:
+        label = label.split(
+            "(",
+            1,
+        )[0].strip()
+
+    if " - " not in label:
+        return ""
+
+    product_label, _ = label.split(
+        " - ",
+        1,
+    )
+
+    return normalize_chart_product_label(
+        product_label
+    )
+
+def build_product_market_monthly_chart_from_table(
+    table,
+):
+    """
+    Product -> Market hierarchy:
+
+        Biktarvy
+            Retail
+            Non-retail
+
+    Chart:
+
+        Biktarvy - Retail
+        Biktarvy - Non-retail
+    """
+
+    chart_rows = []
+
+    for product_row in table.get(
+        "rows",
+        [],
+    ):
+        product_label = str(
+            product_row.get(
+                "label",
+                "",
+            )
+        ).strip()
+
+        if not product_label:
+            continue
+
+        if normalize_chart_product_label(
+            product_label
+        ) == "overall":
+            continue
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+            market_label = str(
+                market_row.get(
+                    "label",
+                    "",
+                )
+            ).strip()
+
+            if not market_label:
+                continue
+
+            chart_rows.append(
+                {
+                    "label": (
+                        f"{product_label} - "
+                        f"{market_label}"
+                    ),
+                    "values": list(
+                        market_row.get(
+                            "values",
+                            [],
+                        )
+                    ),
+                }
+            )
+
+    flattened_table = {
+        "type": "flat",
+        "rows": chart_rows,
+    }
+
+    return build_chart_from_table(
+        flattened_table
+    )
+
+# def build_yearly_child_chart_from_table(
+#     table,
+#     parent_type,
+#     existing_chart=None,
+# ):
+#     """
+#     Builds yearly chart series from hierarchy child rows.
+
+#     parent_type="market_product":
+#         Retail - Biktarvy
+
+#     parent_type="product_market":
+#         Biktarvy - Retail
+#     """
+
+#     existing_chart = existing_chart or {}
+
+#     rows = table.get("rows", [])
+#     series = []
+
+#     for parent_row in rows:
+#         parent_label = str(
+#             parent_row.get("label", "")
+#         ).strip()
+
+#         if normalize_row_label(parent_label) == "overall":
+#             continue
+
+#         children = parent_row.get("children", [])
+
+#         for child_row in children:
+#             child_label = str(
+#                 child_row.get("label", "")
+#             ).strip()
+
+#             if parent_type == "market_product":
+#                 series_label = (
+#                     f"{parent_label} - {child_label}"
+#                 )
+
+#             elif parent_type == "product_market":
+#                 series_label = (
+#                     f"{parent_label} - {child_label}"
+#                 )
+
+#             else:
+#                 raise ValueError(
+#                     f"Unsupported parent_type: "
+#                     f"{parent_type}"
+#                 )
+
+#             series.append(
+#                 {
+#                     "label": series_label,
+#                     "values": child_row.get(
+#                         "values",
+#                         [],
+#                     ),
+#                 }
+#             )
+
+#     return {
+#         **existing_chart,
+#         "series": series,
+#     }

@@ -168,8 +168,8 @@ def get_market_event_filters(
             "available_months": available_months,
             "selected_filter": {
                 "scenario_name": config["scenario_name"],
-                "markets": [config["market"]] if config["market"] else [],
-                "products": [config["product"]] if config["product"] else [],
+                "markets": config["market"],
+                "products": config["product"],
                 "start_date": config["start_date"].strftime("%Y-%m-%d")
                 if config["start_date"]
                 else None,
@@ -1000,31 +1000,27 @@ def edit_save(
     payload: EditSaveRequest,
     db=Depends(get_connection),
 ):
-    """
-    Edit, normalize, recompute and save forecast data.
-
-    Editable:
-        market_event
-        product_event
-
-    Read-only:
-        overall_event
-
-    Response:
-        Exactly the same structure as apply_filters.
-    """
-
     cursor = db.cursor(
         cursor_factory=RealDictCursor
     )
 
     try:
         selected_filter = (
-            payload.selected_filter.model_dump()
+            payload.selected_filter.model_dump(
+                mode="json"
+            )
         )
 
         scenario_name = (
             payload.selected_filter.scenario_name
+        )
+
+        selected_market = (
+            payload.selected_filter.markets
+        )
+
+        selected_product = (
+            payload.selected_filter.products
         )
 
         # ================================================
@@ -1038,12 +1034,53 @@ def edit_save(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Overall Event is read-only and cannot be edited."
+                    "Overall Event is read-only and "
+                    "cannot be edited."
                 ),
             )
 
         # ================================================
-        # 2. Load complete unfiltered database data
+        # 2. Validate filters
+        # ================================================
+
+        if (
+            payload.selected_filter.start_date
+            > payload.selected_filter.end_date
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "start_date cannot be greater "
+                    "than end_date."
+                ),
+            )
+
+        if (
+            payload.selected_tab == "market_event"
+            and not selected_product
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A product must be selected when "
+                    "editing Market Event."
+                ),
+            )
+
+        if (
+            payload.selected_tab == "product_event"
+            and not selected_market
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A market must be selected when "
+                    "editing Product Event."
+                ),
+            )
+
+        # ================================================
+        # 3. Load complete unfiltered database data
         # ================================================
 
         original_metrics = load_forecast_outputs(
@@ -1058,7 +1095,8 @@ def edit_save(
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    "No market-share forecast data was found."
+                    "No market-share forecast data "
+                    "was found."
                 ),
             )
 
@@ -1068,23 +1106,21 @@ def edit_save(
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    "No market-volume forecast data was found."
+                    "No market-volume forecast data "
+                    "was found."
                 ),
             )
 
         # ================================================
-        # 3. Build complete calculation tree
+        # 4. Build calculation tree
         # ================================================
 
         tree = build_calculation_tree(
             original_metrics
         )
 
-        # Do not filter the tree before editing.
-        # The DB save requires the complete timeline.
-
         # ================================================
-        # 4. Resolve the selected monthly range
+        # 5. Resolve selected monthly range
         # ================================================
 
         selected_months, selected_indexes = (
@@ -1095,7 +1131,7 @@ def edit_save(
         )
 
         # ================================================
-        # 5. Validate the submitted rows
+        # 6. Validate submitted rows
         # ================================================
 
         validate_edited_rows(
@@ -1111,19 +1147,20 @@ def edit_save(
         )
 
         # ================================================
-        # 6. Build canonical market-product matrix
+        # 7. Build matrix
         # ================================================
 
-        matrix = build_market_product_volume_matrix(
-            tree
+        matrix = (
+            build_market_product_volume_matrix(
+                tree
+            )
         )
 
         # ================================================
-        # 7. Apply edits and normalize
+        # 8. Apply edits
         # ================================================
 
         if payload.selected_tab == "market_event":
-
             apply_market_event_edits(
                 tree=tree,
                 matrix=matrix,
@@ -1132,7 +1169,6 @@ def edit_save(
             )
 
         elif payload.selected_tab == "product_event":
-
             apply_product_event_edits(
                 tree=tree,
                 matrix=matrix,
@@ -1141,7 +1177,7 @@ def edit_save(
             )
 
         # ================================================
-        # 8. Push normalized values into source products
+        # 9. Recompute
         # ================================================
 
         apply_matrix_to_tree(
@@ -1150,25 +1186,13 @@ def edit_save(
             selected_indexes=selected_indexes,
         )
 
-        # ================================================
-        # 9. Recompute both event orientations
-        # ================================================
-
         recompute_tree(
             tree=tree,
             selected_indexes=selected_indexes,
         )
 
-        # Both event tabs now use the same recomputed tree:
-        #
-        # build_market_event(tree)
-        # build_product_event(tree)
-        #
-        # Yearly tables are regenerated from monthly data
-        # by the existing event builders.
-
         # ================================================
-        # 10. Save into forecast_outputs
+        # 10. Save
         # ================================================
 
         save_tree_to_forecast_outputs(
@@ -1179,11 +1203,10 @@ def edit_save(
             scenario_name=scenario_name,
         )
 
-        # Save all changes atomically.
         db.commit()
 
         # ================================================
-        # 11. Reload DB and return Apply Filters response
+        # 11. Return refreshed response
         # ================================================
 
         return build_apply_filters_response(
@@ -1210,8 +1233,9 @@ def edit_save(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Unable to edit, normalize, recompute and "
-                f"save the forecast: {exc}"
+                "Unable to edit, normalize, "
+                "recompute and save the forecast: "
+                f"{exc}"
             ),
         ) from exc
 
