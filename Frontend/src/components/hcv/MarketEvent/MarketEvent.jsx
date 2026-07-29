@@ -141,8 +141,24 @@ const sanitizeRunCalculationRow = (row = {}, selectedTab = "overall_event") => {
 const normalizeImpactCurveRowForUi = (row = {}) => ({
     ...row,
     products: Array.isArray(row.products) ? row.products : [],
-    markets: Array.isArray(row.markets) ? row.markets : [],
-    impacted_items: Array.isArray(row.impacted_items) ? row.impacted_items : [],
+    // The UI's internal field is `markets`, but sanitizeRunCalculationRow
+    // above sends it back to the API as `payers` — so when reading rows
+    // back (e.g. after a refresh), prefer `row.markets` if already in UI
+    // shape, but fall back to `row.payers` since that's what the API's
+    // saved rows actually come back as. Without this fallback, the payer
+    // selection silently reverts to empty on every refresh.
+    markets: Array.isArray(row.markets)
+        ? row.markets
+        : Array.isArray(row.payers)
+            ? row.payers
+            : [],
+    impacted_items: Array.isArray(row.impacted_items)
+        ? row.impacted_items
+        : Array.isArray(row.impacted_payers)
+            ? row.impacted_payers
+            : Array.isArray(row.impacted_products)
+                ? row.impacted_products
+                : [],
     source_percentages:
         row.source_percentages && typeof row.source_percentages === "object"
             ? row.source_percentages
@@ -269,6 +285,15 @@ const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
                 markets: payerConfig.markets || payerConfig.payers || fallbackPayerConfig.markets || fallbackPayerConfig.payers || [],
                 impact_markets:
                     payerConfig.impact_markets || payerConfig.impact_payers || fallbackPayerConfig.impact_markets || fallbackPayerConfig.impact_payers || [],
+                // Apply Filter / Run Calculation / Refresh Table responses
+                // always echo this back empty, so if the new payload has no
+                // rows, keep whatever the fallback (e.g. the initial page
+                // load, which does carry the saved rows) already had —
+                // otherwise the blanket spread above would silently wipe
+                // out the saved configuration on every refresh.
+                rows: (payerConfig.rows && payerConfig.rows.length)
+                    ? payerConfig.rows
+                    : (fallbackPayerConfig.rows || []),
             },
             metrics_views: normalizeMetricsViews(payerTab.metrics_views, fallbackPayerTab.metrics_views),
         },
@@ -281,6 +306,9 @@ const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
                 markets: productConfig.markets || productConfig.payers || fallbackProductConfig.markets || fallbackProductConfig.payers || [],
                 impact_products:
                     productConfig.impact_products || fallbackProductConfig.impact_products || [],
+                rows: (productConfig.rows && productConfig.rows.length)
+                    ? productConfig.rows
+                    : (fallbackProductConfig.rows || []),
             },
             metrics_views: normalizeMetricsViews(productTab.metrics_views, fallbackProductTab.metrics_views),
         },
@@ -291,6 +319,9 @@ const normalizeEventTabs = (eventTabs = {}, fallbackTabs = {}) => {
                 ...fallbackOverallConfig,
                 ...overallConfig,
                 markets: overallConfig.markets || overallConfig.payers || fallbackOverallConfig.markets || fallbackOverallConfig.payers || [],
+                rows: (overallConfig.rows && overallConfig.rows.length)
+                    ? overallConfig.rows
+                    : (fallbackOverallConfig.rows || []),
             },
             metrics_views: normalizeMetricsViews(overallTab.metrics_views, fallbackOverallTab.metrics_views),
         },
@@ -311,6 +342,13 @@ export default function HIVMarketEvent() {
     const [eventTabsData, setEventTabsData] = useState({});
 
     const [scenarioName, setScenarioName] = useState("");
+
+    // Tracks the scenario that's actually been applied (via Apply Filter /
+    // initial load / Run Calculation / Save), as opposed to `scenarioName`
+    // which also reflects whatever the user has picked in the dropdown but
+    // not yet applied. Base-scenario guards should check this, not the
+    // live dropdown selection.
+    const [appliedScenarioName, setAppliedScenarioName] = useState("");
 
     const [selectedPayers, setSelectedPayers] = useState([]);
     const [selectedProducts, setSelectedProducts] = useState([]);
@@ -544,6 +582,7 @@ export default function HIVMarketEvent() {
                 {};
 
             setScenarioName(filter.scenario_name || "Base");
+            setAppliedScenarioName(filter.scenario_name || "Base");
 
             setSelectedPayers(
                 Array.isArray(filter.payers)
@@ -665,6 +704,7 @@ export default function HIVMarketEvent() {
         const appliedFilter = apiData.selected_filter || fallbackSelectedFilter;
 
         setScenarioName(appliedFilter.scenario_name || scenarioName);
+        setAppliedScenarioName(appliedFilter.scenario_name || appliedScenarioName);
         setSelectedPayers(appliedFilter.payers || selectedPayers);
         setSelectedProducts(appliedFilter.products || selectedProducts);
         setFromDate(appliedFilter.start_date || fromDate);
@@ -847,6 +887,7 @@ export default function HIVMarketEvent() {
             await saveLiverMarketEvents(buildSaveScenarioPayload(trimmedName));
 
             setScenarioName(trimmedName);
+            setAppliedScenarioName(trimmedName);
             setAvailableScenarios((prev) =>
                 prev.includes(trimmedName) ? prev : [...prev, trimmedName],
             );
@@ -946,7 +987,7 @@ export default function HIVMarketEvent() {
     };
 
     const handleRunCalculation = async () => {
-        if (scenarioName.trim().toLowerCase() === "base") {
+        if (appliedScenarioName.trim().toLowerCase() === "base") {
             openInfoDialog("Run Calculation", RUN_CALCULATION_BASE_MESSAGE);
             return;
         }
@@ -954,7 +995,7 @@ export default function HIVMarketEvent() {
         const payload = {
             ta_name: "HCV",
             selected_filter: {
-                scenario_name: scenarioName,
+                scenario_name: appliedScenarioName,
                 payers: selectedPayers,
                 products: selectedProducts,
                 start_date: fromDate,
