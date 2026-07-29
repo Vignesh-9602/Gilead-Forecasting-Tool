@@ -396,7 +396,7 @@ class CurvePreviewUpdate(BaseModel):
 class UploadCurveResponse(BaseModel):
     message: str
     curve_list: List[CurveListItemUpdate]
-    curve_previews: List[CurvePreviewUpdate]
+    curve_preview: CurvePreviewUpdate
  
  
 class ErrorResponse(BaseModel):

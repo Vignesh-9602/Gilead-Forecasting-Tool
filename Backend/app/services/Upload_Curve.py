@@ -216,20 +216,21 @@ async def process_curve_upload(file: UploadFile, ta_name: str) -> dict:
 
     conn = get_connection()
     try:
-        curve_previews = []
         for curve_name, months, values in curves:
             upsert_curve(conn, ta_name, curve_name, months, values)
-            curve_previews.append({
-                "curve_name": curve_name,
-                "months": months,
-                "values": values,
-            })
         curve_list = fetch_curve_list(conn, ta_name)
     finally:
         conn.close()
 
+    # Preview reflects only the first curve in the uploaded file.
+    first_curve_name, first_months, first_values = curves[0]
+
     return {
         "message": "Curve uploaded successfully",
         "curve_list": curve_list,
-        "curve_previews": curve_previews,
+        "curve_preview": {
+            "curve_name": first_curve_name,
+            "months": first_months,
+            "values": first_values,
+        },
     }
