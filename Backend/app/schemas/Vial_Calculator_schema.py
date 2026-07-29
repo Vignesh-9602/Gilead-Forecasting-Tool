@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # =============================
 # Persistency Schema 
@@ -383,30 +383,26 @@ class InventoryStockUpdateResponse(BaseModel):
 Pydantic schemas for the Persistency Curve Upload API.
 """
 
-from typing import List
-from pydantic import BaseModel, Field
-
-
 class CurveListItemUpdate(BaseModel):
     curve_name: str
-
-
+ 
+ 
 class CurvePreviewUpdate(BaseModel):
     curve_name: str
     months: List[str]
     values: List[float]
-
-
+ 
+ 
 class UploadCurveResponse(BaseModel):
     message: str
     curve_list: List[CurveListItemUpdate]
-    curve_preview: CurvePreviewUpdate
-
-
+    curve_previews: List[CurvePreviewUpdate]
+ 
+ 
 class ErrorResponse(BaseModel):
     detail: str
-
-
+ 
+ 
 class CurveValuesJSON(BaseModel):
     """
     Shape of the JSONB column `curve_values` stored in
