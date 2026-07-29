@@ -109,11 +109,24 @@ def _apply_payer_delta(data: dict, y: int, m: int,
     """
     Scale all (product, payer) cells for `payer` so the payer's total volume
     changes by `delta_vol`. Proportional scaling preserves the product mix.
+
+    If `payer` currently has zero volume across `show_products` (e.g. a
+    payer that's never bought this narrowed product context) but the event
+    wants to give it a positive target, there is nothing to scale
+    proportionally from -- 0 * any scale is still 0. In that case, set each
+    cell to an even split of the target instead of scaling. This is what
+    lets a brand-new entity actually receive volume from an event, rather
+    than the event's computed target being silently discarded.
     """
     ym = data.get((y, m), {})
     current = sum(ym.get(prod, {}).get(payer, 0.0) for prod in show_products)
     target = max(0.0, current + delta_vol)
     if current <= 0:
+        if target <= 0 or not show_products:
+            return
+        even_share = target / len(show_products)
+        for prod in show_products:
+            ym.setdefault(prod, {})[payer] = even_share
         return
     scale = target / current
     for prod in show_products:
@@ -127,13 +140,24 @@ def _apply_product_delta(data: dict, y: int, m: int,
     Scale (product, payer) cells for `product` so the product's total volume
     (summed over `show_payers`, or every payer under it if not given) changes
     by `delta_vol`. Proportional scaling preserves the payer mix within that set.
+
+    Same zero-current bootstrap as _apply_payer_delta above: a product with
+    no existing volume (e.g. a brand-new product added via Manage Products)
+    can't be grown by scaling, since there's nothing there to multiply. If
+    the target is positive, set an even split across the relevant payers
+    instead of returning with no-op.
     """
     ym = data.get((y, m), {})
-    prod_data = ym.get(product, {})
+    prod_data = ym.setdefault(product, {})
     payers = show_payers if show_payers is not None else list(prod_data.keys())
     current = sum(prod_data.get(payer, 0.0) for payer in payers)
     target = max(0.0, current + delta_vol)
     if current <= 0:
+        if target <= 0 or not payers:
+            return
+        even_share = target / len(payers)
+        for payer in payers:
+            prod_data[payer] = even_share
         return
     scale = target / current
     for payer in payers:
@@ -601,6 +625,23 @@ def run_market_events_calculation(payload) -> dict:
 
         # ── Base data ──────────────────────────────────────────────────────
         base_data = organize_raw_data(raw_rows)
+
+        # Seed every (product, payer) combo from the full active master-data
+        # universe (products/payers fetched above), not just the ones with
+        # real transaction_data rows -- using setdefault so any real,
+        # existing value is left completely untouched. Without this, a
+        # brand-new product (e.g. added via Manage Products, zero rows in
+        # transaction_data) would be entirely absent from base_data: it'd be
+        # selectable in every dropdown (those are product_master-driven,
+        # independent of this) but produce no row in any table/chart, and
+        # _apply_payer_delta/_apply_product_delta would have no cell to
+        # write into at all.
+        for (y, m) in month_tuples:
+            cell = base_data.setdefault((y, m), {})
+            for prod in products:
+                prod_cell = cell.setdefault(prod, {})
+                for payer in payers:
+                    prod_cell.setdefault(payer, 0.0)
 
         show_products = sorted({p for ym in base_data.values() for p in ym})
         show_payers = sorted({

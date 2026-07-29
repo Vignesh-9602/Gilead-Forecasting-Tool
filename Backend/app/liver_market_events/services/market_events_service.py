@@ -5,6 +5,8 @@ from app.liver_market_events.schemas.market_events_schema import (
     ApplyFiltersRequest,
     RefreshRequest,
     SaveMarketEventsRequest,
+    CreateProductRequest,
+    UpdateProductRequest,
 )
 from app.liver_market_events.repository.market_events_repo import (
     get_payers,
@@ -21,6 +23,12 @@ from app.liver_market_events.repository.market_events_repo import (
     load_market_analysis,
     save_market_analysis,
     load_impact_rows,
+    get_products_with_audit,
+    create_product,
+    update_product_name,
+    delete_product,
+    rename_product_in_impact_rows,
+    delete_product_from_impact_rows,
 )
 from app.liver_market_events.helpers.date_helpers import (
     parse_year_month,
@@ -2407,6 +2415,143 @@ def save_market_events(payload: SaveMarketEventsRequest) -> dict:
             "message":             "Scenario saved successfully.",
             "scenario_name":       name,
             "available_scenarios": all_scenarios,
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Manage Products
+# ---------------------------------------------------------------------------
+
+def get_manage_products() -> dict:
+    """
+    GET /products -- every product (active and inactive) with its audit
+    columns, for the Manage Products modal's table.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        rows = get_products_with_audit(cur)
+        products = [
+            {
+                "product_name": r[0],
+                "active_flag":  r[1],
+                "added_by":     r[2],
+                "added_at":     r[3].isoformat() if r[3] else None,
+                "modified_by":  r[4],
+                "modified_at":  r[5].isoformat() if r[5] else None,
+            }
+            for r in rows
+        ]
+        return {"products": products}
+    finally:
+        cur.close()
+        conn.close()
+
+
+# No real user/auth concept exists yet in this app -- hardcoded until one does.
+_CURRENT_USER = "admin"
+
+
+def create_market_events_product(payload: CreateProductRequest) -> dict:
+    """
+    POST /products -- create a new product. Rejects with ValueError if the
+    name is empty or already exists (case-sensitive match, matching
+    product_master's existing exact-string usage elsewhere).
+    """
+    name = payload.product_name.strip()
+    if not name:
+        raise ValueError("Product name cannot be empty.")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        created = create_product(cur, name, _CURRENT_USER)
+        if not created:
+            raise ValueError(f"Product '{name}' already exists.")
+        conn.commit()
+        return {"message": "Product created.", "product_name": name}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_market_events_product(product_name: str, payload: UpdateProductRequest) -> dict:
+    """
+    PUT /products/{product_name} -- rename a product. Rejects with
+    ValueError if the new name is empty or product_name doesn't exist.
+
+    Cascades the rename into every saved event row (any scenario, any tab)
+    that references the old name -- products are global, so a stale name
+    left behind in a saved event would silently stop matching anything the
+    next time that scenario is opened or run. Cascade is best-effort: the
+    core rename is committed first and must never be rolled back by a
+    cascade failure (mirrors _persist_market_events_result's pattern).
+    """
+    new_name = payload.new_product_name.strip()
+    if not new_name:
+        raise ValueError("Product name cannot be empty.")
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        rows_updated = update_product_name(cur, product_name, new_name, _CURRENT_USER)
+        if rows_updated == 0:
+            raise ValueError(f"Product '{product_name}' does not exist.")
+        conn.commit()
+
+        events_touched = 0
+        try:
+            events_touched = rename_product_in_impact_rows(cur, "HCV", product_name, new_name)
+            conn.commit()
+        except Exception as _cascade_err:
+            conn.rollback()
+            print(f"[market_events] product-rename event cascade skipped: {_cascade_err}")
+
+        return {
+            "message": "Product updated.",
+            "product_name": new_name,
+            "events_updated": events_touched,
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_market_events_product(product_name: str) -> dict:
+    """
+    DELETE /products/{product_name} -- hard delete. Rejects with ValueError
+    if product_name doesn't exist.
+
+    Cascades the deletion into every saved event row (any scenario): drops
+    the product's own launch event (a product_event row targeting it)
+    entirely, and strips any lingering reference to it from every other
+    row (context/impacted lists, source_percentages). Cascade is
+    best-effort, same reasoning as update_market_events_product above.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        rows_deleted = delete_product(cur, product_name)
+        if rows_deleted == 0:
+            raise ValueError(f"Product '{product_name}' does not exist.")
+        conn.commit()
+
+        cascade = {"deleted_rows": 0, "updated_rows": 0}
+        try:
+            cascade = delete_product_from_impact_rows(cur, "HCV", product_name)
+            conn.commit()
+        except Exception as _cascade_err:
+            conn.rollback()
+            print(f"[market_events] product-delete event cascade skipped: {_cascade_err}")
+
+        return {
+            "message": "Product deleted.",
+            "product_name": product_name,
+            "deleted_event_rows": cascade["deleted_rows"],
+            "updated_event_rows": cascade["updated_rows"],
         }
     finally:
         cur.close()
