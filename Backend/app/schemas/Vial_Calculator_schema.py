@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # =============================
 # Persistency Schema 
@@ -107,33 +107,35 @@ class PersistencyCalculateApplyResponse(BaseModel):
     curve_preview: PersistencyCurvePreview
     curve_list: List[PersistencyCurveListItem]
 
+class PersistencyCurveListItemUpdate(BaseModel):
+    curve_name: str
 
 class PersistencyCurveNamesResponse(BaseModel):
-    curve_list: List[PersistencyCurveListItem]
+    curve_list: List[PersistencyCurveListItemUpdate]
 
 
 class PersistencyCurveDetails(BaseModel):
-
+ 
     curve_name: str
-
+ 
     ta_name: str
-
-    start_month: int
-    end_month: int
-
-    start_value: float
-    end_value: float
-
-    method: str
-
-    k_factor: float
-
-
+ 
+    start_month: Optional[str] = None
+    end_month: Optional[str] = None
+ 
+    start_value: Optional[float] = None
+    end_value: Optional[float] = None
+ 
+    # method: Optional[str] = None
+ 
+    # k_factor: Optional[float] = None
+ 
+ 
 class PersistencyCurvePreview(BaseModel):
     months: List[str]
     values: List[float]
-
-
+ 
+ 
 class PersistencyCurveConfigResponse(BaseModel):
     curve_details: PersistencyCurveDetails
     curve_preview: PersistencyCurvePreview
@@ -142,10 +144,12 @@ class PersistencyCurveListItem(BaseModel):
     curve_name: str
     method: str
 
+class PersistencyCurveListItemUpdate(BaseModel):
+    curve_name: str
 
 class DeletePersistencyCurveResponse(BaseModel):
     message: str
-    curve_list: List[PersistencyCurveListItem]
+    curve_list: List[PersistencyCurveListItemUpdate]
 
 class PersistencyCurvePeriod(BaseModel):
     curve_name: str
@@ -375,3 +379,34 @@ class InventoryStockUpdateResponse(BaseModel):
     brand: str
     months: List[str]
     inventory_table: InventoryTable
+"""
+Pydantic schemas for the Persistency Curve Upload API.
+"""
+
+class CurveListItemUpdate(BaseModel):
+    curve_name: str
+ 
+ 
+class CurvePreviewUpdate(BaseModel):
+    curve_name: str
+    months: List[str]
+    values: List[float]
+ 
+ 
+class UploadCurveResponse(BaseModel):
+    message: str
+    curve_list: List[CurveListItemUpdate]
+    curve_previews: List[CurvePreviewUpdate]
+ 
+ 
+class ErrorResponse(BaseModel):
+    detail: str
+ 
+ 
+class CurveValuesJSON(BaseModel):
+    """
+    Shape of the JSONB column `curve_values` stored in
+    raw.persistency_curve_master.
+    """
+    months: List[str] = Field(..., description="Ordered month labels, e.g. M1, M2 ...")
+    values: List[float] = Field(..., description="Persistency values aligned with `months`")

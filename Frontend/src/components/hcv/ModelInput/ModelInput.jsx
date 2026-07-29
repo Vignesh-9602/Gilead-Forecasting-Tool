@@ -3064,7 +3064,6 @@ export default function PBCModelInput() {
                   value={safeFrom}
                   onChange={(e) => {
                     setFromDate(e.target.value);
-                    setToDate("");
                   }}
                   MenuProps={{
                     PaperProps: {

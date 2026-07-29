@@ -1220,30 +1220,25 @@ def calculate_apply_persistency_service(
         "curve_list": curve_list
     }
 
-def get_persistency_curve_names_service(
-    ta_name: str
-):
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
+def get_persistency_curve_names_service(ta_name: str):
+    conn = None
+    cursor = None
     try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
         cursor.execute("""
             SELECT
-                curve_name,
-                curve_type
+                curve_name
             FROM raw.persistency_curve_master
             WHERE ta_name = %s
-            order by updated_at desc
+            ORDER BY updated_at DESC
         """, (ta_name,))
 
         rows = cursor.fetchall()
 
         curve_list = [
-            {
-                "curve_name": row[0],
-                "method": row[1]
-            }
+            {"curve_name": row[0]}
             for row in rows
         ]
 
@@ -1252,140 +1247,98 @@ def get_persistency_curve_names_service(
         }
 
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-def get_persistency_curve_config_service(
-    curve_name: str
-):
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
+def get_persistency_curve_config_service(curve_name: str):
+    conn = None
+    cursor = None
     try:
+        conn = get_connection()
+        cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
                 ta_name,
-                start_month,
-                end_month,
-                start_value,
-                end_value,
-                curve_type,
-                k_factor,
                 curve_values
             FROM raw.persistency_curve_master
             WHERE curve_name = %s
             LIMIT 1
-        """, (
-            curve_name,
-        ))
+        """, (curve_name,))
 
         row = cursor.fetchone()
 
         if not row:
-            raise ValueError(
-                f"Curve '{curve_name}' not found"
-            )
+            raise ValueError(f"Curve '{curve_name}' not found")
 
-        (
-            ta_name,
-            start_month,
-            end_month,
-            start_value,
-            end_value,
-            curve_type,
-            k_factor,
-            curve_values
-        ) = row
+        ta_name, curve_values = row
+
+        months = curve_values.get("months", [])
+        values = curve_values.get("values", [])
 
         return {
-
             "curve_details": {
-
                 "curve_name": curve_name,
-
                 "ta_name": ta_name,
-
-                "start_month": start_month,
-
-                "end_month": end_month,
-
-                "start_value": float(start_value),
-
-                "end_value": float(end_value),
-
-                "method": curve_type,
-
-                "k_factor": float(k_factor)
+                "start_month": months[0] if months else None,
+                "end_month": months[-1] if months else None,
+                "start_value": float(values[0]) if values else None,
+                "end_value": float(values[-1]) if values else None
+                # "method": None,      # not currently stored - see note below
+                # "k_factor": None,    # not currently stored - see note below
             },
-
             "curve_preview": {
-
-                "months": curve_values.get(
-                    "months",
-                    []
-                ),
-
-                "values": curve_values.get(
-                    "values",
-                    []
-                )
+                "months": months,
+                "values": values,
             }
         }
 
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
-def delete_persistency_curve_service(
-    curve_name: str
-):
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
+def delete_persistency_curve_service(curve_name: str):
+    conn = None
+    cursor = None
     try:
+        conn = get_connection()
+        cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT 1
+            SELECT ta_name
             FROM raw.persistency_curve_master
             WHERE curve_name = %s
-        """, (
-            curve_name,
-        ))
+        """, (curve_name,))
 
         existing = cursor.fetchone()
 
         if not existing:
-            raise ValueError(
-                f"Curve '{curve_name}' not found"
-            )
+            raise ValueError(f"Curve '{curve_name}' not found")
+
+        ta_name = existing[0]
 
         cursor.execute("""
             DELETE FROM raw.persistency_curve_master
             WHERE curve_name = %s
-        """, (
-            curve_name,
-        ))
+        """, (curve_name,))
 
         conn.commit()
 
         cursor.execute("""
-            SELECT
-                curve_name,
-                curve_type
+            SELECT curve_name
             FROM raw.persistency_curve_master
-            ORDER BY updated_at
-        """)
+            WHERE ta_name = %s
+            ORDER BY updated_at DESC
+        """, (ta_name,))
 
         rows = cursor.fetchall()
 
         curve_list = [
-            {
-                "curve_name": row[0],
-                "method": row[1]
-            }
+            {"curve_name": row[0]}
             for row in rows
         ]
 
@@ -1395,8 +1348,10 @@ def delete_persistency_curve_service(
         }
 
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 def fetch_curve_values_map(cursor, ta_name, curve_names):
