@@ -135,10 +135,14 @@ class PersistencyCurvePreview(BaseModel):
     months: List[str]
     values: List[float]
  
- 
+class PersistencyCurvePreviewconfigure(BaseModel):
+    curve_name: str
+    months: List[str]
+    values: List[float]
+    
 class PersistencyCurveConfigResponse(BaseModel):
     curve_details: PersistencyCurveDetails
-    curve_preview: PersistencyCurvePreview
+    curve_preview: PersistencyCurvePreviewconfigure
 
 class PersistencyCurveListItem(BaseModel):
     curve_name: str
@@ -396,7 +400,7 @@ class CurvePreviewUpdate(BaseModel):
 class UploadCurveResponse(BaseModel):
     message: str
     curve_list: List[CurveListItemUpdate]
-    curve_previews: List[CurvePreviewUpdate]
+    curve_preview: CurvePreviewUpdate
  
  
 class ErrorResponse(BaseModel):
