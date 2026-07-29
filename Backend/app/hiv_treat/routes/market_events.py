@@ -190,6 +190,122 @@ from fastapi import Depends, HTTPException
 
 
 
+
+def parse_events_payload(raw_payload):
+    if raw_payload is None:
+        return []
+
+    if isinstance(raw_payload, list):
+        return [
+            event
+            for event in raw_payload
+            if isinstance(event, dict)
+        ]
+
+    if isinstance(raw_payload, dict):
+        return [raw_payload]
+
+    if isinstance(raw_payload, str):
+        raw_payload = raw_payload.strip()
+
+        if not raw_payload:
+            return []
+
+        parsed = json.loads(raw_payload)
+
+        if isinstance(parsed, list):
+            return [
+                event
+                for event in parsed
+                if isinstance(event, dict)
+            ]
+
+        if isinstance(parsed, dict):
+            return [parsed]
+
+    return []
+
+def load_scenario_events_payload(
+    cursor,
+    ta_name,
+    scenario_name,
+):
+    cursor.execute(
+        """
+        SELECT events_payload
+        FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND events_payload IS NOT NULL
+        """,
+        (
+            ta_name,
+            scenario_name,
+        ),
+    )
+
+    rows = cursor.fetchall() or []
+
+    all_events = []
+    seen_events = set()
+
+    print(
+        "[EVENT LOADER] DATABASE ROW COUNT:",
+        len(rows),
+    )
+
+    for index, row in enumerate(rows):
+        raw_payload = (
+            row.get("events_payload")
+            if isinstance(row, dict)
+            else row[0]
+        )
+
+        print(
+            f"[EVENT LOADER] ROW {index + 1} RAW:",
+            raw_payload,
+        )
+
+        try:
+            parsed_events = parse_events_payload(
+                raw_payload
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Invalid events_payload JSON for "
+                f"scenario {scenario_name!r}: {exc}"
+            ) from exc
+
+        print(
+            f"[EVENT LOADER] ROW {index + 1} "
+            f"PARSED EVENT COUNT:",
+            len(parsed_events),
+        )
+
+        for event in parsed_events:
+            # Prevent repeated payloads from being returned
+            # when forecast_outputs has multiple metric rows.
+            signature = json.dumps(
+                event,
+                sort_keys=True,
+                default=str,
+            )
+
+            if signature in seen_events:
+                continue
+
+            seen_events.add(signature)
+            all_events.append(event)
+
+    print(
+        "[EVENT LOADER] UNIQUE EVENTS:",
+        len(all_events),
+    )
+
+    pprint(all_events)
+
+    return all_events
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -235,7 +351,6 @@ def apply_market_event_filters(
             selected_filter.products,
         )
 
-        # Warn about placeholder date values.
         if str(
             selected_filter.start_date
         ).strip().lower() == "string":
@@ -334,13 +449,31 @@ def apply_market_event_filters(
             )
 
         # =====================================================
-        # 3. Build tree
+        # 3. Load saved event payload
         # =====================================================
 
-        print("\n[3] BUILDING CALCULATION TREE")
+        print("\n[3] LOADING SAVED EVENTS")
 
-        # Keep metrics in its original structure.
-        # build_calculation_tree() already expects this format.
+        saved_events = load_scenario_events_payload(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+        )
+
+        print(
+            "SAVED EVENTS COUNT:",
+            len(saved_events),
+        )
+
+        print("SAVED EVENTS:")
+        pprint(saved_events)
+
+        # =====================================================
+        # 4. Build tree
+        # =====================================================
+
+        print("\n[4] BUILDING CALCULATION TREE")
+
         tree = build_calculation_tree(
             metrics
         )
@@ -351,10 +484,10 @@ def apply_market_event_filters(
         )
 
         # =====================================================
-        # 4. Date filtering
+        # 5. Date filtering
         # =====================================================
 
-        print("\n[4] FILTERING TREE BY DATE")
+        print("\n[5] FILTERING TREE BY DATE")
 
         tree = filter_tree_by_date(
             tree,
@@ -368,13 +501,17 @@ def apply_market_event_filters(
         )
 
         # =====================================================
-        # 5. Build events
+        # 6. Build events
         # =====================================================
 
-        print("\n[5] BUILDING EVENTS")
+        print("\n[6] BUILDING EVENTS")
 
+        # Pass events_payload into Overall Event.
+        # build_overall_impact_curve_configuration()
+        # will retain only overall-event rows.
         overall_event = build_overall_event(
-            tree
+            tree=tree,
+            saved_events=saved_events,
         )
 
         debug_event_summary(
@@ -382,9 +519,13 @@ def apply_market_event_filters(
             event=overall_event,
         )
 
+        # Market and Product events are unchanged for now.
         market_event = build_market_event(
             tree=tree,
-            selected_products=selected_filter.products,
+            selected_products=(
+                selected_filter.products
+            ),
+            saved_events=saved_events,
         )
 
         debug_event_summary(
@@ -393,8 +534,11 @@ def apply_market_event_filters(
         )
 
         product_event = build_product_event(
-            tree,
-            selected_markets=selected_filter.markets,
+            tree=tree,
+            selected_markets=(
+                selected_filter.markets
+            ),
+            saved_events=saved_events,
         )
 
         debug_event_summary(
@@ -403,7 +547,7 @@ def apply_market_event_filters(
         )
 
         # =====================================================
-        # 6. Response
+        # 7. Response
         # =====================================================
 
         response = {
@@ -444,7 +588,7 @@ def apply_market_event_filters(
             },
         }
 
-        print("\n[6] RESPONSE SUMMARY")
+        print("\n[7] RESPONSE SUMMARY")
 
         for event_name, event_value in response[
             "event_tabs"
@@ -469,12 +613,44 @@ def apply_market_event_filters(
                 },
             )
 
+        overall_rows = (
+            response
+            .get("event_tabs", {})
+            .get("overall_event", {})
+            .get(
+                "impact_curve_configuration",
+                {},
+            )
+            .get("rows", [])
+        )
+
+        print(
+            "OVERALL EVENT CONFIGURATION ROWS:"
+        )
+        pprint(overall_rows)
+
         print("=" * 90 + "\n")
 
         return response
 
     except HTTPException:
         raise
+
+    except ValueError as exc:
+        print("\n[APPLY FILTERS VALIDATION ERROR]")
+        print(
+            "ERROR TYPE:",
+            type(exc).__name__,
+        )
+        print(
+            "ERROR MESSAGE:",
+            str(exc),
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
 
     except Exception as exc:
         print("\n[APPLY FILTERS ERROR]")
@@ -487,7 +663,13 @@ def apply_market_event_filters(
             str(exc),
         )
 
-        raise
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unable to apply market event filters: "
+                f"{exc}"
+            ),
+        ) from exc
 
     finally:
         cursor.close()

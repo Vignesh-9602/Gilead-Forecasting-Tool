@@ -43,19 +43,29 @@ def exclude_overall_from_chart(table):
 
     return chart_table
 
-def build_overall_event(tree):
+def build_overall_event(
+    tree,
+    saved_events=None,
+):
     """
     Build Overall Event from the calculation tree.
 
     Provides one view:
         overall_level
+
+    Saved overall events are returned inside:
+        impact_curve_configuration.rows
     """
 
     months = tree["months"]
-    forecast_start_index = tree["forecast_start_index"]
+    forecast_start_index = tree[
+        "forecast_start_index"
+    ]
 
     overall_volume = tree["overall"]["volume"]
-    overall_share = [100.0] * len(months)
+    overall_share = [
+        100.0
+    ] * len(months)
 
     view_options = [
         {
@@ -92,7 +102,6 @@ def build_overall_event(tree):
         hierarchy=False,
     )
 
-    # Overall-level tables are flat and non-editable
     market_share_monthly["type"] = "flat"
     market_share_monthly["editable"] = False
 
@@ -124,8 +133,12 @@ def build_overall_event(tree):
     # =====================================================
 
     return {
-        "impact_curve_configuration":
-            build_overall_impact_curve_configuration(tree),
+        "impact_curve_configuration": (
+            build_overall_impact_curve_configuration(
+                tree=tree,
+                saved_events=saved_events,
+            )
+        ),
 
         "metrics_views": {
             "market_share": {
@@ -491,6 +504,7 @@ def build_product_chart_rows(
 def build_product_event(
     tree,
     selected_markets=None,
+    saved_events=None,
 ):
     """
     Build Product Event.
@@ -854,7 +868,8 @@ def build_product_event(
     return {
         "impact_curve_configuration": (
             build_product_impact_curve_configuration(
-                tree
+                tree=tree,
+                saved_events=saved_events,
             )
         ),
 
@@ -1114,8 +1129,8 @@ def build_product_market_chart(
             series.append(
                 {
                     "label": (
-                        f"{market_name} - "
-                        f"{product_name}"
+                        f"{product_name} - "
+                        f"{market_name}"
                     ),
                     "history": values[
                         :forecast_start_index
@@ -1136,6 +1151,7 @@ def build_product_market_chart(
 def build_market_event(
     tree,
     selected_products=None,
+    saved_events=None,
 ):
     """
     Build Market Event.
@@ -1494,7 +1510,8 @@ def build_market_event(
     return {
         "impact_curve_configuration": (
             build_market_impact_curve_configuration(
-                tree
+                tree=tree,
+                saved_events=saved_events,
             )
         ),
 
@@ -1726,18 +1743,131 @@ def build_market_chart_rows(
 
     return rows
 
-def build_overall_impact_curve_configuration(tree):
+def normalize_overall_event(event):
+    """
+    Normalize one saved Overall Event row.
+
+    Overall events are identified by the absence of:
+        impacted_markets
+        impacted_products
+    """
+
+    if not isinstance(event, dict):
+        return None
+
+    if "impacted_markets" in event:
+        return None
+
+    if "impacted_products" in event:
+        return None
 
     return {
-        "products": list(tree["products"].keys()),
+        "event_id": event.get("event_id"),
 
-        "markets": list(tree["markets"].keys()),
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
 
-        "impact_markets": ["Overall"],
+        "start_date": event.get("start_date"),
+
+        "peak_percent": float(
+            event.get("peak_percent", 0) or 0
+        ),
+
+        "months": int(
+            event.get("months", 0) or 0
+        ),
+
+        "curve_type": str(
+            event.get("curve_type", "Linear")
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get("factor", 0) or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get("enable_coverage", False)
+        ),
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_overall_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Overall Event impact-curve configuration.
+
+    saved_events may contain overall, market, and product events.
+    Only overall events are included here.
+    """
+
+    normalized_rows = []
+
+    for event in saved_events or []:
+        normalized_event = normalize_overall_event(
+            event
+        )
+
+        if normalized_event is not None:
+            normalized_rows.append(
+                normalized_event
+            )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_markets": [
+            "Overall"
+        ],
 
         "forecast_start_date": (
-            tree["months"][tree["forecast_start_index"]]
-            if tree["forecast_start_index"] < len(tree["months"])
+            tree["months"][
+                tree["forecast_start_index"]
+            ]
+            if (
+                tree["forecast_start_index"]
+                < len(tree["months"])
+            )
             else None
         ),
 
@@ -1748,55 +1878,417 @@ def build_overall_impact_curve_configuration(tree):
             "SCurve",
         ],
 
-        "rows": [],
+        "rows": normalized_rows,
     }
 
-def build_market_impact_curve_configuration(tree):
+def normalize_market_event(event):
+    """
+    Normalize one saved Market Event row.
 
-    return {
-        "products": list(tree["products"].keys()),
+    A Market Event is identified by the presence of:
+        impacted_markets
+    """
 
-        "markets": list(tree["markets"].keys()),
+    if not isinstance(event, dict):
+        return None
 
-        "impact_markets": list(tree["markets"].keys()),
+    if "impacted_markets" not in event:
+        return None
 
-        "forecast_start_date": (
-            tree["months"][tree["forecast_start_index"]]
-            if tree["forecast_start_index"] < len(tree["months"])
-            else None
-        ),
+    markets = event.get("markets") or []
+    products = event.get("products") or []
+    impacted_markets = (
+        event.get("impacted_markets") or []
+    )
 
-        "curve_types": [
-            "Linear",
-            "Exponential",
-            "Logarithmic",
-            "SCurve",
-        ],
+    if isinstance(markets, str):
+        markets = [markets]
 
-        "rows": [],
-    }
+    if isinstance(products, str):
+        products = [products]
 
-def build_product_impact_curve_configuration(tree):
-    forecast_start_index = tree["forecast_start_index"]
+    if isinstance(impacted_markets, str):
+        impacted_markets = [
+            impacted_markets
+        ]
 
-    forecast_start_date = (
-        tree["months"][forecast_start_index]
-        if forecast_start_index < len(tree["months"])
-        else None
+    source_percentages = (
+        event.get("source_percentages") or {}
     )
 
     return {
-        "products": list(tree["products"].keys()),
-        "markets": list(tree["markets"].keys()),
-        "impact_products": list(tree["products"].keys()),
-        "forecast_start_date": forecast_start_date,
+        "event_id": event.get("event_id"),
+
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
+
+        "markets": markets,
+
+        "products": products,
+
+        "impacted_markets": impacted_markets,
+
+        "start_date": event.get(
+            "start_date"
+        ),
+
+        "peak_percent": float(
+            event.get(
+                "peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "months": int(
+            event.get(
+                "months",
+                0,
+            )
+            or 0
+        ),
+
+        "curve_type": str(
+            event.get(
+                "curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get(
+                "factor",
+                0,
+            )
+            or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get(
+                "enable_coverage",
+                False,
+            )
+        ),
+
+        "source_percentages": {
+            str(market): float(
+                percentage or 0
+            )
+            for market, percentage
+            in source_percentages.items()
+        },
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_market_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Market Event impact-curve configuration.
+
+    saved_events may contain overall, market,
+    and product events. Only market events are
+    returned in rows.
+    """
+
+    saved_events = saved_events or []
+
+    rows = []
+
+    for event in saved_events:
+        normalized_event = normalize_market_event(
+            event
+        )
+
+        if normalized_event is not None:
+            rows.append(normalized_event)
+
+    print(
+        "[MARKET CONFIG] RECEIVED EVENTS:",
+        len(saved_events),
+    )
+
+    print(
+        "[MARKET CONFIG] MARKET ROWS:",
+        len(rows),
+    )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_markets": list(
+            tree["markets"].keys()
+        ),
+
+        "forecast_start_date": (
+            tree["months"][
+                tree["forecast_start_index"]
+            ]
+            if (
+                tree["forecast_start_index"]
+                < len(tree["months"])
+            )
+            else None
+        ),
+
         "curve_types": [
             "Linear",
             "Exponential",
             "Logarithmic",
             "SCurve",
         ],
-        "rows": [],
+
+        "rows": rows,
+    }
+
+def normalize_product_event(event):
+    """
+    Normalize one saved Product Event row.
+
+    Product Events are identified by the presence of:
+        impacted_products
+
+    Key presence is used because impacted_products
+    can validly be an empty list.
+    """
+
+    if not isinstance(event, dict):
+        return None
+
+    if "impacted_products" not in event:
+        return None
+
+    markets = event.get("markets") or []
+    products = event.get("products") or []
+    impacted_products = (
+        event.get("impacted_products") or []
+    )
+
+    if isinstance(markets, str):
+        markets = [markets]
+
+    if isinstance(products, str):
+        products = [products]
+
+    if isinstance(impacted_products, str):
+        impacted_products = [
+            impacted_products
+        ]
+
+    source_percentages = (
+        event.get("source_percentages") or {}
+    )
+
+    if not isinstance(source_percentages, dict):
+        source_percentages = {}
+
+    return {
+        "event_id": event.get("event_id"),
+
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
+
+        "markets": markets,
+
+        "products": products,
+
+        "impacted_products": impacted_products,
+
+        "start_date": event.get(
+            "start_date"
+        ),
+
+        "peak_percent": float(
+            event.get(
+                "peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "months": int(
+            event.get(
+                "months",
+                0,
+            )
+            or 0
+        ),
+
+        "curve_type": str(
+            event.get(
+                "curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get(
+                "factor",
+                0,
+            )
+            or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get(
+                "enable_coverage",
+                False,
+            )
+        ),
+
+        "source_percentages": {
+            str(product): float(
+                percentage or 0
+            )
+            for product, percentage
+            in source_percentages.items()
+        },
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_product_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Product Event impact-curve configuration.
+
+    saved_events can contain events from all tabs.
+    Only events containing impacted_products are
+    returned in rows.
+    """
+
+    saved_events = saved_events or []
+
+    rows = []
+
+    for event in saved_events:
+        normalized_event = (
+            normalize_product_event(event)
+        )
+
+        if normalized_event is not None:
+            rows.append(normalized_event)
+
+    forecast_start_index = tree[
+        "forecast_start_index"
+    ]
+
+    forecast_start_date = (
+        tree["months"][forecast_start_index]
+        if forecast_start_index
+        < len(tree["months"])
+        else None
+    )
+
+    print(
+        "[PRODUCT CONFIG] RECEIVED EVENTS:",
+        len(saved_events),
+    )
+
+    print(
+        "[PRODUCT CONFIG] PRODUCT ROWS:",
+        len(rows),
+    )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_products": list(
+            tree["products"].keys()
+        ),
+
+        "forecast_start_date": (
+            forecast_start_date
+        ),
+
+        "curve_types": [
+            "Linear",
+            "Exponential",
+            "Logarithmic",
+            "SCurve",
+        ],
+
+        "rows": rows,
     }
 
 # def build_impact_curve_configuration(tree):

@@ -1,3 +1,6 @@
+import json
+
+
 METRIC_FILTERS = [
     {
         "label": "Market Share",
@@ -160,4 +163,184 @@ def load_forecast_outputs(
         )
 
     return metrics
+
+
+
+def load_events_payload(
+    cursor,
+    ta_name,
+    scenario_name,
+):
+    cursor.execute(
+        """
+        SELECT events_payload
+        FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND events_payload IS NOT NULL
+        LIMIT 1
+        """,
+        (
+            ta_name,
+            scenario_name,
+        ),
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
+        return []
+
+    if isinstance(row, dict):
+        raw_payload = row.get(
+            "events_payload"
+        )
+    else:
+        raw_payload = row[0]
+
+    if raw_payload is None:
+        return []
+
+    # JSON/JSONB may already be converted
+    if isinstance(raw_payload, list):
+        return raw_payload
+
+    if isinstance(raw_payload, dict):
+        return [raw_payload]
+
+    if isinstance(raw_payload, str):
+        raw_payload = raw_payload.strip()
+
+        if not raw_payload:
+            return []
+
+        try:
+            parsed = json.loads(
+                raw_payload
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Invalid events_payload JSON "
+                f"for scenario {scenario_name!r}: "
+                f"{exc}"
+            ) from exc
+
+        if isinstance(parsed, list):
+            return parsed
+
+        if isinstance(parsed, dict):
+            return [parsed]
+
+    return []
+
+
+def is_overall_event(event):
+    if not isinstance(event, dict):
+        return False
+
+    return (
+        "impacted_markets" not in event
+        and "impacted_products" not in event
+    )
+
+def get_overall_events(events):
+    return [
+        event
+        for event in (events or [])
+        if is_overall_event(event)
+    ]
+
+def normalize_overall_event(event):
+    event = event or {}
+
+    return {
+        "event_id": event.get(
+            "event_id"
+        ),
+
+        "event_name": str(
+            event.get(
+                "event_name",
+                "",
+            )
+            or ""
+        ),
+
+        "start_date": event.get(
+            "start_date"
+        ),
+
+        "peak_percent": float(
+            event.get(
+                "peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "months": int(
+            event.get(
+                "months",
+                0,
+            )
+            or 0
+        ),
+
+        "curve_type": str(
+            event.get(
+                "curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get(
+                "factor",
+                0,
+            )
+            or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get(
+                "enable_coverage",
+                False,
+            )
+        ),
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+
 
