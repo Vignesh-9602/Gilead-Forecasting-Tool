@@ -1,10 +1,10 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse, UploadCurveResponse
+from app.schemas.Vial_Calculator_schema import AvgVialsSaveRequest, AvgVialsSaveResponse, ConfigureComplianceApplyRequest, ConfigureComplianceApplyResponse, ConfigureComplianceGetResponse, DeletePersistencyCurveResponse, DemandAdjustmentsSaveRequest, DemandAdjustmentsSaveResponse, EditRowValuesRequest, EditRowValuesResponse, InventoryStockUpdateRequest, InventoryStockUpdateResponse, PersistencyApplyCurveRequest, PersistencyApplyCurveResponse, PersistencyApplyRequest, PersistencyApplyResponse,PersistencyCalculateApplyRequest, PersistencyCalculateApplyResponse,PersistencyCurveConfigResponse, PersistencyCurveNamesResponse, PersistencyFiltersResponse, UpdateCurveRequest, UpdateCurveResponse, UploadCurveResponse
 from app.services.Persistency_service import apply_persistency_curve_service, apply_persistency_service, calculate_apply_persistency_service, delete_persistency_curve_service, get_persistency_curve_config_service, get_persistency_curve_names_service, get_persistency_filters_service, save_avg_vials_per_dose_service
 from app.services.Vial_Calculator_functions import apply_compliance_configuration_service, apply_edit_row_values_service, get_compliance_configuration_service, save_demand_adjustments_service, update_inventory_stock_service
-from app.services.Upload_Curve import UploadFile,process_curve_upload
+from app.services.Upload_Curve import UploadFile,process_curve_upload, update_curve_service
 
 
 router = APIRouter(prefix="/api/persistency", tags=["Vial_Calculator"])
@@ -206,3 +206,12 @@ async def upload_curve(
  
     result = await process_curve_upload(file, ta_name)
     return result
+
+@router.post("/Edit-curve", response_model=UpdateCurveResponse)
+def update_curve(payload: UpdateCurveRequest):
+    return update_curve_service(
+        ta_name=payload.ta_name,
+        curve_name=payload.curve_name,
+        months=payload.months,
+        values=payload.values,
+    )
