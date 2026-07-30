@@ -2734,6 +2734,18 @@ export default function PBCModelInput() {
         const normalized = normalizeLiverResponse(respData, metric);
         setLiverTabsRaw(normalized);
         setLiverRawData(respData);
+
+        // Sync factor controls (trajectory_start, total_growth, etc.) from the
+        // activated scenario's stored factors so the recalculate panel reflects
+        // what was used when the scenario was saved.
+        const activatedScenarioObj = respData.scenarios?.[chosenScenario] || null;
+        const f = activatedScenarioObj?.factors || {};
+        if (Object.keys(f).length) {
+          let am = f?.active_model || modelSelection;
+          am = resolveModelForTab(am);
+          setModelSelection(am);
+          syncFactors(f, am);
+        }
       } else if (liverRawData) {
         const patched = { ...liverRawData, active_scenario: chosenScenario };
         const normalized = normalizeLiverResponse(patched, metric);
@@ -3926,17 +3938,9 @@ export default function PBCModelInput() {
                               ? chartData.months.slice(chartData.forecast_start_index)
                               : trajectoryMonthOptions;
 
-                          // Dropdown shows only months STRICTLY AFTER the
-                          // current trajectoryStart — the default value itself
-                          // is displayed via renderValue above and acts as the
-                          // "current" selection; the list lets the user pick a
-                          // later start date.
-                          const dropdownOptions = trajectoryStart
-                            ? forecastMonths.filter((m) => m > trajectoryStart)
-                            : forecastMonths;
-
-                          // Fallback: if nothing passes the filter, show all.
-                          const opts = dropdownOptions.length ? dropdownOptions : forecastMonths;
+                          // Show all forecast months so the user can pick any
+                          // start date (including going back to an earlier one).
+                          const opts = forecastMonths.length ? forecastMonths : trajectoryMonthOptions;
 
                           return opts.map((m) => (
                             <MenuItem key={m} value={m}>

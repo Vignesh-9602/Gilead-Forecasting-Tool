@@ -389,25 +389,27 @@ def _apply_events_to_data(
             if row_payers:
                 ctx_payers = [p for p in show_payers if p in row_payers] or show_payers
 
+        # Anchor month: the month just before THIS row's own start_date, not
+        # always the last history month -- when a later-starting row is
+        # stacked on the same entity/market after an earlier row already ran
+        # (e.g. row 1 ramps to peak by Jun-2026, row 2 starts Aug-2026), data
+        # at that prior month already reflects row 1's effect, so row 2's
+        # curve continues from wherever row 1 left things instead of jumping
+        # back to the original historical baseline. Rows starting at/before
+        # the forecast begins are unaffected -- they still anchor to the last
+        # history month, same as always.
+        baseline_idx = forecast_start_index - 1
+        event_start_iso = str(event_row.get("start_date", ""))[:10]
+        if event_start_iso:
+            start_idx = next(
+                (i for i, ms in enumerate(month_iso) if ms >= event_start_iso), None
+            )
+            if start_idx is not None and start_idx - 1 > baseline_idx:
+                baseline_idx = start_idx - 1
+
         baseline_share = 0.0
+        baseline_total = 0.0
         if tab != "overall_event":
-            # Anchor to the month just before THIS row's own start_date, not
-            # always the last history month -- when a later-starting row is
-            # stacked on the same entity after an earlier row already ran
-            # (e.g. row 1 ramps Cash to 50% by Jun-2026, row 2 starts
-            # Aug-2026), data at that prior month already reflects row 1's
-            # effect, so row 2's curve continues from wherever row 1 left
-            # Cash instead of jumping back to its original historical share.
-            # Rows starting at/before the forecast begins are unaffected --
-            # they still anchor to the last history month, same as before.
-            baseline_idx = forecast_start_index - 1
-            event_start_iso = str(event_row.get("start_date", ""))[:10]
-            if event_start_iso:
-                start_idx = next(
-                    (i for i, ms in enumerate(month_iso) if ms >= event_start_iso), None
-                )
-                if start_idx is not None and start_idx - 1 > baseline_idx:
-                    baseline_idx = start_idx - 1
             if baseline_idx >= 0:
                 last_y, last_m = month_tuples[baseline_idx]
                 if tab == "payer_event":
@@ -431,6 +433,14 @@ def _apply_events_to_data(
                                 for py in ctx_payers
                             )
                             baseline_share = entity_vol / last_ctx_total * 100.0
+        else:
+            # overall_event's "baseline" is the anchor month's TOTAL market
+            # volume (not a share) -- the fixed reference point peak_percent
+            # growth is computed against, e.g. "peak=40%" means "40% above
+            # whatever the market was at the anchor month," regardless of how
+            # many times this calculation gets re-run afterward.
+            if baseline_idx >= 0:
+                baseline_total = total_all[baseline_idx]
 
         event_input = _build_event_input(event_row, tab)
         if event_input is None:
@@ -469,17 +479,33 @@ def _apply_events_to_data(
             after_window = event_end_month is not None and month_str > event_end_month
 
             if tab == "overall_event":
+                # Pin the market's total volume to an ABSOLUTE target each
+                # month (baseline_total * (1 + peak%/100)), the same
+                # "pinning" principle payer_event/product_event use for their
+                # selected entity -- NOT a multiplicative scale applied to
+                # whatever total_vol currently is. The old scale-in-place
+                # approach compounded on every re-run (each run grew the
+                # ALREADY-grown total by another peak% on top), and never
+                # truly held flat after the ramp, since a constant multiplier
+                # on a naturally-varying baseline still varies. Pinning to a
+                # FIXED baseline_total makes re-running idempotent and makes
+                # the post-ramp "sustained" months land on a genuinely
+                # constant absolute value.
                 if before_window:
                     continue
                 delta_share = sustained_selected if after_window else selected_curve.get(month_str, sustained_selected)
-                if delta_share == 0.0:
+                target_total = max(0.0, baseline_total * (1.0 + delta_share / 100.0))
+                event_touched_forecast = True
+                if target_total <= 0:
                     continue
-                scale = max(0.0, total_vol + delta_share / 100.0 * total_vol) / total_vol
                 ym = data.get((y, m), {})
+                current_total = sum(v for pd in ym.values() for v in pd.values() if v > 0)
+                if current_total <= 0:
+                    continue
+                scale = target_total / current_total
                 for prod in ym:
                     for payer in ym[prod]:
                         ym[prod][payer] = max(0.0, ym[prod][payer] * scale)
-                event_touched_forecast = True
                 continue
 
             # payer_event / product_event: pin the selected entity to the curve's
