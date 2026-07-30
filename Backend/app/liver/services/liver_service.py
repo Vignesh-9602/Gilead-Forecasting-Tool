@@ -933,7 +933,9 @@ def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -
         d = {
             "total_growth":     int(round(model_params.total_growth)),
             "duration":         model_params.duration,
-            "trajectory_start": trajectory_start,
+            # Prefer the model's own trajectory_start (from the user's request);
+            # fall back to the caller-supplied default only when absent.
+            "trajectory_start": getattr(model_params, "trajectory_start", None) or trajectory_start,
         }
         if hasattr(model_params, "k_value") and model_params.k_value is not None:
             d["k_value"] = model_params.k_value
@@ -2480,7 +2482,8 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         factors = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
+        # Store the payload's market_analysis (filter window with user edits) for the
+        # chart. from_date/to_date use the wide range so activate knows the full span.
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
@@ -2492,17 +2495,20 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
             factors=factors,
         )
 
-        # Sync volumes into market_events snapshot so market events screen stays in sync.
-        # Use store_ma (wide date range, first transaction month) not the payload's
-        # filter-clipped market_analysis — best-effort, must not roll back the save.
+        # Sync market_events from the wide recompute (full date range Apr 2020+),
+        # not from the payload which only covers the user's filter window.
         try:
-            snapshot = extract_snapshot_from_market_analysis(store_ma)
-            if snapshot:
-                save_market_events_scenario(cur, name, snapshot)
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
         except Exception as _sync_err:
             print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
 
@@ -2607,10 +2613,10 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
-            # Use the stored market_analysis (wide date range, Apr 2020+) rather than
-            # the payload's market_analysis (clipped to the user's applied filter dates).
-            stored_ma = _normalize_ma_keys(saved.get(name, {}).get("market_analysis") or market_analysis)
-            scenarios[sc] = {"factors": factors, "market_analysis": stored_ma}
+            # Return the payload's market_analysis (the user's filter-window view with
+            # any table edits). The DB stores the full wide range via _prepend_wide_months;
+            # the response only needs to cover the visible filter window.
+            scenarios[sc] = {"factors": factors, "market_analysis": market_analysis}
         elif sc == "Base":
             scenarios[sc] = {"market_analysis": _base_ma}
         else:
@@ -2624,6 +2630,162 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
         "active_scenario": name,
         "scenarios": scenarios,
     }
+
+
+def _splice_snapshots(wide_snap: dict, payload_snap: dict, filter_start: str) -> dict | None:
+    """
+    Build a market_events snapshot with the full date range AND user edits:
+      pre-filter months  → from wide_snap  (model-computed, Apr 2020 start)
+      filter window      → from payload_snap (carries user's table edits)
+    """
+    if not wide_snap and not payload_snap:
+        return None
+    if not wide_snap:
+        return payload_snap
+    if not payload_snap:
+        return wide_snap
+
+    wide_months = wide_snap.get("months", [])
+    p_months    = payload_snap.get("months", [])
+    splice_idx  = sum(1 for m in wide_months if str(m) < filter_start)
+
+    if splice_idx == 0:
+        return payload_snap
+
+    pre_train = min(splice_idx, wide_snap.get("forecast_start_index", 0))
+    new_fsi   = pre_train + payload_snap.get("forecast_start_index", 0)
+    new_total = list(wide_snap.get("total_all", []))[:splice_idx] + \
+                list(payload_snap.get("total_all", []))
+
+    w_series, p_series = wide_snap.get("series", {}), payload_snap.get("series", {})
+    new_series: dict = {}
+    for product in set(w_series) | set(p_series):
+        wp, pp = w_series.get(product, {}), p_series.get(product, {})
+        new_series[product] = {
+            payer: list(wp.get(payer, [0.0] * splice_idx))[:splice_idx] +
+                   list(pp.get(payer, []))
+            for payer in set(wp) | set(pp)
+        }
+
+    return {
+        "months":               wide_months[:splice_idx] + p_months,
+        "forecast_start_index": new_fsi,
+        "total_all":            new_total,
+        "series":               new_series,
+    }
+
+
+def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> dict:
+    """
+    Merge wide_ma (full date range, model-computed) with payload_ma (user's filter
+    view, may contain table edits).
+
+    Months BEFORE filter_start  → taken from wide_ma  (user was not viewing/editing these)
+    Months FROM filter_start on → taken from payload_ma (preserves any table edits)
+
+    Falls back gracefully when either side is absent.
+    """
+    if not wide_ma:
+        return payload_ma or {}
+    if not payload_ma:
+        return wide_ma
+
+    def _splice_chart(w_chart: dict, p_chart: dict) -> dict:
+        w_months = w_chart.get("months", [])
+        if not w_months:
+            return p_chart
+        # Year strings ("2020") compare correctly with ISO filter_start ("2023-07-01").
+        splice_idx = sum(1 for m in w_months if str(m) < filter_start)
+        if splice_idx == 0:
+            return p_chart
+
+        p_months  = p_chart.get("months", [])
+        w_fsi     = w_chart.get("forecast_start_index", 0)
+        p_fsi     = p_chart.get("forecast_start_index", 0)
+        new_months    = w_months[:splice_idx] + p_months
+        pre_train_cnt = min(splice_idx, w_fsi)
+        new_fsi       = pre_train_cnt + p_fsi
+
+        w_series_map = {s.get("label"): s for s in w_chart.get("series", [])}
+        new_series = []
+        for ps in p_chart.get("series", []):
+            ws = w_series_map.get(ps.get("label"))
+            if ws is None:
+                new_series.append(ps)
+                continue
+            w_all    = list(ws.get("history", ws.get("train_values", []))) + \
+                       list(ws.get("forecast", ws.get("forecast_values", [])))
+            pre_vals = w_all[:splice_idx]
+            new_hist = pre_vals[:pre_train_cnt] + \
+                       list(ps.get("history", ps.get("train_values", [])))
+            new_fore = pre_vals[pre_train_cnt:] + \
+                       list(ps.get("forecast", ps.get("forecast_values", [])))
+            new_series.append({**ps, "history": new_hist, "forecast": new_fore})
+
+        return {**p_chart, "months": new_months, "forecast_start_index": new_fsi, "series": new_series}
+
+    def _splice_flat_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
+        if not w_table or splice_idx == 0:
+            return p_table
+        w_rows = {r.get("label", r.get("hierarchy", "")): r for r in w_table.get("rows", [])}
+        new_rows = []
+        for pr in p_table.get("rows", []):
+            key     = pr.get("label", pr.get("hierarchy", ""))
+            wr      = w_rows.get(key)
+            pre_v   = list(wr.get("values", []))[:splice_idx] if wr else []
+            new_rows.append({**pr, "values": pre_v + list(pr.get("values", []))})
+        return {**p_table, "rows": new_rows}
+
+    def _splice_hier_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
+        if not w_table or splice_idx == 0:
+            return p_table
+        w_rows = {r.get("hierarchy", ""): r for r in w_table.get("rows", [])}
+        new_rows = []
+        for pr in p_table.get("rows", []):
+            wr = w_rows.get(pr.get("hierarchy", ""))
+            if wr is None:
+                new_rows.append(pr)
+                continue
+            pre_total   = list(wr.get("total", []))[:splice_idx]
+            w_children  = {c.get("label", ""): c for c in wr.get("children", [])}
+            new_children = []
+            for pc in pr.get("children", []):
+                wc    = w_children.get(pc.get("label", ""))
+                pre_c = list(wc.get("values", []))[:splice_idx] if wc else []
+                new_children.append({**pc, "values": pre_c + list(pc.get("values", []))})
+            new_rows.append({**pr,
+                             "total":    pre_total + list(pr.get("total", [])),
+                             "children": new_children})
+        return {**p_table, "rows": new_rows}
+
+    def _splice_gran(w_gran: dict, p_gran: dict) -> dict:
+        if not w_gran or not p_gran:
+            return p_gran or w_gran or {}
+        w_chart    = w_gran.get("chart", {})
+        p_chart    = p_gran.get("chart", {})
+        w_months   = w_chart.get("months", [])
+        splice_idx = sum(1 for m in w_months if str(m) < filter_start) if w_months else 0
+        new_chart  = _splice_chart(w_chart, p_chart)
+        w_table    = w_gran.get("table", {})
+        p_table    = p_gran.get("table", {})
+        table_type = (p_table or w_table).get("type", "flat")
+        if table_type == "hierarchy":
+            new_table = _splice_hier_table(w_table, p_table, splice_idx)
+        else:
+            new_table = _splice_flat_table(w_table, p_table, splice_idx)
+        return {**p_gran, "chart": new_chart, "table": new_table}
+
+    def _splice_metric(w_metric: dict, p_metric: dict) -> dict:
+        if not w_metric or not p_metric:
+            return p_metric or w_metric or {}
+        return {gk: _splice_gran(w_metric.get(gk, {}), pg) for gk, pg in p_metric.items()}
+
+    def _splice_tab(w_tab: dict, p_tab: dict) -> dict:
+        if not w_tab or not p_tab:
+            return p_tab or w_tab or {}
+        return {mk: _splice_metric(w_tab.get(mk, {}), pm) for mk, pm in p_tab.items()}
+
+    return {tk: _splice_tab(wide_ma.get(tk, {}), pt) for tk, pt in payload_ma.items()}
 
 
 def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
@@ -2709,7 +2871,6 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
             raise ValueError(f"Scenario '{name}' already exists. Use PUT /liver/save to update it.")
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
@@ -2721,9 +2882,21 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
             factors=factors,
         )
+
+        try:
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
+        except Exception as _sync_err:
+            print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
+
         conn.commit()
         return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
     finally:
@@ -2748,7 +2921,6 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
             raise ValueError(f"Scenario '{name}' does not exist. Use POST /liver/save to create it.")
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
@@ -2760,9 +2932,21 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
             factors=factors,
         )
+
+        try:
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
+        except Exception as _sync_err:
+            print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
+
         conn.commit()
         return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
     finally:

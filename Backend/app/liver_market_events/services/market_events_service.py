@@ -2466,10 +2466,34 @@ def _persist_market_events_result(cur, conn, scenario_name: str, event_tabs: dic
     conn.commit()
 
     # Best-effort: sync volumes into market_analysis in a separate transaction.
+    # Clip the snapshot to the existing market_analysis's own month window first —
+    # the snapshot covers the full date range (Apr 2020+) but market_analysis may
+    # only cover the user's filter window (e.g. Nov 2024+). Patching with the
+    # unclipped snapshot causes array-length mismatches that break chart rendering.
     try:
         existing_ma = load_market_analysis(cur, scenario_name)
         if existing_ma:
-            updated_ma = _update_market_analysis_volumes(existing_ma, volume_snapshot)
+            ma_months = (
+                existing_ma.get("total_market_volume", {})
+                           .get("payer_volume", {})
+                           .get("monthly", {})
+                           .get("chart", {})
+                           .get("months", [])
+            )
+            snap = volume_snapshot
+            if ma_months and snap.get("months"):
+                clipped = _clip_snapshot_to_range(
+                    snap["months"], snap["forecast_start_index"],
+                    snap["total_all"], snap.get("series", {}),
+                    ma_months[0], ma_months[-1],
+                )
+                snap = {
+                    "months":               clipped[0],
+                    "forecast_start_index": clipped[1],
+                    "total_all":            clipped[2],
+                    "series":               clipped[3],
+                }
+            updated_ma = _update_market_analysis_volumes(existing_ma, snap)
             _recompute_ma_shares_inplace(updated_ma)
             save_market_analysis(cur, scenario_name, updated_ma)
             conn.commit()
