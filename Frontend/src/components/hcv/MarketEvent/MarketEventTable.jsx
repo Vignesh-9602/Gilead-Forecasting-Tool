@@ -108,10 +108,18 @@ export default function HIVImpactCurveTable({
   // the top-level rows, payers are nested underneath in the hierarchy view),
   // and the Product Event tab's rows are rooted in PAYERS (Cash/Commercial/
   // etc. are the top-level rows, products nested underneath) — confirmed
-  // against the actual API responses. The left-most column header must
-  // reflect that, which is the opposite of what the tab is named.
+  // against the actual API responses. That's still true structurally, but
+  // per product feedback the header should just match the tab name, not the
+  // top-level row content.
+  // Header label for the left-most (label) column — simply matches the tab
+  // name: Payer Event -> "Payer", Product Event -> "Product", Overall Event
+  // -> "Event". Note this is about what the column is *called*, not what
+  // the top-level rows happen to contain — the combined/hierarchy sub-view
+  // for a tab can have its top-level rows rooted in the *other* dimension
+  // (e.g. Payer Event's "Product-Payer Level" view roots rows in Products),
+  // but the header still reflects the tab itself.
   const labelText =
-    activeTab === "product_event"
+    activeTab === "payer_event"
       ? "Payer"
       : activeTab === "overall_event"
         ? "Event"
