@@ -131,8 +131,8 @@ export default function GlobalConfiguration() {
       newErrors.modelGranularity = "Model Granularity is required";
     if (!forecastPeriods)
       newErrors.forecastPeriods = "Forecast End Date is required";
-    if (!payer.length) newErrors.payer = "Payer is required";
-    if (!product.length) newErrors.product = "Product is required";
+    // if (!payer.length) newErrors.payer = "Payer is required";
+    // if (!product.length) newErrors.product = "Product is required";
 
     setErrors(newErrors);
     if (Object.keys(newErrors).length > 0) {

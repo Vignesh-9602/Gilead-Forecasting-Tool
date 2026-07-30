@@ -104,6 +104,7 @@ const ForecastChart = ({
   activeMetricKey,
   filterFromYM,
   filterToYM,
+  viewMode = "monthly",
 }) => {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
@@ -214,42 +215,58 @@ const ForecastChart = ({
           tabObj.payer_volume ||
           tabObj.payer_share ||
           Object.values(tabObj)[0];
-        const rawChart = metricObj?.monthly?.chart || metricObj?.chart;
+        const rawChart =
+          viewMode === "yearly"
+            ? (metricObj?.yearly?.chart || metricObj?.monthly?.chart || metricObj?.chart)
+            : (metricObj?.monthly?.chart || metricObj?.chart);
         let seriesList = rawChart?.series;
         let seriesMonths = rawChart?.months || [];
         let seriesFsi = rawChart?.forecast_start_index != null ? rawChart.forecast_start_index : 0;
 
-        // Some tab/scenario combinations don't populate chart.series even
-        // though the table's own row data is present and correct (the
-        // table pulls from table.rows, not chart.series) — reconstruct an
-        // equivalent series list from table.rows in that case, rather than
-        // silently showing nothing for this scenario.
-        if (!seriesList?.length) {
-          const rawTable = metricObj?.monthly?.table || metricObj?.table;
-          const tableRows = rawTable?.rows || [];
-          if (tableRows.length) {
-            seriesMonths = seriesMonths.length ? seriesMonths : rawTable?.headers || [];
-            seriesList = [];
-            tableRows.forEach((r) => {
-              const parentLabel = r.label || r.hierarchy || "";
-              if (r.children?.length) {
-                r.children.forEach((c) => {
-                  seriesList.push({
-                    label: `${parentLabel} - ${c.label || ""}`,
-                    history: (c.values || []).slice(0, seriesFsi),
-                    forecast: (c.values || []).slice(seriesFsi),
-                  });
-                });
-              } else if (parentLabel) {
-                const vals = r.values || r.total || [];
+        // The backend's chart.series can exist but be only PARTIALLY
+        // populated — some entities get real history/forecast arrays,
+        // others come back as empty stub entries (e.g. only one
+        // payer/product combo has real numbers, its siblings are blank).
+        // Drop those empty entries, then fill in whatever's missing — by
+        // label — from the table's own rows/children, which reliably has
+        // complete data for every entity (same source the table view
+        // already renders correctly).
+        const hasRealValues = (s) => {
+          const h = s?.history || s?.train_values || [];
+          const f = s?.forecast || s?.forecast_values || [];
+          return h.some((v) => v != null) || f.some((v) => v != null);
+        };
+        seriesList = (seriesList || []).filter(hasRealValues);
+
+        const rawTable =
+          viewMode === "yearly"
+            ? (metricObj?.yearly?.table || metricObj?.monthly?.table || metricObj?.table)
+            : (metricObj?.monthly?.table || metricObj?.table);
+        const tableRows = rawTable?.rows || [];
+        if (tableRows.length) {
+          seriesMonths = seriesMonths.length ? seriesMonths : rawTable?.headers || [];
+          const existingLabels = new Set(seriesList.map((s) => s.label));
+          tableRows.forEach((r) => {
+            const parentLabel = r.label || r.hierarchy || "";
+            if (r.children?.length) {
+              r.children.forEach((c) => {
+                const label = `${parentLabel} - ${c.label || ""}`;
+                if (existingLabels.has(label)) return;
                 seriesList.push({
-                  label: parentLabel,
-                  history: vals.slice(0, seriesFsi),
-                  forecast: vals.slice(seriesFsi),
+                  label,
+                  history: (c.values || []).slice(0, seriesFsi),
+                  forecast: (c.values || []).slice(seriesFsi),
                 });
-              }
-            });
-          }
+              });
+            } else if (parentLabel && !existingLabels.has(parentLabel)) {
+              const vals = r.values || r.total || [];
+              seriesList.push({
+                label: parentLabel,
+                history: vals.slice(0, seriesFsi),
+                forecast: vals.slice(seriesFsi),
+              });
+            }
+          });
         }
 
         if (!seriesList?.length) return [];
@@ -856,10 +873,126 @@ export default function PBCModelInput() {
 
       const chart = parseChartObj(rawMonthlyChart, months, fsi, isTabPercent);
       const table = parseTableObj(rawMonthlyTable, chart.months, isTabPercent);
-      const yearlyChart = rawYearlyChart ? parseChartObj(rawYearlyChart, [], 0, isTabPercent) : null;
+      let yearlyChart = rawYearlyChart ? parseChartObj(rawYearlyChart, [], 0, isTabPercent) : null;
       const yearlyTable = rawYearlyTable ? parseTableObj(rawYearlyTable, yearlyChart?.months || [], isTabPercent) : null;
 
+      // The backend's yearly.chart.series can be present but only
+      // PARTIALLY populated — some entities get real history/forecast
+      // arrays, others get empty placeholder arrays (e.g. only the
+      // currently focused payer/product combo has real yearly numbers,
+      // its siblings come back as empty stubs). The yearly TABLE reliably
+      // has complete data for every entity (same rows/children the table
+      // view already renders correctly), so: drop any chart series entries
+      // that are entirely empty, then fill in whatever's missing — by
+      // label — from the table's own rows/children.
+      const hasRealValues = (s) =>
+        (s?.train_values || []).some((v) => v != null) ||
+        (s?.forecast_values || []).some((v) => v != null);
+
+      if (yearlyChart) {
+        yearlyChart = { ...yearlyChart, series: (yearlyChart.series || []).filter(hasRealValues) };
+      }
+
+      // Skip the trivial single-row case (Total Market Volume, "Base") —
+      // it already gets complete data directly from the backend and has
+      // its own separate per-scenario rebuild further below.
+      if (yearlyTable?.rows?.length && (yearlyTable.rows.length > 1 || yearlyTable.type === "hierarchy")) {
+        const yearlyHeaders = yearlyTable.headers || yearlyChart?.months || [];
+        const yearlyFsi = yearlyChart?.forecast_start_index ?? (() => {
+          // Only estimate when the backend gave us no yearly chart at all
+          // (no forecast_start_index to trust) — otherwise use its own value.
+          const firstForecastMonth = chart.months?.[chart.forecast_start_index];
+          if (!firstForecastMonth) return yearlyHeaders.length;
+          const cutoffYear = String(firstForecastMonth).slice(0, 4);
+          const idx = yearlyHeaders.findIndex((h) => String(h || "").startsWith(cutoffYear));
+          return idx !== -1 ? idx : yearlyHeaders.length;
+        })();
+
+        // Flattens table rows (and their children, for hierarchy tabs) into
+        // the same "Parent - Child" label convention the chart's own series
+        // already use (e.g. "Cash - ASGA").
+        const flattenTableRows = (rows) => {
+          const out = [];
+          (rows || []).forEach((r) => {
+            const label = r.label || r.hierarchy || "";
+            if (r.children?.length) {
+              r.children.forEach((c) => {
+                out.push({ label: `${label} - ${c.label}`, values: c.values || [] });
+              });
+            } else if (label) {
+              out.push({ label, values: Array.isArray(r.total) ? r.total : r.values || [] });
+            }
+          });
+          return out;
+        };
+
+        const existingLabels = new Set((yearlyChart?.series || []).map((s) => s.label));
+        const missingSeries = flattenTableRows(yearlyTable.rows)
+          .filter((r) => !existingLabels.has(r.label))
+          .map((r) => ({
+            label: r.label,
+            lot: r.label,
+            train_values: r.values.slice(0, yearlyFsi),
+            forecast_values: r.values.slice(yearlyFsi),
+          }));
+
+        if (missingSeries.length) {
+          yearlyChart = {
+            months: yearlyChart?.months?.length ? yearlyChart.months : yearlyHeaders,
+            forecast_start_index: yearlyFsi,
+            series: [...(yearlyChart?.series || []), ...missingSeries],
+          };
+        }
+      }
+
       tabs[tabKey] = { chart, table, yearlyChart, yearlyTable };
+
+      // Diagnostic: confirms whether yearlyChart is actually built with
+      // real series data at this point, for tabs where the raw API
+      // response has proven to contain complete yearly.chart data. If
+      // this logs "series: 0" or similar, the gap is in this build step;
+      // if it logs real series counts here but the chart still doesn't
+      // switch, the gap is downstream (in the render, or in how the
+      // Monthly/Yearly toggle reaches the chart component).
+      if (
+        ["product_distribution", "payer_distribution", "payer_product", "product_payer"].includes(
+          tabKey,
+        )
+      ) {
+        console.log(`[ModelInput yearlyChart debug] tab="${tabKey}"`, {
+          rawYearlyChartPresent: !!rawYearlyChart,
+          rawYearlyChartSeriesCount: rawYearlyChart?.series?.length ?? "n/a",
+          builtYearlyChartSeriesCount: yearlyChart?.series?.length ?? 0,
+          builtYearlyChartMonths: yearlyChart?.months,
+          builtYearlyChartSeriesLabels: (yearlyChart?.series || []).map((s) => s.label),
+        });
+      }
+
+      // Diagnostic: if Payer Volume table rows are empty/all-null while
+      // Payer Share has real data for the same tab, that confirms the gap
+      // is in the backend response (payer_volume missing/empty) rather
+      // than a frontend rendering bug — check this tab's payer_volume key
+      // in the Network tab's apply-filters response if this logs.
+      if (tabKey !== "total_market_volume") {
+        const volRows = tableTabObj?.payer_volume?.monthly?.table?.rows || [];
+        const shareRows = tableTabObj?.payer_share?.monthly?.table?.rows || [];
+        const hasAnyVolumeValue = volRows.some(
+          (r) =>
+            (r.values || []).some((v) => v != null) ||
+            (r.children || []).some((c) => (c.values || []).some((v) => v != null)),
+        );
+        const hasAnyShareValue = shareRows.some(
+          (r) =>
+            (r.values || []).some((v) => v != null) ||
+            (r.children || []).some((c) => (c.values || []).some((v) => v != null)),
+        );
+        if (shareRows.length && hasAnyShareValue && (!volRows.length || !hasAnyVolumeValue)) {
+          console.warn(
+            `[ModelInput] "${tabKey}": payer_volume rows are empty/all-null while payer_share has data — this is a backend data gap, not a frontend rendering issue.`,
+            { payer_volume: tableTabObj?.payer_volume, payer_share: tableTabObj?.payer_share },
+          );
+        }
+      }
 
       // Per-scenario series map for this tab — powers Compare Scenarios on
       // the chart for every tab. Each entry is the full series list (e.g.
@@ -1090,11 +1223,20 @@ export default function PBCModelInput() {
         table: [],
       };
 
-    // Chart always uses monthly data (time-series visualization).
-    // Table uses yearly backend data when in yearly mode (pre-computed by API).
+    // Chart and table both switch to yearly backend data (pre-computed by
+    // the API) when in yearly mode — previously only the table did this;
+    // the chart always stayed on monthly data regardless of view mode.
     const activeTableData = (viewMode === "yearly" && tab.yearlyTable) ? tab.yearlyTable : tab.table;
+    const activeChartData = (viewMode === "yearly" && tab.yearlyChart) ? tab.yearlyChart : tab.chart;
+    // Sliced to a new array (not just referenced) so nothing downstream can
+    // ever mutate liverTabsRaw's own month arrays in place — see the note
+    // on displayColumns for why that class of bug matters here.
+    const activeMonths = (viewMode === "yearly" && tab.yearlyChart) ? (tab.yearlyChart.months || []).slice() : months.slice();
+    const activeFsi = (viewMode === "yearly" && tab.yearlyChart)
+      ? (tab.yearlyChart.forecast_start_index || 0)
+      : fsi;
 
-    const series = (tab.chart?.series || [])
+    const series = (activeChartData?.series || [])
       .filter((s) => {
         const lbl = (s.label || "").toLowerCase();
         if (
@@ -1138,8 +1280,10 @@ export default function PBCModelInput() {
       ];
       let candidate = null;
       for (const k of ck) {
-        if (tabs[k]?.chart?.series?.length) {
-          candidate = tabs[k].chart.series;
+        const candidateTabChart =
+          (viewMode === "yearly" && tabs[k]?.yearlyChart) ? tabs[k].yearlyChart : tabs[k]?.chart;
+        if (candidateTabChart?.series?.length) {
+          candidate = candidateTabChart.series;
           break;
         }
       }
@@ -1174,7 +1318,7 @@ export default function PBCModelInput() {
               0,
             ),
           );
-          const lbl = tab.chart?.series?.[0]?.label || "Summary Metrics";
+          const lbl = activeChartData?.series?.[0]?.label || "Summary Metrics";
           series.length = 0;
           series.push({
             label: lbl,
@@ -1186,7 +1330,7 @@ export default function PBCModelInput() {
       }
     }
 
-    const headers = activeTableData?.headers || months;
+    const headers = activeTableData?.headers || activeMonths;
     const mkMonthly = (vals, hdrs) => {
       const obj = {};
       hdrs.forEach((m, i) => {
@@ -1228,7 +1372,7 @@ export default function PBCModelInput() {
     });
 
     return {
-      chart: { months, forecast_start_index: fsi, series, scenarioSeries: tab.scenarioSeries || null },
+      chart: { months: activeMonths, forecast_start_index: activeFsi, series, scenarioSeries: tab.scenarioSeries || null },
       table,
     };
   };
@@ -1598,19 +1742,37 @@ export default function PBCModelInput() {
   useEffect(() => {
     if (!liverTabsRaw) return;
     const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode);
+    console.log("[ModelInput chartData debug]", {
+      activeTab,
+      totalMarketViewMode,
+      chartMonths: chart?.months,
+      chartSeriesCount: chart?.series?.length ?? 0,
+      chartSeriesLabels: (chart?.series || []).map((s) => s.label),
+    });
     setChartData(chart);
     setTableData(table);
-    // Auto-expand the applied/filtered parent row on hierarchical tabs.
+    // Auto-expand the applied/filtered parent row so it doesn't collapse
+    // back to nothing on every data change (tab switch, apply filter,
+    // refresh, etc.) — the user shouldn't have to manually re-open it
+    // each time.
     if (activeTab === "payer_prod") {
       const key = appliedPayerFilter || payerFilter;
-      setExpandedBrands(key ? { [key]: true } : {});
+      // Parent labels are always scenario-tagged now, even for the applied
+      // scenario (e.g. "PayerA (Base Case)") — match that format.
+      const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
+      setExpandedBrands(taggedKey ? { [taggedKey]: true } : {});
     } else if (activeTab === "prod_payer") {
       const key = appliedProductFilter || productFilter;
-      setExpandedBrands(key ? { [key]: true } : {});
+      const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
+      setExpandedBrands(taggedKey ? { [taggedKey]: true } : {});
+    } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
+      // These group by scenario (collapsible) — auto-expand whichever
+      // scenario is currently applied.
+      setExpandedBrands(currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {});
     } else {
       setExpandedBrands({});
     }
-  }, [activeTab, liverTabsRaw, totalMarketViewMode]);
+  }, [activeTab, liverTabsRaw, totalMarketViewMode, currentlyAppliedScenario]);
 
   useEffect(() => {
     if (filterOptions?.scenario_names?.length) {
@@ -2901,24 +3063,85 @@ export default function PBCModelInput() {
 
   // ── Monthly / Yearly toggle helpers ──────────────────────────────────────
   // displayColumns are the column keys actually rendered in the table header.
-  // In monthly mode: raw month strings from chartData.months.
+  // In monthly mode: raw month strings from liverTabsRaw's global month axis.
   // In yearly mode: use the yearly months from the backend (pre-computed),
   //                  falling back to extracting unique years from monthly months.
+  //
+  // IMPORTANT: this reads directly from liverTabsRaw (the stable, fetched-once
+  // source), NOT from chartData. chartData is derived state that's only
+  // updated a render later, via a separate useEffect keyed on
+  // totalMarketViewMode. Deriving displayColumns from chartData meant that,
+  // on the render immediately after flipping the toggle, totalMarketViewMode
+  // had already changed but chartData had not caught up yet — producing a
+  // one-render mismatch (e.g. "monthly" mode momentarily reading yearly
+  // months, or vice versa). That transient, wrong column set then got baked
+  // into whatever rendered/snapshotted at that moment and didn't self-correct
+  // on subsequent toggles — matching the observed "+2 columns after one
+  // Yearly round trip, stays there" behavior. Computing straight from
+  // liverTabsRaw in the same render as activeTab/totalMarketViewMode removes
+  // that intermediate async hop entirely.
+  //
+  // The backend's forecast horizon can also run a bit past the user's
+  // actually applied "To" date (and similarly the train range can start
+  // before the applied "From" date) — the raw month/year axis isn't
+  // guaranteed to be clipped exactly to the applied filter window, so we
+  // clip it here too. Mirrors the same clipToFilterRange pattern
+  // ForecastChart already uses for comparison-scenario overlays.
   const displayColumns = useMemo(() => {
-    const months = chartData?.months || [];
-    if (totalMarketViewMode !== "yearly") return months;
-    // Try backend yearly chart months from liverTabsRaw
     const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
-    const yearlyMonths = liverTabsRaw?.tabs?.[backendKey]?.yearlyChart?.months;
-    if (yearlyMonths?.length) return yearlyMonths;
-    // Fallback: extract unique years from monthly months
+    const tabsMap = liverTabsRaw?.tabs || {};
+    const tab = tabsMap[backendKey] || tabsMap[Object.keys(tabsMap)[0]] || null;
+    const globalMonths = liverTabsRaw?.months || [];
+
+    const fromYM = appliedFromDate ? toYearMonth(appliedFromDate) : "";
+    const toYM = appliedToDate ? toYearMonth(appliedToDate) : "";
+
+    // Always return a brand-new, deduplicated array — never a live reference
+    // into liverTabsRaw's own arrays. If anything downstream ever mutates
+    // the returned columns array in place (push/unshift/sort/etc.), a bare
+    // reference would corrupt liverTabsRaw itself, and since liverTabsRaw
+    // isn't refetched on toggle, that corruption would persist and compound
+    // on every subsequent toggle — which is exactly the "one more '2023'
+    // column every time I toggle" symptom. Cloning + deduping here closes
+    // off that entire class of bug regardless of where such a mutation
+    // might be coming from.
+    const finalize = (arr) => Array.from(new Set((arr || []).map((v) => String(v))));
+
+    const clipMonthly = (arr) => {
+      if (!fromYM && !toYM) return arr;
+      return arr.filter((m) => {
+        const ym = toYearMonth(m) || String(m);
+        if (fromYM && ym < fromYM) return false;
+        if (toYM && ym > toYM) return false;
+        return true;
+      });
+    };
+
+    if (totalMarketViewMode !== "yearly") return finalize(clipMonthly(globalMonths));
+
+    const fromYear = fromYM ? fromYM.slice(0, 4) : "";
+    const toYear = toYM ? toYM.slice(0, 4) : "";
+    const clipYearly = (arr) => {
+      if (!fromYear && !toYear) return arr;
+      return arr.filter((y) => {
+        const yr = String(y).slice(0, 4);
+        if (fromYear && yr < fromYear) return false;
+        if (toYear && yr > toYear) return false;
+        return true;
+      });
+    };
+
+    // Try backend yearly chart months directly from this tab
+    const yearlyMonths = tab?.yearlyChart?.months;
+    if (yearlyMonths?.length) return finalize(clipYearly(yearlyMonths));
+    // Fallback: extract unique years from the global monthly axis
     const years = [];
-    months.forEach((m) => {
+    globalMonths.forEach((m) => {
       const y = String(m).slice(0, 4);
       if (y && !years.includes(y)) years.push(y);
     });
-    return years;
-  }, [chartData, totalMarketViewMode, liverTabsRaw, activeTab]);
+    return finalize(clipYearly(years));
+  }, [liverTabsRaw, activeTab, totalMarketViewMode, appliedFromDate, appliedToDate]);
 
   // Map of year -> array of underlying month keys, used for aggregation and
   // for forecast-period detection in yearly mode.
@@ -3881,6 +4104,7 @@ export default function PBCModelInput() {
                 activeMetricKey={toApiMetricKey(metric)}
                 filterFromYM={appliedFromDate ? toYearMonth(appliedFromDate) : ""}
                 filterToYM={appliedToDate ? toYearMonth(appliedToDate) : ""}
+                viewMode={totalMarketViewMode}
               />
             </AccordionDetails>
           </Accordion>
