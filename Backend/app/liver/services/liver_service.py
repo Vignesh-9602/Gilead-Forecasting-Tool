@@ -131,6 +131,60 @@ def _add_months(d: date_type, months: int) -> date_type:
     return date_type(year, month, 1)
 
 
+def _widest_forecast_end(cur, ta: str) -> tuple[int, int] | None:
+    """
+    Latest (train_end_date + forecast_periods) across EVERY (payer, brand)
+    config for this TA -- the same "available_months" end-of-range concept
+    already computed inline for the date-range dropdown (get_liver_filters,
+    apply_liver_filters). Different (payer, brand) combos can have different
+    train_end_date/forecast_periods, so the widest available end is not
+    necessarily whatever the currently-selected combo's own config says.
+
+    Returns None if no config has a usable train_end_date (caller should
+    fall back to the selected config's own values in that case).
+    """
+    all_cfgs = get_liver_configs_for_ta(cur, ta)
+    end_ym = None
+    for row in all_cfgs:
+        cfg = row[2] if isinstance(row[2], dict) else {}
+        te = cfg.get("train_end_date", "")
+        fp = int(cfg.get("forecast_periods", 24))
+        if not te:
+            continue
+        try:
+            ey, em = _parse_ym(te)
+            fe = _add_months(date_type(ey, em, 1), fp)
+            feym = fe.year * 100 + fe.month
+            if end_ym is None or feym > end_ym:
+                end_ym = feym
+        except Exception:
+            continue
+    if end_ym is None:
+        return None
+    return end_ym // 100, end_ym % 100
+
+
+def _extend_forecast_periods_to_widest_end(
+    cur, ta: str, train_end_year: int, train_end_month: int, forecast_periods: int
+) -> int:
+    """
+    Extend `forecast_periods` (from one specific config) so the resulting
+    train_end + forecast_periods reaches at least as far as the widest
+    available end across every config for this TA -- never shortens it.
+    train_end_year/month stay as the SELECTED config's own values (that's
+    still the correct model-fitting boundary); only how far the forecast is
+    carried forward changes.
+    """
+    widest_end = _widest_forecast_end(cur, ta)
+    if widest_end is None:
+        return forecast_periods
+    widest_end_dt = date_type(widest_end[0], widest_end[1], 1)
+    this_end_dt = _add_months(date_type(train_end_year, train_end_month, 1), forecast_periods)
+    if widest_end_dt <= this_end_dt:
+        return forecast_periods
+    return (widest_end_dt.year - train_end_year) * 12 + (widest_end_dt.month - train_end_month)
+
+
 def get_liver_configuration(ta_name: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
@@ -1948,7 +2002,16 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     wide_from_year, wide_from_month = _txn_months[0]
                 else:
                     wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
-                wide_forecast_periods = int(cfg["forecast_periods"])
+                # forecast_periods from the currently-selected (payer, brand)
+                # config alone isn't necessarily the widest available end --
+                # a different combo's config may forecast further out.
+                # Extend (never shorten) to match that widest end, the same
+                # "available_months" concept the date-range dropdown already
+                # uses, so what's persisted for Base isn't capped by whichever
+                # combo happens to be selected right now.
+                wide_forecast_periods = _extend_forecast_periods_to_widest_end(
+                    cur, payload.ta, train_end_year, train_end_month, int(cfg["forecast_periods"])
+                )
                 persist_ma, _ = _build_market_analysis_both_granularities(
                     cur, payload.ta, wide_from_year, wide_from_month,
                     train_end_year, train_end_month, wide_forecast_periods, factors,
@@ -2434,9 +2497,10 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         )
 
         # Sync volumes into market_events snapshot so market events screen stays in sync.
-        # Best-effort: a failure here must not roll back the model input save.
+        # Use store_ma (wide date range, first transaction month) not the payload's
+        # filter-clipped market_analysis — best-effort, must not roll back the save.
         try:
-            snapshot = extract_snapshot_from_market_analysis(payload.market_analysis)
+            snapshot = extract_snapshot_from_market_analysis(store_ma)
             if snapshot:
                 save_market_events_scenario(cur, name, snapshot)
         except Exception as _sync_err:
@@ -2543,7 +2607,10 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
-            scenarios[sc] = {"factors": factors, "market_analysis": market_analysis}
+            # Use the stored market_analysis (wide date range, Apr 2020+) rather than
+            # the payload's market_analysis (clipped to the user's applied filter dates).
+            stored_ma = _normalize_ma_keys(saved.get(name, {}).get("market_analysis") or market_analysis)
+            scenarios[sc] = {"factors": factors, "market_analysis": stored_ma}
         elif sc == "Base":
             scenarios[sc] = {"market_analysis": _base_ma}
         else:
@@ -2564,17 +2631,26 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
     Recompute market_analysis for the FULL available date range (first TA
     transaction month → config forecast end) using the saved factors.
 
-    This ensures the stored chart_data is not limited to whatever narrower
-    display window was active when the user clicked Save — pre-config-start
-    historical months are included so the compare view can show them later.
-
-    Returns {"market_analysis": <wide_ma>} on success, or {} on failure so
-    the caller can fall back to storing the payload's market_analysis as-is.
+    Always returns at least {"_wide_start": ..., "_wide_end": ...} so callers
+    store the correct available dates even when chart building fails.
+    Falls back to {} only if the date range itself cannot be computed.
     """
+    # Stage 1: compute the available date range independently of chart building
+    wide_start = wide_end = None
+    wide_from_year = wide_from_month = train_end_year = train_end_month = None
+    wide_forecast_periods = None
+    granularity = "monthly"
     try:
         cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-        wide_forecast_periods = int(cfg["forecast_periods"])
+        # Same reasoning as apply_liver_filters' Base-persist block: the
+        # selected (payer, brand) combo's own forecast_periods isn't
+        # necessarily the widest available end across every config for this
+        # TA -- extend (never shorten) to match that widest end so a saved
+        # scenario isn't capped by whichever combo happened to be active.
+        wide_forecast_periods = _extend_forecast_periods_to_widest_end(
+            cur, ta, train_end_year, train_end_month, int(cfg["forecast_periods"])
+        )
         granularity = cfg.get("model_granularity", "monthly")
 
         txn_months = get_transaction_distinct_months(cur, ta)
@@ -2583,6 +2659,17 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
         else:
             wide_from_year, wide_from_month = _parse_ym(cfg.get("train_start_date", flt.start_date))
 
+        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
+        wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
+                                  wide_forecast_periods).isoformat()
+    except Exception as _de:
+        print(f"[liver] wide date range skipped: {_de}")
+
+    if wide_from_year is None or train_end_year is None:
+        return {}
+
+    # Stage 2: build full chart data — may fail; dates are already computed above
+    try:
         try:
             factors = LiverFactors(**factors_dict)
         except Exception:
@@ -2599,13 +2686,10 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
             scenario_name=ta,
         )
         wide_ma = _recompute_all_market_shares_nested(wide_ma)
-        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
-        wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
-                                  wide_forecast_periods).isoformat()
         return {"market_analysis": wide_ma, "_wide_start": wide_start, "_wide_end": wide_end}
     except Exception as _e:
         print(f"[liver] wide chart_data recompute skipped: {_e}")
-        return {}
+        return {"_wide_start": wide_start, "_wide_end": wide_end}
 
 
 def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
@@ -2705,9 +2789,12 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         granularity = cfg.get("model_granularity", "monthly")
 
         cur.execute(
-            "SELECT scenario_name, chart_data, factors FROM raw_liver.liver_scenarios"
+            "SELECT scenario_name, chart_data, factors, from_date, to_date FROM raw_liver.liver_scenarios"
         )
-        saved = {r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}} for r in cur.fetchall()}
+        saved = {
+            r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}, "from_date": r[3], "to_date": r[4]}
+            for r in cur.fetchall()
+        }
 
         all_names = get_scenarios(cur)
         if "Base" in all_names:
@@ -2731,6 +2818,18 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         else:
             raise ValueError(f"Scenario '{name}' not found.")
 
+        # The scenario's OWN persisted from_date/to_date (see apply_liver_filters'
+        # Base-persist block and _compute_wide_chart_data) reflect the full
+        # available train dates + forecast periods, independent of whatever
+        # narrower selected_filter the frontend happened to be showing before
+        # switching scenarios. Surface those back here -- returning flt.start_date/
+        # end_date unchanged would silently discard that fix, since the frontend
+        # only knows the wide range if this response tells it. Falls back to the
+        # request's own dates if this scenario predates that persisted range.
+        stored = saved.get("Base" if is_base else name, {})
+        resp_start = stored.get("from_date") or flt.start_date
+        resp_end   = stored.get("to_date") or flt.end_date
+
         scenarios = {}
         for sc in available_scenarios:
             if sc == name or (is_base and sc == "Base"):
@@ -2745,8 +2844,8 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         return {
             "ta_name": ta,
             "selected_filter": {
-                "start_date": flt.start_date,
-                "end_date":   flt.end_date,
+                "start_date": resp_start,
+                "end_date":   resp_end,
                 "payer":      flt.payer,
                 "product":    flt.product,
             },

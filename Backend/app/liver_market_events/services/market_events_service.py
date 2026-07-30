@@ -15,7 +15,6 @@ from app.liver_market_events.repository.market_events_repo import (
     get_distinct_months,
     get_volume_by_product_payer,
     get_all_configs_for_ta,
-    get_configs_for_selection,
     save_filter_state,
     load_filter_state,
     load_scenario_event_tabs,
@@ -162,6 +161,27 @@ def _available_months_fallback(cur, ta: str) -> tuple:
     return available_months, forecast_start_date
 
 
+def _clamp_min_start_to_transaction_floor(cur, ta: str, min_start: str) -> str:
+    """
+    _get_date_range_from_configs' min_start is min(train_start_date) across
+    configs -- a MODEL-FITTING boundary (where each config trains from), not
+    necessarily where real data begins. If raw transaction_data actually
+    starts earlier than every config's own train_start_date (e.g. configs
+    all trained from Sep-2022 onward, but real transaction rows exist back to
+    Apr-2020), the true floor should win -- otherwise available_months (and
+    everything derived from it: the date-range dropdown, what a saved
+    scenario can span) stays silently capped at a training-window boundary
+    instead of the actual available range. Falls back to min_start unchanged
+    if there's no transaction data at all.
+    """
+    month_rows = get_distinct_months(cur, ta)
+    if not month_rows:
+        return min_start
+    y, m = month_rows[0]
+    txn_start = f"{y:04d}-{m:02d}-01"
+    return txn_start if txn_start < min_start else min_start
+
+
 # ---------------------------------------------------------------------------
 # GET /filters
 # ---------------------------------------------------------------------------
@@ -180,6 +200,8 @@ def get_market_events_filters(ta: str = "HCV") -> dict:
 
         configs = get_all_configs_for_ta(cur, ta)
         min_start, _, max_end = _get_date_range_from_configs(configs)
+        if min_start:
+            min_start = _clamp_min_start_to_transaction_floor(cur, ta, min_start)
 
         if min_start and max_end:
             from_year, from_month = parse_year_month(min_start)
@@ -233,8 +255,17 @@ def apply_market_events_filters(payload: ApplyFiltersRequest) -> dict:
         products  = get_products(cur)
         scenarios = _get_scenarios_with_base(cur)
 
-        configs = get_configs_for_selection(cur, ta, sf.payers, sf.products)
+        # Full config set for the TA, NOT narrowed to whichever payers/products
+        # are currently selected (get_configs_for_selection) -- available_months
+        # should reflect the TA's true full range regardless of filter
+        # selection, matching get_market_events_filters' (GET /filters, page
+        # load) already-correct use of get_all_configs_for_ta. Narrowing by
+        # selection made the date range visibly shrink the moment a filter was
+        # applied, instead of staying at the full available range.
+        configs = get_all_configs_for_ta(cur, ta)
         min_start, forecast_start_date, max_end = _get_date_range_from_configs(configs)
+        if min_start:
+            min_start = _clamp_min_start_to_transaction_floor(cur, ta, min_start)
 
         if min_start and max_end:
             from_year, from_month = parse_year_month(min_start)
@@ -536,7 +567,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
                 forecast_fn=forecast_fn,
             )
-            sh_all = [compute_share(av[i], total_all[i]) for i in range(len(av))]
+            sh_all = [compute_share(av[i], prod_vol_m[product][2][i]) for i in range(len(av))]
             pp_vol_m[(product, payer)]   = (h, f, av)
             pp_share_m[(product, payer)] = sh_all
 
@@ -573,7 +604,8 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
             _, _, av = pp_vol_m[(product, payer)]
             _, yv_h, yv_f, _ = aggregate_monthly_to_yearly(month_tuples, av, forecast_start_index)
             y_vol_all_pp = yv_h + yv_f
-            ys_all = [compute_share(y_vol_all_pp[i], y_total_all[i]) for i in range(len(y_total_all))]
+            parent_y_all = prod_vol_y[product][0] + prod_vol_y[product][1]
+            ys_all = [compute_share(y_vol_all_pp[i], parent_y_all[i]) for i in range(len(y_total_all))]
             pp_vol_y[(product, payer)]   = (yv_h, yv_f)
             pp_share_y[(product, payer)] = (ys_all[:y_fsi], ys_all[y_fsi:])
 
@@ -628,7 +660,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
                     children.append({"label": payer, "values": [round(v, 2) for v in (ys_h + ys_f)]})
                 else:
                     children.append({"label": payer, "values": [round(v, 2) for v in pp[(product, payer)]]})
-            ppl_rows.append({"label": product, "values": [round(v, 2) for v in _prod_vals(product)], "children": children})
+            ppl_rows.append({"label": product, "values": [100.0] * n_pts, "children": children})
 
         return {
             "view_options":  PAYER_EVENT_VIEW_OPTIONS,
@@ -787,7 +819,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
                 forecast_fn=forecast_fn,
             )
-            sh_all = [compute_share(av[i], total_all[i]) for i in range(len(av))]
+            sh_all = [compute_share(av[i], payer_vol_m[payer][2][i]) for i in range(len(av))]
             pp_vol_m[(payer, product)]   = (h, f, av)
             pp_share_m[(payer, product)] = sh_all
 
@@ -824,7 +856,8 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
             _, _, av = pp_vol_m[(payer, product)]
             _, yv_h, yv_f, _ = aggregate_monthly_to_yearly(month_tuples, av, forecast_start_index)
             y_vol_all_pp = yv_h + yv_f
-            ys_all = [compute_share(y_vol_all_pp[i], y_total_all[i]) for i in range(len(y_total_all))]
+            parent_y_all = payer_vol_y[payer][0] + payer_vol_y[payer][1]
+            ys_all = [compute_share(y_vol_all_pp[i], parent_y_all[i]) for i in range(len(y_total_all))]
             pp_vol_y[(payer, product)]   = (yv_h, yv_f)
             pp_share_y[(payer, product)] = (ys_all[:y_fsi], ys_all[y_fsi:])
 
@@ -879,7 +912,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
                     children.append({"label": product, "values": [round(v, 2) for v in (ys_h + ys_f)]})
                 else:
                     children.append({"label": product, "values": [round(v, 2) for v in pp[(payer, product)]]})
-            ppl_rows.append({"label": payer, "values": [round(v, 2) for v in _payer_vals(payer)], "children": children})
+            ppl_rows.append({"label": payer, "values": [100.0] * n_pts, "children": children})
 
         return {
             "view_options":  PRODUCT_EVENT_VIEW_OPTIONS,
@@ -1757,8 +1790,17 @@ def refresh_market_events(payload: RefreshRequest) -> dict:
         products  = get_products(cur)
         scenarios = _get_scenarios_with_base(cur)
 
-        configs = get_configs_for_selection(cur, ta, sf.payers, sf.products)
+        # Full config set for the TA, NOT narrowed to whichever payers/products
+        # are currently selected (get_configs_for_selection) -- available_months
+        # should reflect the TA's true full range regardless of filter
+        # selection, matching get_market_events_filters' (GET /filters, page
+        # load) already-correct use of get_all_configs_for_ta. Narrowing by
+        # selection made the date range visibly shrink the moment a filter was
+        # applied, instead of staying at the full available range.
+        configs = get_all_configs_for_ta(cur, ta)
         min_start, forecast_start_date, max_end = _get_date_range_from_configs(configs)
+        if min_start:
+            min_start = _clamp_min_start_to_transaction_floor(cur, ta, min_start)
 
         if min_start and max_end:
             from_year, from_month = parse_year_month(min_start)
@@ -1995,13 +2037,16 @@ def _clip_snapshot_to_range(months: list, forecast_start_index: int, total_all: 
     return clipped_months, clipped_fsi, clipped_total, clipped_series
 
 
-def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, filter_payers=None,
-                                           start_date: str | None = None, end_date: str | None = None) -> dict:
+def _snapshot_to_raw_series(snapshot: dict, start_date: str | None = None,
+                             end_date: str | None = None) -> tuple:
     """
-    Rebuild a full event_tabs from a compact volume snapshot.
+    Convert a compact volume snapshot ({"months", "forecast_start_index",
+    "total_all", "series"}) into the raw ingredients both the metrics
+    builders below AND run_calculation_service operate on. Optionally
+    clipped to [start_date, end_date] first (see _clip_snapshot_to_range).
 
-    Shares are computed fresh from volume / total_volume * 100, so they
-    are always consistent with whatever denominator the model input module uses.
+    Returns (data, months, month_tuples, forecast_start_index, total_all,
+    show_products, show_payers) -- data is {(year, month): {product: {payer: volume}}}.
     """
     months               = snapshot["months"]
     forecast_start_index = snapshot["forecast_start_index"]
@@ -2014,7 +2059,6 @@ def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, 
 
     month_tuples = [(int(m[:4]), int(m[5:7])) for m in months]
 
-    # Reconstruct data: {(year, month): {product: {payer: volume}}}
     data: dict = {}
     for i, (y, mo) in enumerate(month_tuples):
         data[(y, mo)] = {}
@@ -2026,6 +2070,53 @@ def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, 
 
     show_products = sorted(saved_series.keys())
     show_payers   = sorted({p for pm in saved_series.values() for p in pm})
+
+    return data, months, month_tuples, forecast_start_index, total_all, show_products, show_payers
+
+
+def _load_scenario_raw_series(cur, scenario_name: str, start_date: str | None = None,
+                               end_date: str | None = None):
+    """
+    Return this scenario's own persisted, properly-forecasted volumes as raw
+    ingredients (same shape _snapshot_to_raw_series returns), using the exact
+    same source priority _load_saved_event_tabs uses for the metrics-building
+    path: a market_events snapshot first, then one derived from
+    market_analysis. Returns None if neither exists yet (caller -- currently
+    only run_market_events_calculation -- should fall back to its own
+    from-scratch computation, e.g. raw transaction_data, in that case).
+
+    This is what lets run-calculation start from the SAME baseline
+    apply_market_events_filters/refresh_market_events would show for this
+    scenario, instead of a separately-sourced (and much cruder, flat-forecast)
+    reconstruction from transaction_data -- otherwise every product/payer an
+    event doesn't touch would visibly diverge from what every other screen
+    shows for that same scenario.
+    """
+    raw = load_scenario_event_tabs(cur, scenario_name)
+    snapshot = None
+    if raw is not None and "series" in raw:
+        snapshot = raw
+    else:
+        ma = load_market_analysis(cur, scenario_name)
+        if ma:
+            snapshot = extract_snapshot_from_market_analysis(ma)
+
+    if not snapshot:
+        return None
+    return _snapshot_to_raw_series(snapshot, start_date, end_date)
+
+
+def _reconstruct_event_tabs_from_snapshot(snapshot: dict, filter_products=None, filter_payers=None,
+                                           start_date: str | None = None, end_date: str | None = None) -> dict:
+    """
+    Rebuild a full event_tabs from a compact volume snapshot.
+
+    Shares are computed fresh from volume / total_volume * 100, so they
+    are always consistent with whatever denominator the model input module uses.
+    """
+    data, months, month_tuples, forecast_start_index, total_all, show_products, show_payers = (
+        _snapshot_to_raw_series(snapshot, start_date, end_date)
+    )
 
     return {
         "payer_event": {
@@ -2402,7 +2493,28 @@ def save_market_events(payload: SaveMarketEventsRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        _persist_market_events_result(cur, conn, name, payload.event_tabs)
+        ta = payload.ta_name
+        sf = payload.selected_filter
+
+        # Always save with the FULL available date range (first transaction month →
+        # max forecast end), not the user's display-filter dates. The frontend's
+        # event_tabs are clipped to the user's FROM/TO filter, so using them
+        # directly would truncate pre-filter history from the persisted snapshot.
+        configs = get_all_configs_for_ta(cur, ta)
+        min_start, forecast_start_date, max_end = _get_date_range_from_configs(configs)
+        if min_start:
+            min_start = _clamp_min_start_to_transaction_floor(cur, ta, min_start)
+
+        if min_start and max_end:
+            wide_filter = {**sf.model_dump(), "start_date": min_start, "end_date": max_end}
+        else:
+            wide_filter = sf.model_dump()
+
+        wide_event_tabs = _load_saved_event_tabs(
+            cur, name, ta, wide_filter,
+            forecast_start_date or sf.model_dump().get("end_date", ""),
+        )
+        _persist_market_events_result(cur, conn, name, wide_event_tabs)
 
         all_scenarios = get_scenarios(cur)
         if "Base" not in all_scenarios:
