@@ -139,7 +139,7 @@ class PersistencyCurvePreviewconfigure(BaseModel):
     curve_name: str
     months: List[str]
     values: List[float]
-    
+
 class PersistencyCurveConfigResponse(BaseModel):
     curve_details: PersistencyCurveDetails
     curve_preview: PersistencyCurvePreviewconfigure
@@ -414,3 +414,21 @@ class CurveValuesJSON(BaseModel):
     """
     months: List[str] = Field(..., description="Ordered month labels, e.g. M1, M2 ...")
     values: List[float] = Field(..., description="Persistency values aligned with `months`")
+
+
+class CurvePreviewEdit(BaseModel):
+    curve_name: str
+    months: List[str]
+    values: List[float]
+
+
+class UpdateCurveRequest(BaseModel):
+    ta_name: str
+    curve_name: str
+    months: List[str]
+    values: List[float]
+ 
+ 
+class UpdateCurveResponse(BaseModel):
+    message: str
+    curve_preview: CurvePreviewEdit
