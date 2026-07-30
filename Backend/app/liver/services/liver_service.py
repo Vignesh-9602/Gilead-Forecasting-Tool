@@ -626,9 +626,12 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
-def _forecast_share_by_factors(train_values: list, forecast_count: int, factors) -> list:
+def _forecast_share_by_factors(train_values: list, forecast_count: int, factors,
+                                traj_adj: int = 0) -> list:
     """Apply the user's active model to a share (%) training series.
     MA window is clamped to a minimum of 3.
+    traj_adj: number of flat (base-value) periods prepended before growth, matching
+    the trajectory_start offset computed by the caller (traj_idx + fc_offset).
     """
     if not train_values or all(v == 0 for v in train_values):
         return [0.0] * forecast_count
@@ -647,14 +650,18 @@ def _forecast_share_by_factors(train_values: list, forecast_count: int, factors)
     tg  = f_params.total_growth
     dur = f_params.duration
     k   = getattr(f_params, "k_value", None)
+    pre_values = [base] * traj_adj
+    remaining  = forecast_count - traj_adj
+    if remaining <= 0:
+        return pre_values[:forecast_count]
     if active == "linear":
-        return forecast_linear(base, forecast_count, tg, dur, "nps")
+        return pre_values + forecast_linear(base, remaining, tg, dur, "nps")
     if active == "exponential":
-        return forecast_exponential(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_exponential(base, remaining, tg, dur, k, "nps")
     if active == "logarithmic":
-        return forecast_logarithmic(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_logarithmic(base, remaining, tg, dur, k, "nps")
     if active == "scurve":
-        return forecast_s_curve(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_s_curve(base, remaining, tg, dur, k, "nps")
     return _simple_moving_average_forecast(train_values, forecast_count, window=6)
 
 
@@ -676,6 +683,24 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
     historical_months = month_range[:fsi]
     forecast_count = len(month_range) - fsi
     _model_fc_count = forecast_count + fc_offset
+
+    # Compute trajectory adjustment so _forecast_share_by_factors can insert the
+    # same flat pre-growth period that _build_series_with_forecast does for Tab1.
+    _forecast_months = month_range[fsi:]
+    _active_key = factors.active_model.lower() if factors else "moving_average"
+    _fp = getattr(factors, _active_key, None) if factors else None
+    _traj_str = getattr(_fp, "trajectory_start", None) if _fp else None
+    _traj_idx = 0
+    if _traj_str:
+        try:
+            _tstart = datetime.fromisoformat(_traj_str[:10])
+            for _i, (_fy, _fm) in enumerate(_forecast_months):
+                if datetime(_fy, _fm, 1) >= _tstart:
+                    _traj_idx = _i
+                    break
+        except Exception:
+            pass
+    _traj_adj = _traj_idx + fc_offset
 
     def _mtm(label):
         """Return the model-training months for this label (per-series config or full history)."""
@@ -707,7 +732,7 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
         # -- Selected series: apply user's model directly --
         sel_share_map = share_series_dict[selected_label]
         sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in _mtm(selected_label)]
-        sel_raw = _forecast_share_by_factors(sel_train, _model_fc_count, factors)
+        sel_raw = _forecast_share_by_factors(sel_train, _model_fc_count, factors, traj_adj=_traj_adj)
         # Slice off the fc_offset periods before the display window.
         sel_fc_shares[selected_label] = [min(100.0, max(0.0, v)) for v in sel_raw[fc_offset:]]
 
@@ -730,7 +755,8 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
         raw_fc = {}
         for label, share_map in share_series_dict.items():
             share_train = [float(share_map.get((y, m), 0)) for y, m in _mtm(label)]
-            raw_fc[label] = _forecast_share_by_factors(share_train, _model_fc_count, factors)
+            raw_fc[label] = _forecast_share_by_factors(share_train, _model_fc_count, factors,
+                                                        traj_adj=_traj_adj)
         for i in range(_model_fc_count):
             total = sum(raw_fc[l][i] for l in raw_fc)
             for l in raw_fc:
@@ -787,6 +813,23 @@ def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, mont
     forecast_count = len(month_range) - fsi
     _model_fc_count = forecast_count + fc_offset
 
+    # Compute trajectory adjustment (mirrors _build_tab_data_from_shares logic).
+    _forecast_months_h = month_range[fsi:]
+    _active_key_h = factors.active_model.lower() if factors else "moving_average"
+    _fp_h = getattr(factors, _active_key_h, None) if factors else None
+    _traj_str_h = getattr(_fp_h, "trajectory_start", None) if _fp_h else None
+    _traj_idx_h = 0
+    if _traj_str_h:
+        try:
+            _tstart_h = datetime.fromisoformat(_traj_str_h[:10])
+            for _i_h, (_fy_h, _fm_h) in enumerate(_forecast_months_h):
+                if datetime(_fy_h, _fm_h, 1) >= _tstart_h:
+                    _traj_idx_h = _i_h
+                    break
+        except Exception:
+            pass
+    _traj_adj_h = _traj_idx_h + fc_offset
+
     def _mtm(parent, child):
         """Return model-training months for this (parent, child) cell."""
         if model_months_by_pair:
@@ -831,7 +874,8 @@ def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, mont
         if selected_child is not None and selected_child in children_ms and factors is not None:
             sel_share_map = children_ms[selected_child]
             sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in _mtm(parent, selected_child)]
-            sel_child_fc = _forecast_share_by_factors(sel_train, _model_fc_count, factors)
+            sel_child_fc = _forecast_share_by_factors(sel_train, _model_fc_count, factors,
+                                                       traj_adj=_traj_adj_h)
             # Slice off fc_offset periods that precede the display window.
             norm_shares[selected_child] = [min(100.0, max(0.0, v)) for v in sel_child_fc[fc_offset:]]
 
@@ -2207,7 +2251,8 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         granularity      = cfg.get("model_granularity", "monthly")
 
         to_month_safe = train_end_month if granularity != "yearly" else 1
-        default_traj  = date_type(train_end_year, to_month_safe, 1).isoformat()
+        _dt_dt        = datetime(train_end_year, to_month_safe, 1) + relativedelta(months=1)
+        default_traj  = date_type(_dt_dt.year, _dt_dt.month, 1).isoformat()
 
         factors = _factors_from_request(
             payload.factors, model_type, default_traj, forecast_periods
@@ -2487,6 +2532,12 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
+        # Splice: pre-filter months from wide (full history), filter-window from payload
+        # (preserves user's table edits). Falls back to payload alone if wide failed.
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
+
         save_scenario(
             cur,
             scenario_name=name,
@@ -2495,7 +2546,7 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
 
@@ -2739,22 +2790,27 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
     def _splice_hier_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
         if not w_table or splice_idx == 0:
             return p_table
-        w_rows = {r.get("hierarchy", ""): r for r in w_table.get("rows", [])}
+        # stored format uses "label" (from _fmt_hier); fall back to "hierarchy" for legacy
+        w_rows = {r.get("label", r.get("hierarchy", "")): r for r in w_table.get("rows", [])}
         new_rows = []
         for pr in p_table.get("rows", []):
-            wr = w_rows.get(pr.get("hierarchy", ""))
+            row_key = pr.get("label", pr.get("hierarchy", ""))
+            wr = w_rows.get(row_key)
             if wr is None:
                 new_rows.append(pr)
                 continue
-            pre_total   = list(wr.get("total", []))[:splice_idx]
-            w_children  = {c.get("label", ""): c for c in wr.get("children", [])}
+            # stored format uses "values" for parent totals (from _fmt_hier), not "total"
+            val_key   = "values" if "values" in wr else "total"
+            pre_total = list(wr.get(val_key, []))[:splice_idx]
+            w_children = {c.get("label", ""): c for c in wr.get("children", [])}
             new_children = []
             for pc in pr.get("children", []):
                 wc    = w_children.get(pc.get("label", ""))
                 pre_c = list(wc.get("values", []))[:splice_idx] if wc else []
                 new_children.append({**pc, "values": pre_c + list(pc.get("values", []))})
+            p_val_key = "values" if "values" in pr else "total"
             new_rows.append({**pr,
-                             "total":    pre_total + list(pr.get("total", [])),
+                             p_val_key:  pre_total + list(pr.get(p_val_key, [])),
                              "children": new_children})
         return {**p_table, "rows": new_rows}
 
@@ -2874,6 +2930,10 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
+
         save_scenario(
             cur,
             scenario_name=name,
@@ -2882,7 +2942,7 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
 
@@ -2924,6 +2984,10 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
+
         save_scenario(
             cur,
             scenario_name=name,
@@ -2932,7 +2996,7 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": wide.get("market_analysis") or payload.market_analysis},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
 
@@ -3076,7 +3140,10 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
         est_growth         = 0.0
 
     to_month_safe      = to_month if granularity != "yearly" else 1
-    trajectory_start   = date_type(to_year, to_month_safe, 1).isoformat()
+    # Default trajectory start = first forecast month (train_end + 1), so the
+    # dropdown always shows a valid, selectable date on initial load.
+    _traj_dt           = datetime(to_year, to_month_safe, 1) + relativedelta(months=1)
+    trajectory_start   = date_type(_traj_dt.year, _traj_dt.month, 1).isoformat()
     default_duration   = 12
 
     return LiverFactors(
