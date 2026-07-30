@@ -128,7 +128,16 @@ def get_output_filters(ta: str = "HCV") -> dict:
         scenarios = _get_scenarios_with_base(cur)
 
         configs = get_all_configs_for_ta(cur, ta)
-        min_start, max_end = _get_date_range_from_configs(configs)
+        _, max_end = _get_date_range_from_configs(configs)
+
+        # The available range should span from the earliest month real data
+        # actually exists (not the configured train_start_date — the model may
+        # only train on a subset of history, e.g. train_start_date=2022-09-01
+        # while transaction_data actually goes back to 2020-04-01, and users
+        # should still be able to view/select that earlier history here) out
+        # to the forecast end (train_end_date + forecast_periods, from config).
+        month_rows = get_distinct_months(cur, ta)
+        min_start = to_month_label(*month_rows[0]) if month_rows else None
 
         if min_start and max_end:
             from_year, from_month = parse_year_month(min_start)
@@ -367,12 +376,19 @@ def _build_scenario_aggregates(cube: dict, month_tuples: list, forecast_start_in
 
 def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples: list, month_keys: list,
                              forecast_start_index: int, year_labels: list, yearly_fsi: int,
-                             entities: list = None, agg_key: str = None) -> dict:
+                             share_totals: dict, entities: list = None, agg_key: str = None) -> dict:
     """
     Build one flat tab: total_market_volume when entities is empty/None (one row/series
     per scenario, the grand total), otherwise payer_distribution / product_distribution
     (a "Grand Total" row plus one row per entity, per scenario). agg_key selects
     "by_payer" or "by_product" from each scenario's aggregates.
+
+    share_totals: scenario -> monthly GLOBAL total (every master payer/product,
+    regardless of the selected filter). payer_share is always computed against
+    this, not against whatever subset is currently selected/displayed — actual
+    market share doesn't change just because you narrowed the filter, and using
+    the displayed subset's own total as the denominator would make any
+    selection's shares trivially sum to 100% instead of reflecting reality.
     """
     per_scenario = {}
     for scenario in scenario_names:
@@ -406,9 +422,10 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
             for scenario in scenario_names:
                 total_vol, entity_vols = per_scenario[scenario]
                 total_view = total_vol if is_monthly else _yearly(total_vol)
+                share_total_view = share_totals[scenario] if is_monthly else _yearly(share_totals[scenario])
                 total_metric_vals = (
                     total_view if metric == "payer_volume"
-                    else [compute_share(v, v) for v in total_view]
+                    else [compute_share(v, t) for v, t in zip(total_view, share_total_view)]
                 )
 
                 if not entities:
@@ -421,7 +438,7 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
                     entity_view = entity_vols[entity] if is_monthly else _yearly(entity_vols[entity])
                     entity_metric_vals = (
                         entity_view if metric == "payer_volume"
-                        else [compute_share(ev, tv) for ev, tv in zip(entity_view, total_view)]
+                        else [compute_share(ev, tv) for ev, tv in zip(entity_view, share_total_view)]
                     )
                     chart_series.append((f"{entity} ({scenario})", entity_metric_vals))
                     table_rows.append((f"{entity} ({scenario} Scenario)", entity_metric_vals))
@@ -437,26 +454,20 @@ def _build_distribution_tab(aggregates: dict, scenario_names: list, month_tuples
 def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: list, month_keys: list,
                           forecast_start_index: int, year_labels: list, yearly_fsi: int,
                           parents: list, children: list, parent_agg_key: str, cell_key,
-                          chart_parents: set) -> dict:
+                          chart_parents: set, share_totals: dict) -> dict:
     """
     Build one 3-level hierarchical tab: Grand Total (per scenario) -> parent entity -> child
-    entity (leaf). Percentages at every level are computed against that scenario's grand
-    total, not the immediate parent's total — matching the target contract (this differs
-    from the existing Liver Model Input screen's payer_product/product_payer tabs, which
-    use % of parent).
-
-    The TABLE always covers every entity in `parents`/`children` (the full master
-    payer/product list, via `aggregates` built over that same full list) — it is
-    NOT limited to the user's selected filter. The CHART emits a line for every
-    child under a parent that's in the selected filter — e.g. tab4 (payer_product)
-    shows every product for each selected payer, tab5 (product_payer) shows every
-    payer for each selected product — matching Model Input's _fmt_hier, which
-    filters its chart by parent only (chart_parent_filter), never by child.
-    (chart_parents/chart_children), so it doesn't try to plot every master
-    combination.
+    entity (leaf). The CHART emits a line for every child under a parent that's in the
+    selected filter — e.g. tab4 (payer_product) shows every product for each selected
+    payer, tab5 (product_payer) shows every payer for each selected product — matching
+    Model Input's _fmt_hier, which filters its chart by parent only (chart_parent_filter),
+    never by child.
 
     parent_agg_key: "by_product" or "by_payer" — which aggregate holds the parent rows.
     cell_key(parent, child): maps to the (product, payer) tuple used to key aggregates["cells"].
+    share_totals: scenario -> monthly GLOBAL total, used as the payer_share denominator
+    at every level (grand total, parent, child) — real market share, unaffected by
+    whatever payers/products are currently selected. See _build_distribution_tab.
     """
     per_scenario = {}
     for scenario in scenario_names:
@@ -491,10 +502,11 @@ def _build_hierarchy_tab(aggregates: dict, scenario_names: list, month_tuples: l
             for scenario in scenario_names:
                 total_vol, parent_vols, cell_vols = per_scenario[scenario]
                 total_view = total_vol if is_monthly else _yearly(total_vol)
+                share_total_view = share_totals[scenario] if is_monthly else _yearly(share_totals[scenario])
 
-                def _metric_vals(view_vals, _total_view=total_view):
+                def _metric_vals(view_vals, _share_total_view=share_total_view):
                     return view_vals if metric == "payer_volume" else [
-                        compute_share(v, t) for v, t in zip(view_vals, _total_view)
+                        compute_share(v, t) for v, t in zip(view_vals, _share_total_view)
                     ]
 
                 parent_rows = []
@@ -645,25 +657,34 @@ def apply_output_filters(payload) -> dict:
         selected_payers   = set(payers)
         selected_products = set(products)
 
+        # payer_share is always % of the whole market (global_aggregates' total),
+        # never % of whatever subset is currently selected/displayed — see
+        # _build_distribution_tab's docstring.
+        share_totals = {scenario: global_aggregates[scenario]["total"] for scenario in scenario_names}
+
         output_tabs = {
-            "total_market_volume": _build_distribution_tab(global_aggregates, scenario_names, *common_args),
+            "total_market_volume": _build_distribution_tab(
+                global_aggregates, scenario_names, *common_args, share_totals=share_totals
+            ),
             "payer_distribution": _build_distribution_tab(
-                selected_aggregates, scenario_names, *common_args, entities=payers, agg_key="by_payer"
+                selected_aggregates, scenario_names, *common_args,
+                share_totals=share_totals, entities=payers, agg_key="by_payer",
             ),
             "product_distribution": _build_distribution_tab(
-                selected_aggregates, scenario_names, *common_args, entities=products, agg_key="by_product"
+                selected_aggregates, scenario_names, *common_args,
+                share_totals=share_totals, entities=products, agg_key="by_product",
             ),
             "product_payer": _build_hierarchy_tab(
                 selected_aggregates, scenario_names, *common_args,
                 parents=products, children=payers, parent_agg_key="by_product",
                 cell_key=lambda p, c: (p, c),
-                chart_parents=selected_products,
+                chart_parents=selected_products, share_totals=share_totals,
             ),
             "payer_product": _build_hierarchy_tab(
                 selected_aggregates, scenario_names, *common_args,
                 parents=payers, children=products, parent_agg_key="by_payer",
                 cell_key=lambda p, c: (c, p),
-                chart_parents=selected_payers,
+                chart_parents=selected_payers, share_totals=share_totals,
             ),
         }
 
