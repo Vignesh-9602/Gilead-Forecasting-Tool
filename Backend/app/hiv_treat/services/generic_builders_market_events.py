@@ -1,4 +1,5 @@
 from app.hiv_treat.services.response_builder_market_events import *
+from app.hiv_treat.services.calculation_tree_market_events import normalize_dimension,is_all
 
 from copy import deepcopy
 
@@ -43,19 +44,29 @@ def exclude_overall_from_chart(table):
 
     return chart_table
 
-def build_overall_event(tree):
+def build_overall_event(
+    tree,
+    saved_events=None,
+):
     """
     Build Overall Event from the calculation tree.
 
     Provides one view:
         overall_level
+
+    Saved overall events are returned inside:
+        impact_curve_configuration.rows
     """
 
     months = tree["months"]
-    forecast_start_index = tree["forecast_start_index"]
+    forecast_start_index = tree[
+        "forecast_start_index"
+    ]
 
     overall_volume = tree["overall"]["volume"]
-    overall_share = [100.0] * len(months)
+    overall_share = [
+        100.0
+    ] * len(months)
 
     view_options = [
         {
@@ -92,7 +103,6 @@ def build_overall_event(tree):
         hierarchy=False,
     )
 
-    # Overall-level tables are flat and non-editable
     market_share_monthly["type"] = "flat"
     market_share_monthly["editable"] = False
 
@@ -124,8 +134,12 @@ def build_overall_event(tree):
     # =====================================================
 
     return {
-        "impact_curve_configuration":
-            build_overall_impact_curve_configuration(tree),
+        "impact_curve_configuration": (
+            build_overall_impact_curve_configuration(
+                tree=tree,
+                saved_events=saved_events,
+            )
+        ),
 
         "metrics_views": {
             "market_share": {
@@ -486,11 +500,334 @@ def build_product_chart_rows(
 
     return rows
 
+def build_market_product_rows(
+    tree: dict,
+    metric: str = "share",
+    decimals: int = 2,
+) -> list:
+    """
+    Build Channel -> Product hierarchy matching the Model Input
+    market_product table.
 
+    Output:
+
+        Overall
+
+        Retail
+            Biktarvy
+            Truvada
+            Descovy
+
+        Non-retail
+            Biktarvy
+            Truvada
+            Descovy
+
+    Rules
+    -----
+    metric="share":
+        Market parent = 100%.
+
+        Product child share =
+            product volume within market
+            / total product volume within market
+            * 100
+
+    metric="volume":
+        Product child = product volume within market.
+
+        Market parent =
+            sum of all product child volumes within that market.
+
+    The function uses product volumes, not product shares, because
+    the shares stored under the current calculation tree may represent
+    contribution to the overall market rather than distribution within
+    a channel.
+    """
+
+    if metric not in {"share", "volume"}:
+        raise ValueError(
+            "metric must be either 'share' or 'volume'. "
+            f"Received {metric!r}."
+        )
+
+    months = list(
+        tree.get("months", [])
+        or []
+    )
+    month_count = len(months)
+
+    markets = (
+        tree.get("markets", {})
+        or {}
+    )
+
+    top_level_products = (
+        tree.get("products", {})
+        or {}
+    )
+
+    # Preserve product order from tree["products"].
+    product_order = list(
+        top_level_products.keys()
+    )
+
+    # market_product_volumes[market][product] = monthly volumes
+    market_product_volumes = {}
+
+    # =====================================================
+    # Build canonical Market x Product volume matrix
+    # =====================================================
+
+    for market_name, market_node in markets.items():
+        sources = (
+            market_node.get("sources", {})
+            or {}
+        )
+
+        market_product_volumes.setdefault(
+            market_name,
+            {},
+        )
+
+        # -------------------------------------------------
+        # Prefer direct Product-Channel rows under Unknown
+        #
+        # Example database row:
+        #     Retail | ALL | Biktarvy
+        #
+        # Current calculation tree stores this as:
+        #     Retail -> Unknown -> Biktarvy
+        # -------------------------------------------------
+
+        unknown_source = sources.get("Unknown")
+
+        if unknown_source is not None:
+            direct_products = (
+                unknown_source.get("products", {})
+                or {}
+            )
+
+            for product_name, product_node in (
+                direct_products.items()
+            ):
+                volumes = list(
+                    product_node.get("volume", [])
+                    or []
+                )
+
+                if len(volumes) != month_count:
+                    raise ValueError(
+                        "Product-volume length mismatch for "
+                        f"{market_name!r}|"
+                        f"{product_name!r}. "
+                        f"Expected {month_count}, "
+                        f"received {len(volumes)}."
+                    )
+
+                market_product_volumes[
+                    market_name
+                ][product_name] = [
+                    float(value or 0)
+                    for value in volumes
+                ]
+
+                if product_name not in product_order:
+                    product_order.append(product_name)
+
+            # The Unknown source contains the direct
+            # Market -> Product rows, so do not add the same
+            # values again from other source nodes.
+            if direct_products:
+                continue
+
+        # -------------------------------------------------
+        # Fallback: aggregate products across real sources
+        # -------------------------------------------------
+
+        for source_name, source_node in sources.items():
+            products = (
+                source_node.get("products", {})
+                or {}
+            )
+
+            for product_name, product_node in products.items():
+                volumes = list(
+                    product_node.get("volume", [])
+                    or []
+                )
+
+                if len(volumes) != month_count:
+                    raise ValueError(
+                        "Product-volume length mismatch for "
+                        f"{market_name!r}|"
+                        f"{source_name!r}|"
+                        f"{product_name!r}. "
+                        f"Expected {month_count}, "
+                        f"received {len(volumes)}."
+                    )
+
+                product_values = (
+                    market_product_volumes[
+                        market_name
+                    ].setdefault(
+                        product_name,
+                        [0.0] * month_count,
+                    )
+                )
+
+                for month_index, value in enumerate(volumes):
+                    product_values[month_index] += float(
+                        value or 0
+                    )
+
+                if product_name not in product_order:
+                    product_order.append(product_name)
+
+    # =====================================================
+    # Build hierarchy rows
+    # =====================================================
+
+    rows = []
+
+    overall_volume = list(
+        tree.get("overall", {}).get(
+            "volume",
+            [],
+        )
+        or []
+    )
+
+    if metric == "share":
+        overall_values = [
+            100.0
+        ] * month_count
+    else:
+        if len(overall_volume) != month_count:
+            raise ValueError(
+                "Overall-volume length mismatch. "
+                f"Expected {month_count}, "
+                f"received {len(overall_volume)}."
+            )
+
+        overall_values = [
+            round(
+                float(value or 0),
+                decimals,
+            )
+            for value in overall_volume
+        ]
+
+    rows.append({
+        "label": "Overall",
+        "editable": False,
+        "values": overall_values,
+        "children": [],
+    })
+
+    # =====================================================
+    # Market parents with product children
+    # =====================================================
+
+    for market_name in markets.keys():
+        products_for_market = (
+            market_product_volumes.get(
+                market_name,
+                {},
+            )
+        )
+
+        if not products_for_market:
+            continue
+
+        # Total product volume within this channel.
+        market_product_totals = [
+            0.0
+        ] * month_count
+
+        for product_volumes in (
+            products_for_market.values()
+        ):
+            for month_index, value in enumerate(
+                product_volumes
+            ):
+                market_product_totals[
+                    month_index
+                ] += float(value or 0)
+
+        children = []
+
+        for product_name in product_order:
+            product_volumes = (
+                products_for_market.get(
+                    product_name
+                )
+            )
+
+            if product_volumes is None:
+                continue
+
+            if metric == "volume":
+                child_values = [
+                    round(
+                        float(value or 0),
+                        decimals,
+                    )
+                    for value in product_volumes
+                ]
+
+            else:
+                child_values = [
+                    round(
+                        (
+                            float(product_volume or 0)
+                            / float(market_total or 0)
+                            * 100
+                        )
+                        if float(market_total or 0) != 0
+                        else 0.0,
+                        decimals,
+                    )
+                    for product_volume, market_total in zip(
+                        product_volumes,
+                        market_product_totals,
+                    )
+                ]
+
+            children.append({
+                "label": product_name,
+                "parent": market_name,
+                "editable": True,
+                "values": child_values,
+                "children": [],
+            })
+
+        if metric == "share":
+            parent_values = [
+                100.0
+            ] * month_count
+        else:
+            parent_values = [
+                round(
+                    float(value or 0),
+                    decimals,
+                )
+                for value in market_product_totals
+            ]
+
+        rows.append({
+            "label": market_name,
+            "editable": False,
+            "values": parent_values,
+            "children": children,
+        })
+
+    return rows
 
 def build_product_event(
     tree,
     selected_markets=None,
+    saved_events=None,
 ):
     """
     Build Product Event.
@@ -579,9 +916,10 @@ def build_product_event(
     )
 
     market_product_share_rows = (
-        build_product_rows(
-            tree,
+        build_market_product_rows(
+            tree=tree,
             metric="share",
+            decimals=2,
         )
     )
 
@@ -593,9 +931,10 @@ def build_product_event(
     )
 
     market_product_volume_rows = (
-        build_product_rows(
-            tree,
+        build_market_product_rows(
+            tree=tree,
             metric="volume",
+            decimals=2,
         )
     )
 
@@ -854,7 +1193,8 @@ def build_product_event(
     return {
         "impact_curve_configuration": (
             build_product_impact_curve_configuration(
-                tree
+                tree=tree,
+                saved_events=saved_events,
             )
         ),
 
@@ -1114,8 +1454,8 @@ def build_product_market_chart(
             series.append(
                 {
                     "label": (
-                        f"{market_name} - "
-                        f"{product_name}"
+                        f"{product_name} - "
+                        f"{market_name}"
                     ),
                     "history": values[
                         :forecast_start_index
@@ -1133,9 +1473,483 @@ def build_product_market_chart(
         "series": series,
     }
 
+def build_product_market_rows(
+    tree: dict,
+    metric: str = "share",
+    decimals: int = 2,
+) -> list:
+    """
+    Build Product -> Channel rows.
+
+    Data priority:
+
+    1. Use tree["product_market_inputs"] when available.
+       This preserves the original Product-Channel input shares.
+
+    2. Fall back to Product-Channel volumes stored under:
+           market -> source -> product
+       and calculate:
+           channel share = channel volume / product total volume * 100
+
+    This supports both Base and saved scenarios.
+    """
+
+    if metric not in {"share", "volume"}:
+        raise ValueError(
+            "metric must be either 'share' or 'volume'. "
+            f"Received {metric!r}."
+        )
+
+    months = list(
+        tree.get("months", [])
+        or []
+    )
+    month_count = len(months)
+
+    overall_volume = list(
+        tree.get("overall", {}).get(
+            "volume",
+            [],
+        )
+        or []
+    )
+
+    if len(overall_volume) != month_count:
+        raise ValueError(
+            "Overall-volume length mismatch. "
+            f"Expected {month_count}, "
+            f"received {len(overall_volume)}."
+        )
+
+    markets = (
+        tree.get("markets", {})
+        or {}
+    )
+
+    market_order = list(markets.keys())
+
+    # matrix[product][market] = monthly volumes
+    product_market_volumes = {}
+
+    # input_shares[product][market] = original input shares
+    input_shares = {}
+
+    # overall_product_shares[product] = overall product shares
+    overall_product_shares = {}
+
+    product_order = []
+
+    # =====================================================
+    # 1. Read preserved Product-Channel inputs
+    # =====================================================
+
+    product_market_inputs = (
+        tree.get("product_market_inputs", {})
+        or {}
+    )
+
+    for product_name, product_input in (
+        product_market_inputs.items()
+    ):
+        if product_name not in product_order:
+            product_order.append(product_name)
+
+        overall_share = list(
+            product_input.get(
+                "overall_share",
+                [],
+            )
+            or []
+        )
+
+        if len(overall_share) == month_count:
+            overall_product_shares[
+                product_name
+            ] = [
+                float(value or 0)
+                for value in overall_share
+            ]
+
+        markets_for_product = (
+            product_input.get(
+                "markets",
+                {},
+            )
+            or {}
+        )
+
+        for market_name, shares in (
+            markets_for_product.items()
+        ):
+            shares = list(shares or [])
+
+            if len(shares) != month_count:
+                continue
+
+            input_shares.setdefault(
+                product_name,
+                {},
+            )[market_name] = [
+                float(value or 0)
+                for value in shares
+            ]
+
+    # =====================================================
+    # 2. Build Product x Market volume matrix from tree
+    # =====================================================
+
+    for market_name, market_node in markets.items():
+
+        sources = (
+            market_node.get("sources", {})
+            or {}
+        )
+
+        unknown_source = sources.get("Unknown")
+
+        # Direct Product-Channel rows are normally stored
+        # under the synthetic Unknown source.
+        if unknown_source is not None:
+            products = (
+                unknown_source.get(
+                    "products",
+                    {},
+                )
+                or {}
+            )
+
+            for product_name, product_node in (
+                products.items()
+            ):
+                volumes = list(
+                    product_node.get(
+                        "volume",
+                        [],
+                    )
+                    or []
+                )
+
+                if len(volumes) != month_count:
+                    raise ValueError(
+                        "Product-volume length mismatch for "
+                        f"{market_name!r}|"
+                        f"{product_name!r}. "
+                        f"Expected {month_count}, "
+                        f"received {len(volumes)}."
+                    )
+
+                if product_name not in product_order:
+                    product_order.append(product_name)
+
+                product_market_volumes.setdefault(
+                    product_name,
+                    {},
+                )[market_name] = [
+                    float(value or 0)
+                    for value in volumes
+                ]
+
+            continue
+
+        # Fallback for real sources.
+        for source_name, source_node in sources.items():
+
+            products = (
+                source_node.get(
+                    "products",
+                    {},
+                )
+                or {}
+            )
+
+            for product_name, product_node in (
+                products.items()
+            ):
+                volumes = list(
+                    product_node.get(
+                        "volume",
+                        [],
+                    )
+                    or []
+                )
+
+                if len(volumes) != month_count:
+                    raise ValueError(
+                        "Product-volume length mismatch for "
+                        f"{market_name!r}|"
+                        f"{source_name!r}|"
+                        f"{product_name!r}. "
+                        f"Expected {month_count}, "
+                        f"received {len(volumes)}."
+                    )
+
+                if product_name not in product_order:
+                    product_order.append(product_name)
+
+                market_values = (
+                    product_market_volumes
+                    .setdefault(
+                        product_name,
+                        {},
+                    )
+                    .setdefault(
+                        market_name,
+                        [0.0] * month_count,
+                    )
+                )
+
+                for index, value in enumerate(volumes):
+                    market_values[index] += float(
+                        value or 0
+                    )
+
+    # Preserve top-level product order.
+    top_level_order = list(
+        (
+            tree.get("products", {})
+            or {}
+        ).keys()
+    )
+
+    ordered_products = [
+        product_name
+        for product_name in top_level_order
+        if (
+            product_name in product_market_volumes
+            or product_name in input_shares
+        )
+    ]
+
+    ordered_products.extend(
+        product_name
+        for product_name in product_order
+        if product_name not in ordered_products
+    )
+
+    # =====================================================
+    # Build response rows
+    # =====================================================
+
+    rows = []
+
+    rows.append({
+        "label": "Overall",
+        "editable": False,
+        "values": (
+            [100.0] * month_count
+            if metric == "share"
+            else [
+                round(
+                    float(value or 0),
+                    decimals,
+                )
+                for value in overall_volume
+            ]
+        ),
+        "children": [],
+    })
+
+    for product_name in ordered_products:
+
+        market_volume_map = (
+            product_market_volumes.get(
+                product_name,
+                {},
+            )
+        )
+
+        product_input_shares = (
+            input_shares.get(
+                product_name,
+                {},
+            )
+        )
+
+        available_markets = set(
+            market_volume_map.keys()
+        ) | set(
+            product_input_shares.keys()
+        )
+
+        if not available_markets:
+            continue
+
+        ordered_markets = [
+            market_name
+            for market_name in market_order
+            if market_name in available_markets
+        ]
+
+        ordered_markets.extend(
+            market_name
+            for market_name in available_markets
+            if market_name not in ordered_markets
+        )
+
+        # -----------------------------------------------
+        # Calculate product total volume
+        # -----------------------------------------------
+
+        product_total_volumes = [
+            0.0
+        ] * month_count
+
+        if market_volume_map:
+            for market_values in (
+                market_volume_map.values()
+            ):
+                for index, value in enumerate(
+                    market_values
+                ):
+                    product_total_volumes[
+                        index
+                    ] += float(value or 0)
+
+        elif product_name in overall_product_shares:
+            product_total_volumes = [
+                float(total or 0)
+                * float(share or 0)
+                / 100
+                for total, share in zip(
+                    overall_volume,
+                    overall_product_shares[
+                        product_name
+                    ],
+                )
+            ]
+
+        children = []
+
+        for market_name in ordered_markets:
+
+            channel_volumes = market_volume_map.get(
+                market_name
+            )
+
+            original_channel_shares = (
+                product_input_shares.get(
+                    market_name
+                )
+            )
+
+            # -------------------------------------------
+            # Share values
+            # -------------------------------------------
+
+            if metric == "share":
+
+                # Always derive shares from the latest tree volumes.
+                if channel_volumes is not None:
+
+                    child_values = []
+
+                    for channel_volume, product_total in zip(
+                        channel_volumes,
+                        product_total_volumes,
+                    ):
+
+                        if float(product_total or 0) == 0:
+                            child_values.append(0.0)
+                        else:
+                            child_values.append(
+                                round(
+                                    float(channel_volume or 0)
+                                    / float(product_total or 0)
+                                    * 100,
+                                    decimals,
+                                )
+                            )
+
+                # Fallback only when volumes are unavailable.
+                elif original_channel_shares is not None:
+
+                    child_values = [
+                        round(
+                            float(value or 0),
+                            decimals,
+                        )
+                        for value in original_channel_shares
+                    ]
+
+                else:
+
+                    child_values = [
+                        0.0
+                    ] * month_count
+
+            # -------------------------------------------
+            # Volume values
+            # -------------------------------------------
+
+            else:
+
+                if channel_volumes is not None:
+
+                    child_values = [
+                        round(
+                            float(value or 0),
+                            decimals,
+                        )
+                        for value in channel_volumes
+                    ]
+
+                elif original_channel_shares is not None:
+
+                    child_values = [
+                        round(
+                            float(product_total or 0)
+                            * float(channel_share or 0)
+                            / 100,
+                            decimals,
+                        )
+                        for (
+                            product_total,
+                            channel_share,
+                        ) in zip(
+                            product_total_volumes,
+                            original_channel_shares,
+                        )
+                    ]
+
+                else:
+
+                    child_values = [
+                        0.0
+                    ] * month_count
+
+            children.append({
+                "label": market_name,
+                "parent": product_name,
+                "editable": True,
+                "values": child_values,
+                "children": [],
+            })
+
+        parent_values = (
+            [100.0] * month_count
+            if metric == "share"
+            else [
+                round(
+                    float(value or 0),
+                    decimals,
+                )
+                for value in product_total_volumes
+            ]
+        )
+
+        rows.append({
+            "label": product_name,
+            "editable": False,
+            "values": parent_values,
+            "children": children,
+        })
+
+    return rows
+
 def build_market_event(
     tree,
     selected_products=None,
+    saved_events=None,
 ):
     """
     Build Market Event.
@@ -1217,9 +2031,10 @@ def build_market_event(
 
     # Full Product -> Market hierarchy for table
     product_market_share_rows = (
-        build_market_rows(
-            tree,
+        build_product_market_rows(
+            tree=tree,
             metric="share",
+            decimals=2,
         )
     )
 
@@ -1232,9 +2047,10 @@ def build_market_event(
 
     # Full Product -> Market hierarchy for table
     product_market_volume_rows = (
-        build_market_rows(
-            tree,
+        build_product_market_rows(
+            tree=tree,
             metric="volume",
+            decimals=2,
         )
     )
 
@@ -1494,7 +2310,8 @@ def build_market_event(
     return {
         "impact_curve_configuration": (
             build_market_impact_curve_configuration(
-                tree
+                tree=tree,
+                saved_events=saved_events,
             )
         ),
 
@@ -1726,18 +2543,131 @@ def build_market_chart_rows(
 
     return rows
 
-def build_overall_impact_curve_configuration(tree):
+def normalize_overall_event(event):
+    """
+    Normalize one saved Overall Event row.
+
+    Overall events are identified by the absence of:
+        impacted_markets
+        impacted_products
+    """
+
+    if not isinstance(event, dict):
+        return None
+
+    if "impacted_markets" in event:
+        return None
+
+    if "impacted_products" in event:
+        return None
 
     return {
-        "products": list(tree["products"].keys()),
+        "event_id": event.get("event_id"),
 
-        "markets": list(tree["markets"].keys()),
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
 
-        "impact_markets": ["Overall"],
+        "start_date": event.get("start_date"),
+
+        "peak_percent": float(
+            event.get("peak_percent", 0) or 0
+        ),
+
+        "months": int(
+            event.get("months", 0) or 0
+        ),
+
+        "curve_type": str(
+            event.get("curve_type", "Linear")
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get("factor", 0) or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get("enable_coverage", False)
+        ),
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_overall_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Overall Event impact-curve configuration.
+
+    saved_events may contain overall, market, and product events.
+    Only overall events are included here.
+    """
+
+    normalized_rows = []
+
+    for event in saved_events or []:
+        normalized_event = normalize_overall_event(
+            event
+        )
+
+        if normalized_event is not None:
+            normalized_rows.append(
+                normalized_event
+            )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_markets": [
+            "Overall"
+        ],
 
         "forecast_start_date": (
-            tree["months"][tree["forecast_start_index"]]
-            if tree["forecast_start_index"] < len(tree["months"])
+            tree["months"][
+                tree["forecast_start_index"]
+            ]
+            if (
+                tree["forecast_start_index"]
+                < len(tree["months"])
+            )
             else None
         ),
 
@@ -1748,55 +2678,417 @@ def build_overall_impact_curve_configuration(tree):
             "SCurve",
         ],
 
-        "rows": [],
+        "rows": normalized_rows,
     }
 
-def build_market_impact_curve_configuration(tree):
+def normalize_market_event(event):
+    """
+    Normalize one saved Market Event row.
 
-    return {
-        "products": list(tree["products"].keys()),
+    A Market Event is identified by the presence of:
+        impacted_markets
+    """
 
-        "markets": list(tree["markets"].keys()),
+    if not isinstance(event, dict):
+        return None
 
-        "impact_markets": list(tree["markets"].keys()),
+    if "impacted_markets" not in event:
+        return None
 
-        "forecast_start_date": (
-            tree["months"][tree["forecast_start_index"]]
-            if tree["forecast_start_index"] < len(tree["months"])
-            else None
-        ),
+    markets = event.get("markets") or []
+    products = event.get("products") or []
+    impacted_markets = (
+        event.get("impacted_markets") or []
+    )
 
-        "curve_types": [
-            "Linear",
-            "Exponential",
-            "Logarithmic",
-            "SCurve",
-        ],
+    if isinstance(markets, str):
+        markets = [markets]
 
-        "rows": [],
-    }
+    if isinstance(products, str):
+        products = [products]
 
-def build_product_impact_curve_configuration(tree):
-    forecast_start_index = tree["forecast_start_index"]
+    if isinstance(impacted_markets, str):
+        impacted_markets = [
+            impacted_markets
+        ]
 
-    forecast_start_date = (
-        tree["months"][forecast_start_index]
-        if forecast_start_index < len(tree["months"])
-        else None
+    source_percentages = (
+        event.get("source_percentages") or {}
     )
 
     return {
-        "products": list(tree["products"].keys()),
-        "markets": list(tree["markets"].keys()),
-        "impact_products": list(tree["products"].keys()),
-        "forecast_start_date": forecast_start_date,
+        "event_id": event.get("event_id"),
+
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
+
+        "markets": markets,
+
+        "products": products,
+
+        "impacted_markets": impacted_markets,
+
+        "start_date": event.get(
+            "start_date"
+        ),
+
+        "peak_percent": float(
+            event.get(
+                "peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "months": int(
+            event.get(
+                "months",
+                0,
+            )
+            or 0
+        ),
+
+        "curve_type": str(
+            event.get(
+                "curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get(
+                "factor",
+                0,
+            )
+            or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get(
+                "enable_coverage",
+                False,
+            )
+        ),
+
+        "source_percentages": {
+            str(market): float(
+                percentage or 0
+            )
+            for market, percentage
+            in source_percentages.items()
+        },
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_market_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Market Event impact-curve configuration.
+
+    saved_events may contain overall, market,
+    and product events. Only market events are
+    returned in rows.
+    """
+
+    saved_events = saved_events or []
+
+    rows = []
+
+    for event in saved_events:
+        normalized_event = normalize_market_event(
+            event
+        )
+
+        if normalized_event is not None:
+            rows.append(normalized_event)
+
+    print(
+        "[MARKET CONFIG] RECEIVED EVENTS:",
+        len(saved_events),
+    )
+
+    print(
+        "[MARKET CONFIG] MARKET ROWS:",
+        len(rows),
+    )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_markets": list(
+            tree["markets"].keys()
+        ),
+
+        "forecast_start_date": (
+            tree["months"][
+                tree["forecast_start_index"]
+            ]
+            if (
+                tree["forecast_start_index"]
+                < len(tree["months"])
+            )
+            else None
+        ),
+
         "curve_types": [
             "Linear",
             "Exponential",
             "Logarithmic",
             "SCurve",
         ],
-        "rows": [],
+
+        "rows": rows,
+    }
+
+def normalize_product_event(event):
+    """
+    Normalize one saved Product Event row.
+
+    Product Events are identified by the presence of:
+        impacted_products
+
+    Key presence is used because impacted_products
+    can validly be an empty list.
+    """
+
+    if not isinstance(event, dict):
+        return None
+
+    if "impacted_products" not in event:
+        return None
+
+    markets = event.get("markets") or []
+    products = event.get("products") or []
+    impacted_products = (
+        event.get("impacted_products") or []
+    )
+
+    if isinstance(markets, str):
+        markets = [markets]
+
+    if isinstance(products, str):
+        products = [products]
+
+    if isinstance(impacted_products, str):
+        impacted_products = [
+            impacted_products
+        ]
+
+    source_percentages = (
+        event.get("source_percentages") or {}
+    )
+
+    if not isinstance(source_percentages, dict):
+        source_percentages = {}
+
+    return {
+        "event_id": event.get("event_id"),
+
+        "event_name": str(
+            event.get("event_name", "") or ""
+        ),
+
+        "markets": markets,
+
+        "products": products,
+
+        "impacted_products": impacted_products,
+
+        "start_date": event.get(
+            "start_date"
+        ),
+
+        "peak_percent": float(
+            event.get(
+                "peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "months": int(
+            event.get(
+                "months",
+                0,
+            )
+            or 0
+        ),
+
+        "curve_type": str(
+            event.get(
+                "curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "factor": float(
+            event.get(
+                "factor",
+                0,
+            )
+            or 0
+        ),
+
+        "enable_coverage": bool(
+            event.get(
+                "enable_coverage",
+                False,
+            )
+        ),
+
+        "source_percentages": {
+            str(product): float(
+                percentage or 0
+            )
+            for product, percentage
+            in source_percentages.items()
+        },
+
+        "coverage_peak_percent": float(
+            event.get(
+                "coverage_peak_percent",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_peak_months": int(
+            event.get(
+                "coverage_peak_months",
+                0,
+            )
+            or 0
+        ),
+
+        "coverage_curve_type": str(
+            event.get(
+                "coverage_curve_type",
+                "Linear",
+            )
+            or "Linear"
+        ),
+
+        "coverage_factor": float(
+            event.get(
+                "coverage_factor",
+                0,
+            )
+            or 0
+        ),
+    }
+
+def build_product_impact_curve_configuration(
+    tree,
+    saved_events=None,
+):
+    """
+    Build Product Event impact-curve configuration.
+
+    saved_events can contain events from all tabs.
+    Only events containing impacted_products are
+    returned in rows.
+    """
+
+    saved_events = saved_events or []
+
+    rows = []
+
+    for event in saved_events:
+        normalized_event = (
+            normalize_product_event(event)
+        )
+
+        if normalized_event is not None:
+            rows.append(normalized_event)
+
+    forecast_start_index = tree[
+        "forecast_start_index"
+    ]
+
+    forecast_start_date = (
+        tree["months"][forecast_start_index]
+        if forecast_start_index
+        < len(tree["months"])
+        else None
+    )
+
+    print(
+        "[PRODUCT CONFIG] RECEIVED EVENTS:",
+        len(saved_events),
+    )
+
+    print(
+        "[PRODUCT CONFIG] PRODUCT ROWS:",
+        len(rows),
+    )
+
+    return {
+        "products": list(
+            tree["products"].keys()
+        ),
+
+        "markets": list(
+            tree["markets"].keys()
+        ),
+
+        "impact_products": list(
+            tree["products"].keys()
+        ),
+
+        "forecast_start_date": (
+            forecast_start_date
+        ),
+
+        "curve_types": [
+            "Linear",
+            "Exponential",
+            "Logarithmic",
+            "SCurve",
+        ],
+
+        "rows": rows,
     }
 
 # def build_impact_curve_configuration(tree):
@@ -1823,29 +3115,223 @@ def build_product_impact_curve_configuration(tree):
 #         "rows": [],
 #     }
 
-def build_product_level_rows(tree, metric):
+def build_product_level_rows(
+    tree: dict,
+    metric: str = "share",
+    decimals: int = 2,
+) -> list:
+    """
+    Build flat Product Level rows.
 
-    overall_values = (
-        [100] * len(tree["months"])
-        if metric == "share"
-        else tree["overall"]["volume"]
+    Output:
+
+        Overall
+        Biktarvy
+        Descovy
+        Truvada
+
+    Data priority:
+
+    1. Prefer the original overall-product share stored in:
+
+           tree["product_market_inputs"]
+               [product]["overall_share"]
+
+       This corresponds to:
+
+           market = ALL
+           source_of_market = ALL
+           product != ALL
+
+    2. Fall back to tree["products"][product]["volume"]
+       only when the original share row is unavailable.
+
+    For share:
+        Product value = overall product share.
+
+    For volume:
+        Product volume =
+            overall market volume
+            × overall product share
+            / 100
+    """
+
+    if metric not in {"share", "volume"}:
+        raise ValueError(
+            "metric must be either 'share' or 'volume'. "
+            f"Received {metric!r}."
+        )
+
+    months = list(
+        tree.get("months", [])
+        or []
+    )
+    month_count = len(months)
+
+    overall_volume = list(
+        tree.get("overall", {}).get(
+            "volume",
+            [],
+        )
+        or []
     )
 
-    rows = [
-        {
-            "label": "Overall",
-            "values": overall_values,
-        }
-    ]
-
-    for product_name in sorted(tree["products"]):
-
-        rows.append(
-            {
-                "label": product_name,
-                "values": tree["products"][product_name][metric],
-            }
+    if len(overall_volume) != month_count:
+        raise ValueError(
+            "Overall-volume length mismatch. "
+            f"Expected {month_count}, "
+            f"received {len(overall_volume)}."
         )
+
+    product_market_inputs = (
+        tree.get("product_market_inputs", {})
+        or {}
+    )
+
+    aggregated_products = (
+        tree.get("products", {})
+        or {}
+    )
+
+    # Preserve the product order from tree["products"] first.
+    product_order = list(
+        aggregated_products.keys()
+    )
+
+    # Add products that exist only in product_market_inputs.
+    for product_name in product_market_inputs.keys():
+        if product_name not in product_order:
+            product_order.append(product_name)
+
+    rows = []
+
+    # =====================================================
+    # Overall row
+    # =====================================================
+
+    rows.append({
+        "label": "Overall",
+        "editable": False,
+        "values": (
+            [100.0] * month_count
+            if metric == "share"
+            else [
+                round(
+                    float(value or 0),
+                    decimals,
+                )
+                for value in overall_volume
+            ]
+        ),
+        "children": [],
+    })
+
+    # =====================================================
+    # Product rows
+    # =====================================================
+
+    for product_name in product_order:
+
+        product_input = (
+            product_market_inputs.get(
+                product_name,
+                {},
+            )
+            or {}
+        )
+
+        original_share = list(
+            product_input.get(
+                "overall_share",
+                [],
+            )
+            or []
+        )
+
+        # -------------------------------------------------
+        # Preferred path:
+        # ALL | ALL | Product share
+        # -------------------------------------------------
+
+        if len(original_share) == month_count:
+            product_share = [
+                float(value or 0)
+                for value in original_share
+            ]
+
+            product_volume = [
+                float(overall_value or 0)
+                * float(share_value or 0)
+                / 100
+                for overall_value, share_value in zip(
+                    overall_volume,
+                    product_share,
+                )
+            ]
+
+        # -------------------------------------------------
+        # Base fallback:
+        # derive from aggregated product volume
+        # -------------------------------------------------
+
+        else:
+            product_node = (
+                aggregated_products.get(
+                    product_name,
+                    {},
+                )
+                or {}
+            )
+
+            product_volume = list(
+                product_node.get(
+                    "volume",
+                    [],
+                )
+                or []
+            )
+
+            if len(product_volume) != month_count:
+                # Skip products without valid data.
+                continue
+
+            product_volume = [
+                float(value or 0)
+                for value in product_volume
+            ]
+
+            product_share = [
+                (
+                    float(product_value or 0)
+                    / float(overall_value or 0)
+                    * 100
+                )
+                if float(overall_value or 0) != 0
+                else 0.0
+                for product_value, overall_value in zip(
+                    product_volume,
+                    overall_volume,
+                )
+            ]
+
+        values = (
+            product_share
+            if metric == "share"
+            else product_volume
+        )
+
+        rows.append({
+            "label": product_name,
+            "editable": True,
+            "values": [
+                round(
+                    float(value or 0),
+                    decimals,
+                )
+                for value in values
+            ],
+            "children": [],
+        })
 
     return rows
 
@@ -1880,74 +3366,74 @@ def build_market_level_rows(tree, metric):
 
     return rows
 
-def build_market_product_rows(tree, metric):
-    """
-    Overall
+# def build_market_product_rows(tree, metric):
+#     """
+#     Overall
 
-        Retail
-            Biktarvy
-            Descovy
-            Truvada
+#         Retail
+#             Biktarvy
+#             Descovy
+#             Truvada
 
-        Non-retail
-            Biktarvy
-            Descovy
-            Truvada
-    """
+#         Non-retail
+#             Biktarvy
+#             Descovy
+#             Truvada
+#     """
 
-    overall_values = (
-        [100] * len(tree["months"])
-        if metric == "share"
-        else tree["overall"]["volume"]
-    )
+#     overall_values = (
+#         [100] * len(tree["months"])
+#         if metric == "share"
+#         else tree["overall"]["volume"]
+#     )
 
-    rows = [
-        {
-            "label": "Overall",
-            "values": overall_values,
-        }
-    ]
+#     rows = [
+#         {
+#             "label": "Overall",
+#             "values": overall_values,
+#         }
+#     ]
 
-    for market_name in sorted(tree["markets"]):
+#     for market_name in sorted(tree["markets"]):
 
-        market = tree["markets"][market_name]
+#         market = tree["markets"][market_name]
 
-        market_row = {
-            "label": market_name,
-            "values": market[metric],
-            "children": [],
-        }
+#         market_row = {
+#             "label": market_name,
+#             "values": market[metric],
+#             "children": [],
+#         }
 
-        product_totals = {}
+#         product_totals = {}
 
-        for source in market["sources"].values():
+#         for source in market["sources"].values():
 
-            for product_name, product in source["products"].items():
+#             for product_name, product in source["products"].items():
 
-                if product_name not in product_totals:
+#                 if product_name not in product_totals:
 
-                    product_totals[product_name] = [0] * len(product[metric])
+#                     product_totals[product_name] = [0] * len(product[metric])
 
-                product_totals[product_name] = [
+#                 product_totals[product_name] = [
 
-                    round(a + b, 2)
+#                     round(a + b, 2)
 
-                    for a, b in zip(
-                        product_totals[product_name],
-                        product[metric],
-                    )
-                ]
+#                     for a, b in zip(
+#                         product_totals[product_name],
+#                         product[metric],
+#                     )
+#                 ]
 
-        for product_name in sorted(product_totals):
+#         for product_name in sorted(product_totals):
 
-            market_row["children"].append(
-                {
-                    "label": product_name,
-                    "values": product_totals[product_name],
-                }
-            )
+#             market_row["children"].append(
+#                 {
+#                     "label": product_name,
+#                     "values": product_totals[product_name],
+#                 }
+#             )
 
-        rows.append(market_row)
+#         rows.append(market_row)
 
-    return rows
+#     return rows
 

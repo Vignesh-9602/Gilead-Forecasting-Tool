@@ -181,3 +181,18 @@ class EditSaveRequest(BaseModel):
 
 
 EditedTableRow.model_rebuild()
+
+#delete
+
+
+class DeleteEventRequest(BaseModel):
+    ta_name: str = Field(..., min_length=1)
+    scenario_name: str = Field(..., min_length=1)
+
+    tab: Literal[
+        "overall_event",
+        "market_event",
+        "product_event",
+    ]
+
+    event_name: str = Field(..., min_length=1)

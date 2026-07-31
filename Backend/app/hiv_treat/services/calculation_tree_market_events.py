@@ -1,15 +1,117 @@
 from pprint import pprint
 
+def populate_product_market_inputs(
+    tree: dict,
+    metrics: dict,
+):
+    """
+    Preserve the original Product -> Market input shares.
+
+    Database rows:
+
+        ALL        | ALL | Biktarvy
+            Product share of overall market.
+
+        Retail     | ALL | Biktarvy
+        Non-retail | ALL | Biktarvy
+            Channel distribution within Biktarvy.
+    """
+
+    month_count = len(
+        tree.get("months", [])
+    )
+
+    tree["product_market_inputs"] = {}
+
+    rows = (
+        metrics.get("market_share", [])
+        or []
+    )
+
+    for row in rows:
+        market = normalize_dimension(
+            row.get("market")
+        )
+        source = normalize_dimension(
+            row.get("source_of_market")
+        )
+        product = normalize_dimension(
+            row.get("product")
+        )
+
+        if is_all(product):
+            continue
+
+        # Product-Channel input rows must have source = ALL.
+        if not is_all(source):
+            continue
+
+        forecast = (
+            row.get("forecast_data", {})
+            or {}
+        )
+
+        values = (
+            list(
+                forecast.get(
+                    "train_values",
+                    [],
+                )
+                or []
+            )
+            + list(
+                forecast.get(
+                    "forecast_values",
+                    [],
+                )
+                or []
+            )
+        )
+
+        if len(values) != month_count:
+            raise ValueError(
+                "Product-market input length mismatch for "
+                f"{market!r}|{product!r}. "
+                f"Expected {month_count}, "
+                f"received {len(values)}."
+            )
+
+        product_node = (
+            tree["product_market_inputs"]
+            .setdefault(
+                product,
+                {
+                    "overall_share": [],
+                    "markets": {},
+                },
+            )
+        )
+
+        if is_all(market):
+            # ALL | ALL | Product
+            product_node["overall_share"] = [
+                float(value or 0)
+                for value in values
+            ]
+
+        else:
+            # Market | ALL | Product
+            product_node["markets"][market] = [
+                float(value or 0)
+                for value in values
+            ]
+
 def build_calculation_tree(metrics):
 
     tree = {
         "months": [],
         "forecast_start_index": 0,
         "overall": {
-            "volume": []
+            "volume": [],
         },
         "markets": {},
         "products": {},
+        "product_market_inputs": {},
     }
 
     populate_metadata(tree, metrics)
@@ -29,6 +131,12 @@ def build_calculation_tree(metrics):
     populate_product_volumes(tree)
 
     aggregate_products(tree)
+
+    # Preserve canonical Product-Channel input values.
+    populate_product_market_inputs(
+        tree,
+        metrics,
+    )
 
     return tree
 
