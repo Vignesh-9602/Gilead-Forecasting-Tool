@@ -201,6 +201,49 @@ def fetch_curve_list(conn, ta_name: str) -> List[dict]:
     return [{"curve_name": r[0]} for r in rows]
 
 
+def curve_exists(conn, ta_name: str, curve_name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM raw.persistency_curve_master
+            WHERE ta_name = %s AND curve_name = %s
+            """,
+            (ta_name, curve_name),
+        )
+        return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Payload validation (shared by JSON-body update endpoint)
+# ---------------------------------------------------------------------------
+def validate_curve_payload(months: List[str], values: List[float]) -> None:
+    if not months:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid month header found. Expected format: M1, M2, M3...",
+        )
+
+    for m in months:
+        if not MONTH_PATTERN.match(str(m).strip()):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid month header found. Expected format: M1, M2, M3...",
+            )
+
+    if len(months) != len(values):
+        raise HTTPException(
+            status_code=400,
+            detail="Number of months must equal number of values.",
+        )
+
+    if any(v is None for v in values):
+        raise HTTPException(status_code=400, detail="All month values must be provided.")
+
+    for v in values:
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            raise HTTPException(status_code=400, detail="Persistency values must be numeric.")
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -216,20 +259,57 @@ async def process_curve_upload(file: UploadFile, ta_name: str) -> dict:
 
     conn = get_connection()
     try:
-        curve_previews = []
         for curve_name, months, values in curves:
             upsert_curve(conn, ta_name, curve_name, months, values)
-            curve_previews.append({
-                "curve_name": curve_name,
-                "months": months,
-                "values": values,
-            })
         curve_list = fetch_curve_list(conn, ta_name)
     finally:
         conn.close()
 
+    # Preview reflects only the first curve in the uploaded file.
+    first_curve_name, first_months, first_values = curves[0]
+
     return {
         "message": "Curve uploaded successfully",
         "curve_list": curve_list,
-        "curve_previews": curve_previews,
+        "curve_preview": {
+            "curve_name": first_curve_name,
+            "months": first_months,
+            "values": first_values,
+        },
+    }
+
+
+def update_curve_service(ta_name: str, curve_name: str, months: List[str], values: List[float]) -> dict:
+    """
+    Updates an existing curve's months/values (e.g. from the "Edit" -> "Apply"
+    flow in the Configure UI). The curve must already exist for this
+    (ta_name, curve_name) pair - this endpoint does not create new curves.
+    """
+    if not ta_name or not ta_name.strip():
+        raise HTTPException(status_code=400, detail="TA name is required.")
+
+    if not curve_name or not curve_name.strip():
+        raise HTTPException(status_code=400, detail="Curve name is required.")
+
+    validate_curve_payload(months, values)
+
+    conn = get_connection()
+    try:
+        if not curve_exists(conn, ta_name, curve_name):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Curve '{curve_name}' not found for TA '{ta_name}'.",
+            )
+
+        upsert_curve(conn, ta_name, curve_name, months, values)
+    finally:
+        conn.close()
+
+    return {
+        "message": "Curve updated successfully",
+        "curve_preview": {
+            "curve_name": curve_name,
+            "months": months,
+            "values": values,
+        },
     }

@@ -131,6 +131,60 @@ def _add_months(d: date_type, months: int) -> date_type:
     return date_type(year, month, 1)
 
 
+def _widest_forecast_end(cur, ta: str) -> tuple[int, int] | None:
+    """
+    Latest (train_end_date + forecast_periods) across EVERY (payer, brand)
+    config for this TA -- the same "available_months" end-of-range concept
+    already computed inline for the date-range dropdown (get_liver_filters,
+    apply_liver_filters). Different (payer, brand) combos can have different
+    train_end_date/forecast_periods, so the widest available end is not
+    necessarily whatever the currently-selected combo's own config says.
+
+    Returns None if no config has a usable train_end_date (caller should
+    fall back to the selected config's own values in that case).
+    """
+    all_cfgs = get_liver_configs_for_ta(cur, ta)
+    end_ym = None
+    for row in all_cfgs:
+        cfg = row[2] if isinstance(row[2], dict) else {}
+        te = cfg.get("train_end_date", "")
+        fp = int(cfg.get("forecast_periods", 24))
+        if not te:
+            continue
+        try:
+            ey, em = _parse_ym(te)
+            fe = _add_months(date_type(ey, em, 1), fp)
+            feym = fe.year * 100 + fe.month
+            if end_ym is None or feym > end_ym:
+                end_ym = feym
+        except Exception:
+            continue
+    if end_ym is None:
+        return None
+    return end_ym // 100, end_ym % 100
+
+
+def _extend_forecast_periods_to_widest_end(
+    cur, ta: str, train_end_year: int, train_end_month: int, forecast_periods: int
+) -> int:
+    """
+    Extend `forecast_periods` (from one specific config) so the resulting
+    train_end + forecast_periods reaches at least as far as the widest
+    available end across every config for this TA -- never shortens it.
+    train_end_year/month stay as the SELECTED config's own values (that's
+    still the correct model-fitting boundary); only how far the forecast is
+    carried forward changes.
+    """
+    widest_end = _widest_forecast_end(cur, ta)
+    if widest_end is None:
+        return forecast_periods
+    widest_end_dt = date_type(widest_end[0], widest_end[1], 1)
+    this_end_dt = _add_months(date_type(train_end_year, train_end_month, 1), forecast_periods)
+    if widest_end_dt <= this_end_dt:
+        return forecast_periods
+    return (widest_end_dt.year - train_end_year) * 12 + (widest_end_dt.month - train_end_month)
+
+
 def get_liver_configuration(ta_name: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
@@ -572,9 +626,12 @@ def _build_hierarchical_tab_data(rows, month_range, month_labels, forecast_start
     )
 
 
-def _forecast_share_by_factors(train_values: list, forecast_count: int, factors) -> list:
+def _forecast_share_by_factors(train_values: list, forecast_count: int, factors,
+                                traj_adj: int = 0) -> list:
     """Apply the user's active model to a share (%) training series.
     MA window is clamped to a minimum of 3.
+    traj_adj: number of flat (base-value) periods prepended before growth, matching
+    the trajectory_start offset computed by the caller (traj_idx + fc_offset).
     """
     if not train_values or all(v == 0 for v in train_values):
         return [0.0] * forecast_count
@@ -593,14 +650,18 @@ def _forecast_share_by_factors(train_values: list, forecast_count: int, factors)
     tg  = f_params.total_growth
     dur = f_params.duration
     k   = getattr(f_params, "k_value", None)
+    pre_values = [base] * traj_adj
+    remaining  = forecast_count - traj_adj
+    if remaining <= 0:
+        return pre_values[:forecast_count]
     if active == "linear":
-        return forecast_linear(base, forecast_count, tg, dur, "nps")
+        return pre_values + forecast_linear(base, remaining, tg, dur, "nps")
     if active == "exponential":
-        return forecast_exponential(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_exponential(base, remaining, tg, dur, k, "nps")
     if active == "logarithmic":
-        return forecast_logarithmic(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_logarithmic(base, remaining, tg, dur, k, "nps")
     if active == "scurve":
-        return forecast_s_curve(base, forecast_count, tg, dur, k, "nps")
+        return pre_values + forecast_s_curve(base, remaining, tg, dur, k, "nps")
     return _simple_moving_average_forecast(train_values, forecast_count, window=6)
 
 
@@ -622,6 +683,24 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
     historical_months = month_range[:fsi]
     forecast_count = len(month_range) - fsi
     _model_fc_count = forecast_count + fc_offset
+
+    # Compute trajectory adjustment so _forecast_share_by_factors can insert the
+    # same flat pre-growth period that _build_series_with_forecast does for Tab1.
+    _forecast_months = month_range[fsi:]
+    _active_key = factors.active_model.lower() if factors else "moving_average"
+    _fp = getattr(factors, _active_key, None) if factors else None
+    _traj_str = getattr(_fp, "trajectory_start", None) if _fp else None
+    _traj_idx = 0
+    if _traj_str:
+        try:
+            _tstart = datetime.fromisoformat(_traj_str[:10])
+            for _i, (_fy, _fm) in enumerate(_forecast_months):
+                if datetime(_fy, _fm, 1) >= _tstart:
+                    _traj_idx = _i
+                    break
+        except Exception:
+            pass
+    _traj_adj = _traj_idx + fc_offset
 
     def _mtm(label):
         """Return the model-training months for this label (per-series config or full history)."""
@@ -653,7 +732,7 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
         # -- Selected series: apply user's model directly --
         sel_share_map = share_series_dict[selected_label]
         sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in _mtm(selected_label)]
-        sel_raw = _forecast_share_by_factors(sel_train, _model_fc_count, factors)
+        sel_raw = _forecast_share_by_factors(sel_train, _model_fc_count, factors, traj_adj=_traj_adj)
         # Slice off the fc_offset periods before the display window.
         sel_fc_shares[selected_label] = [min(100.0, max(0.0, v)) for v in sel_raw[fc_offset:]]
 
@@ -676,7 +755,8 @@ def _build_tab_data_from_shares(share_series_dict, vol_series_dict, month_range,
         raw_fc = {}
         for label, share_map in share_series_dict.items():
             share_train = [float(share_map.get((y, m), 0)) for y, m in _mtm(label)]
-            raw_fc[label] = _forecast_share_by_factors(share_train, _model_fc_count, factors)
+            raw_fc[label] = _forecast_share_by_factors(share_train, _model_fc_count, factors,
+                                                        traj_adj=_traj_adj)
         for i in range(_model_fc_count):
             total = sum(raw_fc[l][i] for l in raw_fc)
             for l in raw_fc:
@@ -733,6 +813,23 @@ def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, mont
     forecast_count = len(month_range) - fsi
     _model_fc_count = forecast_count + fc_offset
 
+    # Compute trajectory adjustment (mirrors _build_tab_data_from_shares logic).
+    _forecast_months_h = month_range[fsi:]
+    _active_key_h = factors.active_model.lower() if factors else "moving_average"
+    _fp_h = getattr(factors, _active_key_h, None) if factors else None
+    _traj_str_h = getattr(_fp_h, "trajectory_start", None) if _fp_h else None
+    _traj_idx_h = 0
+    if _traj_str_h:
+        try:
+            _tstart_h = datetime.fromisoformat(_traj_str_h[:10])
+            for _i_h, (_fy_h, _fm_h) in enumerate(_forecast_months_h):
+                if datetime(_fy_h, _fm_h, 1) >= _tstart_h:
+                    _traj_idx_h = _i_h
+                    break
+        except Exception:
+            pass
+    _traj_adj_h = _traj_idx_h + fc_offset
+
     def _mtm(parent, child):
         """Return model-training months for this (parent, child) cell."""
         if model_months_by_pair:
@@ -777,7 +874,8 @@ def _build_hierarchical_tab_data_from_shares(rows_ms, rows_mv, month_range, mont
         if selected_child is not None and selected_child in children_ms and factors is not None:
             sel_share_map = children_ms[selected_child]
             sel_train = [float(sel_share_map.get((y, m), 0)) for y, m in _mtm(parent, selected_child)]
-            sel_child_fc = _forecast_share_by_factors(sel_train, _model_fc_count, factors)
+            sel_child_fc = _forecast_share_by_factors(sel_train, _model_fc_count, factors,
+                                                       traj_adj=_traj_adj_h)
             # Slice off fc_offset periods that precede the display window.
             norm_shares[selected_child] = [min(100.0, max(0.0, v)) for v in sel_child_fc[fc_offset:]]
 
@@ -879,7 +977,9 @@ def _build_response_factors(factors: LiverFactors, trajectory_start: str = "") -
         d = {
             "total_growth":     int(round(model_params.total_growth)),
             "duration":         model_params.duration,
-            "trajectory_start": trajectory_start,
+            # Prefer the model's own trajectory_start (from the user's request);
+            # fall back to the caller-supplied default only when absent.
+            "trajectory_start": getattr(model_params, "trajectory_start", None) or trajectory_start,
         }
         if hasattr(model_params, "k_value") and model_params.k_value is not None:
             d["k_value"] = model_params.k_value
@@ -1948,7 +2048,16 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     wide_from_year, wide_from_month = _txn_months[0]
                 else:
                     wide_from_year, wide_from_month = _parse_ym(cfg["train_start_date"])
-                wide_forecast_periods = int(cfg["forecast_periods"])
+                # forecast_periods from the currently-selected (payer, brand)
+                # config alone isn't necessarily the widest available end --
+                # a different combo's config may forecast further out.
+                # Extend (never shorten) to match that widest end, the same
+                # "available_months" concept the date-range dropdown already
+                # uses, so what's persisted for Base isn't capped by whichever
+                # combo happens to be selected right now.
+                wide_forecast_periods = _extend_forecast_periods_to_widest_end(
+                    cur, payload.ta, train_end_year, train_end_month, int(cfg["forecast_periods"])
+                )
                 persist_ma, _ = _build_market_analysis_both_granularities(
                     cur, payload.ta, wide_from_year, wide_from_month,
                     train_end_year, train_end_month, wide_forecast_periods, factors,
@@ -2142,7 +2251,8 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         granularity      = cfg.get("model_granularity", "monthly")
 
         to_month_safe = train_end_month if granularity != "yearly" else 1
-        default_traj  = date_type(train_end_year, to_month_safe, 1).isoformat()
+        _dt_dt        = datetime(train_end_year, to_month_safe, 1) + relativedelta(months=1)
+        default_traj  = date_type(_dt_dt.year, _dt_dt.month, 1).isoformat()
 
         factors = _factors_from_request(
             payload.factors, model_type, default_traj, forecast_periods
@@ -2417,9 +2527,16 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         factors = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
+        # Store the payload's market_analysis (filter window with user edits) for the
+        # chart. from_date/to_date use the wide range so activate knows the full span.
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
+
+        # Splice: pre-filter months from wide (full history), filter-window from payload
+        # (preserves user's table edits). Falls back to payload alone if wide failed.
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
 
         save_scenario(
             cur,
@@ -2429,16 +2546,20 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
 
-        # Sync volumes into market_events snapshot so market events screen stays in sync.
-        # Best-effort: a failure here must not roll back the model input save.
+        # Sync market_events from the wide recompute (full date range Apr 2020+),
+        # not from the payload which only covers the user's filter window.
         try:
-            snapshot = extract_snapshot_from_market_analysis(payload.market_analysis)
-            if snapshot:
-                save_market_events_scenario(cur, name, snapshot)
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
         except Exception as _sync_err:
             print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
 
@@ -2543,6 +2664,9 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
+            # Return the payload's market_analysis (the user's filter-window view with
+            # any table edits). The DB stores the full wide range via _prepend_wide_months;
+            # the response only needs to cover the visible filter window.
             scenarios[sc] = {"factors": factors, "market_analysis": market_analysis}
         elif sc == "Base":
             scenarios[sc] = {"market_analysis": _base_ma}
@@ -2559,22 +2683,192 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     }
 
 
+def _splice_snapshots(wide_snap: dict, payload_snap: dict, filter_start: str) -> dict | None:
+    """
+    Build a market_events snapshot with the full date range AND user edits:
+      pre-filter months  → from wide_snap  (model-computed, Apr 2020 start)
+      filter window      → from payload_snap (carries user's table edits)
+    """
+    if not wide_snap and not payload_snap:
+        return None
+    if not wide_snap:
+        return payload_snap
+    if not payload_snap:
+        return wide_snap
+
+    wide_months = wide_snap.get("months", [])
+    p_months    = payload_snap.get("months", [])
+    splice_idx  = sum(1 for m in wide_months if str(m) < filter_start)
+
+    if splice_idx == 0:
+        return payload_snap
+
+    pre_train = min(splice_idx, wide_snap.get("forecast_start_index", 0))
+    new_fsi   = pre_train + payload_snap.get("forecast_start_index", 0)
+    new_total = list(wide_snap.get("total_all", []))[:splice_idx] + \
+                list(payload_snap.get("total_all", []))
+
+    w_series, p_series = wide_snap.get("series", {}), payload_snap.get("series", {})
+    new_series: dict = {}
+    for product in set(w_series) | set(p_series):
+        wp, pp = w_series.get(product, {}), p_series.get(product, {})
+        new_series[product] = {
+            payer: list(wp.get(payer, [0.0] * splice_idx))[:splice_idx] +
+                   list(pp.get(payer, []))
+            for payer in set(wp) | set(pp)
+        }
+
+    return {
+        "months":               wide_months[:splice_idx] + p_months,
+        "forecast_start_index": new_fsi,
+        "total_all":            new_total,
+        "series":               new_series,
+    }
+
+
+def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> dict:
+    """
+    Merge wide_ma (full date range, model-computed) with payload_ma (user's filter
+    view, may contain table edits).
+
+    Months BEFORE filter_start  → taken from wide_ma  (user was not viewing/editing these)
+    Months FROM filter_start on → taken from payload_ma (preserves any table edits)
+
+    Falls back gracefully when either side is absent.
+    """
+    if not wide_ma:
+        return payload_ma or {}
+    if not payload_ma:
+        return wide_ma
+
+    def _splice_chart(w_chart: dict, p_chart: dict) -> dict:
+        w_months = w_chart.get("months", [])
+        if not w_months:
+            return p_chart
+        # Year strings ("2020") compare correctly with ISO filter_start ("2023-07-01").
+        splice_idx = sum(1 for m in w_months if str(m) < filter_start)
+        if splice_idx == 0:
+            return p_chart
+
+        p_months  = p_chart.get("months", [])
+        w_fsi     = w_chart.get("forecast_start_index", 0)
+        p_fsi     = p_chart.get("forecast_start_index", 0)
+        new_months    = w_months[:splice_idx] + p_months
+        pre_train_cnt = min(splice_idx, w_fsi)
+        new_fsi       = pre_train_cnt + p_fsi
+
+        w_series_map = {s.get("label"): s for s in w_chart.get("series", [])}
+        new_series = []
+        for ps in p_chart.get("series", []):
+            ws = w_series_map.get(ps.get("label"))
+            if ws is None:
+                new_series.append(ps)
+                continue
+            w_all    = list(ws.get("history", ws.get("train_values", []))) + \
+                       list(ws.get("forecast", ws.get("forecast_values", [])))
+            pre_vals = w_all[:splice_idx]
+            new_hist = pre_vals[:pre_train_cnt] + \
+                       list(ps.get("history", ps.get("train_values", [])))
+            new_fore = pre_vals[pre_train_cnt:] + \
+                       list(ps.get("forecast", ps.get("forecast_values", [])))
+            new_series.append({**ps, "history": new_hist, "forecast": new_fore})
+
+        return {**p_chart, "months": new_months, "forecast_start_index": new_fsi, "series": new_series}
+
+    def _splice_flat_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
+        if not w_table or splice_idx == 0:
+            return p_table
+        w_rows = {r.get("label", r.get("hierarchy", "")): r for r in w_table.get("rows", [])}
+        new_rows = []
+        for pr in p_table.get("rows", []):
+            key     = pr.get("label", pr.get("hierarchy", ""))
+            wr      = w_rows.get(key)
+            pre_v   = list(wr.get("values", []))[:splice_idx] if wr else []
+            new_rows.append({**pr, "values": pre_v + list(pr.get("values", []))})
+        return {**p_table, "rows": new_rows}
+
+    def _splice_hier_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
+        if not w_table or splice_idx == 0:
+            return p_table
+        # stored format uses "label" (from _fmt_hier); fall back to "hierarchy" for legacy
+        w_rows = {r.get("label", r.get("hierarchy", "")): r for r in w_table.get("rows", [])}
+        new_rows = []
+        for pr in p_table.get("rows", []):
+            row_key = pr.get("label", pr.get("hierarchy", ""))
+            wr = w_rows.get(row_key)
+            if wr is None:
+                new_rows.append(pr)
+                continue
+            # stored format uses "values" for parent totals (from _fmt_hier), not "total"
+            val_key   = "values" if "values" in wr else "total"
+            pre_total = list(wr.get(val_key, []))[:splice_idx]
+            w_children = {c.get("label", ""): c for c in wr.get("children", [])}
+            new_children = []
+            for pc in pr.get("children", []):
+                wc    = w_children.get(pc.get("label", ""))
+                pre_c = list(wc.get("values", []))[:splice_idx] if wc else []
+                new_children.append({**pc, "values": pre_c + list(pc.get("values", []))})
+            p_val_key = "values" if "values" in pr else "total"
+            new_rows.append({**pr,
+                             p_val_key:  pre_total + list(pr.get(p_val_key, [])),
+                             "children": new_children})
+        return {**p_table, "rows": new_rows}
+
+    def _splice_gran(w_gran: dict, p_gran: dict) -> dict:
+        if not w_gran or not p_gran:
+            return p_gran or w_gran or {}
+        w_chart    = w_gran.get("chart", {})
+        p_chart    = p_gran.get("chart", {})
+        w_months   = w_chart.get("months", [])
+        splice_idx = sum(1 for m in w_months if str(m) < filter_start) if w_months else 0
+        new_chart  = _splice_chart(w_chart, p_chart)
+        w_table    = w_gran.get("table", {})
+        p_table    = p_gran.get("table", {})
+        table_type = (p_table or w_table).get("type", "flat")
+        if table_type == "hierarchy":
+            new_table = _splice_hier_table(w_table, p_table, splice_idx)
+        else:
+            new_table = _splice_flat_table(w_table, p_table, splice_idx)
+        return {**p_gran, "chart": new_chart, "table": new_table}
+
+    def _splice_metric(w_metric: dict, p_metric: dict) -> dict:
+        if not w_metric or not p_metric:
+            return p_metric or w_metric or {}
+        return {gk: _splice_gran(w_metric.get(gk, {}), pg) for gk, pg in p_metric.items()}
+
+    def _splice_tab(w_tab: dict, p_tab: dict) -> dict:
+        if not w_tab or not p_tab:
+            return p_tab or w_tab or {}
+        return {mk: _splice_metric(w_tab.get(mk, {}), pm) for mk, pm in p_tab.items()}
+
+    return {tk: _splice_tab(wide_ma.get(tk, {}), pt) for tk, pt in payload_ma.items()}
+
+
 def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
     """
     Recompute market_analysis for the FULL available date range (first TA
     transaction month → config forecast end) using the saved factors.
 
-    This ensures the stored chart_data is not limited to whatever narrower
-    display window was active when the user clicked Save — pre-config-start
-    historical months are included so the compare view can show them later.
-
-    Returns {"market_analysis": <wide_ma>} on success, or {} on failure so
-    the caller can fall back to storing the payload's market_analysis as-is.
+    Always returns at least {"_wide_start": ..., "_wide_end": ...} so callers
+    store the correct available dates even when chart building fails.
+    Falls back to {} only if the date range itself cannot be computed.
     """
+    # Stage 1: compute the available date range independently of chart building
+    wide_start = wide_end = None
+    wide_from_year = wide_from_month = train_end_year = train_end_month = None
+    wide_forecast_periods = None
+    granularity = "monthly"
     try:
         cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
-        wide_forecast_periods = int(cfg["forecast_periods"])
+        # Same reasoning as apply_liver_filters' Base-persist block: the
+        # selected (payer, brand) combo's own forecast_periods isn't
+        # necessarily the widest available end across every config for this
+        # TA -- extend (never shorten) to match that widest end so a saved
+        # scenario isn't capped by whichever combo happened to be active.
+        wide_forecast_periods = _extend_forecast_periods_to_widest_end(
+            cur, ta, train_end_year, train_end_month, int(cfg["forecast_periods"])
+        )
         granularity = cfg.get("model_granularity", "monthly")
 
         txn_months = get_transaction_distinct_months(cur, ta)
@@ -2583,6 +2877,17 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
         else:
             wide_from_year, wide_from_month = _parse_ym(cfg.get("train_start_date", flt.start_date))
 
+        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
+        wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
+                                  wide_forecast_periods).isoformat()
+    except Exception as _de:
+        print(f"[liver] wide date range skipped: {_de}")
+
+    if wide_from_year is None or train_end_year is None:
+        return {}
+
+    # Stage 2: build full chart data — may fail; dates are already computed above
+    try:
         try:
             factors = LiverFactors(**factors_dict)
         except Exception:
@@ -2599,13 +2904,10 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
             scenario_name=ta,
         )
         wide_ma = _recompute_all_market_shares_nested(wide_ma)
-        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
-        wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
-                                  wide_forecast_periods).isoformat()
         return {"market_analysis": wide_ma, "_wide_start": wide_start, "_wide_end": wide_end}
     except Exception as _e:
         print(f"[liver] wide chart_data recompute skipped: {_e}")
-        return {}
+        return {"_wide_start": wide_start, "_wide_end": wide_end}
 
 
 def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
@@ -2625,9 +2927,12 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
             raise ValueError(f"Scenario '{name}' already exists. Use PUT /liver/save to update it.")
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
+
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
 
         save_scenario(
             cur,
@@ -2637,9 +2942,21 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
+
+        try:
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
+        except Exception as _sync_err:
+            print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
+
         conn.commit()
         return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
     finally:
@@ -2664,9 +2981,12 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
             raise ValueError(f"Scenario '{name}' does not exist. Use POST /liver/save to create it.")
 
         wide = _compute_wide_chart_data(cur, ta, flt, factors)
-        store_ma   = wide.get("market_analysis") or payload.market_analysis
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
+
+        spliced_ma = _prepend_wide_months(
+            wide.get("market_analysis", {}), payload.market_analysis, flt.start_date
+        ) if wide.get("market_analysis") else payload.market_analysis
 
         save_scenario(
             cur,
@@ -2676,9 +2996,21 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
             product=flt.product or "",
             from_date=store_from,
             to_date=store_to,
-            chart_data={"market_analysis": store_ma},
+            chart_data={"market_analysis": spliced_ma},
             factors=factors,
         )
+
+        try:
+            me_snap = _splice_snapshots(
+                extract_snapshot_from_market_analysis(wide.get("market_analysis", {})),
+                extract_snapshot_from_market_analysis(payload.market_analysis),
+                flt.start_date,
+            )
+            if me_snap:
+                save_market_events_scenario(cur, name, me_snap)
+        except Exception as _sync_err:
+            print(f"[liver] market_events snapshot sync skipped: {_sync_err}")
+
         conn.commit()
         return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
     finally:
@@ -2705,9 +3037,12 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         granularity = cfg.get("model_granularity", "monthly")
 
         cur.execute(
-            "SELECT scenario_name, chart_data, factors FROM raw_liver.liver_scenarios"
+            "SELECT scenario_name, chart_data, factors, from_date, to_date FROM raw_liver.liver_scenarios"
         )
-        saved = {r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}} for r in cur.fetchall()}
+        saved = {
+            r[0]: {"chart_data": r[1] or {}, "factors": r[2] or {}, "from_date": r[3], "to_date": r[4]}
+            for r in cur.fetchall()
+        }
 
         all_names = get_scenarios(cur)
         if "Base" in all_names:
@@ -2731,6 +3066,18 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         else:
             raise ValueError(f"Scenario '{name}' not found.")
 
+        # The scenario's OWN persisted from_date/to_date (see apply_liver_filters'
+        # Base-persist block and _compute_wide_chart_data) reflect the full
+        # available train dates + forecast periods, independent of whatever
+        # narrower selected_filter the frontend happened to be showing before
+        # switching scenarios. Surface those back here -- returning flt.start_date/
+        # end_date unchanged would silently discard that fix, since the frontend
+        # only knows the wide range if this response tells it. Falls back to the
+        # request's own dates if this scenario predates that persisted range.
+        stored = saved.get("Base" if is_base else name, {})
+        resp_start = stored.get("from_date") or flt.start_date
+        resp_end   = stored.get("to_date") or flt.end_date
+
         scenarios = {}
         for sc in available_scenarios:
             if sc == name or (is_base and sc == "Base"):
@@ -2745,8 +3092,8 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         return {
             "ta_name": ta,
             "selected_filter": {
-                "start_date": flt.start_date,
-                "end_date":   flt.end_date,
+                "start_date": resp_start,
+                "end_date":   resp_end,
                 "payer":      flt.payer,
                 "product":    flt.product,
             },
@@ -2793,7 +3140,10 @@ def _estimate_default_factors(cur, ta, from_year, from_month, to_year, to_month,
         est_growth         = 0.0
 
     to_month_safe      = to_month if granularity != "yearly" else 1
-    trajectory_start   = date_type(to_year, to_month_safe, 1).isoformat()
+    # Default trajectory start = first forecast month (train_end + 1), so the
+    # dropdown always shows a valid, selectable date on initial load.
+    _traj_dt           = datetime(to_year, to_month_safe, 1) + relativedelta(months=1)
+    trajectory_start   = date_type(_traj_dt.year, _traj_dt.month, 1).isoformat()
     default_duration   = 12
 
     return LiverFactors(

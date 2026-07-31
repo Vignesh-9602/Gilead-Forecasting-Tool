@@ -27,6 +27,18 @@ const DEFAULT_METRIC_BY_TAB = {
     product_payer: "payer_volume",
 };
 
+// The underlying metric keys (payer_volume/payer_share) stay the same
+// across every tab — only the label shown in the dropdown changes,
+// since "Product Distribution" and "Product-Payer" are describing
+// product-level numbers, not payer-level ones.
+const METRIC_LABELS_BY_TAB = {
+    total_market_volume: { payer_volume: "Payer Volume", payer_share: "Payer Share" },
+    payer_distribution: { payer_volume: "Payer Volume", payer_share: "Payer Share" },
+    product_distribution: { payer_volume: "Product Volume", payer_share: "Product Share" },
+    payer_product: { payer_volume: "Product Volume", payer_share: "Product Share" },
+    product_payer: { payer_volume: "Payer Volume", payer_share: "Payer Share" },
+};
+
 // Flat tables (Total Market Volume, Payer/Product Distribution) come back
 // as a flat list — every scenario's "Grand Total" row followed by its
 // breakdown rows, all as siblings with no nesting. Group each scenario's
@@ -173,8 +185,12 @@ export default function OutputAnalysis({ outputAnalysis, selectedPayers, selecte
                                 value={selectedMetric}
                                 onChange={(e) => setSelectedMetric(e.target.value)}
                             >
-                                <MenuItem value="payer_volume">Payer Volume</MenuItem>
-                                <MenuItem value="payer_share">Payer Share</MenuItem>
+                                <MenuItem value="payer_volume">
+                                    {METRIC_LABELS_BY_TAB[activeTab]?.payer_volume || "Payer Volume"}
+                                </MenuItem>
+                                <MenuItem value="payer_share">
+                                    {METRIC_LABELS_BY_TAB[activeTab]?.payer_share || "Payer Share"}
+                                </MenuItem>
                             </Select>
                         </FormControl>
                     </Box>
