@@ -125,6 +125,7 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 _upsert_row(cur, ta, scenario, user_id, mkt, src, "ALL", "market_share", child_data)
  
     # ---- market_product: market -> product shares ----------------------------
+    # ---- market_product: market -> product shares ----------------------------
     mp_share = ma.get("market_product", {}).get("market_share", {}).get("monthly", {})
     if mp_share:
         mp_chart = mp_share["chart"]
@@ -137,6 +138,114 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
                 prod = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
                 _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
+
+    # ---- market_product source breakdown: market -> source -> product  [NEW] -
+    # market_product only carries market-level product share (blended across
+    # sources). Non-Retail markets are read back per (market, source, product)
+    # by build_market_product/build_product_market, and that row never existed
+    # for anything except the originally-seeded BASE data -- every other
+    # scenario silently fell back to BASE's row there, producing numbers that
+    # matched neither BASE nor what was actually saved.
+    #
+    # We derive it here: split each product's market-level volume across
+    # sources proportionally to how that product was already distributed
+    # across sources (this scenario's own prior save if it exists, else
+    # BASE's), rescaled so sources still sum back to the new market total
+    # exactly. This keeps a fresh save of a scenario stable (it won't drift
+    # toward BASE's mix) while still being fully self-consistent on first save.
+    if tmv and md_share and mp_share:
+        tmv_chart   = tmv["chart"]
+        tmv_row     = tmv_chart["series"][0]
+        total_vals  = tmv_row["history"] + tmv_row["forecast"]
+        sb_months   = tmv_chart["months"]
+        sb_fsi      = tmv_chart["forecast_start_index"]
+        n           = len(total_vals)
+
+        md_rows_by_mkt = {
+            r["label"]: r
+            for r in md_share.get("table", {}).get("rows", [])
+            if r.get("label") not in (None, "Overall")
+        }
+        mp_rows_by_mkt = {
+            r["label"]: r
+            for r in mp_share.get("table", {}).get("rows", [])
+            if r.get("label") not in (None, "Overall")
+        }
+
+        for mkt, md_row in md_rows_by_mkt.items():
+            if mkt == "Retail":
+                continue  # Retail has no source layer -- nothing to derive
+
+            src_children = md_row.get("children") or []
+            if not src_children:
+                continue
+
+            mkt_share_vals = md_row["values"]
+            m = min(n, len(mkt_share_vals))
+            mkt_vol = [total_vals[t] * mkt_share_vals[t] / 100 for t in range(m)]
+
+            src_vol = {}
+            for child in src_children:
+                src = child["label"]
+                s_vals = child["values"]
+                sm = min(m, len(s_vals))
+                src_vol[src] = [mkt_vol[t] * s_vals[t] / 100 for t in range(sm)]
+
+            mp_row = mp_rows_by_mkt.get(mkt)
+            if not mp_row:
+                continue
+
+            for prod_child in mp_row.get("children", []):
+                prod = prod_child["label"]
+                prod_share_in_mkt = prod_child["values"]
+                pm = min(m, len(prod_share_in_mkt))
+                target_vol = [mkt_vol[t] * prod_share_in_mkt[t] / 100 for t in range(pm)]
+
+                # Baseline per-source share of THIS product -- prefer this
+                # scenario's own previously-saved row, else fall back to BASE.
+                baseline_share = {}
+                for src in src_vol:
+                    b = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario)
+                    if b:
+                        baseline_share[src] = b.get("train_values", []) + b.get("forecast_values", [])
+                    else:
+                        baseline_share[src] = []
+
+                new_share_by_src = {src: [] for src in src_vol}
+
+                for t in range(pm):
+                    baseline_vol_t = {}
+                    for src in src_vol:
+                        sv = src_vol[src][t] if t < len(src_vol[src]) else 0.0
+                        bshare_list = baseline_share[src]
+                        bshare = bshare_list[t] if t < len(bshare_list) else None
+                        baseline_vol_t[src] = (sv * bshare / 100) if bshare is not None else 0.0
+
+                    total_baseline = sum(baseline_vol_t.values())
+
+                    for src in src_vol:
+                        sv = src_vol[src][t] if t < len(src_vol[src]) else 0.0
+                        if total_baseline > 0:
+                            frac = baseline_vol_t[src] / total_baseline
+                        else:
+                            # No baseline anywhere for this product/source yet
+                            # -- fall back to splitting by source volume share.
+                            total_src_vol = sum(
+                                src_vol[s][t] if t < len(src_vol[s]) else 0.0
+                                for s in src_vol
+                            )
+                            frac = (sv / total_src_vol) if total_src_vol > 0 else 0.0
+
+                        new_vol   = target_vol[t] * frac
+                        new_share = (new_vol / sv * 100) if sv > 0 else 0.0
+                        new_share_by_src[src].append(round(new_share, 2))
+
+                for src, share_vals in new_share_by_src.items():
+                    if not share_vals:
+                        continue
+                    data = _chart_row_to_forecast_data(sb_months, sb_fsi, share_vals)
+                    _upsert_row(cur, ta, scenario, user_id, mkt, src, prod, "market_share", data)
  
     # ---- product_market: product -> market shares  [NEW] --------------------
     # Same (market, "ALL", product) tuple as market_product above -- these two
@@ -154,7 +263,7 @@ def _save_market_analysis(cur, ta, scenario, user_id, ma, factors):
             for child in row.get("children", []):
                 mkt = child["label"]
                 data = _chart_row_to_forecast_data(months, fsi, child["values"])
-                _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share", data)
+                _upsert_row(cur, ta, scenario, user_id, mkt, None, prod, "market_share_pm", data)
  
     # ---- product_distribution: global blended product share  [NEW] ----------
     # No per-market key exists for this one -- it's a blend across every
