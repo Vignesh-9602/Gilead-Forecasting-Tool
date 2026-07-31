@@ -1122,7 +1122,7 @@ def _market_event_volume_conserving_shares(
         prod_combined = prod_row["history"] + prod_row["forecast"]
         prod_share = [prod_combined[i] if i < len(prod_combined) else 0.0 for i in range(n)]
         product_vols[market] = [market_vols[market][i] * prod_share[i] / 100.0 for i in range(n)]
-
+    
     # `product`'s fixed total across just the touched markets -- the pool
     # being re-split; never changes because of this event.
     product_total_vol = [sum(product_vols[m][i] for m in touched_markets) for i in range(n)]
@@ -1138,6 +1138,17 @@ def _market_event_volume_conserving_shares(
     start_month = event.start_date.strftime("%Y-%m-%d")
     start_idx = month_index.get(start_month)
     baseline_pct_at_start = baseline_cross_pct[start_idx] if start_idx is not None and start_idx < n else 0.0
+    _i = start_idx if start_idx is not None else 0
+    print(
+        f"DEBUG scenario={scenario_name!r} market={selected_market!r} product={product!r} "
+        f"month_idx={_i} "
+        f"market_vols[{selected_market}]={market_vols[selected_market][_i]:.2f} "
+        f"overall_vol={overall_vol[_i]:.2f} "
+        f"product_vols[{selected_market}]={product_vols[selected_market][_i]:.2f} "
+        f"product_total_vol={product_total_vol[_i]:.2f} "
+        f"baseline_cross_pct={baseline_cross_pct[_i]:.4f} "
+        f"market_vols_pct_of_overall={(market_vols[selected_market][_i] / overall_vol[_i] * 100 if overall_vol[_i] else 0):.4f}"
+    )
 
     result = compute_event_forecast(event, baseline_pct=baseline_pct_at_start)
     event_start_idx = month_index.get(result.months[0]) if result.months else None
