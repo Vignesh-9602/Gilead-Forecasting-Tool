@@ -2109,139 +2109,44 @@ def _yearly_overall_row(years: List[str], metric: str,
     s = yearly["series"][0]
     return {"label": OVERALL_LABEL, "values": s["history"] + s["forecast"]}
 
-def _normalize_market_share_all_rows(
-    rows: Optional[List[dict]],
-) -> List[dict]:
-    """
-    Convert canonical market-share rows into the format expected
-    by the flat chart builders.
 
-    Expected input:
-        market = "Retail"
-        product = "ALL"
-
-    Output adds:
-        label = "Retail"
-    """
-
-    normalized_rows = []
-
-    for row in rows or []:
-        market = row.get("market")
-        product = row.get("product")
-
-        if not market or market == "ALL":
-            continue
-
-        # The market-level view must use only aggregate
-        # market rows, not individual market-product rows.
-        if product != "ALL":
-            continue
-
-        normalized_rows.append({
-            **row,
-            "label": market,
-        })
-
-    return normalized_rows
-
-def build_hierarchical_dual_view(
-    tab: str,
-    metric: str,
-    grid: List[dict],
-    parent_field: str,
-    child_field: str,
-    agg: str,
-    overall_series: Optional[dict] = None,
-    volume_grid: Optional[List[dict]] = None,
-    overall_volume_series: Optional[dict] = None,
-    scope_cells: Optional[Set[Tuple[str, str]]] = None,
-    market_share_all: Optional[List[dict]] = None,
-) -> dict:
-
+def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent_field: str, child_field: str,
+                                  agg: str, overall_series: Optional[dict] = None,
+                                  volume_grid: Optional[List[dict]] = None,
+                                  overall_volume_series: Optional[dict] = None,
+                                  scope_cells: Optional[Set[Tuple[str, str]]] = None,
+                                  market_share_all: Optional[List[dict]] = None) -> dict:   # <-- new param
+    
     levels = TAB_VIEW_LEVELS[tab]
-
     view_options = [
-        {
-            "label": levels["flat_label"],
-            "value": levels["flat_key"],
-        },
-        {
-            "label": levels["hierarchy_label"],
-            "value": levels["hierarchy_key"],
-        },
+        {"label": levels["flat_label"], "value": levels["flat_key"]},
+        {"label": levels["hierarchy_label"], "value": levels["hierarchy_key"]},
     ]
 
-    # =====================================================
-    # Empty response
-    # =====================================================
-
     if not grid:
-        empty_chart = {
-            "months": [],
-            "forecast_start_index": 0,
-            "series": [],
-        }
-
+        empty_chart = {"months": [], "forecast_start_index": 0, "series": []}
         empty_side = {
             "view_options": view_options,
             "selected_view": levels["flat_key"],
-
             levels["flat_key"]: {
-                "chart": copy.deepcopy(empty_chart),
-                "table": {
-                    "type": "flat",
-                    "headers": [],
-                    "forecast_start_index": 0,
-                    "editable": False,
-                    "rows": [],
-                },
+                "chart": empty_chart,
+                "table": {"type": "flat", "headers": [], "forecast_start_index": 0,
+                          "editable": False, "rows": []},
             },
-
             levels["hierarchy_key"]: {
-                "chart": copy.deepcopy(empty_chart),
-                "table": {
-                    "type": "hierarchy",
-                    "headers": [],
-                    "forecast_start_index": 0,
-                    "editable": True,
-                    "rows": [],
-                },
+                "chart": empty_chart,
+                "table": {"type": "hierarchy", "headers": [], "forecast_start_index": 0,
+                          "editable": True, "rows": []},
             },
         }
-
-        return {
-            "monthly": copy.deepcopy(empty_side),
-            "yearly": copy.deepcopy(empty_side),
-        }
-
-    volume_grid = volume_grid or []
-    scope_cells = scope_cells or set()
+        return {"monthly": copy.deepcopy(empty_side), "yearly": copy.deepcopy(empty_side)}
 
     fsi = grid[0]["forecast_start_index"]
 
-    # =====================================================
-    # Normalize canonical market-level share rows
-    # =====================================================
-
-    canonical_market_rows = []
-
-    if tab == "market_event" and metric == "market_share":
-        canonical_market_rows = (
-            _normalize_market_share_all_rows(
-                market_share_all
-            )
-        )
-
-    # =====================================================
-    # Debug
-    # =====================================================
-
-    print(
-        "\n================ "
-        "build_hierarchical_dual_view "
-        "================"
-    )
+    # ---- monthly: hierarchy chart groups by parent; flat chart groups by
+    # child, summed across parents -- two different series sets, not one
+    # chart shared between the levels ----
+    print("\n================ build_hierarchical_dual_view ================")
     print("Tab    :", tab)
     print("Metric :", metric)
     print("Parent :", parent_field)
@@ -2249,385 +2154,158 @@ def build_hierarchical_dual_view(
 
     if metric == "market_share":
         print("\nGrid (share):")
-
-        for row in grid:
+        for r in grid:
             print(
-                row.get(parent_field),
-                row.get(child_field),
-                row.get("history", [])
-                + row.get("forecast", []),
+                r[parent_field],
+                r[child_field],
+                r["history"] + r["forecast"]
             )
 
         print("\nVolume Grid:")
-
-        for row in volume_grid:
+        for r in volume_grid:
             print(
-                row.get(parent_field),
-                row.get(child_field),
-                row.get("history", [])
-                + row.get("forecast", []),
+                r[parent_field],
+                r[child_field],
+                r["history"] + r["forecast"]
             )
-
-    if (
-        tab == "market_event"
-        and metric == "market_share"
-    ):
-        print(
-            "\n========== "
-            "CANONICAL MARKET ROWS "
-            "=========="
-        )
-
-        for row in canonical_market_rows:
-            print({
-                "label": row.get("label"),
-                "market": row.get("market"),
-                "product": row.get("product"),
-                "months_count": len(
-                    row.get("months", [])
-                ),
-                "history_count": len(
-                    row.get("history", [])
-                ),
-                "forecast_count": len(
-                    row.get("forecast", [])
-                ),
-            })
-
-    # =====================================================
-    # Monthly hierarchy view
-    # =====================================================
-
-    (
-        monthly_parent_chart,
-        hierarchy_rows,
-        overall_row,
-    ) = _monthly_parent_child_view(
+    monthly_parent_chart, hierarchy_rows, overall_row = _monthly_parent_child_view(
         grid,
         parent_field,
         child_field,
         overall_series,
         metric,
         volume_grid,
-        overall_volume_series,
+        overall_volume_series,   # <-- add this
     )
 
-    # Only the hierarchy chart is scoped to selected
-    # market-product cells. The hierarchy table remains full.
+    # Once markets/products are selected in selected_filter, the hierarchy
+    # chart shows only the (market, product) cells implied by that
+    # selection -- every child under each selected parent -- instead of
+    # the full parent-summed rollup. The table (hierarchy_rows, computed
+    # above) keeps showing the full nested rollup regardless; only the
+    # chart series change here.
     if scope_cells:
-        monthly_parent_chart = (
-            _scoped_cells_chart(
-                grid,
-                scope_cells,
-                parent_field,
-                child_field,
-            )
-        )
-
-    # =====================================================
-    # Monthly flat view
-    # =====================================================
+        monthly_parent_chart = _scoped_cells_chart(grid, scope_cells, parent_field, child_field)
 
     if metric == "market_share":
-
-        # For Market Event, the flat market-level view must
-        # come from canonical (market, ALL) rows.
-        if (
-            tab == "market_event"
-            and canonical_market_rows
-        ):
-            (
-                monthly_child_chart,
-                flat_rows,
-            ) = (
-                _monthly_flat_view_from_canonical_rows(
-                    canonical_market_rows
-                )
-            )
-
+        if tab == "market_event" and market_share_all:
+            monthly_child_chart, flat_rows = _monthly_flat_view_from_canonical_rows(market_share_all)
         else:
-            (
-                monthly_child_chart,
-                flat_rows,
-            ) = _monthly_flat_view(
+            monthly_child_chart, flat_rows = _monthly_flat_view(
                 volume_grid,
                 child_field,
                 overall_volume_series,
             )
-
     else:
-        (
-            monthly_child_chart,
-            flat_rows,
-        ) = _monthly_flat_view(
+        monthly_child_chart, flat_rows = _monthly_flat_view(
             grid,
             child_field,
         )
-
-    overall_rows = (
-        [overall_row]
-        if overall_row
-        else []
-    )
+    overall_rows = [overall_row] if overall_row else []
 
     monthly_flat_table = {
         "type": "flat",
-        "headers": monthly_child_chart.get(
-            "months",
-            [],
-        ),
+        "headers": monthly_child_chart["months"],
         "forecast_start_index": fsi,
         "editable": False,
         "rows": overall_rows + flat_rows,
     }
-
     monthly_hierarchy_table = {
         "type": "hierarchy",
-        "headers": (
-            monthly_parent_chart.get(
-                "months",
-                [],
-            )
-            or grid[0].get("months", [])
-        ),
+        "headers": monthly_parent_chart["months"] if monthly_parent_chart["months"] else grid[0]["months"],
         "forecast_start_index": fsi,
         "editable": True,
         "rows": overall_rows + hierarchy_rows,
     }
 
-    # =====================================================
-    # Yearly views
-    # =====================================================
-
+    # ---- yearly: same parent/child split as monthly. Yearly has no
+    # synthesized 100%/summed series to pull an Overall row from the way
+    # _monthly_parent_child_view does, so it's built separately here (see
+    # _yearly_overall_row) to keep the yearly tables consistent with monthly. ----
     if metric == "market_share":
-        (
-            parent_yearly,
-            yearly_hierarchy_rows,
-        ) = _yearly_parent_child_view(
-            volume_grid,
-            parent_field,
-            child_field,
-            overall_volume_series,
-        )
-
-        # Market Event flat yearly view also uses the
-        # canonical (market, ALL) market-share rows.
-        if (
-            tab == "market_event"
-            and canonical_market_rows
-        ):
-            child_yearly = _to_yearly_chart(
-                canonical_market_rows,
-                YEARLY_AGG["market_share"],
-            )
-
+        parent_yearly, yearly_hierarchy_rows = _yearly_parent_child_view(
+            volume_grid, parent_field, child_field, overall_volume_series)
+        if tab == "market_event" and market_share_all:
+            child_yearly = _to_yearly_chart(market_share_all, YEARLY_AGG["market_share"])
         else:
-            child_yearly = (
-                _to_yearly_share_from_volume(
-                    volume_grid,
-                    child_field,
-                    overall_volume_series,
-                )
-                if volume_grid
-                else {
-                    "years": [],
-                    "forecast_start_index": 0,
-                    "series": [],
-                }
-            )
-
+            child_yearly = (_to_yearly_share_from_volume(volume_grid, child_field, overall_volume_series)
+                            if volume_grid else {"years": [], "forecast_start_index": 0, "series": []})
     else:
-        parent_series = _group_series_by_field(
-            grid,
-            parent_field,
-        )
+        parent_series = _group_series_by_field(grid, parent_field)
+        parent_yearly = _to_yearly_chart(parent_series, agg)
 
-        parent_yearly = _to_yearly_chart(
-            parent_series,
-            agg,
-        )
-
-        cell_totals = _yearly_cell_totals(
-            grid,
-            parent_field,
-            child_field,
-            agg,
-        )
-
-        children_by_parent: Dict[
-            str,
-            List[dict],
-        ] = {}
-
+        cell_totals = _yearly_cell_totals(grid, parent_field, child_field, agg)
+        children_by_parent: Dict[str, List[dict]] = {}
         for cell in cell_totals:
-            children_by_parent.setdefault(
-                cell["parent"],
-                [],
-            ).append(cell)
-
+            children_by_parent.setdefault(cell["parent"], []).append(cell)
         yearly_hierarchy_rows = [
             {
-                "label": series["label"],
-                "values": (
-                    series["history"]
-                    + series["forecast"]
-                ),
+                "label": s["label"],
+                "values": s["history"] + s["forecast"],
                 "children": [
-                    {
-                        "label": child["child"],
-                        "values": (
-                            child["history"]
-                            + child["forecast"]
-                        ),
-                    }
-                    for child in (
-                        children_by_parent.get(
-                            series["label"],
-                            [],
-                        )
-                    )
+                    {"label": c["child"], "values": c["history"] + c["forecast"]}
+                    for c in children_by_parent.get(s["label"], [])
                 ],
             }
-            for series in parent_yearly["series"]
+            for s in parent_yearly["series"]
         ]
 
-        child_series = _group_series_by_field(
-            grid,
-            child_field,
-        )
+        child_series = _group_series_by_field(grid, child_field)
+        child_yearly = _to_yearly_chart(child_series, agg)
 
-        child_yearly = _to_yearly_chart(
-            child_series,
-            agg,
-        )
-
-    # =====================================================
-    # Scope yearly hierarchy chart
-    # =====================================================
-
+    # Same scoped-values swap as monthly, but built off the already-
+    # scaffolded per-cell yearly helpers (_yearly_cell_shares /
+    # _yearly_cell_totals) instead of _scoped_cells_chart, since
+    # yearly needs the year-bucketing logic those helpers already
+    # implement. cell_rows carry both "parent" and "child" keys, so we
+    # filter on the (parent, child) pair -- same identity used by
+    # _scoped_cells_chart for monthly -- to keep each product only
+    # paired with the markets it's actually selected against, not
+    # every market it happens to share a name with.
     if scope_cells:
         if metric == "market_share":
-            cell_rows = _yearly_cell_shares(
-                volume_grid,
-                parent_field,
-                child_field,
-                overall_volume_series,
-            )
+            cell_rows = _yearly_cell_shares(volume_grid, parent_field, child_field, overall_volume_series)
         else:
-            cell_rows = _yearly_cell_totals(
-                grid,
-                parent_field,
-                child_field,
-                agg,
-            )
+            cell_rows = _yearly_cell_totals(grid, parent_field, child_field, agg)
 
         parent_yearly = {
-            "years": parent_yearly.get(
-                "years",
-                [],
-            ),
-            "forecast_start_index": (
-                parent_yearly.get(
-                    "forecast_start_index",
-                    0,
-                )
-            ),
+            "years": parent_yearly["years"],
+            "forecast_start_index": parent_yearly["forecast_start_index"],
             "series": [
-                {
-                    "label": (
-                        f"{cell['parent']} - "
-                        f"{cell['child']}"
-                    ),
-                    "history": cell["history"],
-                    "forecast": cell["forecast"],
-                }
-                for cell in cell_rows
-                if (
-                    cell["parent"],
-                    cell["child"],
-                ) in scope_cells
+                {"label": f"{c['parent']} - {c['child']}", "history": c["history"], "forecast": c["forecast"]}
+                for c in cell_rows
+                if (c["parent"], c["child"]) in scope_cells
             ],
         }
 
-    # =====================================================
-    # Yearly tables
-    # =====================================================
+    yearly_overall = _yearly_overall_row(child_yearly["years"], metric, overall_volume_series)
+    yearly_overall_rows = [yearly_overall] if yearly_overall else []
 
-    yearly_overall = _yearly_overall_row(
-        child_yearly.get("years", []),
-        metric,
-        overall_volume_series,
-    )
-
-    yearly_overall_rows = (
-        [yearly_overall]
-        if yearly_overall
-        else []
-    )
-
-    yearly_flat_table = _to_table(
-        child_yearly
-    )
-
+    yearly_flat_table = _to_table(child_yearly)
     yearly_flat_table["type"] = "flat"
     yearly_flat_table["editable"] = False
-    yearly_flat_table["rows"] = (
-        yearly_overall_rows
-        + yearly_flat_table.get("rows", [])
-    )
+    yearly_flat_table["rows"] = yearly_overall_rows + yearly_flat_table["rows"]
 
     yearly_hierarchy_table = {
         "type": "hierarchy",
-        "headers": parent_yearly.get(
-            "years",
-            [],
-        ),
-        "forecast_start_index": (
-            parent_yearly.get(
-                "forecast_start_index",
-                0,
-            )
-        ),
+        "headers": parent_yearly["years"],
+        "forecast_start_index": parent_yearly["forecast_start_index"],
         "editable": True,
-        "rows": (
-            yearly_overall_rows
-            + yearly_hierarchy_rows
-        ),
+        "rows": yearly_overall_rows + yearly_hierarchy_rows,
     }
-
-    # =====================================================
-    # Response
-    # =====================================================
 
     return {
         "monthly": {
             "view_options": view_options,
             "selected_view": levels["flat_key"],
-
-            levels["flat_key"]: {
-                "chart": monthly_child_chart,
-                "table": monthly_flat_table,
-            },
-
-            levels["hierarchy_key"]: {
-                "chart": monthly_parent_chart,
-                "table": monthly_hierarchy_table,
-            },
+            levels["flat_key"]: {"chart": monthly_child_chart, "table": monthly_flat_table},
+            levels["hierarchy_key"]: {"chart": monthly_parent_chart, "table": monthly_hierarchy_table},
         },
-
         "yearly": {
             "view_options": view_options,
             "selected_view": levels["flat_key"],
-
-            levels["flat_key"]: {
-                "chart": child_yearly,
-                "table": yearly_flat_table,
-            },
-
-            levels["hierarchy_key"]: {
-                "chart": parent_yearly,
-                "table": yearly_hierarchy_table,
-            },
+            levels["flat_key"]: {"chart": child_yearly, "table": yearly_flat_table},
+            levels["hierarchy_key"]: {"chart": parent_yearly, "table": yearly_hierarchy_table},
         },
     }
 
@@ -2673,190 +2351,24 @@ def _scoped_cells_chart(grid: List[dict], cell_pairs: Set[Tuple[str, str]],
     return {"months": months, "forecast_start_index": fsi, "series": series}
 
 
-def _build_hierarchy_views(
-    tab: str,
-    scenario_name: str,
-    ta_name: str,
-    entities: Dict[str, List[str]],
-    cache: Optional[CacheType] = None,
-    date_range: Tuple[
-        Optional[str],
-        Optional[str],
-    ] = (None, None),
-    selected_filter: Optional[dict] = None,
-) -> Tuple[Dict, Optional[str]]:
+def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities: Dict[str, List[str]],
+                            cache: Optional[CacheType] = None,
+                            date_range: Tuple[Optional[str], Optional[str]] = (None, None),
+                            selected_filter: Optional[dict] = None
+                            ) -> Tuple[Dict, Optional[str]]:
 
     parent_field, child_field = TAB_HIERARCHY[tab]
-
     markets = entities.get("markets", [])
     products = entities.get("products", [])
-
     start_date, end_date = date_range
-    selected_filter = selected_filter or {}
-
-    # =====================================================
-    # Normalize selected filters
-    # =====================================================
-
-    selected_markets = (
-        selected_filter.get("markets")
-        or selected_filter.get("selected_markets")
-        or selected_filter.get("market")
-        or selected_filter.get("selected_market")
-        or []
-    )
-
-    selected_products = (
-        selected_filter.get("products")
-        or selected_filter.get("selected_products")
-        or selected_filter.get("product")
-        or selected_filter.get("selected_product")
-        or []
-    )
-
-    if isinstance(selected_markets, str):
-        selected_markets = [selected_markets]
-
-    if isinstance(selected_products, str):
-        selected_products = [selected_products]
-
-    selected_markets = [
-        market
-        for market in selected_markets
-        if (
-            market
-            and market != "ALL"
-            and market in markets
-        )
-    ]
-
-    selected_products = [
-        product
-        for product in selected_products
-        if (
-            product
-            and product != "ALL"
-            and product in products
-        )
-    ]
-
-    # =====================================================
-    # Build tab-specific chart scope
-    # =====================================================
-
-    scope_cells: Set[Tuple[str, str]] = set()
-
-    if tab == "market_event":
-        # Channel/Market Event:
-        # Show selected products across every market.
-        #
-        # Example:
-        # Product filter = Biktarvy
-        # Market filter = Retail
-        #
-        # Chart:
-        #   Retail - Biktarvy
-        #   Non-retail - Biktarvy
-
-        chart_markets = markets
-        chart_products = selected_products
-
-        if chart_products:
-            for market in chart_markets:
-                for product in chart_products:
-                    cell_values = {
-                        "market": market,
-                        "product": product,
-                    }
-
-                    scope_cells.add(
-                        (
-                            cell_values[parent_field],
-                            cell_values[child_field],
-                        )
-                    )
-
-    elif tab == "product_event":
-        # Product Event:
-        # Show selected markets across every product.
-        #
-        # Example:
-        # Market filter = Retail
-        #
-        # Chart:
-        #   Biktarvy - Retail
-        #   Descovy - Retail
-        #   Truvada - Retail
-
-        chart_markets = selected_markets
-        chart_products = products
-
-        if chart_markets:
-            for market in chart_markets:
-                for product in chart_products:
-                    cell_values = {
-                        "market": market,
-                        "product": product,
-                    }
-
-                    scope_cells.add(
-                        (
-                            cell_values[parent_field],
-                            cell_values[child_field],
-                        )
-                    )
-
-    else:
-        # Overall Event or fallback:
-        # Respect both selected filters.
-
-        chart_markets = (
-            selected_markets
-            if selected_markets
-            else markets
-        )
-
-        chart_products = (
-            selected_products
-            if selected_products
-            else products
-        )
-
-        if selected_markets or selected_products:
-            for market in chart_markets:
-                for product in chart_products:
-                    cell_values = {
-                        "market": market,
-                        "product": product,
-                    }
-
-                    scope_cells.add(
-                        (
-                            cell_values[parent_field],
-                            cell_values[child_field],
-                        )
-                    )
-
-    print("\n========== EVENT CHART SCOPE ==========")
-    print("Tab:", tab)
-    print("Parent field:", parent_field)
-    print("Child field:", child_field)
-    print("Available markets:", markets)
-    print("Available products:", products)
-    print("Selected markets:", selected_markets)
-    print("Selected products:", selected_products)
-    print("Scope cells:", scope_cells)
-
-    # =====================================================
-    # Fetch detailed market-product shares
-    # =====================================================
+    scope_cells = _selected_filter_cells(tab, entities, selected_filter or {})
 
     share_grid = fetch_grid(
-        scenario_name,
-        ta_name,
-        "market_share",
-        markets,
-        products,
+    scenario_name,
+    ta_name,
+    "market_share",
+    markets,
+    products,
     )
 
     if cache is not None:
@@ -2865,205 +2377,65 @@ def _build_hierarchy_views(
             cache["market_share"],
         )
 
-    # =====================================================
-    # Overall share
-    # =====================================================
-
     overall_share = None
-
     if share_grid:
-        grid_months = share_grid[0]["months"]
-        grid_fsi = share_grid[0]["forecast_start_index"]
-
+        g_months, g_fsi = share_grid[0]["months"], share_grid[0]["forecast_start_index"]
         overall_share = {
-            "months": grid_months,
-            "forecast_start_index": grid_fsi,
-            "history": [100.0] * grid_fsi,
-            "forecast": (
-                [100.0]
-                * (len(grid_months) - grid_fsi)
-            ),
+            "months": g_months,
+            "forecast_start_index": g_fsi,
+            "history": [100.0] * g_fsi,
+            "forecast": [100.0] * (len(g_months) - g_fsi),
         }
 
-    # =====================================================
-    # Overall market volume
-    # =====================================================
-
-    overall_volume_rows = _fetch_overall_series(
-        scenario_name,
-        ta_name,
-        "market_volume",
-    )
-
-    # =====================================================
-    # Canonical market-level share rows
-    # =====================================================
+    overall_volume_rows = _fetch_overall_series(scenario_name, ta_name, "market_volume")
 
     market_share_all = fetch_series(
-        scenario_name,
-        ta_name,
-        "market_share",
-        label_field="market",
-        market=markets,
-        products=["ALL"],
+        scenario_name, ta_name, "market_share",
+        label_field="market", market=markets, products=["ALL"],
         source_of_market="ALL",
     )
-
     if cache is not None:
-        cached_market_share = cache.get(
-            "market_share",
-            {},
-        )
-
-        # Overlay database rows with recalculated cache rows.
         market_share_all = [
-            cached_market_share.get(
-                (
-                    row.get("market"),
-                    row.get("product"),
-                ),
-                row,
-            )
+            cache["market_share"].get((row["market"], row["product"]), row)
             for row in market_share_all
         ]
 
-        # Include aggregate market rows available only in cache.
-        existing_keys = {
-            (
-                row.get("market"),
-                row.get("product"),
-            )
-            for row in market_share_all
-        }
-
-        for key, cached_row in cached_market_share.items():
-            market, product = key
-
-            if (
-                product == "ALL"
-                and market in markets
-                and key not in existing_keys
-            ):
-                market_share_all.append(
-                    cached_row
-                )
-
-                existing_keys.add(key)
-
-    # =====================================================
-    # Derive market-product volumes
-    # =====================================================
-
+    # print("\n========== Market Share ALL ==========")
+    # for row in market_share_all:
+    #     print(
+    #         row["market"],
+    #         row["product"],
+    #         row["history"] + row["forecast"]
+    #     )
+    # print("\n========== Overall_volume_rows ==========")
+    # print(overall_volume_rows)
     volume_grid = _derive_volume_grid(
-        share_grid,
-        market_share_all,
-        overall_volume_rows,
-    )
+            share_grid,
+            market_share_all,
+            overall_volume_rows,
+        )
 
-    # =====================================================
-    # Clip to selected date range
-    # =====================================================
-
-    share_grid = _clip_series_list(
-        share_grid,
-        start_date,
-        end_date,
-    )
-
-    volume_grid = _clip_series_list(
-        volume_grid,
-        start_date,
-        end_date,
-    )
-
-    market_share_all_clipped = _clip_series_list(
-        market_share_all,
-        start_date,
-        end_date,
-    )
-
+    share_grid = _clip_series_list(share_grid, start_date, end_date)
+    volume_grid = _clip_series_list(volume_grid, start_date, end_date)
+    market_share_all_clipped = _clip_series_list(market_share_all, start_date, end_date)
     if overall_share is not None:
-        overall_share = _clip_series_to_range(
-            overall_share,
-            start_date,
-            end_date,
-        )
+        overall_share = _clip_series_to_range(overall_share, start_date, end_date)
+    overall_volume_rows = _clip_series_list(overall_volume_rows, start_date, end_date)
 
-    overall_volume_rows = _clip_series_list(
-        overall_volume_rows,
-        start_date,
-        end_date,
-    )
-
-    overall_volume_series = (
-        overall_volume_rows[0]
-        if overall_volume_rows
-        else None
-    )
-
-    # =====================================================
-    # Debug scope matching
-    # =====================================================
-
-    available_cells = {
-        (
-            row.get(parent_field),
-            row.get(child_field),
-        )
-        for row in share_grid
-    }
-
-    matched_cells = (
-        available_cells & scope_cells
-        if scope_cells
-        else available_cells
-    )
-
-    print("\n========== SCOPE MATCH DEBUG ==========")
-    print("Available cells:", available_cells)
-    print("Requested scope:", scope_cells)
-    print("Matched cells:", matched_cells)
-
-    # =====================================================
-    # Build response views
-    # =====================================================
-
+    overall_volume_series = overall_volume_rows[0] if overall_volume_rows else None
     metrics_views = {
         "market_share": build_hierarchical_dual_view(
-            tab,
-            "market_share",
-            share_grid,
-            parent_field,
-            child_field,
-            YEARLY_AGG["market_share"],
-            overall_series=overall_share,
-            volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series,
-            scope_cells=scope_cells or None,
-            market_share_all=market_share_all_clipped,
-        ),
-
+            tab, "market_share", share_grid, parent_field, child_field, YEARLY_AGG["market_share"],
+            overall_series=overall_share, volume_grid=volume_grid,
+            overall_volume_series=overall_volume_series, scope_cells=scope_cells,
+            market_share_all=market_share_all_clipped),                                    # <-- new
         "market_volume": build_hierarchical_dual_view(
-            tab,
-            "market_volume",
-            volume_grid,
-            parent_field,
-            child_field,
-            YEARLY_AGG["market_volume"],
-            overall_series=overall_volume_series,
-            volume_grid=volume_grid,
-            overall_volume_series=overall_volume_series,
-            scope_cells=scope_cells or None,
-        ),
+            tab, "market_volume", volume_grid, parent_field, child_field, YEARLY_AGG["market_volume"],
+            overall_series=overall_volume_series, volume_grid=volume_grid,
+            overall_volume_series=overall_volume_series, scope_cells=scope_cells),
     }
-
     forecast_start_date = _forecast_start_date_from(
-        {
-            "market_share": share_grid,
-            "market_volume": overall_volume_rows,
-        }
-    )
-
+        {"market_share": share_grid, "market_volume": overall_volume_rows})
     return metrics_views, forecast_start_date
 
 
