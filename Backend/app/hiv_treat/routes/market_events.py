@@ -1,6 +1,7 @@
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, Any
 from psycopg2.extras import RealDictCursor
 from app.hiv_treat.routes.market_events_models import *
 from app.hiv_treat.services.market_event_helpers import *
@@ -477,6 +478,25 @@ def apply_market_event_filters(
         tree = build_calculation_tree(
             metrics
         )
+
+        print("\n===== PRODUCT TOTALS =====")
+
+        overall = tree["overall"]["volume"][0]
+        print("Overall:", overall)
+
+        total = 0
+
+        for product_name, product in tree["products"].items():
+            volume = product["volume"][0]
+            total += volume
+            print(product_name, volume)
+
+        print("Sum:", total)
+        print("Difference:", total - overall)
+
+        # validate_calculation_tree_totals(
+        #     tree
+        # )
 
         debug_tree_summary(
             tree=tree,
@@ -1187,6 +1207,10 @@ def edit_save(
     )
 
     try:
+        payload_dict = payload.model_dump(
+            mode="json"
+        )
+
         selected_filter = (
             payload.selected_filter.model_dump(
                 mode="json"
@@ -1205,11 +1229,15 @@ def edit_save(
             payload.selected_filter.products
         )
 
+        selected_tab = payload.selected_tab
+        selected_view = payload.selected_table_view
+        selected_metric = payload.selected_metric
+
         # ================================================
         # 1. Defensive tab validation
         # ================================================
 
-        if payload.selected_tab not in {
+        if selected_tab not in {
             "market_event",
             "product_event",
         }:
@@ -1237,8 +1265,9 @@ def edit_save(
                 ),
             )
 
+        # Market Event edits require a selected product.
         if (
-            payload.selected_tab == "market_event"
+            selected_tab == "market_event"
             and not selected_product
         ):
             raise HTTPException(
@@ -1249,20 +1278,78 @@ def edit_save(
                 ),
             )
 
+        # Product Level represents products against Overall,
+        # so a selected market is not required.
         if (
-            payload.selected_tab == "product_event"
+            selected_tab == "product_event"
+            and selected_view != "product_level"
             and not selected_market
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "A market must be selected when "
-                    "editing Product Event."
+                    "editing this Product Event view."
                 ),
             )
 
         # ================================================
-        # 3. Load complete unfiltered database data
+        # 3. Validate supported edit combinations
+        # ================================================
+
+        supported_views = {
+            "market_event": {
+                "market_level",
+                "product_market_level",
+            },
+            "product_event": {
+                "product_level",
+                "market_product_level",
+            },
+        }
+
+        if selected_view not in supported_views[
+            selected_tab
+        ]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unsupported edit combination: "
+                    f"{selected_tab!r} / "
+                    f"{selected_view!r}."
+                ),
+            )
+
+        if selected_metric not in {
+            "market_share",
+            "market_volume",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "selected_metric must be either "
+                    "'market_share' or "
+                    "'market_volume'."
+                ),
+            )
+
+        # Product Level normalization is currently based
+        # on product shares summing to 100%.
+        if (
+            selected_tab == "product_event"
+            and selected_view == "product_level"
+            and selected_metric != "market_share"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Product Level editing currently "
+                    "supports Market Share only."
+                ),
+            )
+
+        # ================================================
+        # 4. Load complete unfiltered scenario data
         # ================================================
 
         original_metrics = load_forecast_outputs(
@@ -1294,7 +1381,7 @@ def edit_save(
             )
 
         # ================================================
-        # 4. Build calculation tree
+        # 5. Build calculation tree
         # ================================================
 
         tree = build_calculation_tree(
@@ -1302,7 +1389,7 @@ def edit_save(
         )
 
         # ================================================
-        # 5. Resolve selected monthly range
+        # 6. Resolve selected monthly range
         # ================================================
 
         selected_months, selected_indexes = (
@@ -1312,8 +1399,17 @@ def edit_save(
             )
         )
 
+        if not selected_indexes:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No months were resolved from the "
+                    "selected date range."
+                ),
+            )
+
         # ================================================
-        # 6. Validate submitted rows
+        # 7. Validate submitted rows
         # ================================================
 
         validate_edited_rows(
@@ -1329,52 +1425,113 @@ def edit_save(
         )
 
         # ================================================
-        # 7. Build matrix
-        # ================================================
-
-        matrix = (
-            build_market_product_volume_matrix(
-                tree
-            )
-        )
-
-        # ================================================
         # 8. Apply edits
         # ================================================
 
-        if payload.selected_tab == "market_event":
-            apply_market_event_edits(
+        is_product_level_edit = (
+            payload.selected_tab == "product_event"
+            and payload.selected_table_view
+            == "product_level"
+        )
+
+        is_product_market_level_edit = (
+            payload.selected_tab == "market_event"
+            and payload.selected_table_view
+            == "product_market_level"
+        )
+
+        if is_product_level_edit:
+
+            apply_product_level_edits(
+                tree=tree,
+                payload=payload.model_dump(
+                    mode="json"
+                ),
+                selected_indexes=selected_indexes,
+                decimals=2,
+            )
+
+        elif is_product_market_level_edit:
+
+            matrix = (
+                build_market_product_volume_matrix(
+                    tree
+                )
+            )
+
+            apply_product_market_level_edits(
                 tree=tree,
                 matrix=matrix,
                 payload=payload,
                 selected_indexes=selected_indexes,
+                decimals=2,
             )
 
-        elif payload.selected_tab == "product_event":
-            apply_product_event_edits(
+            apply_matrix_to_tree(
                 tree=tree,
                 matrix=matrix,
-                payload=payload,
+                selected_indexes=selected_indexes,
+            )
+
+            print("\n==== AFTER apply_matrix_to_tree ====")
+
+            for market_name, market in tree["markets"].items():
+
+                total = 0
+
+                for source in market["sources"].values():
+
+                    product = source["products"].get("Biktarvy")
+
+                    if product:
+                        total += product["volume"][selected_indexes[0]]
+
+                print(market_name, total)
+
+            recompute_tree(
+                tree=tree,
+                selected_indexes=selected_indexes,
+            )
+
+        else:
+
+            matrix = (
+                build_market_product_volume_matrix(
+                    tree
+                )
+            )
+
+            if payload.selected_tab == "market_event":
+
+                apply_market_event_edits(
+                    tree=tree,
+                    matrix=matrix,
+                    payload=payload,
+                    selected_indexes=selected_indexes,
+                )
+
+            elif payload.selected_tab == "product_event":
+
+                apply_product_event_edits(
+                    tree=tree,
+                    matrix=matrix,
+                    payload=payload,
+                    selected_indexes=selected_indexes,
+                )
+
+            apply_matrix_to_tree(
+                tree=tree,
+                matrix=matrix,
+                selected_indexes=selected_indexes,
+            )
+
+            recompute_tree(
+                tree=tree,
                 selected_indexes=selected_indexes,
             )
 
         # ================================================
-        # 9. Recompute
-        # ================================================
-
-        apply_matrix_to_tree(
-            tree=tree,
-            matrix=matrix,
-            selected_indexes=selected_indexes,
-        )
-
-        recompute_tree(
-            tree=tree,
-            selected_indexes=selected_indexes,
-        )
-
-        # ================================================
-        # 10. Save
+        # 9. Save complete updated tree
         # ================================================
 
         save_tree_to_forecast_outputs(
@@ -1388,7 +1545,7 @@ def edit_save(
         db.commit()
 
         # ================================================
-        # 11. Return refreshed response
+        # 10. Return refreshed response
         # ================================================
 
         return build_apply_filters_response(
@@ -1423,3 +1580,173 @@ def edit_save(
 
     finally:
         cursor.close()
+
+
+#delete
+
+def delete_event_from_db(
+    ta_name: str,
+    scenario_name: str,
+    tab: str,
+    event_name: str,
+) -> int:
+
+    query = """
+        UPDATE raw_hiv_treat.forecast_outputs
+        SET events_payload =
+            COALESCE(
+                (
+                    SELECT jsonb_agg(event_item)
+                    FROM jsonb_array_elements(
+                        COALESCE(
+                            events_payload,
+                            '[]'::jsonb
+                        )
+                    ) AS event_item
+                    WHERE NOT (
+                        event_item ->> 'event_name' = %s
+                        AND
+                        CASE
+                            WHEN event_item ? 'impacted_markets'
+                                THEN 'market_event'
+
+                            WHEN event_item ? 'impacted_products'
+                                THEN 'product_event'
+
+                            ELSE 'overall_event'
+                        END = %s
+                    )
+                ),
+                '[]'::jsonb
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                  COALESCE(
+                      events_payload,
+                      '[]'::jsonb
+                  )
+              ) AS existing_event
+              WHERE existing_event ->> 'event_name' = %s
+                AND
+                CASE
+                    WHEN existing_event ? 'impacted_markets'
+                        THEN 'market_event'
+
+                    WHEN existing_event ? 'impacted_products'
+                        THEN 'product_event'
+
+                    ELSE 'overall_event'
+                END = %s
+          )
+        RETURNING scenario_name;
+    """
+
+    params = (
+        event_name,
+        tab,
+        ta_name,
+        scenario_name,
+        event_name,
+        tab,
+    )
+
+    connection = get_connection()
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                query,
+                params,
+            )
+
+            updated_row = cursor.fetchone()
+
+        connection.commit()
+
+        return 1 if updated_row else 0
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+
+VALID_EVENT_TABS = {
+    "overall_event",
+    "market_event",
+    "product_event",
+}
+
+
+def delete_event(
+    payload: Dict[str, Any],
+) -> dict:
+
+    ta_name = payload["ta_name"].strip()
+    scenario_name = payload["scenario_name"].strip()
+    tab = payload["tab"]
+    event_name = payload["event_name"].strip()
+
+    if tab not in VALID_EVENT_TABS:
+        raise ValueError(
+            f"Invalid event tab: {tab}"
+        )
+
+    if not event_name:
+        raise ValueError(
+            "event_name is required"
+        )
+
+    deleted_count = delete_event_from_db(
+        ta_name=ta_name,
+        scenario_name=scenario_name,
+        tab=tab,
+        event_name=event_name,
+    )
+
+    if deleted_count == 0:
+        raise ValueError(
+            f"Event '{event_name}' was not found "
+            f"for scenario '{scenario_name}' "
+            f"in tab '{tab}'."
+        )
+
+    return {
+        "status": "success",
+        "message": (
+            f"Event '{event_name}' deleted successfully."
+        ),
+        "ta_name": ta_name,
+        "scenario_name": scenario_name,
+        "tab": tab,
+        "event_name": event_name,
+        "deleted_count": deleted_count,
+    }
+
+@router.delete("/delete-event")
+def delete_event_endpoint(
+    payload: DeleteEventRequest,
+):
+    try:
+        return delete_event(
+            payload.model_dump()
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete event: {str(exc)}",
+        )
