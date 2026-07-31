@@ -66,6 +66,158 @@ from app.liver.repository.liver_repo import (
 _TAB_KEY_MAP    = {"market_distribution": "payer_distribution"}
 _METRIC_KEY_MAP = {"market_volume": "payer_volume", "market_share": "payer_share"}
 
+def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
+    """
+    Clip a market_analysis dict (nested monthly/yearly format) so that all
+    monthly chart months and table headers only cover (from_year, from_month)
+    onwards.  This prevents DB-stored wide data (e.g. Apr-20 start) from
+    appearing in responses when the user's filter starts later (e.g. Mar-22),
+    which would otherwise make the comparison table use Apr-20 column headers.
+
+    Yearly data is left unchanged.  Returns the original dict unchanged when
+    all months already start at or after from_date.
+    """
+    from_ym = from_year * 100 + from_month
+
+    def _find_clip_idx(months: list) -> int:
+        for i, m in enumerate(months):
+            try:
+                parts = str(m).split("-")
+                y, mo = int(parts[0]), int(parts[1])
+                if y * 100 + mo >= from_ym:
+                    return i
+            except Exception:
+                pass
+        return 0
+
+    def _clip_chart(chart: dict) -> dict:
+        months = chart.get("months", [])
+        if not months:
+            return chart
+        clip_idx = _find_clip_idx(months)
+        if clip_idx == 0:
+            return chart
+        new_months = months[clip_idx:]
+        old_fsi = chart.get("forecast_start_index", 0)
+        new_fsi = max(0, old_fsi - clip_idx)
+        new_series = []
+        for s in chart.get("series", []):
+            if "history" in s or "forecast" in s:
+                history  = list(s.get("history", []))
+                forecast = list(s.get("forecast", []))
+                hist_key, fore_key = "history", "forecast"
+            else:
+                history  = list(s.get("train_values", []))
+                forecast = list(s.get("forecast_values", []))
+                hist_key, fore_key = "train_values", "forecast_values"
+            if clip_idx <= old_fsi:
+                new_h, new_f = history[clip_idx:], forecast
+            else:
+                new_h, new_f = [], forecast[clip_idx - old_fsi:]
+            base = {k: v for k, v in s.items()
+                    if k not in ("history", "forecast", "train_values", "forecast_values")}
+            base[hist_key] = new_h
+            base[fore_key] = new_f
+            new_series.append(base)
+        return {**chart, "months": new_months, "forecast_start_index": new_fsi, "series": new_series}
+
+    def _clip_table(table: dict, clip_idx: int) -> dict:
+        if not table or clip_idx == 0:
+            return table
+        # Only write "headers" if the source table already had the key.
+        # Many stored tables omit "headers" (the frontend falls back to the
+        # chart months).  Writing an empty list would override that fallback
+        # in JavaScript ([] is truthy) and produce a zero-column table.
+        src_headers = table.get("headers")  # None if key absent
+        new_rows = []
+        for row in table.get("rows", []):
+            new_row = dict(row)
+            if "values" in row:
+                new_row["values"] = list(row["values"])[clip_idx:]
+            if "total" in row:
+                new_row["total"] = list(row["total"])[clip_idx:]
+            new_children = []
+            for child in row.get("children", []):
+                nc = dict(child)
+                if "values" in child:
+                    nc["values"] = list(child["values"])[clip_idx:]
+                new_children.append(nc)
+            if new_children:
+                new_row["children"] = new_children
+            new_rows.append(new_row)
+        result = {**table, "rows": new_rows}
+        if src_headers is not None:
+            result["headers"] = src_headers[clip_idx:]
+        return result
+
+    def _first_row_len(table: dict) -> int:
+        """Return the value-array length of the first row in table (any shape)."""
+        rows = table.get("rows", [])
+        if not rows:
+            return 0
+        r = rows[0]
+        for key in ("values", "total"):
+            v = r.get(key)
+            if v is not None:
+                return len(v)
+        children = r.get("children") or []
+        if children:
+            return len(children[0].get("values") or [])
+        return 0
+
+    def _table_clip_idx(chart: dict, table: dict, clip_idx: int) -> int:
+        """
+        _clip_chart uses clip_idx derived from the chart's original months array.
+        But _prepend_wide_months widens only the CHART (e.g. to Apr-20) while the
+        TABLE rows stay at the original filter window (e.g. Mar-22).  Applying
+        clip_idx blindly to the table over-clips it — e.g. clipping 23 from a
+        70-value table yields 47 instead of the correct 70.
+
+        Correct the clip index by accounting for the gap between chart months and
+        table row values: if the table already starts later than the chart, shift
+        the clip index left by that offset so the table is not over-clipped.
+        """
+        orig_chart_len = len(chart.get("months", []))
+        if not orig_chart_len or clip_idx == 0:
+            return clip_idx
+        tbl_len = _first_row_len(table)
+        if 0 < tbl_len < orig_chart_len:
+            # Table starts (orig_chart_len - tbl_len) months into the chart.
+            return max(0, clip_idx - (orig_chart_len - tbl_len))
+        return clip_idx
+
+    result = {}
+    for tab_key, tab in ma.items():
+        result[tab_key] = {}
+        for metric_key, metric in tab.items():
+            monthly = metric.get("monthly", {})
+            if monthly:
+                chart = monthly.get("chart", {})
+                table = monthly.get("table", {})
+                clip_idx = _find_clip_idx(chart.get("months", [])) if chart.get("months") else 0
+                clipped_tbl = _clip_table(table, _table_clip_idx(chart, table, clip_idx))
+                result[tab_key][metric_key] = {
+                    "monthly": {
+                        "chart": _clip_chart(chart),
+                        "table": clipped_tbl,
+                    },
+                    "yearly": metric.get("yearly", {}),
+                }
+            elif "chart" in metric:
+                # Flat (legacy) format
+                chart = metric.get("chart", {})
+                table = metric.get("table", {})
+                clip_idx = _find_clip_idx(chart.get("months", [])) if chart.get("months") else 0
+                clipped_tbl = _clip_table(table, _table_clip_idx(chart, table, clip_idx))
+                result[tab_key][metric_key] = {
+                    "chart": _clip_chart(chart),
+                    "table": clipped_tbl,
+                }
+            else:
+                result[tab_key][metric_key] = metric
+    return result
+
+
 def _normalize_ma_keys(ma: dict) -> dict:
     """
     Rename legacy market_analysis keys produced before the payer-rename:
@@ -1962,8 +2114,11 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             factors = _estimate_default_factors(cur, payload.ta, from_year, from_month, train_end_year, train_end_month)
 
         if saved_market_analysis:
-            # Non-Base with saved chart data: return committed values unchanged.
+            # Non-Base with saved chart data: return committed values, clipped to the
+            # user's requested date window so the chart axis starts at from_date not at
+            # the DB-stored wide start (e.g. Apr-20).
             saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
+            saved_market_analysis = _clip_ma_to_from_date(saved_market_analysis, from_year, from_month)
             market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
             _ets_raw = (saved_factors_raw or {}).get("ets", {})
             tab1_ets = EtsParams(
@@ -2102,15 +2257,18 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
 
         def _inactive_stub(sc_name):
             # Always prefer DB-persisted data — it is stable regardless of the
-            # current date filter. For Base this means the snapshot written when
-            # Base was last computed; for other scenarios it is their saved state.
+            # current date filter. Clip to the user's from_date so the shared chart
+            # axis (derived from the active scenario) and the inactive stubs all start
+            # at the same month.  Without clipping, a DB-stored wide snapshot (Apr-20)
+            # causes the X-axis to drift left whenever an inactive scenario's months
+            # array is longer than the active scenario's clipped months.
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                return {"market_analysis": raw_ma}
+                return {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month)}
             # Fallback for Base when it has never been persisted yet
             if sc_name == "Base":
-                return {"market_analysis": base_full_ma}
+                return {"market_analysis": base_full_ma}  # freshly computed from from_year/from_month
             return {"market_analysis": {}}
 
         scenarios = {
@@ -2745,12 +2903,16 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
         w_months = w_chart.get("months", [])
         if not w_months:
             return p_chart
-        # Year strings ("2020") compare correctly with ISO filter_start ("2023-07-01").
-        splice_idx = sum(1 for m in w_months if str(m) < filter_start)
+        p_months  = p_chart.get("months", [])
+        # Use the payload chart's actual first month as the splice point.
+        # filter_start can be earlier than the payload data (e.g., user saved
+        # with Jun-22 data but re-saves with a Mar-22 filter) which would create
+        # a month gap in the stored chart.  The payload's own first month is
+        # always the correct boundary.
+        actual_p_start = str(p_months[0]) if p_months else filter_start
+        splice_idx = sum(1 for m in w_months if str(m) < actual_p_start)
         if splice_idx == 0:
             return p_chart
-
-        p_months  = p_chart.get("months", [])
         w_fsi     = w_chart.get("forecast_start_index", 0)
         p_fsi     = p_chart.get("forecast_start_index", 0)
         new_months    = w_months[:splice_idx] + p_months
@@ -2778,12 +2940,19 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
     def _splice_flat_table(w_table: dict, p_table: dict, splice_idx: int) -> dict:
         if not w_table or splice_idx == 0:
             return p_table
-        w_rows = {r.get("label", r.get("hierarchy", "")): r for r in w_table.get("rows", [])}
+        w_rows_list = w_table.get("rows", [])
+        w_rows_by_label = {r.get("label", r.get("hierarchy", "")): r for r in w_rows_list}
         new_rows = []
-        for pr in p_table.get("rows", []):
-            key     = pr.get("label", pr.get("hierarchy", ""))
-            wr      = w_rows.get(key)
-            pre_v   = list(wr.get("values", []))[:splice_idx] if wr else []
+        for i, pr in enumerate(p_table.get("rows", [])):
+            key = pr.get("label", pr.get("hierarchy", ""))
+            wr  = w_rows_by_label.get(key)
+            if wr is None and i < len(w_rows_list):
+                # Label mismatch fallback: use the wide row at the same position.
+                # This handles the TMV tab where the wide row is labeled with the
+                # TA name (e.g. "HCV") but the payload row carries the scenario name
+                # (e.g. "Base" or "t1"), so label-keyed lookup always returns None.
+                wr = w_rows_list[i]
+            pre_v = list(wr.get("values", []))[:splice_idx] if wr else []
             new_rows.append({**pr, "values": pre_v + list(pr.get("values", []))})
         return {**p_table, "rows": new_rows}
 
@@ -2820,7 +2989,12 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
         w_chart    = w_gran.get("chart", {})
         p_chart    = p_gran.get("chart", {})
         w_months   = w_chart.get("months", [])
-        splice_idx = sum(1 for m in w_months if str(m) < filter_start) if w_months else 0
+        p_months   = p_chart.get("months", [])
+        # Mirror _splice_chart: derive splice point from payload's actual first
+        # month so the chart and table always use the same boundary and never
+        # produce a month gap when filter_start < payload start date.
+        actual_p_start = str(p_months[0]) if p_months else filter_start
+        splice_idx = sum(1 for m in w_months if str(m) < actual_p_start) if w_months else 0
         new_chart  = _splice_chart(w_chart, p_chart)
         w_table    = w_gran.get("table", {})
         p_table    = p_gran.get("table", {})
@@ -3062,38 +3236,41 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             active_factors = base_factors.model_dump()
         elif name in saved:
             active_ma      = _normalize_ma_keys(saved[name]["chart_data"].get("market_analysis", {}))
+            # Clip to the user's filter window: DB stores wide data (e.g. Apr-20)
+            # but the response must cover only the user's selected range (e.g. Mar-22).
+            # Without clipping, normalizeLiverResponse picks the active scenario's
+            # Apr-20 months as the comparison-table axis, making all other scenarios
+            # appear to start from Apr-20 in the chart and table.
+            active_ma      = _clip_ma_to_from_date(active_ma, from_year, from_month)
             active_factors = saved[name]["factors"]
         else:
             raise ValueError(f"Scenario '{name}' not found.")
-
-        # The scenario's OWN persisted from_date/to_date (see apply_liver_filters'
-        # Base-persist block and _compute_wide_chart_data) reflect the full
-        # available train dates + forecast periods, independent of whatever
-        # narrower selected_filter the frontend happened to be showing before
-        # switching scenarios. Surface those back here -- returning flt.start_date/
-        # end_date unchanged would silently discard that fix, since the frontend
-        # only knows the wide range if this response tells it. Falls back to the
-        # request's own dates if this scenario predates that persisted range.
-        stored = saved.get("Base" if is_base else name, {})
-        resp_start = stored.get("from_date") or flt.start_date
-        resp_end   = stored.get("to_date") or flt.end_date
 
         scenarios = {}
         for sc in available_scenarios:
             if sc == name or (is_base and sc == "Base"):
                 scenarios[sc] = {"factors": active_factors, "market_analysis": active_ma}
             elif sc == "Base":
-                scenarios[sc] = {"market_analysis": _base_ma}
+                # _base_ma is freshly computed from from_year/from_month, but clip
+                # defensively in case its month count differs from active_ma's.
+                scenarios[sc] = {"market_analysis": _clip_ma_to_from_date(_base_ma, from_year, from_month)}
             else:
                 cd     = saved.get(sc, {}).get("chart_data", {})
                 raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
-                scenarios[sc] = {"market_analysis": raw_ma}
+                # Clip DB-stored wide data to the user's filter window so all
+                # scenarios share the same month axis in the comparison chart.
+                scenarios[sc] = {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month) if raw_ma else raw_ma}
 
+        # Return the REQUEST's filter dates — not DB-stored wide dates.
+        # Returning stored.get("from_date") (e.g. "2020-04-01") poisoned
+        # liverRawData.selected_filter so the 2nd "Apply Selected Scenario"
+        # click sent Apr-20 to the backend, causing Base to expand to the
+        # full wide range instead of the user's filter window.
         return {
             "ta_name": ta,
             "selected_filter": {
-                "start_date": resp_start,
-                "end_date":   resp_end,
+                "start_date": flt.start_date,
+                "end_date":   flt.end_date,
                 "payer":      flt.payer,
                 "product":    flt.product,
             },
