@@ -514,157 +514,172 @@ def populate_product_volumes(tree):
                     )
                 ]
 
-def aggregate_products(tree):
+
+def calculate_percentage(
+    numerator: float,
+    denominator: float,
+    decimals: int = 6,
+) -> float:
     """
-    Sum product volumes across markets and sources,
-    then derive each product's overall market share.
+    Safely calculate percentage.
+
+    Returns:
+        numerator / denominator * 100
+
+    If denominator is 0, returns 0.
     """
 
-    month_count = len(tree["months"])
+    if denominator == 0:
+        return 0.0
+
+    return round(
+        (float(numerator) / float(denominator)) * 100.0,
+        decimals,
+    )
+
+from app.hiv_treat.services.edit_helpers import get_canonical_sources
+
+def aggregate_products(
+    tree: dict,
+):
+    """
+    Aggregate product volumes across markets and calculate
+    overall Product share.
+
+    If Unknown exists under a market, only Unknown is used
+    for market-level product aggregation.
+    """
+
+    month_count = len(
+        tree.get("months", [])
+    )
 
     tree["products"] = {}
 
-    for market in tree["markets"].values():
+    for market_name, market in (
+        tree.get("markets", {}).items()
+    ):
 
-        for source in market["sources"].values():
-
-            for product_name, product in source["products"].items():
-
-                if product_name not in tree["products"]:
-                    tree["products"][product_name] = {
-                        "share": [0.0] * month_count,
-                        "volume": [0.0] * month_count,
-                    }
-
-                tree["products"][product_name]["volume"] = [
-                    round(current + value, 2)
-                    for current, value in zip(
-                        tree["products"][product_name]["volume"],
-                        product["volume"],
-                    )
-                ]
-
-    overall_volume = tree["overall"]["volume"]
-
-    for product in tree["products"].values():
-
-        product["share"] = [
-            round(product_volume / total_volume * 100, 2)
-            if total_volume
-            else 0.0
-            for product_volume, total_volume in zip(
-                product["volume"],
-                overall_volume,
-            )
-        ]
-
-def filter_tree_by_date(
-    tree: dict,
-    start_date: str,
-    end_date: str,
-) -> dict:
-    """
-    Trim the complete calculation tree to the selected date range.
-
-    This must slice:
-        - overall volume
-        - market share and volume
-        - source share and volume
-        - product share and volume
-        - top-level aggregated products
-    """
-
-    months = tree.get("months", [])
-
-    if not months:
-        return tree
-
-    selected_indexes = [
-        index
-        for index, month in enumerate(months)
-        if start_date <= month <= end_date
-    ]
-
-    if not selected_indexes:
-        tree["months"] = []
-        tree["forecast_start_index"] = 0
-
-        filter_node_by_date(
-            node=tree,
-            start_index=0,
-            end_index=0,
+        sources_to_use = get_canonical_sources(
+            market
         )
 
-        return tree
-
-    start_index = selected_indexes[0]
-    end_index = selected_indexes[-1] + 1
-
-    original_forecast_start_index = tree.get(
-        "forecast_start_index",
-        0,
-    )
-
-    # Slice all arrays before replacing the month list.
-    filter_node_by_date(
-        node=tree,
-        start_index=start_index,
-        end_index=end_index,
-    )
-
-    tree["months"] = months[
-        start_index:end_index
-    ]
-
-    new_month_count = len(tree["months"])
-
-    adjusted_forecast_index = (
-        original_forecast_start_index
-        - start_index
-    )
-
-    # Cases:
-    # adjusted <= 0            -> all selected data is forecast
-    # adjusted >= month count  -> all selected data is history
-    tree["forecast_start_index"] = max(
-        0,
-        min(
-            adjusted_forecast_index,
-            new_month_count,
-        ),
-    )
-
-    return tree
-
-def filter_node_by_date(
-    node,
-    start_index: int,
-    end_index: int,
-):
-    if not isinstance(node, dict):
-        return
-
-    time_series_keys = {
-        "values",
-        "history",
-        "forecast",
-        "share",
-        "volume",
-    }
-
-    for key, value in node.items():
-
-        if (
-            key in time_series_keys
-            and isinstance(value, list)
+        for source_name, source in (
+            sources_to_use.items()
         ):
-            node[key] = value[
-                start_index:end_index
-            ]
 
-        elif isinstance(value, dict):
-            filter_node_by_date(
-                node=value,
-                start_index=start_index,
-                end_index=end_index,
+            source_products = (
+                source.get("products", {})
+                or {}
             )
+
+            for (
+                product_name,
+                product,
+            ) in source_products.items():
+
+                if product_name not in tree[
+                    "products"
+                ]:
+                    tree[
+                        "products"
+                    ][
+                        product_name
+                    ] = {
+                        "share": (
+                            [0.0] * month_count
+                        ),
+                        "volume": (
+                            [0.0] * month_count
+                        ),
+                    }
+
+                product_volumes = (
+                    product.get("volume", [])
+                    or []
+                )
+
+                for month_index in range(
+                    month_count
+                ):
+
+                    if month_index >= len(
+                        product_volumes
+                    ):
+                        continue
+
+                    current = float(
+                        tree[
+                            "products"
+                        ][
+                            product_name
+                        ][
+                            "volume"
+                        ][
+                            month_index
+                        ]
+                        or 0
+                    )
+
+                    incoming = float(
+                        product_volumes[
+                            month_index
+                        ]
+                        or 0
+                    )
+
+                    tree[
+                        "products"
+                    ][
+                        product_name
+                    ][
+                        "volume"
+                    ][
+                        month_index
+                    ] = round(
+                        current + incoming,
+                        6,
+                    )
+
+    overall_volumes = (
+        tree.get("overall", {}).get(
+            "volume",
+            [],
+        )
+        or []
+    )
+
+    for product_name, product in (
+        tree["products"].items()
+    ):
+
+        for month_index in range(
+            month_count
+        ):
+
+            product_volume = float(
+                product["volume"][
+                    month_index
+                ]
+                or 0
+            )
+
+            overall_volume = (
+                float(
+                    overall_volumes[
+                        month_index
+                    ]
+                    or 0
+                )
+                if month_index
+                < len(overall_volumes)
+                else 0.0
+            )
+
+            product["share"][
+                month_index
+            ] = calculate_percentage(
+                numerator=product_volume,
+                denominator=overall_volume,
+            )
+

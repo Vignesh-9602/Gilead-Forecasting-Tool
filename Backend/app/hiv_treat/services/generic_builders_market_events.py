@@ -824,6 +824,85 @@ def build_market_product_rows(
 
     return rows
 
+from copy import deepcopy
+
+
+def filter_market_product_rows_for_chart(
+    *,
+    rows: list,
+    selected_markets=None,
+) -> list:
+    """
+    Filter Channel -> Product hierarchy rows for chart use.
+
+    The chart uses the exact same values as the table.
+
+    Input
+    -----
+    Overall
+
+    Non-retail
+        Biktarvy
+        Descovy
+        Truvada
+
+    Retail
+        Biktarvy
+        Descovy
+        Truvada
+
+    Output
+    ------
+    Only selected market parents and all product children.
+
+    If no markets are selected, all markets are returned.
+    """
+
+    selected_market_set = {
+        str(market).strip().lower()
+        for market in (selected_markets or [])
+        if (
+            market
+            and str(market).strip().lower() != "all"
+        )
+    }
+
+    filtered_rows = []
+
+    for row in rows or []:
+
+        market_name = str(
+            row.get("label", "")
+        ).strip()
+
+        # Overall is not needed in the Channel-Product chart.
+        if market_name.lower() == "overall":
+            continue
+
+        if (
+            selected_market_set
+            and market_name.lower()
+            not in selected_market_set
+        ):
+            continue
+
+        filtered_row = deepcopy(row)
+
+        filtered_row["editable"] = False
+
+        for child in (
+            filtered_row.get("children", [])
+            or []
+        ):
+            child["editable"] = False
+            child["parent"] = market_name
+
+        filtered_rows.append(
+            filtered_row
+        )
+
+    return filtered_rows
+
 def build_product_event(
     tree,
     selected_markets=None,
@@ -943,9 +1022,8 @@ def build_product_event(
     # =====================================================
 
     market_product_share_chart_rows = (
-        build_product_chart_rows(
-            tree=tree,
-            metric="share",
+        filter_market_product_rows_for_chart(
+            rows=market_product_share_rows,
             selected_markets=(
                 normalized_selected_markets
             ),
@@ -953,9 +1031,8 @@ def build_product_event(
     )
 
     market_product_volume_chart_rows = (
-        build_product_chart_rows(
-            tree=tree,
-            metric="volume",
+        filter_market_product_rows_for_chart(
+            rows=market_product_volume_rows,
             selected_markets=(
                 normalized_selected_markets
             ),
@@ -1946,6 +2023,81 @@ def build_product_market_rows(
 
     return rows
 
+from copy import deepcopy
+
+
+def filter_product_market_rows_for_chart(
+    *,
+    rows: list,
+    selected_products=None,
+) -> list:
+    """
+    Filter Product -> Market hierarchy rows for chart use.
+
+    The chart uses the exact same values as the table.
+
+    Input hierarchy
+    ---------------
+    Overall
+
+    Biktarvy
+        Non-retail
+        Retail
+
+    Descovy
+        Non-retail
+        Retail
+
+    Output
+    ------
+    Only selected product parents and their market children.
+
+    If no products are selected, all products are returned.
+    """
+
+    selected_product_set = {
+        str(product).strip().lower()
+        for product in (selected_products or [])
+        if (
+            product
+            and str(product).strip().lower() != "all"
+        )
+    }
+
+    filtered_rows = []
+
+    for row in rows or []:
+
+        product_name = str(
+            row.get("label", "")
+        ).strip()
+
+        # Overall is not required in the Product-Market chart.
+        if product_name.lower() == "overall":
+            continue
+
+        if (
+            selected_product_set
+            and product_name.lower()
+            not in selected_product_set
+        ):
+            continue
+
+        filtered_row = deepcopy(row)
+
+        filtered_row["editable"] = False
+
+        for child in (
+            filtered_row.get("children", [])
+            or []
+        ):
+            child["editable"] = False
+            child["parent"] = product_name
+
+        filtered_rows.append(filtered_row)
+
+    return filtered_rows
+
 def build_market_event(
     tree,
     selected_products=None,
@@ -2059,9 +2211,8 @@ def build_market_event(
     # =====================================================
 
     product_market_share_chart_rows = (
-        build_market_chart_rows(
-            tree=tree,
-            metric="share",
+        filter_product_market_rows_for_chart(
+            rows=product_market_share_rows,
             selected_products=(
                 normalized_selected_products
             ),
@@ -2069,9 +2220,8 @@ def build_market_event(
     )
 
     product_market_volume_chart_rows = (
-        build_market_chart_rows(
-            tree=tree,
-            metric="volume",
+        filter_product_market_rows_for_chart(
+            rows=product_market_volume_rows,
             selected_products=(
                 normalized_selected_products
             ),
