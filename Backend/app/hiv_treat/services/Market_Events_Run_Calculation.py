@@ -509,9 +509,19 @@ def _apply_growth_pct_to_series(series: dict, curve_months: List[str], curve_val
                                  ) -> Tuple[dict, bool]:
     """Used for overall_event's market_volume: curve_values are a percentage
     growth curve (0 -> peak_pct, coverage-gated), applied MULTIPLICATIVELY
-    onto the existing baseline forecast -- peak_pct is a %, not raw volume
-    units, so adding it directly (like _apply_curve_to_series's "add" mode)
-    is a unit mismatch and has almost no visible effect at real volume scale."""
+    onto the existing baseline forecast WHILE THE CURVE IS ACTIVE -- peak_pct
+    is a %, not raw volume units, so adding it directly (like
+    _apply_curve_to_series's "add" mode) is a unit mismatch and has almost no
+    visible effect at real volume scale.
+
+    Once the curve itself runs out (pos >= len(curve_values), i.e. past the
+    peak/coverage tail), the ABSOLUTE volume from the last curve-active month
+    is held flat going forward -- NOT re-derived by continuing to apply
+    peak_pct to whatever the baseline forecast is doing in later months.
+    Baseline months typically keep moving (trend/seasonality), so
+    re-multiplying a moving baseline by a constant % does not stay flat;
+    freezing the last computed absolute value is what "stays the same after
+    peak" actually requires."""
     series = copy.deepcopy(series)
     applied = False
     if not curve_months or not curve_values:
@@ -522,18 +532,26 @@ def _apply_growth_pct_to_series(series: dict, curve_months: List[str], curve_val
     if start_idx is None:
         return series, applied
 
-    hold_value = curve_values[-1]
+    frozen_value = None
     for idx in range(start_idx, len(series["months"])):
         if idx < series["forecast_start_index"]:
             continue
         pos = idx - start_idx
-        pct = curve_values[pos] if pos < len(curve_values) else hold_value
 
         fi = idx - series["forecast_start_index"]
         if fi >= len(series["forecast"]):
             break
 
-        series["forecast"][fi] = round(series["forecast"][fi] * (1 + pct / 100.0), 2)
+        if pos < len(curve_values):
+            pct = curve_values[pos]
+            new_value = round(series["forecast"][fi] * (1 + pct / 100.0), 2)
+            frozen_value = new_value
+        else:
+            # curve has ended -- hold the absolute volume from the last
+            # curve-active month, regardless of what baseline does now.
+            new_value = frozen_value if frozen_value is not None else series["forecast"][fi]
+
+        series["forecast"][fi] = new_value
         applied = True
 
     return series, applied
@@ -638,229 +656,41 @@ def _reconcile_product_event_market(
             share_cache[(row["market"], row["product"])] = row
 
 
-def _rebalance_market_products(
-    cache: CacheType,
-    scenario_name: str,
-    ta_name: str,
-    selected_product: str,
-    markets: List[str],
-    all_products: List[str],
-    grid_fetch_cache: GridFetchCache,
-) -> None:
-
-    share_cache = cache["market_share"]
-    bounds = CLAMP_BOUNDS["market_share"]
-
-    selected_rows = {
-        market: share_cache[(market, selected_product)]
-        for market in markets
-        if (market, selected_product) in share_cache
-    }
-
-    if not selected_rows:
-        return
-
-    affected_markets = list(selected_rows.keys())
-
-    other_rows_by_market = {
-    market: [
-        row
-        for row in _grid_with_cache_overlay(
-            scenario_name,
-            ta_name,
-            share_cache,
-            [market],
-            all_products,
-            grid_fetch_cache,
-        )
-        if row["product"] not in (selected_product, "ALL")
-    ]
-    for market in affected_markets
-    }   
-
-    n_forecast = len(next(iter(selected_rows.values()))["forecast"])
-
-    for i in range(n_forecast):
-
-        for market in affected_markets:
-
-            if i >= len(selected_rows[market]["forecast"]):
-                continue
-
-            selected_rows[market] = share_cache[
-                (market, selected_product)
-            ]
-
-            selected_value = selected_rows[market]["forecast"][i]
-
-            all_row = share_cache.get((market, "ALL"))
-
-            rows = [
-                r
-                for r in other_rows_by_market[market]
-                if i < len(r["forecast"])
-            ]
-
-            # Market share must always total 100%
-            market_total = 100.0
-            # target_remaining = market_total - selected_value
-            # if i in (0, 1):
-            #     print("\n==============================")
-            #     print(f"Market: {market}")
-            #     print(f"Forecast Month Index: {i}")
-
-            #     print("Selected Product:", selected_product)
-            #     print("Selected Value:", selected_value)
-
-            #     print("\nSibling Values BEFORE:")
-            #     for r in rows:
-            #         print(r["product"], r["forecast"][i])
-
-            #     print("Market Total BEFORE:", market_total)
-            target_remaining = market_total - selected_value
-
-            rows = [
-                r
-                for r in other_rows_by_market[market]
-                if i < len(r["forecast"])
-            ]
-
-            current_remaining = sum(
-                r["forecast"][i]
-                for r in rows
-            )
-
-            if current_remaining <= 0:
-                continue
-
-            scale = target_remaining / current_remaining
-            if i in (0, 1):
-                print("Current Remaining:", current_remaining)
-                print("Target Remaining :", target_remaining)
-                print("Scale:", scale)
-
-            for row in rows:
-
-                new_value = round(
-                    row["forecast"][i] * scale,
-                    4,
-                )
-
-                if bounds is not None:
-                    new_value = max(
-                        bounds[0],
-                        min(bounds[1], new_value),
-                    )
-
-                row["forecast"][i] = new_value
-            if i in (0, 1):
-                print("\nSibling Values AFTER:")
-                for r in rows:
-                    print(r["product"], r["forecast"][i])
-
-                final_total = (
-                    selected_rows[market]["forecast"][i]
-                    + sum(r["forecast"][i] for r in rows)
-                )
-
-                # print("Final Market Total:", final_total)
-
-                # print("Final Market Total:", final_total)
-            #
-            # Refresh ALL row after redistribution.
-            #
-           
-
-    #
-    # Push updated sibling rows back into cache.
-    #
-    for market, rows in other_rows_by_market.items():
-        for row in rows:
-            share_cache[(row["market"], row["product"])] = row
-
-def _rescale_market_event_siblings(
+def _apply_market_scale_to_siblings(
     cache: CacheType,
     scenario_name: str,
     ta_name: str,
     product: str,
-    touched_markets: List[str],
+    market_scale: Dict[str, List[float]],
     all_products: List[str],
     grid_fetch_cache: GridFetchCache,
 ) -> None:
-    """market_event's sibling reconciliation. `product`'s share in each
-    touched market has already been pinned (written into share_cache by
-    _market_event_volume_conserving_shares). Siblings split whatever
-    share remains (100 - product's new share) PROPORTIONAL TO EACH
-    OTHER's baseline weight -- not scaled independently against each
-    one's own claimed volume.
-
-    This replaces an earlier uniform-scale approach that scaled every
-    sibling by the same market-total ratio. That broke whenever a
-    market's baseline product shares don't sum to 100% on their own --
-    verified in practice, e.g. Non-retail's Biktarvy+Truvada+Descovy
-    baseline shares summed to ~240%, not 100%. Scaling each sibling
-    independently to "conserve its own (overlapping, unreliable) claimed
-    volume" pushed whichever sibling started closest to 100% over the
-    ceiling and clamped there, while others still had headroom -- an
-    asymmetric, silently-wrong result (confirmed: Descovy clamped at a
-    literal 100% share while its own displayed VOLUME for the same cell
-    implied a true ratio of ~40%, an internal contradiction).
-
-    Proportional splitting of the remainder guarantees siblings always
-    sum to exactly (100 - product's share), for every month, with no
-    clamping needed for legitimate values -- it can never produce a
-    share above 100% or a contradiction with the underlying volume."""
     share_cache = cache["market_share"]
     bounds = CLAMP_BOUNDS["market_share"]
 
-    for market in touched_markets:
-        touched_row = share_cache.get((market, product))
-        if touched_row is None:
-            continue
-
+    for market, scale in market_scale.items():
         sibling_rows = [
             row for row in _grid_with_cache_overlay(
                 scenario_name, ta_name, share_cache, [market], all_products, grid_fetch_cache)
-            if row["product"] != product
+            if row["product"] not in (product, "ALL")
         ]
         if not sibling_rows:
             continue
 
-        touched_combined = touched_row["history"] + touched_row["forecast"]
-        n = len(touched_combined)
-
-        # Snapshot each sibling's own BASELINE combined series before any
-        # of them get overwritten this pass -- this is the relative
-        # WEIGHT used to split the remainder, not a literal volume claim.
-        sibling_combined = {row["product"]: row["history"] + row["forecast"] for row in sibling_rows}
-        sibling_fsi = {row["product"]: row["forecast_start_index"] for row in sibling_rows}
-        new_combined = {p: list(vals) for p, vals in sibling_combined.items()}
-
-        for i in range(n):
-            touched_value = touched_combined[i] if i < len(touched_combined) else 0.0
-            remaining = max(0.0, 100.0 - touched_value)
-
-            weights = {p: (vals[i] if i < len(vals) else 0.0) for p, vals in sibling_combined.items()}
-            weight_total = sum(weights.values())
-
-            for p in sibling_combined:
-                new_v = round(remaining * (weights[p] / weight_total), 4) if weight_total > 0 else 0.0
-                if bounds is not None:
-                    new_v = max(bounds[0], min(bounds[1], new_v))
-                if i < len(new_combined[p]):
-                    new_combined[p][i] = new_v
-
         for row in sibling_rows:
-            p = row["product"]
-            fsi = sibling_fsi[p]
-            row["forecast"] = new_combined[p][fsi:]
-            share_cache[(row["market"], p)] = row
+            combined = row["history"] + row["forecast"]
+            fsi = row["forecast_start_index"]
+            n = min(len(combined), len(scale))
+
+            new_combined = list(combined)
+            for i in range(n):
+                new_v = combined[i] * scale[i]
+                new_combined[i] = max(bounds[0], min(bounds[1], round(new_v, 4)))
+
+            row["forecast"] = new_combined[fsi:n] if n < len(combined) else new_combined[fsi:]
+            share_cache[(row["market"], row["product"])] = row
 from typing import Dict, List, Tuple
- 
-# These come from run_calculation.py's existing imports/definitions --
-# not redefined here, just referenced for clarity of what this function
-# depends on: CLAMP_BOUNDS, EventInput, compute_event_forecast,
-# _fetch_overall_series, fetch_series, _aggregate_by_cell
+
  
 def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
     """
@@ -901,136 +731,6 @@ def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
  
     return normalized
 
-def _market_event_pinned_reconcile(
-    cache: CacheType,
-    scenario_name: str,
-    ta_name: str,
-    product: str,
-    selected_market: str,
-    impacted_markets: List[Tuple[str, float]],
-    event,
-    all_products: List[str],
-    grid_fetch_cache: GridFetchCache,
-) -> bool:
-
-    share_cache = cache["market_share"]
-    bounds = CLAMP_BOUNDS["market_share"]
-    touched_markets = [selected_market] + [m for m, _ in impacted_markets]
-
-    needed = [(m, product) for m in touched_markets] + [(m, "ALL") for m in touched_markets]
-    missing = [k for k in needed if k not in share_cache]
-    if missing:
-        prod_rows = _aggregate_by_cell(
-            fetch_series(scenario_name, ta_name, "market_share", label_field="market",
-                         market=touched_markets, products=[product], source_of_market=None),
-            "market_share", scenario_name, ta_name)
-        all_rows = fetch_series(scenario_name, ta_name, "market_share", label_field="market",
-                                 market=touched_markets, products=["ALL"], source_of_market="ALL")
-        for row in prod_rows + all_rows:
-            share_cache.setdefault((row["market"], row["product"]), row)
-
-    if any((m, product) not in share_cache or (m, "ALL") not in share_cache for m in touched_markets):
-        print("BAILOUT: missing cells for market_event pinned reconcile")
-        return False
-
-    grid = _grid_with_cache_overlay(
-        scenario_name, ta_name, share_cache, touched_markets, all_products, grid_fetch_cache)
-    grid_by_market: Dict[str, List[dict]] = {}
-    for row in grid:
-        grid_by_market.setdefault(row["market"], []).append(row)
-
-    any_applied = False
-
-    for market in touched_markets:
-        rows = grid_by_market.get(market)
-        if not rows:
-            continue
-
-        # Seed the cache with every product's row for this market -- the
-        # write-back loop below checks `if key not in share_cache: continue`,
-        # and only `product` and (market, "ALL") were ever added to the
-        # cache earlier (via fetch_baseline/the `needed` fetch above).
-        # Without this, siblings' correctly-normalized values are computed
-        # but silently dropped since their key was never in share_cache.
-        for row in rows:
-            share_cache.setdefault((row["market"], row["product"]), row)
-
-        all_row = share_cache[(market, "ALL")]
-        n = len(all_row["months"])
-        fsi = all_row["forecast_start_index"]
-        # Frozen total volume for this market -- never modified anywhere
-        # in this function, guaranteeing the market's total stays exactly
-        # at baseline once shares are normalized to sum to 100 against it.
-        market_total = all_row["history"] + all_row["forecast"]
-
-        # ---- Baseline volumes per product, computed independently
-        # (raw_share * frozen_total) -- these do NOT need to already sum
-        # to market_total; normalize_shares_with_pins fixes that below.
-        baseline_volumes: Dict[str, List[float]] = {}
-        for row in rows:
-            share = row["history"] + row["forecast"]
-            baseline_volumes[row["product"]] = [
-                market_total[i] * share[i] / 100.0 if i < len(share) else 0.0
-                for i in range(n)
-            ]
-        if product not in baseline_volumes:
-            continue
-
-        # ---- Target share curve for `product` in THIS market
-        selected_row = share_cache[(selected_market, product)]
-        start_month = event.start_date.strftime("%Y-%m-%d")
-        month_index = {m: i for i, m in enumerate(selected_row["months"])}
-        start_idx = month_index.get(start_month)
-        baseline_pct = 0.0
-        if start_idx is not None:
-            combined = selected_row["history"] + selected_row["forecast"]
-            if start_idx < len(combined):
-                baseline_pct = combined[start_idx]
-
-        result = compute_event_forecast(event, baseline_pct=baseline_pct)
-        event_start_idx = month_index.get(result.months[0]) if result.months else None
-        if event_start_idx is None:
-            continue
-
-        if market == selected_market:
-            curve_values = result.selected_curve
-            hold = curve_values[-1] if curve_values else baseline_pct
-            pinned = [baseline_pct] * n
-            for i in range(event_start_idx, n):
-                pos = i - event_start_idx
-                pinned[i] = curve_values[pos] if pos < len(curve_values) else hold
-        else:
-            delta_curve = (result.impacted_curves or {}).get(market)
-            if delta_curve is None:
-                continue
-            own_row = share_cache[(market, product)]
-            own_combined = own_row["history"] + own_row["forecast"]
-            own_baseline_pct = own_combined[start_idx] if start_idx is not None and start_idx < len(own_combined) else 0.0
-            hold = delta_curve[-1] if delta_curve else 0.0
-            pinned = [own_baseline_pct] * n
-            for i in range(event_start_idx, n):
-                pos = i - event_start_idx
-                pinned[i] = own_baseline_pct + (delta_curve[pos] if pos < len(delta_curve) else hold)
-
-        pinned = [max(bounds[0], min(bounds[1], v)) for v in pinned]
-
-        # ---- Normalize: `product` pinned exactly, everyone else fills
-        # the remainder proportional to their own baseline volume weight.
-        labels = list(baseline_volumes.keys())
-        children_values_list = [baseline_volumes[p] for p in labels]
-        pinned_shares = {p: (pinned if p == product else None) for p in labels}
-        normalized = normalize_shares_with_pins(children_values_list, labels, pinned_shares, n)
-
-        for idx, p in enumerate(labels):
-            key = (market, p)
-            if key not in share_cache:
-                continue
-            new_forecast = [max(bounds[0], min(bounds[1], v)) for v in normalized[idx]][fsi:]
-            share_cache[key]["forecast"] = new_forecast
-            any_applied = True
-
-    return any_applied
-
 
 def _market_event_volume_conserving_shares(
     cache: CacheType,
@@ -1041,31 +741,7 @@ def _market_event_volume_conserving_shares(
     impacted_markets: List[Tuple[str, float]],
     event,
 ) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
-    """
-    market_event's cross-market redistribution: peak_percent targets the
-    share of `product`'s TOTAL volume (summed across selected_market +
-    impacted_markets -- the closed set the event is defined over) that
-    sits in selected_market. E.g. product total = 20K, Retail 5K (25%) /
-    Non-retail 15K (75%) baseline; peak_percent=40 -> Retail 8K (40%) /
-    Non-retail 12K (60%). `product`'s own total across these markets never
-    changes -- only how it's split between them.
-
-    Every OTHER product in each touched market keeps its volume EXACTLY
-    frozen at baseline -- not rescaled, not redistributed (see
-    _rescale_market_event_siblings, which consumes market_scale below to
-    enforce this). Each touched market's own total volume necessarily
-    grows/shrinks by exactly the amount `product`'s volume moved in that
-    market -- nothing more -- and that real change is persisted onto the
-    market's (market, "ALL") row (its % of the OVERALL portfolio, per
-    _derive_volume_grid's convention) so every downstream volume view
-    reflects it honestly instead of silently drifting or over/under-
-    shooting.
-
-    Returns (new_forecasts, market_scale):
-      new_forecasts: {market: [share_pct, ...]} -- `product`'s own row
-      market_scale:  {market: [old_market_total/new_market_total, ...]}
-                      for siblings; consumed by _rescale_market_event_siblings.
-    """
+    
     share_cache = cache["market_share"]
     volume_cache = cache["market_volume"]
     bounds = CLAMP_BOUNDS["market_share"]
@@ -1182,7 +858,20 @@ def _market_event_volume_conserving_shares(
 
     new_forecasts: Dict[str, List[float]] = {}
     market_scale: Dict[str, List[float]] = {}
-
+    impacted_labels = [m for m in target_cross_share if m != selected_market]
+    if impacted_labels:
+        for i in range(n):
+            remaining = 100.0 - target_cross_share[selected_market][i]
+            impacted_sum = sum(target_cross_share[m][i] for m in impacted_labels)
+            if impacted_sum > 0:
+                scale = remaining / impacted_sum
+                for m in impacted_labels:
+                    target_cross_share[m][i] = max(0.0, min(100.0, target_cross_share[m][i] * scale))
+            elif impacted_labels:
+                # no baseline volume to scale from -- split remainder evenly
+                even_share = remaining / len(impacted_labels)
+                for m in impacted_labels:
+                    target_cross_share[m][i] = max(0.0, min(100.0, even_share))
     for market, shares in target_cross_share.items():
         new_vol = [product_total_vol[i] * shares[i] / 100.0 for i in range(n)]
 
@@ -1196,6 +885,10 @@ def _market_event_volume_conserving_shares(
             for i in range(n)
         ]
         new_forecasts[market] = [max(bounds[0], min(bounds[1], v)) for v in new_raw][fsi:]
+
+        print(f"DEBUG new_forecasts[{market}]:", new_forecasts[market])
+        print(f"DEBUG target_cross_share[{market}]:", shares)
+        print(f"DEBUG new_vol[{market}]:", new_vol)
 
         # Siblings' volumes never change -- this ratio, applied to their
         # OWN share, keeps new_share * new_total == old_share * old_total
@@ -1234,36 +927,6 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
 
     for event in events:
         contexts = event.contexts if event.event_scope != EventScope.OVERALL_EVENT else [None]
-        # if event.event_scope == EventScope.MARKET_EVENT:
-        #     all_label_names = [event.selected_entity] + [
-        #         e.name for e in (event.impacted_entities or [])
-        #     ]
-        #     all_keys = {label: (label, "ALL") for label in all_label_names}
-
-        #     if any(k not in cache["market_share"] for k in all_keys.values()):
-        #         for row in fetch_baseline(event, "market_share"):
-        #             cache["market_share"].setdefault((row["market"], row["product"]), row)
-
-        #     baseline_pct_all = 0.0
-        #     selected_row_all = cache["market_share"].get(all_keys[event.selected_entity])
-        #     if selected_row_all is not None:
-        #         start_month = event.start_date.strftime("%Y-%m-%d")
-        #         idx = {m: i for i, m in enumerate(selected_row_all["months"])}.get(start_month)
-        #         if idx is not None:
-        #             combined = selected_row_all["history"] + selected_row_all["forecast"]
-        #             if idx < len(combined):
-        #                 baseline_pct_all = combined[idx]
-
-        #     result_all = compute_event_forecast(event, baseline_pct=baseline_pct_all)
-        #     bounds = CLAMP_BOUNDS["market_share"]
-        #     for label, curve in _entity_curves(result_all).items():
-        #         key = all_keys.get(label)
-        #         if key is None or key not in cache["market_share"]:
-        #             continue
-        #         mode = "set" if label == event.selected_entity else "add"
-        #         cache["market_share"][key], _ = _apply_curve_to_series(
-        #             cache["market_share"][key], result_all.months, curve, bounds, mode=mode)
-
         for context in contexts:
             event_touched_forecast = False
 
@@ -1322,10 +985,13 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
 
                     if new_forecasts:
                         work_key = (event.scenario_name, event.ta_name, context)
-                        entry = market_event_work.setdefault(work_key, {"touched_markets": set()})
+                        entry = market_event_work.setdefault(
+                            work_key, {"touched_markets": set(), "market_scale": {}})
                         entry["touched_markets"].update(new_forecasts.keys())
+                        entry["market_scale"].update(market_scale)   # <-- carry it forward
                     continue
-
+                if event.event_scope == EventScope.MARKET_EVENT and metric == "market_volume":
+                    continue
                 bounds = CLAMP_BOUNDS.get(metric)
                 selected_label = event.selected_entity or OVERALL_LABEL
                 for label, curve in curves.items():
@@ -1365,16 +1031,6 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                 entry["touched_products"].update(curves.keys())
                 entry["has_explicit_redistribution"] |= bool(event.impacted_entities)
                 entry["selected_products"].add(event.selected_entity)
-            # elif event.event_scope == EventScope.MARKET_EVENT:
-            #     # context is fixed (= product) for this pass through the loop, so no
-            #     # inner loop over market_label is needed — curves.keys() already IS
-            #     # every touched market (selected + impacted) for this product.
-            #     work_key = (event.scenario_name, event.ta_name, context)
-            #     entry = market_event_work.setdefault(work_key, {
-            #         "touched_markets": set(), "has_explicit_redistribution": False, "selected_markets": set()})
-            #     entry["touched_markets"].update(curves.keys())
-            #     entry["has_explicit_redistribution"] |= bool(event.impacted_entities)
-            #     entry["selected_markets"].add(event.selected_entity)
 
     # Reconcile once every event's curve has landed in the cache.
     for (scenario_name, ta_name, market), entry in product_event_work.items():
@@ -1387,9 +1043,9 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
             grid_fetch_cache=grid_fetch_cache,
         )
     for (scenario_name, ta_name, product), entry in market_event_work.items():
-        _rescale_market_event_siblings(
+        _apply_market_scale_to_siblings(
             cache, scenario_name, ta_name, product,
-            touched_markets=list(entry["touched_markets"]),
+            market_scale=entry["market_scale"],
             all_products=all_products,
             grid_fetch_cache=grid_fetch_cache,
         )
@@ -1479,39 +1135,16 @@ def _derive_volume_grid(
 
                 market_share = market_share_info["values"][market_idx]
 
-                # print("\n--------------------------------")
-                # print("Market :", cell["market"])
-                # print("Product:", cell["product"])
-                # print("Month  :", month)
-
-                # print("Market Share ALL :", market_share)
-                # print("Overall Volume   :", total)
 
                 market_volume = total * market_share / 100
-
-                # print("Computed Market Volume:", market_volume)
-
                 volume = round(
                     market_volume * share_pct / 100,
                     2,
                 )
-
-                # print("Product Share :", share_pct)
-                # print("Product Volume:", volume)
-
                 volume = round(
                     market_volume * share_pct / 100,
                     2,
                 )
-
-                # print(
-                #     f"Month={month} "
-                #     f"MarketShare={market_share:.2f}% "
-                #     f"ProductShare={share_pct:.2f}% "
-                #     f"Overall={total:.2f} "
-                #     f"MarketVolume={market_volume:.2f} "
-                #     f"ProductVolume={volume:.2f}"
-                # )
 
                 values.append(volume)
             else:
@@ -1526,11 +1159,6 @@ def _derive_volume_grid(
 
     market_totals = _group_series_by_field(derived, "market")
 
-    # for m in market_totals:
-    #     print(
-    #         m["label"],
-    #         m["history"] + m["forecast"]
-    #     )
 
     print("\n========== Derived Product Totals ==========")
 
@@ -2120,7 +1748,50 @@ def _yearly_overall_row(years: List[str], metric: str,
     s = yearly["series"][0]
     return {"label": OVERALL_LABEL, "values": s["history"] + s["forecast"]}
 
+def _monthly_cell_shares(volume_grid: List[dict], cell_pairs: Set[Tuple[str, str]],
+                          parent_field: str, child_field: str) -> dict:
+    """Monthly counterpart to _yearly_cell_shares: per (parent, child) cell
+    share = that cell's own volume / its parent's total volume that month,
+    matching the pivot _monthly_parent_child_view uses for hierarchy_rows.
+    Must NOT reuse raw market_share grid values here -- those are keyed to
+    a different pivot (see _scoped_cells_chart, which is fine for
+    market_volume but wrong for market_share)."""
+    if not volume_grid or not cell_pairs:
+        return {"months": [], "forecast_start_index": 0, "series": []}
 
+    months = volume_grid[0]["months"]
+    fsi = volume_grid[0]["forecast_start_index"]
+    n = len(months)
+
+    parent_totals: Dict[str, List[float]] = {}
+    by_parent: Dict[str, List[dict]] = {}
+    for row in volume_grid:
+        by_parent.setdefault(row[parent_field], []).append(row)
+    for label, rows in by_parent.items():
+        combined = [0.0] * n
+        for r in rows:
+            vals = r["history"] + r["forecast"]
+            for i in range(min(n, len(vals))):
+                combined[i] += vals[i]
+        parent_totals[label] = combined
+
+    series = []
+    for cell in volume_grid:
+        key = (cell[parent_field], cell[child_field])
+        if key not in cell_pairs:
+            continue
+        vals = cell["history"] + cell["forecast"]
+        totals = parent_totals.get(cell[parent_field], [0.0] * n)
+        shares = [
+            round(vals[i] / totals[i] * 100, 2) if i < len(vals) and totals[i] else 0.0
+            for i in range(n)
+        ]
+        series.append({
+            "label": f"{cell[parent_field]} - {cell[child_field]}",
+            "history": shares[:fsi],
+            "forecast": shares[fsi:],
+        })
+    return {"months": months, "forecast_start_index": fsi, "series": series}
 def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent_field: str, child_field: str,
                                   agg: str, overall_series: Optional[dict] = None,
                                   volume_grid: Optional[List[dict]] = None,
@@ -2196,7 +1867,10 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     # above) keeps showing the full nested rollup regardless; only the
     # chart series change here.
     if scope_cells:
-        monthly_parent_chart = _scoped_cells_chart(grid, scope_cells, parent_field, child_field)
+        if metric == "market_share":
+            monthly_parent_chart = _monthly_cell_shares(volume_grid, scope_cells, parent_field, child_field)
+        else:
+            monthly_parent_chart = _scoped_cells_chart(grid, scope_cells, parent_field, child_field)
 
     if metric == "market_share":
         if tab == "market_event" and market_share_all:
@@ -2410,7 +2084,11 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             cache["market_share"].get((row["market"], row["product"]), row)
             for row in market_share_all
         ]
-
+    for row in market_share_all:
+        print(
+            f"DEBUG id(all_row) in build_hierarchy_views [{row['market']}]:",
+            id(row), row["forecast"]
+        )
     # print("\n========== Market Share ALL ==========")
     # for row in market_share_all:
     #     print(
@@ -2739,24 +2417,9 @@ def tab_config(tab: str, entities: Dict[str, List[str]]) -> dict:
 # skipped -- known gap, not resolved here.
 
 def _distribute_synthesized_write(metric: str, series: dict) -> List[Tuple[str, str, str, str, List[float]]]:
-    """A synthesized cell (channel-split rows blended into one) has no
-    single backing DB row -- but if it was touched by an event this run,
-    the rebalanced value still needs to land somewhere, or it silently
-    reverts to the old per-channel values on the next refresh. Propagates
-    the cell's change back onto its underlying per-channel rows.
-
-    market_volume channels are combined by SUM, so each channel keeps its
-    original share of the new total (scale by that channel's pre-event
-    share of the pre-event sum).
-
-    market_share channels are combined by weighted BLEND, not a simple
-    share of the total, so there's no clean inverse decomposition. Instead
-    every channel absorbs the same point-change the blended cell picked up
-    (additive delta) -- a defensible default, but a business call worth
-    confirming if channel-level share precision matters downstream."""
     source_rows = series.get("source_rows")
     if not source_rows:
-        return []  # no per-channel breakdown available (e.g. synthetic Overall row)
+        return []
 
     new_forecast = series["forecast"]
     old_forecast = series.get("_baseline_forecast", new_forecast)
@@ -2770,11 +2433,14 @@ def _distribute_synthesized_write(metric: str, series: dict) -> List[Tuple[str, 
             updates.append((metric, src["market"], src["product"], src["source_of_market"], scaled))
     else:
         deltas = [round(n - o, 4) for n, o in zip(new_forecast, old_forecast)]
+        bounds = CLAMP_BOUNDS.get(metric)
         for src in source_rows:
             adjusted = [
                 round(v + (deltas[i] if i < len(deltas) else 0.0), 4)
                 for i, v in enumerate(src["forecast"])
             ]
+            if bounds is not None:
+                adjusted = [max(bounds[0], min(bounds[1], v)) for v in adjusted]
             updates.append((metric, src["market"], src["product"], src["source_of_market"], adjusted))
 
     return updates
@@ -2785,24 +2451,22 @@ def persist_events_to_db(
     ta_name: str,
     rows: List[dict],
     cache: CacheType,
-) -> None:
+) -> List[str]:
     """Writes post-event forecast_values + the FE row config back onto their
     source rows. Skipped for Base (stays untouched baseline).
 
-    Non-synthesized cells write directly onto their single backing row.
-    Synthesized cells (channel-split, no single backing row) are
-    propagated back onto their underlying channel rows via
-    _distribute_synthesized_write instead of being dropped -- previously
-    any rebalanced channel-split cell was silently skipped here, so it
-    would appear correct in the response but revert on the next refresh."""
+    Returns a list of human-readable warnings for any update that targeted
+    a (market, source, product, metric) combination with no matching DB
+    row -- the caller should surface these (e.g. in the API response) so a
+    silently-dropped write is never mistaken for a successfully applied
+    event."""
     if scenario_name == BASELINE_SCENARIO:
-        return
+        return []
 
     updates: List[Tuple[str, str, str, str, List[float]]] = []
     for metric, by_cell in cache.items():
         for series in by_cell.values():
             if not series.get("synthesized"):
-                # CHANGED: was hardcoded "ALL", now uses the row's real source_of_market
                 updates.append((
                     metric, series["market"], series["product"],
                     series.get("source_of_market") or "ALL",
@@ -2811,9 +2475,10 @@ def persist_events_to_db(
             else:
                 updates.extend(_distribute_synthesized_write(metric, series))
     if not updates:
-        return
+        return []
 
     events_payload = json.dumps(rows)
+    warnings: List[str] = []
 
     conn = get_connection()
     try:
@@ -2839,16 +2504,19 @@ def persist_events_to_db(
                     ],
                 )
                 if cur.rowcount == 0:
-                    print(
-                        f"WARNING: No row updated -> "
-                        f"{metric} | {market} | {product} | {source_of_market}"
-                    )
+                    msg = (f"No matching row for {metric} | market={market} | "
+                           f"product={product} | source={source_of_market} -- "
+                           f"this cell's event change was NOT persisted")
+                    print(f"WARNING: {msg}")
+                    warnings.append(msg)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+    return warnings
 
 
 # ======================================================
