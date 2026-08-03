@@ -831,6 +831,45 @@ export default function HIVModelInput() {
         }
     };
 
+    const handleDeleteScenario = async (scenarioName) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: scenarioName,
+            };
+
+            const response = await deleteHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(scenario.factors || {});
+            setAvailableScenarios(response.data.available_scenarios || []);
+            setActiveScenario(response.data.active_scenario || "");
+            setMarketAnalysis(scenario.market_analysis || {});
+            setAllScenariosData(response.data.scenarios || {});
+
+            showSnackbar("Scenario deleted successfully", "success");
+        } catch (err) {
+            console.error(err);
+            showSnackbar("Failed to delete scenario", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
 
     const inputStyle = {
         bgcolor: "#fcfcfd",
@@ -1637,6 +1676,7 @@ export default function HIVModelInput() {
                 onSaveScenario={handleSaveScenario}
                 onApplyScenario={handleApplySelectedScenario}
                 onUpdateScenario={handleUpdateScenario}
+                onDeleteScenario={handleDeleteScenario}
             />
             {/* <Dialog
                 open={openSaveScenario}

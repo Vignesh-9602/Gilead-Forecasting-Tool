@@ -50,6 +50,7 @@ import Tooltip from "@mui/material/Tooltip";
 
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
+import ManageProductsDialog from "./ManageProductsDialog";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
@@ -78,6 +79,9 @@ export default function HIVMarketEvent() {
 
     const [selectedMarkets, setSelectedMarkets] = useState("");
     const [selectedProducts, setSelectedProducts] = useState("");
+
+    const [openManageProducts, setOpenManageProducts] = useState(false);
+    const [products, setProducts] = useState([]);
 
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
@@ -1554,6 +1558,29 @@ export default function HIVMarketEvent() {
                             </Typography>
 
                             <Box>
+
+                                {/* <Button
+                                    variant="outlined"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenManageProducts(true);
+                                    }}
+                                    // onClick={(e) => {
+                                    //     e.stopPropagation();
+                                    //     handleRunCalculation();
+                                    // }}
+                                    sx={{
+                                        height: "33px",
+                                        textTransform: "none",
+                                        borderRadius: "8px",
+                                        // backgroundColor: "#4F46E5",
+                                        px: 1.5,
+                                        fontWeight: 600,
+                                        marginRight: "12px",
+                                    }}
+                                >
+                                    Manage New Products
+                                </Button> */}
 
                                 <Button
                                     variant="contained"
@@ -3208,14 +3235,18 @@ export default function HIVMarketEvent() {
                                     </DialogActions>
 
                                 </>
-
                             );
 
                         })()}
-
                     </DialogContent>
-
                 </Dialog>
+
+                <ManageProductsDialog
+                    open={openManageProducts}
+                    onClose={() => setOpenManageProducts(false)}
+                    products={products}
+                    setProducts={setProducts}
+                />
             </Paper>
 
 
