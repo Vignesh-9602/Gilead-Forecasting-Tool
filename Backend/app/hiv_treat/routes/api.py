@@ -1818,6 +1818,49 @@ def update_scenario(payload: UpdateScenarioRequest):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+
+def delete_scenario_rows(cur, ta, scenario):
+    cur.execute("""
+        DELETE FROM raw_hiv_treat.forecast_outputs
+        WHERE ta_name = %s
+          AND UPPER(COALESCE(scenario_name, 'BASE')) = UPPER(%s)
+    """, (ta, scenario))
+    return cur.rowcount
+@router.delete("/scenarios/{scenario_name}")
+def delete_scenario(payload: DeleteScenarioRequest):
+    ta = payload.ta_name
+    scenario = payload.scenario_name
+
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+
+            if scenario.upper() == "BASE":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Base cannot be deleted"
+                )
+
+            if not scenario_exists_save(cur, ta, scenario):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Scenario '{scenario}' does not exist for ta_name '{ta}'"
+                )
+
+            delete_scenario_rows(cur, ta, scenario)
+            conn.commit()
+
+            remaining_scenarios = MIS.get_scenarios(cur, ta)
+            active_scenario = remaining_scenarios[0]  # canonical Base label, always first
+
+            response = build_save_scenario_response(
+                cur, ta, active_scenario, payload.selected_filter
+            )
+            return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
 class RunCalculationRequest(BaseModel):
     ta_name: str
     selected_filter: dict

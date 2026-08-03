@@ -157,4 +157,8 @@ class UpdateScenarioRequest(BaseModel):
     user_id: Optional[str] = "default_user"
     factors: Optional[Factors] = None
     market_analysis: Dict[str, Any]
- 
+
+class DeleteScenarioRequest(BaseModel):
+    ta_name: str
+    scenario_name: str
+    selected_filter: SelectedFilter
