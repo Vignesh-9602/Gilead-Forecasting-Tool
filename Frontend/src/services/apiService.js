@@ -425,6 +425,28 @@ export const applyHIVOutputFilters = (payload) =>
     payload
   );
 
+export const uploadPersistencyCurve = (formData) =>
+  httpClient.post(
+    "/api/persistency/upload-curve",
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+
+export const updatePersistencyCurve = (payload) =>
+  httpClient.post(
+    "/api/persistency/Edit-curve",
+    payload
+  );
+
+export const deleteHIVScenario = (payload) =>
+  httpClient.delete("/hiv_treat/scenarios", {
+    data: payload,
+  });
+
 
 // export const mainConversation = () => {
 //   return `api/conversations/messages`;

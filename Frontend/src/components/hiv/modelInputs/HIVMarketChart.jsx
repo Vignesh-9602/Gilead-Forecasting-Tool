@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 
 import {
     Accordion,
@@ -46,101 +46,155 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
     // const FADED_COLOR = "#D1D5DB";    // Gray
     // const DEFAULT_COLOR = "#2563EB";  // Blue
 
-    const SCENARIO_COLORS = [
-        "#2563EB", // Blue
-        "#F59E0B", // Orange
-        "#16A34A", // Green
-        "#9333EA", // Purple
-        "#DC2626", // Red
-        "#0891B2", // Cyan
-        "#D97706", // Amber
-        "#4F46E5", // Indigo
-    ];
+    // const SCENARIO_COLORS = [
+    //     "#2563EB", // Blue
+    //     "#F59E0B", // Orange
+    //     "#16A34A", // Green
+    //     "#9333EA", // Purple
+    //     "#DC2626", // Red
+    //     "#0891B2", // Cyan
+    //     "#D97706", // Amber
+    //     "#4F46E5", // Indigo
+    // ];
 
-    const MARKET_COLORS = {
-        Retail: "#2563EB",
-        "Non-retail": "#F59E0B",
-    };
+    // const MARKET_COLORS = {
+    //     Retail: "#2563EB",
+    //     "Non-retail": "#F59E0B",
+    // };
 
-    const PRODUCT_COLORS = {
-        Biktarvy: "#2563EB",
-        Truvada: "#F59E0B",
-        Descovy: "#16A34A",
-    };
+    // const PRODUCT_COLORS = {
+    //     Biktarvy: "#2563EB",
+    //     Truvada: "#F59E0B",
+    //     Descovy: "#16A34A",
+    // };
 
-    const getSeriesColor = (item, index) => {
+    // const SCENARIO_COLORS = [
+    //     "#2563EB", // Blue
+    //     "#F59E0B", // Orange
+    //     "#16A34A", // Green
+    //     "#DC2626", // Red
+    //     "#9333EA", // Purple
+    //     "#0891B2", // Cyan
+    //     "#D97706", // Amber
+    //     "#4F46E5", // Indigo
+    //     "#EC4899", // Pink
+    //     "#14B8A6", // Teal
+    //     "#84CC16", // Lime
+    //     "#F43F5E", // Rose
+    //     "#A855F7", // Violet
+    //     "#0EA5E9", // Sky
+    //     "#22C55E", // Emerald
+    // ];
 
-        const label = item.label || "";
+    // const scenarioColorMap = React.useMemo(() => {
+    //     const map = {};
 
-        switch (activeTab) {
+    //     series.forEach((item, index) => {
+    //         if (!map[item.scenario]) {
+    //             map[item.scenario] =
+    //                 SCENARIO_COLORS[index % SCENARIO_COLORS.length];
+    //         }
+    //     });
 
-            case "total_market_volume":
-                return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
+    //     return map;
+    // }, [series]);
 
-            case "market_distribution": {
+    // const getSeriesColor = (item) =>
+    //     scenarioColorMap[item.scenario] || "#2563EB";
 
-                if (label.startsWith("Retail")) {
-                    return MARKET_COLORS.Retail;
-                }
+    const getScenarioColor = (index) =>
+        `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
 
-                if (label.startsWith("Non-retail")) {
-                    return MARKET_COLORS["Non-retail"];
-                }
+    const scenarioColorMap = React.useMemo(() => {
+        const map = {};
 
-                return "#64748B";
+        let index = 0;
+
+        series.forEach((item) => {
+            if (!map[item.scenario]) {
+                map[item.scenario] = getScenarioColor(index++);
             }
+        });
 
-            case "product_distribution": {
+        return map;
+    }, [series]);
 
-                if (label.startsWith("Biktarvy")) {
-                    return PRODUCT_COLORS.Biktarvy;
-                }
+    const getSeriesColor = (item) =>
+        scenarioColorMap[item.scenario];
 
-                if (label.startsWith("Truvada")) {
-                    return PRODUCT_COLORS.Truvada;
-                }
+    // const getSeriesColor = (item, index) => {
 
-                if (label.startsWith("Descovy")) {
-                    return PRODUCT_COLORS.Descovy;
-                }
+    //     const label = item.label || "";
 
-                return "#64748B";
-            }
+    //     switch (activeTab) {
 
-            case "market_product": {
+    //         case "total_market_volume":
+    //             return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
 
-                if (label.includes("Biktarvy")) {
-                    return PRODUCT_COLORS.Biktarvy;
-                }
+    //         case "market_distribution": {
 
-                if (label.includes("Truvada")) {
-                    return PRODUCT_COLORS.Truvada;
-                }
+    //             if (label.startsWith("Retail")) {
+    //                 return MARKET_COLORS.Retail;
+    //             }
 
-                if (label.includes("Descovy")) {
-                    return PRODUCT_COLORS.Descovy;
-                }
+    //             if (label.startsWith("Non-retail")) {
+    //                 return MARKET_COLORS["Non-retail"];
+    //             }
 
-                return "#64748B";
-            }
+    //             return "#64748B";
+    //         }
 
-            case "product_market": {
+    //         case "product_distribution": {
 
-                if (label.includes("Retail")) {
-                    return MARKET_COLORS.Retail;
-                }
+    //             if (label.startsWith("Biktarvy")) {
+    //                 return PRODUCT_COLORS.Biktarvy;
+    //             }
 
-                if (label.includes("Non-retail")) {
-                    return MARKET_COLORS["Non-retail"];
-                }
+    //             if (label.startsWith("Truvada")) {
+    //                 return PRODUCT_COLORS.Truvada;
+    //             }
 
-                return "#64748B";
-            }
+    //             if (label.startsWith("Descovy")) {
+    //                 return PRODUCT_COLORS.Descovy;
+    //             }
 
-            default:
-                return "#2563EB";
-        }
-    };
+    //             return "#64748B";
+    //         }
+
+    //         case "market_product": {
+
+    //             if (label.includes("Biktarvy")) {
+    //                 return PRODUCT_COLORS.Biktarvy;
+    //             }
+
+    //             if (label.includes("Truvada")) {
+    //                 return PRODUCT_COLORS.Truvada;
+    //             }
+
+    //             if (label.includes("Descovy")) {
+    //                 return PRODUCT_COLORS.Descovy;
+    //             }
+
+    //             return "#64748B";
+    //         }
+
+    //         case "product_market": {
+
+    //             if (label.includes("Retail")) {
+    //                 return MARKET_COLORS.Retail;
+    //             }
+
+    //             if (label.includes("Non-retail")) {
+    //                 return MARKET_COLORS["Non-retail"];
+    //             }
+
+    //             return "#64748B";
+    //         }
+
+    //         default:
+    //             return "#2563EB";
+    //     }
+    // };
 
     const traces = series.flatMap((item, index) => {
 
@@ -227,7 +281,7 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
         //         width = 3;
         // }
 
-        const color = getSeriesColor(item, index);
+        const color = getSeriesColor(item);
         const width = 3;
 
         return [
@@ -244,10 +298,19 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
 
                 mode: "lines",
 
+                // name:
+                //     item.scenario
+                //         ? `${item.label} (${item.scenario})`
+                //         : item.label,
+
                 name:
-                    item.scenario
-                        ? `${item.label} (${item.scenario})`
-                        : item.label,
+                    activeTab === "total_market_volume"
+                        ? (item.scenario || item.label)
+                        : (
+                            item.scenario
+                                ? `${item.label} (${item.scenario})`
+                                : item.label
+                        ),
 
                 line: {
                     color,
@@ -372,17 +435,16 @@ export default function HIVMarketChart({ chartData, activeTab, selectedMarket, s
                             },
 
                             xaxis: {
+                                type: "category",
+                                tickmode: "array",
+                                tickvals: labels,
+                                ticktext: labels,
 
                                 tickangle: -45,
-
                                 showgrid: true,
-
                                 gridcolor: "#F1F5F9",
-
                                 zeroline: false,
-
                             },
-
                             yaxis: {
 
                                 showgrid: true,
