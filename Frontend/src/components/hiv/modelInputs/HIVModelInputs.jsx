@@ -25,7 +25,7 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario } from "../../../services/apiService";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario, deleteHIVScenario } from "../../../services/apiService";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {

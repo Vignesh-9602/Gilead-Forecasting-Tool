@@ -1154,11 +1154,24 @@ export default function HIVMarketTable({
                                                     )}
                                                     {row.label}
                                                 </Box>
-                                                {row.label !== "Base" && (
+                                                {/* {row.label !== "Base" && isTotalMarketVolume && (
                                                     <Tooltip title="Delete Scenario">
                                                         <IconButton
                                                             size="small"
                                                             onClick={() => handleDeleteClick(row.label)}
+                                                        >
+                                                            <DeleteOutlineIcon
+                                                                fontSize="small"
+                                                                color="error"
+                                                            />
+                                                        </IconButton>
+                                                    </Tooltip>
+                                                )} */}
+                                                {isTotalMarketVolume && row.scenario !== "Base" && (
+                                                    <Tooltip title="Delete Scenario">
+                                                        <IconButton
+                                                            size="small"
+                                                            onClick={() => handleDeleteClick(row.scenario)}
                                                         >
                                                             <DeleteOutlineIcon
                                                                 fontSize="small"
