@@ -3,17 +3,17 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict, Any
 from psycopg2.extras import RealDictCursor
-from app.hiv_treat.routes.market_events_models import *
-from app.hiv_treat.services.market_event_helpers import *
-from app.hiv_treat.services.calculation_tree_market_events import *
-from app.hiv_treat.services.generic_builders_market_events import *
-from app.hiv_treat.services.edit_helpers import *
+from app.hiv_prep.routes.market_events_models import *
+from app.hiv_prep.services.market_event_helpers import *
+from app.hiv_prep.services.calculation_tree_market_events import *
+from app.hiv_prep.services.generic_builders_market_events import *
+from app.hiv_prep.services.edit_helpers import *
 
 router = APIRouter()
 
 from app.db.connection import get_connection
 
-router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat_market_events"])
+router = APIRouter(prefix="/api/hiv_prep", tags=["hiv_prep_market_events"])
 
 
 def generate_months(start_date: date, end_date: date):
@@ -61,7 +61,7 @@ def get_market_event_filters(
                 product,
                 start_date,
                 end_date
-            FROM raw_hiv_treat.user_configurations
+            FROM raw_hiv_prep.user_configurations
             WHERE user_id = %s
               AND ta_name = %s
             ORDER BY updated_at DESC
@@ -84,7 +84,7 @@ def get_market_event_filters(
         cursor.execute(
             """
             SELECT DISTINCT scenario_name
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
             ORDER BY scenario_name
             """,
@@ -101,7 +101,7 @@ def get_market_event_filters(
         cursor.execute(
             """
             SELECT DISTINCT market
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
             AND market IS NOT NULL
             AND UPPER(TRIM(market)) <> 'ALL'
@@ -120,7 +120,7 @@ def get_market_event_filters(
         cursor.execute(
             """
             SELECT DISTINCT product
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
             AND product IS NOT NULL
             AND UPPER(TRIM(product)) <> 'ALL'
@@ -142,7 +142,7 @@ def get_market_event_filters(
         cursor.execute(
             """
             SELECT forecast_data
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND UPPER(TRIM(market)) = 'ALL'
               AND UPPER(TRIM(product)) = 'ALL'
@@ -234,7 +234,7 @@ def load_scenario_events_payload(
     cursor.execute(
         """
         SELECT events_payload
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND scenario_name = %s
           AND events_payload IS NOT NULL
@@ -1846,7 +1846,7 @@ def delete_event_from_db(
 ) -> int:
 
     query = """
-        UPDATE raw_hiv_treat.forecast_outputs
+        UPDATE raw_hiv_prep.forecast_outputs
         SET events_payload =
             COALESCE(
                 (

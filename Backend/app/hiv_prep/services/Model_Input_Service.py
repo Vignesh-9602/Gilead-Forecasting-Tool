@@ -10,7 +10,7 @@ from app.db.connection import get_connection
 def fetch_forecast(cur, ta, market, source, product, metric):
     cur.execute("""
         SELECT forecast_data
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND market = %s
           AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
@@ -28,7 +28,7 @@ def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
     if is_base:
         cur.execute("""
             SELECT forecast_data
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
               AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
@@ -39,7 +39,7 @@ def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
     else:
         cur.execute("""
             SELECT forecast_data
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND market = %s
               AND (%s IS NULL OR COALESCE(source_of_market,'ALL') = COALESCE(%s,'ALL'))
@@ -55,7 +55,7 @@ def fetch_forecast_scenario(cur, ta, market, source, product, metric, scenario):
 def get_markets(cur, ta):
     cur.execute("""
         SELECT DISTINCT market
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s AND metric = 'market_share' and market != 'ALL'
     """, (ta,))
     return [r[0] for r in cur.fetchall()]
@@ -64,7 +64,7 @@ def get_markets(cur, ta):
 def get_sources(cur, ta, market):
     cur.execute("""
         SELECT DISTINCT source_of_market
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND market = %s
           AND source_of_market IS NOT NULL
@@ -77,7 +77,7 @@ def get_sources(cur, ta, market):
 def get_products(cur, ta):
     cur.execute("""
         SELECT DISTINCT product
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s AND product != 'ALL'
     """, (ta,))
     return [r[0] for r in cur.fetchall()]
@@ -86,7 +86,7 @@ def get_products(cur, ta):
 def get_scenarios(cur, ta):
     cur.execute("""
         SELECT DISTINCT scenario_name
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND scenario_name IS NOT NULL
     """, (ta,))
@@ -432,7 +432,7 @@ def build_factors(cur, ta, scenario):
         cur.execute(
             """
             SELECT forecast_data
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_volume'
               AND market = 'ALL'
@@ -445,7 +445,7 @@ def build_factors(cur, ta, scenario):
         cur.execute(
             """
             SELECT forecast_data
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_volume'
               AND market = 'ALL'
@@ -491,7 +491,7 @@ def build_factors(cur, ta, scenario):
         cur.execute(
             """
             SELECT forecast_data->'factors'
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_share'
               AND UPPER(COALESCE(scenario_name, 'BASE')) = 'BASE'
@@ -503,7 +503,7 @@ def build_factors(cur, ta, scenario):
         cur.execute(
             """
             SELECT forecast_data->'factors'
-            FROM raw_hiv_treat.forecast_outputs
+            FROM raw_hiv_prep.forecast_outputs
             WHERE ta_name = %s
               AND metric = 'market_share'
               AND scenario_name = %s

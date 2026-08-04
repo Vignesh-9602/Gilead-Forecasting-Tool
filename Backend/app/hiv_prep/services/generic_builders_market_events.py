@@ -1,5 +1,5 @@
-from app.hiv_treat.services.response_builder_market_events import *
-from app.hiv_treat.services.calculation_tree_market_events import normalize_dimension,is_all
+from app.hiv_prep.services.response_builder_market_events import *
+from app.hiv_prep.services.calculation_tree_market_events import normalize_dimension,is_all
 
 from copy import deepcopy
 

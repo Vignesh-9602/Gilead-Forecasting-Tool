@@ -715,7 +715,7 @@ def calculate_percentage(
         decimals,
     )
 
-from app.hiv_treat.services.edit_helpers import get_canonical_sources
+from app.hiv_prep.services.edit_helpers import get_canonical_sources
 
 def aggregate_products(
     tree: dict,

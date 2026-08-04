@@ -1,11 +1,11 @@
 import json
 from fastapi import HTTPException
-from app.hiv_treat.routes.market_events_models import *
-from app.hiv_treat.services.response_builder_market_events import *
-from app.hiv_treat.services.generic_builders_market_events import *
-from app.hiv_treat.services.market_event_helpers import *
-from app.hiv_treat.services.calculation_tree_market_events import *
-from app.hiv_treat.services.common_helpers import *
+from app.hiv_prep.routes.market_events_models import *
+from app.hiv_prep.services.response_builder_market_events import *
+from app.hiv_prep.services.generic_builders_market_events import *
+from app.hiv_prep.services.market_event_helpers import *
+from app.hiv_prep.services.calculation_tree_market_events import *
+from app.hiv_prep.services.common_helpers import *
 
 
 def is_row_edited(
@@ -6445,7 +6445,7 @@ def upsert_forecast_output(
 
     cursor.execute(
         """
-        UPDATE raw_hiv_treat.forecast_outputs
+        UPDATE raw_hiv_prep.forecast_outputs
         SET forecast_data = %s::jsonb
         WHERE ta_name = %s
           AND scenario_name = %s
@@ -6470,7 +6470,7 @@ def upsert_forecast_output(
 
     cursor.execute(
         """
-        INSERT INTO raw_hiv_treat.forecast_outputs (
+        INSERT INTO raw_hiv_prep.forecast_outputs (
             ta_name,
             scenario_name,
             metric,

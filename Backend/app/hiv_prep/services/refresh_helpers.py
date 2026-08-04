@@ -1,4 +1,4 @@
-from app.hiv_treat.services.chart_builder import *
+from app.hiv_prep.services.chart_builder import *
 import re
 from copy import deepcopy
 
@@ -3566,7 +3566,7 @@ def rebuild_market_distribution_from_market_share_edit(
 
     return market_analysis
 
-from app.hiv_treat.services.chart_builder import build_chart_from_table
+from app.hiv_prep.services.chart_builder import build_chart_from_table
 
 #charts rebuild
 def rebuild_all_monthly_charts(
