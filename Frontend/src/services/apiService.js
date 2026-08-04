@@ -1,5 +1,3 @@
-
-
 import axios from "axios";
 import { httpClient } from "./httpClient";
 
@@ -295,6 +293,20 @@ export const getLiverMarketEventsFilters = (ta = "HCV") => {
   return httpClient.get("/api/liver-market-events/filters", {
     params: { ta },
   });
+};
+
+// GET — list products (base + newly added) for the "Manage New Products"
+// modal on the Impact Curve Configuration screen.
+export const getLiverMarketEventsProducts = (params = {}) => {
+  return httpClient.get("/api/liver-market-events/products", {
+    params,
+  });
+};
+
+// POST — add a new product from the "Manage New Products" modal.
+// payload: { product_name: "string" }
+export const addLiverMarketEventsProduct = (payload) => {
+  return httpClient.post("/api/liver-market-events/products", payload);
 };
 
 export const applyLiverMarketEventsFilters = (payload) => {
