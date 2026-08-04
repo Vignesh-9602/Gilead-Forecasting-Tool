@@ -12,10 +12,13 @@ from app.api.monte_carlo_route import router as monte_carlo_router
 from app.api.auth import router as login
 from app.liver.api.liver_route import router as liver_router
 from app.hiv_treat.routes.api import router as hiv_router
+from app.hiv_prep.routes.api import router as hiv_prep_router
 from app.liver_market_events.api.market_events_route import router as liver_market_events_router
 from app.hiv_treat.routes.market_events import router as hiv_market_events_router
+from app.hiv_prep.routes.market_events import router as hiv_prep_market_events_router
 from app.liver_output.api.output_route import router as liver_output_router
 from app.hiv_treat.routes.outputs import router as hiv_outputs_router
+from app.hiv_prep.routes.outputs import router as hiv_prep_outputs_router
 
 app = FastAPI(title="TA Forecast API")
 
@@ -40,8 +43,10 @@ app.include_router(monte_carlo_router)
 app.include_router(login)
 app.include_router(liver_router)
 app.include_router(hiv_router)
+app.include_router(hiv_prep_router)
 app.include_router(liver_market_events_router)
 app.include_router(hiv_market_events_router)
+app.include_router(hiv_prep_market_events_router)
 app.include_router(liver_output_router)
 app.include_router(hiv_outputs_router)
-
+app.include_router(hiv_prep_outputs_router)

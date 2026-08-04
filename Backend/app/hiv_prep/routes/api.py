@@ -5,47 +5,47 @@ from uuid import uuid4
 import json
 from app.db.connection import get_connection
 from typing import Dict, Any
-from app.hiv_treat.routes.schema import *
-from app.hiv_treat.routes.models import *
-from app.hiv_treat.utils.config import add_months
-from app.hiv_treat.services.HIV_helper_functions import (
+from app.hiv_prep.routes.schema import *
+from app.hiv_prep.routes.models import *
+from app.hiv_prep.utils.config import add_months
+from app.hiv_prep.services.HIV_helper_functions import (
     get_total_market_volume,
     get_market_distribution,
     get_product_distribution,
     get_market_wise_product,
     parse_month
 )
-from app.hiv_treat.services.Model_Input_Service import build_apply_scenario_response,get_scenarios
-from app.hiv_treat.services.Model_Input_Save_Scenario import _save_market_analysis,build_save_scenario_response
-from app.hiv_treat.services.Market_Events_Run_Calculation import run_calculation
+from app.hiv_prep.services.Model_Input_Service import build_apply_scenario_response,get_scenarios
+from app.hiv_prep.services.Model_Input_Save_Scenario import _save_market_analysis,build_save_scenario_response
+from app.hiv_prep.services.Market_Events_Run_Calculation import run_calculation
 # -----------------------------------
 # FORECAST MODELS
 # -----------------------------------
 from app.services.forecast_service import process_forecast
 
-from app.hiv_treat.services.HIV_helper_functions import (
+from app.hiv_prep.services.HIV_helper_functions import (
     process_growth_forecast_auto,
     normalize_shares,
     process_moving_average_forecast
 )
 from app.services.growth_forecast_service import process_growth_forecast
-from app.hiv_treat.services import Model_Input_Service as MIS
-from app.hiv_treat.services.HIV_Treat_Retaining_Filters import get_user_configuration, save_user_configuration
-from app.hiv_treat.services.scenario_service import get_available_scenarios
-from app.hiv_treat.routes.schema import  SaveScenarioRequest
+from app.hiv_prep.services import Model_Input_Service as MIS
+from app.hiv_prep.services.HIV_prep_Retaining_Filters import get_user_configuration, save_user_configuration
+from app.hiv_prep.services.scenario_service import get_available_scenarios
+from app.hiv_prep.routes.schema import  SaveScenarioRequest
 import json as Json
-from app.hiv_treat.services.Model_Input_Service import (
+from app.hiv_prep.services.Model_Input_Service import (
     build_apply_scenario_response,
     build_factors,
 )
 
-# from app.hiv_treat.services.helpers import (
+# from app.hiv_prep.services.helpers import (
 #     load_market_analysis_from_db
 # )
 
-from app.hiv_treat.services.scenario_service import get_available_scenarios
+from app.hiv_prep.services.scenario_service import get_available_scenarios
 
-router = APIRouter(prefix="/api/hiv_treat", tags=["hiv_treat"])
+router = APIRouter(prefix="/api/hiv_prep", tags=["hiv_prep"])
 
 @router.get(
     "/configurations/{ta_name}",
@@ -62,7 +62,7 @@ def get_configuration_by_ta(ta_name: str) -> Dict[str, Any]:
             #fetch available months          
             cur.execute("""
                 SELECT DISTINCT year, month
-                FROM raw_hiv_treat.volume
+                FROM raw_hiv_prep.volume
                 WHERE REPLACE(LOWER(TRIM(ta)), '_', ' ') =
                     REPLACE(LOWER(TRIM(%s)), '_', ' ')
                 ORDER BY year, month
@@ -77,7 +77,7 @@ def get_configuration_by_ta(ta_name: str) -> Dict[str, Any]:
             #config list
             cur.execute("""
                 SELECT config
-                FROM raw_hiv_treat.forecast_configurations
+                FROM raw_hiv_prep.forecast_configurations
                 WHERE config->>'ta_name' = %s
                 LIMIT 1
             """, (ta_name,))
@@ -179,7 +179,7 @@ def save_configuration(payload: SaveConfigRequest):
                 SELECT 
                     MIN(make_date(year, month, 1)),
                     MAX(make_date(year, month, 1))
-                FROM raw_hiv_treat.volume
+                FROM raw_hiv_prep.volume
                 WHERE LOWER(TRIM(ta)) = LOWER(TRIM(%s))
             """, (ta,))
 
@@ -214,7 +214,7 @@ def save_configuration(payload: SaveConfigRequest):
             #    DELETE SCENARIO
             # -----------------------------------
             cur.execute("""
-                DELETE FROM raw_hiv_treat.forecast_outputs
+                DELETE FROM raw_hiv_prep.forecast_outputs
                 WHERE user_id=%s AND scenario_name=%s AND ta_name=%s
             """, ("default_user", "Base", ta))
 
@@ -477,7 +477,7 @@ def save_configuration(payload: SaveConfigRequest):
             #    STEP 4 — SAVE (CORRECT HIERARCHY)
             # =====================================================
             upsert_query = """
-            INSERT INTO raw_hiv_treat.forecast_outputs
+            INSERT INTO raw_hiv_prep.forecast_outputs
             (user_id, scenario_name, ta_name,
              market, source_of_market, product,
              metric, forecast_data)
@@ -523,7 +523,7 @@ def save_configuration(payload: SaveConfigRequest):
                 ))
              #     CONFIG SAVE (MATCHES YOUR TABLE)
             cur.execute("""
-                INSERT INTO raw_hiv_treat.forecast_configurations (config_id, config)
+                INSERT INTO raw_hiv_prep.forecast_configurations (config_id, config)
                 VALUES (%s, %s)
                 ON CONFLICT ((config->>'ta_name'))
                 DO UPDATE SET
@@ -558,7 +558,7 @@ def get_model_input_filters(ta_name: str ):
             # MARKETS
             cur.execute("""
                 SELECT DISTINCT market
-                FROM raw_hiv_treat.forecast_outputs
+                FROM raw_hiv_prep.forecast_outputs
                 WHERE ta_name = %s
                 AND market != 'ALL'
             """, (ta,))
@@ -567,7 +567,7 @@ def get_model_input_filters(ta_name: str ):
             # PRODUCTS
             cur.execute("""
                 SELECT DISTINCT product
-                FROM raw_hiv_treat.forecast_outputs
+                FROM raw_hiv_prep.forecast_outputs
                 WHERE ta_name = %s
                 AND product != 'ALL'
             """, (ta,))
@@ -576,7 +576,7 @@ def get_model_input_filters(ta_name: str ):
             # MONTHS (from any one stable row)
             cur.execute("""
                 SELECT forecast_data
-                FROM raw_hiv_treat.forecast_outputs
+                FROM raw_hiv_prep.forecast_outputs
                 WHERE ta_name = %s
                 AND market = 'ALL'
                 AND product = 'ALL'
@@ -635,7 +635,7 @@ def get_model_input_filters(ta_name: str ):
 def _build_lookup_map(cur, ta):
     cur.execute("""
         SELECT market, source_of_market, product, metric, scenario_name, forecast_data
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
     """, (ta,))
     lookup = {}
@@ -702,7 +702,7 @@ def apply_filter(payload: ApplyScenarioRequest):
  
             cur.execute("""
                 SELECT config
-                FROM raw_hiv_treat.forecast_configurations
+                FROM raw_hiv_prep.forecast_configurations
                 WHERE config->>'ta_name' = %s
             """, (ta,))
  
@@ -1074,7 +1074,7 @@ def recalculate(payload: RecalculateRequest):
  
             cur.execute("""
                 SELECT config
-                FROM raw_hiv_treat.forecast_configurations
+                FROM raw_hiv_prep.forecast_configurations
                 WHERE config->>'ta_name' = %s
             """, (ta,))
             row = cur.fetchone()
@@ -1082,7 +1082,7 @@ def recalculate(payload: RecalculateRequest):
  
             cur.execute("""
                 SELECT market, source_of_market, product, metric, forecast_data
-                FROM raw_hiv_treat.forecast_outputs
+                FROM raw_hiv_prep.forecast_outputs
                 WHERE ta_name = %s
                   AND scenario_name = %s
             """, (ta, scenario))
@@ -1278,6 +1278,7 @@ def recalculate(payload: RecalculateRequest):
 
             MIS.fetch_forecast_scenario = fetch_with_override
  
+ 
             try:
                 response = MIS.build_apply_scenario_response(cur, payload, config)
  
@@ -1346,8 +1347,8 @@ def recalculate(payload: RecalculateRequest):
     
 
 
-from app.hiv_treat.services.refresh_helpers import refresh_engine,build_refresh_response,normalize_overall_labels,filter_market_distribution_chart,filter_product_distribution_chart,filter_market_product_chart,filter_product_market_chart
-from app.hiv_treat.routes.refresh_models import RefreshEditsRequest
+from app.hiv_prep.services.refresh_helpers import refresh_engine,build_refresh_response,normalize_overall_labels,filter_market_distribution_chart,filter_product_distribution_chart,filter_market_product_chart,filter_product_market_chart
+from app.hiv_prep.routes.refresh_models import RefreshEditsRequest
 from types import SimpleNamespace
 from copy import deepcopy
 
@@ -1372,7 +1373,7 @@ def refresh_edits(payload: RefreshEditsRequest):
             cur.execute(
                 """
                 SELECT config
-                FROM raw_hiv_treat.forecast_configurations
+                FROM raw_hiv_prep.forecast_configurations
                 WHERE config->>'ta_name' = %s
                 """,
                 (payload.ta_name,),
@@ -1626,7 +1627,7 @@ def refresh_edits(payload: RefreshEditsRequest):
 def scenario_exists(cur, ta, scenario_name):
     cur.execute("""
         SELECT 1
-        FROM raw_hiv_treat.forecast_outputs
+        FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND scenario_name = %s
         LIMIT 1
@@ -1745,7 +1746,7 @@ def apply_scenario(payload: ApplySelectedScenarioRequest):
 
 def scenario_exists_save(cur, ta, scenario):
     cur.execute("""
-        SELECT 1 FROM raw_hiv_treat.forecast_outputs
+        SELECT 1 FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND UPPER(COALESCE(scenario_name, 'BASE')) = UPPER(%s)
         LIMIT 1
@@ -1829,7 +1830,7 @@ def update_scenario(payload: UpdateScenarioRequest):
 
 def delete_scenario_rows(cur, ta, scenario):
     cur.execute("""
-        DELETE FROM raw_hiv_treat.forecast_outputs
+        DELETE FROM raw_hiv_prep.forecast_outputs
         WHERE ta_name = %s
           AND UPPER(COALESCE(scenario_name, 'BASE')) = UPPER(%s)
     """, (ta, scenario))
