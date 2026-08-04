@@ -331,7 +331,7 @@ export const applyLiverOutputFilters = (payload) => {
 
 
 
-//HIC API's
+//HIV API's
 export const getHIVConfigurationByTherapyArea = (taName) => {
   return httpClient.get(`/api/hiv_treat/configurations/${taName}`);
 };
@@ -423,6 +423,34 @@ export const applyHIVOutputFilters = (payload) =>
   httpClient.post(
     "/api/hiv_treat/output-screen/apply-filters",
     payload
+  );
+
+export const uploadPersistencyCurve = (formData) =>
+  httpClient.post(
+    "/api/persistency/upload-curve",
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
+
+export const updatePersistencyCurve = (payload) =>
+  httpClient.post(
+    "/api/persistency/Edit-curve",
+    payload
+  );
+
+// export const deleteHIVScenario = (payload) =>
+//   httpClient.delete("/api/hiv_treat/scenarios/{scenario_name}", payload);
+
+export const deleteHIVScenario = (payload) =>
+  httpClient.delete(
+    `/api/hiv_treat/scenarios/${payload.scenario_name}`,
+    {
+      data: payload,
+    }
   );
 
 

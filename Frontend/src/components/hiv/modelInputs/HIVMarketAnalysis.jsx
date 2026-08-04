@@ -48,7 +48,8 @@ export default function HIVMarketAnalysis({
     onEdit,
     onSaveScenario,
     onApplyScenario,
-    onUpdateScenario
+    onUpdateScenario,
+    onDeleteScenario
 }) {
 
     const DEFAULT_METRIC_BY_TAB = {
@@ -71,9 +72,48 @@ export default function HIVMarketAnalysis({
 
     const [compareScenario, setCompareScenario] = useState([]);
 
+    // useEffect(() => {
+    //     setCompareScenario(availableScenarios);
+    // }, [availableScenarios]);
+
+    // useEffect(() => {
+    //     if (compareScenario.length === 0 && availableScenarios.length) {
+    //         setCompareScenario(availableScenarios);
+    //     }
+    // }, [availableScenarios]);
+
+    // useEffect(() => {
+    //     setCompareScenario(prev => {
+    //         if (!prev.length) {
+    //             return availableScenarios;
+    //         }
+
+    //         return prev.filter(s =>
+    //             availableScenarios.includes(s)
+    //         );
+    //     });
+    // }, [availableScenarios]);
+
     useEffect(() => {
-        setCompareScenario(availableScenarios);
-    }, [availableScenarios]);
+        setCompareScenario(prev => {
+            if (!prev.length) {
+                return availableScenarios;
+            }
+
+            const updated = prev.filter(s =>
+                availableScenarios.includes(s)
+            );
+
+            if (
+                activeScenario &&
+                !updated.includes(activeScenario)
+            ) {
+                updated.push(activeScenario);
+            }
+
+            return updated;
+        });
+    }, [availableScenarios, activeScenario]);
 
     // const currentData =
     //     mockData[activeTab]?.[selectedMetric];
@@ -322,6 +362,7 @@ export default function HIVMarketAnalysis({
                             onUpdateScenario={onUpdateScenario}
                             compareScenario={compareScenario}
                             setCompareScenario={setCompareScenario}
+                            onDeleteScenario={onDeleteScenario}
                         />
                     </Box>
                 </>

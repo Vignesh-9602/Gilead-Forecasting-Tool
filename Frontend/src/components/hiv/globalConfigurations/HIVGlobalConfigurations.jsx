@@ -146,7 +146,7 @@ export default function HIVGlobalConfigurations() {
             // await fetchConfigurationByTA();
 
         } catch (error) {
-            console.error("Save configuration failed:", error);     
+            console.error("Save configuration failed:", error);
 
             const errorMessage =
                 error?.response?.data?.detail ||

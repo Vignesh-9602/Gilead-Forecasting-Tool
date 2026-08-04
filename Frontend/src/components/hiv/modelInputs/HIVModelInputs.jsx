@@ -25,7 +25,7 @@ import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
 import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario } from "../../../services/apiService";
+import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario, deleteHIVScenario } from "../../../services/apiService";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -826,6 +826,45 @@ export default function HIVModelInput() {
         } catch (err) {
             console.error(err);
             showSnackbar("Failed to apply scenario", "error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteScenario = async (scenarioName) => {
+        try {
+            setLoading(true);
+
+            const payload = {
+                ta_name: therapyArea,
+
+                selected_filter: {
+                    start_date: fromDate,
+                    end_date: toDate,
+                    market: marketFilter,
+                    product: productFilter,
+                },
+
+                scenario_name: scenarioName,
+            };
+
+            const response = await deleteHIVScenario(payload);
+
+            const scenario =
+                response.data.scenarios[
+                response.data.active_scenario
+                ];
+
+            setProjectionFactors(scenario.factors || {});
+            setAvailableScenarios(response.data.available_scenarios || []);
+            setActiveScenario(response.data.active_scenario || "");
+            setMarketAnalysis(scenario.market_analysis || {});
+            setAllScenariosData(response.data.scenarios || {});
+
+            showSnackbar("Scenario deleted successfully", "success");
+        } catch (err) {
+            console.error(err);
+            showSnackbar("Failed to delete scenario", "error");
         } finally {
             setLoading(false);
         }
@@ -1637,6 +1676,7 @@ export default function HIVModelInput() {
                 onSaveScenario={handleSaveScenario}
                 onApplyScenario={handleApplySelectedScenario}
                 onUpdateScenario={handleUpdateScenario}
+                onDeleteScenario={handleDeleteScenario}
             />
             {/* <Dialog
                 open={openSaveScenario}

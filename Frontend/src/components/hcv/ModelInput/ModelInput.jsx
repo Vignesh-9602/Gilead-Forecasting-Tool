@@ -1123,12 +1123,32 @@ export default function PBCModelInput() {
           // only the checked scenarios (and highlighting the currently
           // applied one) happens at render time in ForecastChart — mirrors
           // how the table filters scenarioRows via selectedCompareScenarios.
-          const allScenarioChartSeries = scenarioRows.map((row) => ({
-            label: row.hierarchy || row.label || "",
-            lot: row.hierarchy || row.label || "",
-            train_values: (row.values || []).slice(0, chartFsi),
-            forecast_values: (row.values || []).slice(chartFsi),
-          }));
+          //
+          // Use each scenario's own forecast_start_index (translated into the
+          // shared month axis) so its solid/dashed boundary matches its actual
+          // training boundary rather than the active scenario's. This prevents
+          // a 1-month mismatch when scenarios have different training end dates.
+          const allScenarioChartSeries = scenarioRows.map((row) => {
+            const scName = row.hierarchy || row.label || "";
+            const scMetricObj = (() => {
+              const scTmv = data.scenarios?.[scName]?.market_analysis?.total_market_volume;
+              return scTmv ? (scTmv.payer_volume || scTmv.payer_share || Object.values(scTmv)[0]) : null;
+            })();
+            const scChartMonths = scMetricObj?.monthly?.chart?.months || [];
+            const scFsiRaw = scMetricObj?.monthly?.chart?.forecast_start_index ?? chartFsi;
+            // Map the scenario's forecast-start month into the shared month axis.
+            const scForecastMonth = scChartMonths[scFsiRaw];
+            const effectiveFsi = scForecastMonth
+              ? months.findIndex((m) => (m || "").substring(0, 7) === (scForecastMonth || "").substring(0, 7))
+              : -1;
+            const splitFsi = effectiveFsi >= 0 ? effectiveFsi : chartFsi;
+            return {
+              label: scName,
+              lot: scName,
+              train_values: (row.values || []).slice(0, splitFsi),
+              forecast_values: (row.values || []).slice(splitFsi),
+            };
+          });
 
           const singleChartSeries = allScenarioChartSeries.length
             ? allScenarioChartSeries
@@ -2704,20 +2724,40 @@ export default function PBCModelInput() {
       setLoading(true);
       const backendSf = liverRawData?.selected_filter || {};
 
+      // Always use the UI's current filter dates (resolveFromDate / toDate) first.
+      // backendSf.start_date can carry the DB-stored wide date (e.g. "2020-04-01")
+      // from a previous activate response, which would cause Base to expand to the
+      // full wide range on the 2nd click. UI state is always the source of truth here.
       const payload = {
         ta_name: therapyArea || "HCV",
         selected_filter: {
-          start_date: backendSf.start_date || resolveFromDate(),
-          end_date: backendSf.end_date || toDate || "",
-          payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
-          product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
+          start_date: resolveFromDate() || backendSf.start_date,
+          end_date: toDate || backendSf.end_date || "",
+          payer: appliedPayerFilter || payerFilter || backendSf.payer || getFirstOption(payerOptions) || "",
+          product: appliedProductFilter || productFilter || backendSf.product || getFirstOption(productOptions) || "",
         },
         scenario_name: chosenScenario,
       };
 
       // Hit the new activation endpoint
+      console.log("[applySelectedScenario] payload →", JSON.stringify({
+        start_date: payload.selected_filter.start_date,
+        scenario_name: payload.scenario_name,
+      }));
       const response = await activateLiverScenario(payload);
       const respData = response?.data;
+      // Debug: log the first month for each scenario's TMV chart so we can confirm
+      // whether the backend is clipping to the filter window or returning wide data.
+      if (respData?.scenarios) {
+        const dbgMonths = {};
+        Object.entries(respData.scenarios).forEach(([sc, sd]) => {
+          const tmv = sd?.market_analysis?.total_market_volume;
+          const mv = tmv?.payer_volume || tmv?.payer_share || (tmv && Object.values(tmv)[0]);
+          const ch = mv?.monthly?.chart || mv?.chart;
+          dbgMonths[sc] = ch?.months?.[0] ?? "(no chart)";
+        });
+        console.log("[applySelectedScenario] response scenario first-months →", dbgMonths);
+      }
 
       // Update UI configurations
       setCurrentlyAppliedScenario(chosenScenario);

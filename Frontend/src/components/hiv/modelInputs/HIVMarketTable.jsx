@@ -36,6 +36,7 @@ import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 
 export default function HIVMarketTable({
     activeTab,
@@ -58,6 +59,7 @@ export default function HIVMarketTable({
     onUpdateScenario,
     compareScenario,
     setCompareScenario,
+    onDeleteScenario
 }) {
     if (!tableData?.rows?.length) {
         return null;
@@ -166,9 +168,21 @@ export default function HIVMarketTable({
     const [selectedRow, setSelectedRow] =
         useState("");
 
+    const [deleteDialogOpen, setDeleteDialogOpen] =
+        useState(false);
+
+    const [scenarioToDelete, setScenarioToDelete] =
+        useState("");
+
     useEffect(() => {
         setSelectedRow(activeScenario || "");
     }, [activeScenario]);
+
+    useEffect(() => {
+        if (activeTab === "total_market_volume") {
+            setSelectedMetric("market_volume");
+        }
+    }, [activeTab, setSelectedMetric]);
 
 
     // useEffect(() => {
@@ -492,7 +506,7 @@ export default function HIVMarketTable({
 
         tableRows.forEach((row) => {
             if (row.children?.length) {
-                expanded[row.label] = true;
+                expanded[row.label] = false;
             }
         });
 
@@ -565,7 +579,7 @@ export default function HIVMarketTable({
 
     const isOverallFlatRow = (row) =>
         type === "flat" &&
-        row.label === "Overall"
+        row.label.startsWith("Overall");
     // &&
     // (
     //     activeTab === "market_distribution" ||
@@ -580,8 +594,18 @@ export default function HIVMarketTable({
         }
     }, [viewMode]);
 
+    // const handleEditClick = () => {
+    //     if (selectedMetric !== "market_share") return;
+
+    //     setEditable(true);
+    // };
+
     const handleEditClick = () => {
-        if (selectedMetric !== "market_share") return;
+        const canEdit =
+            isTotalMarketVolume ||
+            selectedMetric === "market_share";
+
+        if (!canEdit) return;
 
         setEditable(true);
     };
@@ -707,6 +731,18 @@ export default function HIVMarketTable({
             `${sheetName}_${viewMode}.xlsx`
         );
 
+    };
+
+    const handleDeleteClick = (scenario) => {
+        setScenarioToDelete(scenario);
+        setDeleteDialogOpen(true);
+    };
+
+    const confirmDelete = async () => {
+        await onDeleteScenario(scenarioToDelete);
+
+        setDeleteDialogOpen(false);
+        setScenarioToDelete("");
     };
 
     return (
@@ -920,29 +956,30 @@ export default function HIVMarketTable({
 
                     {/* </> */}
 
-
-                    <FormControl
-                        sx={{
-                            ...inputStyle,
-                            width: 160,
-                        }}
-                    >
-                        <Select
-                            value={selectedMetric}
-                            onChange={(e) =>
-                                setSelectedMetric(e.target.value)
-                            }
+                    {!isTotalMarketVolume && (
+                        <FormControl
+                            sx={{
+                                ...inputStyle,
+                                width: 160,
+                            }}
                         >
-                            {metricOptions.map((option) => (
-                                <MenuItem
-                                    key={option.value}
-                                    value={option.value}
-                                >
-                                    {option.label}
-                                </MenuItem>
-                            ))}
-                        </Select>
-                    </FormControl>
+                            <Select
+                                value={selectedMetric}
+                                onChange={(e) =>
+                                    setSelectedMetric(e.target.value)
+                                }
+                            >
+                                {metricOptions.map((option) => (
+                                    <MenuItem
+                                        key={option.value}
+                                        value={option.value}
+                                    >
+                                        {option.label}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    )}
 
                     {/* <Button
                         variant="contained"
@@ -968,18 +1005,26 @@ export default function HIVMarketTable({
                         Save
                     </Button>
 
+                    {/* {!isTotalMarketVolume && ( */}
+
                     <Button
                         variant="outlined"
                         sx={secondaryButtonStyle}
                         onClick={handleEditClick}
                         disabled={
-                            activeTab === "total_market_volume" ||
-                            selectedMetric !== "market_share" ||
-                            viewMode === "yearly"
+                            editable ||
+                            viewMode === "yearly" ||
+                            (
+                                !isTotalMarketVolume &&
+                                selectedMetric !== "market_share"
+                            )
                         }
                     >
-                        {editable ? "Editing..." : "Edit Changes"}
+                        {/* {editable ? "Editing..." : "Edit Changes"} */}
+                        Edit changes
                     </Button>
+
+                    {/* )} */}
 
                     {editable && (
                         <>
@@ -990,18 +1035,17 @@ export default function HIVMarketTable({
                             >
                                 Refresh
                             </Button>
+
+                            <Button
+                                variant="outlined"
+                                sx={secondaryButtonStyle}
+                                onClick={handleCancel}
+                                disabled={isYearlyView}
+                            >
+                                Cancel
+                            </Button>
                         </>
                     )}
-
-                    <Button
-                        variant="outlined"
-                        sx={secondaryButtonStyle}
-                        onClick={handleCancel}
-                        disabled={isYearlyView}
-                    >
-                        Cancel
-                    </Button>
-
                 </Box>
 
             </Box>
@@ -1074,10 +1118,7 @@ export default function HIVMarketTable({
                                                             ? "#F8FAFC"
                                                             : "#FFFFFF",
 
-                                                fontWeight:
-                                                    isHighlighted || isOverall
-                                                        ? 700
-                                                        : 400,
+                                                fontWeight: isOverall ? 700 : 400,
 
                                                 color:
                                                     isHighlighted
@@ -1087,24 +1128,58 @@ export default function HIVMarketTable({
 
                                             }}
                                         >
-
                                             <Box
                                                 sx={{
                                                     display: "flex",
                                                     alignItems: "center",
-                                                    fontWeight: "inherit",
-                                                    color: "inherit",
+                                                    justifyContent: "space-between",
+                                                    width: "100%",
                                                 }}
                                             >
+                                                <Box
+                                                    sx={{
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        fontWeight: "inherit",
+                                                        color: "inherit",
+                                                    }}
+                                                >
 
-                                                {isTotalMarketVolume && (
-                                                    <Radio
-                                                        size="small"
-                                                        checked={selectedRow === row.scenario}
-                                                        onChange={() => setSelectedRow(row.scenario)}
-                                                    />
+                                                    {isTotalMarketVolume && (
+                                                        <Radio
+                                                            size="small"
+                                                            checked={selectedRow === row.scenario}
+                                                            onChange={() => setSelectedRow(row.scenario)}
+                                                        />
+                                                    )}
+                                                    {row.label}
+                                                </Box>
+                                                {/* {row.label !== "Base" && isTotalMarketVolume && (
+                                                    <Tooltip title="Delete Scenario">
+                                                        <IconButton
+                                                            size="small"
+                                                            onClick={() => handleDeleteClick(row.label)}
+                                                        >
+                                                            <DeleteOutlineIcon
+                                                                fontSize="small"
+                                                                color="error"
+                                                            />
+                                                        </IconButton>
+                                                    </Tooltip>
+                                                )} */}
+                                                {isTotalMarketVolume && row.scenario !== "Base" && (
+                                                    <Tooltip title="Delete Scenario">
+                                                        <IconButton
+                                                            size="small"
+                                                            onClick={() => handleDeleteClick(row.scenario)}
+                                                        >
+                                                            <DeleteOutlineIcon
+                                                                fontSize="small"
+                                                                color="error"
+                                                            />
+                                                        </IconButton>
+                                                    </Tooltip>
                                                 )}
-                                                {row.label}
                                             </Box>
 
                                         </TableCell>
@@ -1123,10 +1198,7 @@ export default function HIVMarketTable({
                                                                 ? "#F1F5F9"
                                                                 : "#FFFFFF",
 
-                                                    fontWeight:
-                                                        isHighlighted && index >= forecastStartIndex
-                                                            ? 700
-                                                            : 400,
+                                                    fontWeight: isOverall ? 700 : 400,
 
                                                     color:
                                                         isHighlighted && index >= forecastStartIndex
@@ -1155,6 +1227,11 @@ export default function HIVMarketTable({
 
                             tableRows.map((parent, parentIndex) => {
                                 const parentHighlighted = isHighlightedRow(parent);
+
+                                const isOverallRow =
+                                    ["market_distribution", "product_distribution"].includes(activeTab) &&
+                                    parent.label.split(" (")[0].trim() === "Overall";
+
                                 return (
 
                                     <React.Fragment key={parent.label}>
@@ -1180,7 +1257,12 @@ export default function HIVMarketTable({
                                                             ? "#f59e0b"
                                                             : "#334155",
 
-                                                    fontWeight: 700,
+                                                    fontWeight:
+                                                        (activeTab === "market_distribution" ||
+                                                            activeTab === "product_distribution")
+                                                            ? (isOverallRow ? 700 : 400)
+                                                            : (parentHighlighted ? 700 : 700),
+
                                                     borderRight: "1px solid #E2E8F0",
                                                 }}
                                             >
@@ -1188,7 +1270,7 @@ export default function HIVMarketTable({
                                                     sx={{
                                                         display: "flex",
                                                         alignItems: "center",
-                                                        pl: parent.children?.length ? 0 : "36px",
+                                                        pl: parent.children?.length ? 0 : 0.5,
                                                     }}
                                                 >
                                                     {parent.children?.length > 0 && (
@@ -1198,7 +1280,8 @@ export default function HIVMarketTable({
                                                                 toggleRow(parent.label)
                                                             }
                                                             sx={{
-                                                                mr: 1,
+                                                                mr: 0.25,      // instead of 1
+                                                                p: 0.5,       // smaller clickable area
                                                             }}
                                                         >
                                                             {expandedRows[parent.label] ? (
@@ -1233,9 +1316,10 @@ export default function HIVMarketTable({
                                                                     : "#F8FAFC",
 
                                                         fontWeight:
-                                                            parentHighlighted && index >= forecastStartIndex
-                                                                ? 700
-                                                                : 700,
+                                                            (activeTab === "market_distribution" ||
+                                                                activeTab === "product_distribution")
+                                                                ? (isOverallRow ? 700 : 400)
+                                                                : (parentHighlighted ? 700 : 700),
 
                                                         color:
                                                             parentHighlighted && index >= forecastStartIndex
@@ -1285,10 +1369,7 @@ export default function HIVMarketTable({
                                                                         ? "#fffbeb"
                                                                         : "#FFFFFF",
 
-                                                                fontWeight:
-                                                                    isHighlighted
-                                                                        ? 700
-                                                                        : 400,
+                                                                fontWeight: 400,
 
                                                                 color:
                                                                     isHighlighted
@@ -1297,7 +1378,15 @@ export default function HIVMarketTable({
                                                                 borderRight: "1px solid #E2E8F0",
                                                             }}
                                                         >
-                                                            {child.label}
+                                                            <Box
+                                                                sx={{
+                                                                    display: "flex",
+                                                                    alignItems: "center",
+                                                                    pl: 2,
+                                                                }}
+                                                            >
+                                                                {child.label}
+                                                            </Box>
                                                         </TableCell>
 
                                                         {child.values.map((value, index) => (
@@ -1314,11 +1403,7 @@ export default function HIVMarketTable({
                                                                                 ? "#F1F5F9"
                                                                                 : "#FFFFFF",
 
-                                                                    fontWeight:
-                                                                        isHighlighted && index >= forecastStartIndex
-                                                                            ? 700
-                                                                            : 400,
-
+                                                                    fontWeight: 400,
                                                                     color:
                                                                         isHighlighted && index >= forecastStartIndex
                                                                             ? "#f59e0b"
@@ -1405,6 +1490,42 @@ export default function HIVMarketTable({
                         sx={{ textTransform: "none", borderRadius: "8px", backgroundColor: "#4F46E5" }}
                     >
                         Save
+                    </Button>
+                </DialogActions>
+            </Dialog>
+            <Dialog
+                open={deleteDialogOpen}
+                onClose={() => setDeleteDialogOpen(false)}
+            >
+                <DialogTitle sx={{ fontWeight: 700, fontSize: "18px", color: "#0f172a", pb: 1 }}>
+                    Delete Scenario
+                </DialogTitle>
+
+                <DialogContent>
+                    <Typography sx={{ fontSize: "16px", color: "#64748b", mb: 2 }}>
+                        Are you sure you want to delete
+                        <b> {scenarioToDelete}</b>?
+                    </Typography>
+                </DialogContent>
+
+                <DialogActions>
+                    <Button
+                        variant="outlined"
+                        onClick={() =>
+                            setDeleteDialogOpen(false)
+                        }
+                        sx={{ textTransform: "none", borderRadius: "8px", color: "#64748b", borderColor: "#e2e8f0" }}
+                    >
+                        Cancel
+                    </Button>
+
+                    <Button
+                        color="error"
+                        variant="contained"
+                        onClick={confirmDelete}
+                        sx={{ textTransform: "none", borderRadius: "8px" }}
+                    >
+                        Delete
                     </Button>
                 </DialogActions>
             </Dialog>
