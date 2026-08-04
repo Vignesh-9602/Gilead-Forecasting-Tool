@@ -50,6 +50,7 @@ def get_products_with_audit(cur) -> list:
     cur.execute("""
         SELECT product_name, active_flag, added_by, added_at, modified_by, modified_at
         FROM raw_liver.product_master
+        WHERE added_by IS NOT NULL
         ORDER BY added_at DESC NULLS LAST, product_name
     """)
     return cur.fetchall()
