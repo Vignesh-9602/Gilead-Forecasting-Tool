@@ -810,6 +810,10 @@ def recompute_from_market_product(
     edited_rows,
     selected_filter,
 ):
+    # =========================================================
+    # 1. Apply Market -> Product edit
+    # =========================================================
+
     if selected_metric == "market_volume":
 
         rebuild_market_product_from_market_volume_edit(
@@ -838,12 +842,34 @@ def recompute_from_market_product(
             f"{selected_metric}"
         )
 
-    # Rebuild monthly charts.
+    # =========================================================
+    # 2. Recompute Market Distribution
+    #
+    # Overall stays FIXED.
+    #
+    # Market volume =
+    #     sum(products inside that market)
+    #
+    # Market share =
+    #     market volume / fixed Overall * 100
+    # =========================================================
+
+    sync_market_distribution_from_market_product(
+        market_analysis
+    )
+
+    # =========================================================
+    # 3. Rebuild monthly charts
+    # =========================================================
+
     rebuild_all_monthly_charts(
         market_analysis,
     )
 
-    # Rebuild yearly tables and charts.
+    # =========================================================
+    # 4. Rebuild yearly tables
+    # =========================================================
+
     rebuild_market_product_yearly(
         market_analysis,
         selected_filter,
@@ -854,7 +880,15 @@ def recompute_from_market_product(
         selected_filter,
     )
 
-    # Apply filters only after all rebuilds.
+    rebuild_market_distribution_yearly(
+        market_analysis,
+        selected_filter,
+    )
+
+    # =========================================================
+    # 5. Apply filters only after all recomputations
+    # =========================================================
+
     filter_market_product_chart(
         market_analysis=market_analysis,
         selected_filter=selected_filter,
@@ -864,6 +898,400 @@ def recompute_from_market_product(
         market_analysis=market_analysis,
         selected_filter=selected_filter,
     )
+
+    return market_analysis
+
+def sync_market_distribution_from_market_product(
+    market_analysis,
+):
+    """
+    Recompute Market Distribution from Market -> Product volumes.
+
+    IMPORTANT
+    ---------
+    Overall volume remains FIXED.
+
+    Market -> Product:
+
+        Retail
+            Biktarvy
+            Descovy
+            Truvada
+
+        Non-retail
+            Biktarvy
+            Descovy
+            Truvada
+
+    becomes Market Distribution:
+
+        Overall              <- FIXED
+        Retail               <- recomputed
+        Non-retail           <- recomputed
+
+    Rules
+    -----
+    Market volume =
+        sum(product volumes inside market)
+
+    Market share =
+        market volume
+        / fixed Overall volume
+        * 100
+
+    Overall must NOT be recalculated from markets.
+    """
+
+    market_product = (
+        market_analysis[
+            "market_product"
+        ]
+    )
+
+    market_distribution = (
+        market_analysis[
+            "market_distribution"
+        ]
+    )
+
+    # =========================================================
+    # 1. Read Market -> Product monthly VOLUME table
+    # =========================================================
+
+    mp_volume_table = (
+        market_product[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    mp_rows = (
+        mp_volume_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    # =========================================================
+    # 2. Read Market Distribution monthly tables
+    # =========================================================
+
+    md_volume_table = (
+        market_distribution[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    md_share_table = (
+        market_distribution[
+            "market_share"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    md_volume_rows = (
+        md_volume_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    md_share_rows = (
+        md_share_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    # =========================================================
+    # 3. Get FIXED Overall volume
+    #
+    # Do NOT recalculate Overall.
+    # =========================================================
+
+    overall_volume_row = next(
+        (
+            row
+            for row in md_volume_rows
+            if str(
+                row.get(
+                    "label",
+                    ""
+                )
+            ).strip().lower()
+            == "overall"
+        ),
+        None,
+    )
+
+    if overall_volume_row is None:
+        raise ValueError(
+            "Market Distribution Overall volume row "
+            "was not found."
+        )
+
+    fixed_overall_volume = [
+        float(value or 0)
+        for value in (
+            overall_volume_row.get(
+                "values",
+                [],
+            )
+            or []
+        )
+    ]
+
+    month_count = len(
+        fixed_overall_volume
+    )
+
+    if month_count == 0:
+        raise ValueError(
+            "Market Distribution Overall volume "
+            "contains no monthly values."
+        )
+
+    # =========================================================
+    # 4. Build market totals from Market -> Product
+    #
+    # Retail =
+    #     Biktarvy + Descovy + Truvada
+    #
+    # Non-retail =
+    #     Biktarvy + Descovy + Truvada
+    # =========================================================
+
+    market_volume_map = {}
+
+    for market_row in mp_rows:
+
+        market_name = (
+            market_row.get(
+                "label"
+            )
+        )
+
+        if not market_name:
+            continue
+
+        if (
+            str(market_name)
+            .strip()
+            .lower()
+            == "overall"
+        ):
+            continue
+
+        children = (
+            market_row.get(
+                "children",
+                [],
+            )
+            or []
+        )
+
+        if not children:
+            continue
+
+        market_total = [
+            0.0
+        ] * month_count
+
+        for product_row in children:
+
+            values = (
+                product_row.get(
+                    "values",
+                    [],
+                )
+                or []
+            )
+
+            for month_index in range(
+                month_count
+            ):
+
+                if month_index >= len(
+                    values
+                ):
+                    continue
+
+                market_total[
+                    month_index
+                ] += float(
+                    values[
+                        month_index
+                    ]
+                    or 0
+                )
+
+        market_volume_map[
+            market_name
+        ] = market_total
+
+    # =========================================================
+    # 5. Update Market Distribution VOLUME
+    #
+    # Overall remains untouched.
+    # =========================================================
+
+    for row in md_volume_rows:
+
+        label = (
+            row.get(
+                "label"
+            )
+        )
+
+        if not label:
+            continue
+
+        normalized_label = (
+            str(label)
+            .strip()
+            .lower()
+        )
+
+        # ---------------------------------------------
+        # Overall is FIXED
+        # ---------------------------------------------
+
+        if normalized_label == "overall":
+            continue
+
+        market_values = (
+            market_volume_map.get(
+                label
+            )
+        )
+
+        if market_values is None:
+            continue
+
+        row[
+            "values"
+        ] = [
+            round(
+                value,
+                6,
+            )
+            for value
+            in market_values
+        ]
+
+    # =========================================================
+    # 6. Update Market Distribution SHARE
+    #
+    # Market share =
+    #     market / FIXED Overall
+    # =========================================================
+
+    for row in md_share_rows:
+
+        label = (
+            row.get(
+                "label"
+            )
+        )
+
+        if not label:
+            continue
+
+        normalized_label = (
+            str(label)
+            .strip()
+            .lower()
+        )
+
+        # ---------------------------------------------
+        # Overall always remains 100%
+        # ---------------------------------------------
+
+        if normalized_label == "overall":
+
+            row[
+                "values"
+            ] = [
+                100.0
+                if value
+                else 0.0
+                for value
+                in fixed_overall_volume
+            ]
+
+            continue
+
+        market_values = (
+            market_volume_map.get(
+                label
+            )
+        )
+
+        if market_values is None:
+            continue
+
+        shares = []
+
+        for month_index in range(
+            month_count
+        ):
+
+            overall_volume = float(
+                fixed_overall_volume[
+                    month_index
+                ]
+                or 0
+            )
+
+            market_volume = (
+                float(
+                    market_values[
+                        month_index
+                    ]
+                    or 0
+                )
+                if month_index
+                < len(
+                    market_values
+                )
+                else 0.0
+            )
+
+            if overall_volume == 0:
+
+                share = 0.0
+
+            else:
+
+                share = (
+                    market_volume
+                    / overall_volume
+                    * 100.0
+                )
+
+            shares.append(
+                round(
+                    share,
+                    2,
+                )
+            )
+
+        row[
+            "values"
+        ] = shares
 
     return market_analysis
 
@@ -1068,8 +1496,12 @@ def recompute_from_product_market(
     market_analysis,
     selected_metric,
     edited_rows,
-    selected_filter
+    selected_filter,
 ):
+
+    # =========================================================
+    # 1. Apply Product -> Market edit
+    # =========================================================
 
     if selected_metric == "market_volume":
 
@@ -1085,19 +1517,811 @@ def recompute_from_product_market(
             edited_rows,
         )
 
+    # =========================================================
+    # 2. Sync Market -> Product from updated Product -> Market
+    # =========================================================
+
+    sync_market_product_from_product_market(
+        market_analysis
+    )
+
+    # =========================================================
+    # 3. Recompute Product Distribution
+    #
+    # Product Distribution should now be derived from the
+    # updated Product -> Market volumes.
+    # =========================================================
+
+    sync_product_distribution_from_product_market(
+        market_analysis
+    )
+
+    # =========================================================
+    # 4. Rebuild monthly charts
+    # =========================================================
+
     rebuild_all_monthly_charts(
         market_analysis,
     )
 
+    # =========================================================
+    # 5. Rebuild yearly tables
+    # =========================================================
+
     rebuild_product_market_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
 
     rebuild_market_product_yearly(
-    market_analysis,
-    selected_filter,
+        market_analysis,
+        selected_filter,
     )
+
+    rebuild_product_distribution_yearly(
+        market_analysis,
+        selected_filter,
+    )
+
+    return market_analysis
+
+def sync_product_distribution_from_product_market(
+    market_analysis,
+):
+    """
+    Recompute Product Distribution from Product -> Market volumes.
+
+    IMPORTANT
+    ---------
+    Overall volume is FIXED.
+
+    Product -> Market edits must NOT change:
+
+        Product Distribution -> Overall
+
+    Only product rows are recomputed.
+
+    Product volume:
+        sum of product volume across markets
+
+    Product share:
+        product volume / FIXED overall volume * 100
+
+    Overall row remains unchanged.
+    """
+
+    product_market = market_analysis[
+        "product_market"
+    ]
+
+    product_distribution = market_analysis[
+        "product_distribution"
+    ]
+
+    # =========================================================
+    # 1. Product -> Market monthly VOLUME table
+    # =========================================================
+
+    pm_volume_table = (
+        product_market[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    pm_rows = (
+        pm_volume_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    # =========================================================
+    # 2. Product Distribution monthly tables
+    # =========================================================
+
+    pd_volume_table = (
+        product_distribution[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    pd_share_table = (
+        product_distribution[
+            "market_share"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    pd_volume_rows = (
+        pd_volume_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    pd_share_rows = (
+        pd_share_table.get(
+            "rows",
+            [],
+        )
+        or []
+    )
+
+    # =========================================================
+    # 3. Get FIXED Overall volume
+    #
+    # Do NOT recompute this.
+    # =========================================================
+
+    overall_volume_row = next(
+        (
+            row
+            for row in pd_volume_rows
+            if str(
+                row.get(
+                    "label",
+                    ""
+                )
+            ).strip().lower()
+            == "overall"
+        ),
+        None,
+    )
+
+    if overall_volume_row is None:
+        raise ValueError(
+            "Product Distribution Overall volume row "
+            "was not found."
+        )
+
+    fixed_overall_volume = [
+        float(value or 0)
+        for value in (
+            overall_volume_row.get(
+                "values",
+                [],
+            )
+            or []
+        )
+    ]
+
+    month_count = len(
+        fixed_overall_volume
+    )
+
+    if month_count == 0:
+        raise ValueError(
+            "Product Distribution Overall volume "
+            "contains no monthly values."
+        )
+
+    # =========================================================
+    # 4. Build Product totals from Product -> Market
+    #
+    # Product total =
+    #     Retail + Non-retail + ...
+    # =========================================================
+
+    product_volume_map = {}
+
+    for product_row in pm_rows:
+
+        product_name = (
+            product_row.get(
+                "label"
+            )
+        )
+
+        if not product_name:
+            continue
+
+        if (
+            str(product_name)
+            .strip()
+            .lower()
+            == "overall"
+        ):
+            continue
+
+        children = (
+            product_row.get(
+                "children",
+                [],
+            )
+            or []
+        )
+
+        if not children:
+            continue
+
+        product_total = [
+            0.0
+        ] * month_count
+
+        for market_row in children:
+
+            values = (
+                market_row.get(
+                    "values",
+                    [],
+                )
+                or []
+            )
+
+            for month_index in range(
+                month_count
+            ):
+
+                if month_index >= len(
+                    values
+                ):
+                    continue
+
+                product_total[
+                    month_index
+                ] += float(
+                    values[
+                        month_index
+                    ]
+                    or 0
+                )
+
+        product_volume_map[
+            product_name
+        ] = product_total
+
+    # =========================================================
+    # 5. Update Product Distribution VOLUME
+    #
+    # IMPORTANT:
+    # Overall is left untouched.
+    # =========================================================
+
+    for row in pd_volume_rows:
+
+        label = (
+            row.get(
+                "label"
+            )
+        )
+
+        if not label:
+            continue
+
+        normalized_label = (
+            str(label)
+            .strip()
+            .lower()
+        )
+
+        # ---------------------------------------------
+        # Overall is FIXED.
+        # ---------------------------------------------
+
+        if normalized_label == "overall":
+            continue
+
+        product_values = (
+            product_volume_map.get(
+                label
+            )
+        )
+
+        if product_values is None:
+            continue
+
+        row[
+            "values"
+        ] = [
+            round(
+                value,
+                6,
+            )
+            for value in product_values
+        ]
+
+    # =========================================================
+    # 6. Update Product Distribution SHARE
+    #
+    # Share denominator = FIXED Overall
+    # =========================================================
+
+    for row in pd_share_rows:
+
+        label = (
+            row.get(
+                "label"
+            )
+        )
+
+        if not label:
+            continue
+
+        normalized_label = (
+            str(label)
+            .strip()
+            .lower()
+        )
+
+        # ---------------------------------------------
+        # Overall remains exactly 100%.
+        # ---------------------------------------------
+
+        if normalized_label == "overall":
+
+            row[
+                "values"
+            ] = [
+                100.0
+                if value
+                else 0.0
+                for value
+                in fixed_overall_volume
+            ]
+
+            continue
+
+        product_values = (
+            product_volume_map.get(
+                label
+            )
+        )
+
+        if product_values is None:
+            continue
+
+        shares = []
+
+        for month_index in range(
+            month_count
+        ):
+
+            overall_volume = float(
+                fixed_overall_volume[
+                    month_index
+                ]
+                or 0
+            )
+
+            product_volume = (
+                float(
+                    product_values[
+                        month_index
+                    ]
+                    or 0
+                )
+                if month_index
+                < len(
+                    product_values
+                )
+                else 0.0
+            )
+
+            if overall_volume == 0:
+
+                share = 0.0
+
+            else:
+
+                share = (
+                    product_volume
+                    / overall_volume
+                    * 100.0
+                )
+
+            shares.append(
+                round(
+                    share,
+                    2,
+                )
+            )
+
+        row[
+            "values"
+        ] = shares
+
+    return market_analysis
+
+def sync_market_product_from_product_market(
+    market_analysis,
+):
+    """
+    Synchronize Market -> Product from Product -> Market.
+
+    Product -> Market:
+
+        Biktarvy
+            Retail
+            Non-retail
+
+        Truvada
+            Retail
+            Non-retail
+
+        Descovy
+            Retail
+            Non-retail
+
+    becomes:
+
+        Retail
+            Biktarvy
+            Truvada
+            Descovy
+
+        Non-retail
+            Biktarvy
+            Truvada
+            Descovy
+
+
+    IMPORTANT
+    ---------
+    Market -> Product share is always:
+
+        product volume inside market
+        ----------------------------
+             market total volume
+        * 100
+
+    Therefore product shares inside each market always
+    sum to 100%.
+    """
+
+    # =========================================================
+    # 1. Get Product -> Market monthly volume table
+    # =========================================================
+
+    product_market = market_analysis[
+        "product_market"
+    ]
+
+    market_product = market_analysis[
+        "market_product"
+    ]
+
+    pm_volume_table = (
+        product_market[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    mp_volume_table = (
+        market_product[
+            "market_volume"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    mp_share_table = (
+        market_product[
+            "market_share"
+        ][
+            "monthly"
+        ][
+            "table"
+        ]
+    )
+
+    pm_rows = pm_volume_table.get(
+        "rows",
+        [],
+    )
+
+    mp_volume_rows = mp_volume_table.get(
+        "rows",
+        [],
+    )
+
+    mp_share_rows = mp_share_table.get(
+        "rows",
+        [],
+    )
+
+    # =========================================================
+    # 2. Build Product -> Market volume lookup
+    #
+    # {
+    #     "Retail": {
+    #         "Biktarvy": [...],
+    #         "Truvada": [...],
+    #         "Descovy": [...]
+    #     },
+    #
+    #     "Non-retail": {...}
+    # }
+    # =========================================================
+
+    market_product_volume_map = {}
+
+    for product_row in pm_rows:
+
+        product = product_row.get(
+            "label"
+        )
+
+        if not product:
+            continue
+
+        for market_row in product_row.get(
+            "children",
+            [],
+        ):
+
+            market = market_row.get(
+                "label"
+            )
+
+            values = market_row.get(
+                "values",
+                [],
+            )
+
+            if not market:
+                continue
+
+            market_product_volume_map.setdefault(
+                market,
+                {},
+            )
+
+            market_product_volume_map[
+                market
+            ][
+                product
+            ] = [
+                float(value or 0)
+                for value in values
+            ]
+
+    # =========================================================
+    # 3. Update Market -> Product VOLUME
+    # =========================================================
+
+    for market_row in mp_volume_rows:
+
+        market = market_row.get(
+            "label"
+        )
+
+        if (
+            not market
+            or market
+            not in market_product_volume_map
+        ):
+            continue
+
+        product_map = (
+            market_product_volume_map[
+                market
+            ]
+        )
+
+        children = market_row.get(
+            "children",
+            [],
+        )
+
+        if not children:
+            continue
+
+        # Determine number of months.
+        n = max(
+            (
+                len(values)
+                for values
+                in product_map.values()
+            ),
+            default=0,
+        )
+
+        # ---------------------------------------------
+        # Update each Product volume
+        # ---------------------------------------------
+
+        for child in children:
+
+            product = child.get(
+                "label"
+            )
+
+            if product not in product_map:
+                continue
+
+            values = (
+                product_map[
+                    product
+                ]
+            )
+
+            child[
+                "values"
+            ] = values[:]
+
+        # ---------------------------------------------
+        # Recalculate Market total
+        #
+        # Market total MUST equal sum(products)
+        # ---------------------------------------------
+
+        market_totals = [
+            0.0
+        ] * n
+
+        for product_values in (
+            product_map.values()
+        ):
+
+            for i in range(
+                min(
+                    n,
+                    len(product_values),
+                )
+            ):
+
+                market_totals[i] += (
+                    float(
+                        product_values[i]
+                        or 0
+                    )
+                )
+
+        market_row[
+            "values"
+        ] = market_totals
+
+    # =========================================================
+    # 4. Recalculate Market -> Product SHARE
+    # =========================================================
+
+    for market_row in mp_share_rows:
+
+        market = market_row.get(
+            "label"
+        )
+
+        if (
+            not market
+            or market
+            not in market_product_volume_map
+        ):
+            continue
+
+        product_map = (
+            market_product_volume_map[
+                market
+            ]
+        )
+
+        children = market_row.get(
+            "children",
+            [],
+        )
+
+        if not children:
+            continue
+
+        n = max(
+            (
+                len(values)
+                for values
+                in product_map.values()
+            ),
+            default=0,
+        )
+
+        # ---------------------------------------------
+        # Calculate Market total from NEW volumes
+        # ---------------------------------------------
+
+        market_totals = [
+            0.0
+        ] * n
+
+        for product_values in (
+            product_map.values()
+        ):
+
+            for i in range(
+                min(
+                    n,
+                    len(product_values),
+                )
+            ):
+
+                market_totals[i] += (
+                    float(
+                        product_values[i]
+                        or 0
+                    )
+                )
+
+        # Parent Market share is always 100%.
+        market_row[
+            "values"
+        ] = [
+            100.0
+        ] * n
+
+        # ---------------------------------------------
+        # Product share within Market
+        # ---------------------------------------------
+
+        for child in children:
+
+            product = child.get(
+                "label"
+            )
+
+            product_values = (
+                product_map.get(
+                    product,
+                    [0.0] * n,
+                )
+            )
+
+            shares = []
+
+            for i in range(n):
+
+                market_total = float(
+                    market_totals[i]
+                    or 0
+                )
+
+                product_volume = (
+                    float(
+                        product_values[i]
+                        or 0
+                    )
+                    if i < len(
+                        product_values
+                    )
+                    else 0.0
+                )
+
+                if market_total:
+
+                    share = (
+                        product_volume
+                        / market_total
+                        * 100.0
+                    )
+
+                else:
+
+                    share = 0.0
+
+                shares.append(
+                    round(
+                        share,
+                        2,
+                    )
+                )
+
+            child[
+                "values"
+            ] = shares
 
     return market_analysis
 

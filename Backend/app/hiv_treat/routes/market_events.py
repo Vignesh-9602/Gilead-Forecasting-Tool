@@ -307,6 +307,88 @@ def load_scenario_events_payload(
 
     return all_events
 
+def debug_product_volume_consistency(
+    tree: dict,
+):
+    matrix = (
+        build_market_product_volume_matrix(
+            tree
+        )
+    )
+
+    markets = list(
+        tree.get(
+            "markets",
+            {}
+        ).keys()
+    )
+
+    products = list(
+        tree.get(
+            "products",
+            {}
+        ).keys()
+    )
+
+    overall = (
+        tree.get(
+            "overall",
+            {}
+        ).get(
+            "volume",
+            []
+        )
+    )
+
+    print(
+        "\n===== PRODUCT VOLUME CONSISTENCY ====="
+    )
+
+    for month_index, month in enumerate(
+        tree.get("months", [])
+    ):
+
+        product_totals = {}
+
+        for product_name in products:
+
+            product_totals[
+                product_name
+            ] = sum(
+                float(
+                    matrix[
+                        market_name
+                    ][
+                        product_name
+                    ][
+                        month_index
+                    ]
+                    or 0
+                )
+                for market_name in markets
+            )
+
+        matrix_total = sum(
+            product_totals.values()
+        )
+
+        overall_volume = float(
+            overall[month_index] or 0
+        )
+
+        print(
+            month,
+            {
+                "overall": overall_volume,
+                "products": product_totals,
+                "product_total": matrix_total,
+                "difference": (
+                    matrix_total
+                    - overall_volume
+                ),
+            },
+        )
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -477,6 +559,10 @@ def apply_market_event_filters(
 
         tree = build_calculation_tree(
             metrics
+        )
+
+        debug_product_volume_consistency(
+            tree
         )
 
         print("\n===== PRODUCT TOTALS =====")
@@ -1207,10 +1293,6 @@ def edit_save(
     )
 
     try:
-        payload_dict = payload.model_dump(
-            mode="json"
-        )
-
         selected_filter = (
             payload.selected_filter.model_dump(
                 mode="json"
@@ -1221,6 +1303,25 @@ def edit_save(
             payload.selected_filter.scenario_name
         )
 
+        # ==================================================
+        # 1. Prevent edits/saves to BASE scenario
+        # ==================================================
+
+        if (
+            str(scenario_name)
+            .strip()
+            .casefold()
+            == "base"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot save changes in the BASE scenario. "
+                    "Please create or select another scenario "
+                    "before editing."
+                ),
+            )
+
         selected_market = (
             payload.selected_filter.markets
         )
@@ -1229,13 +1330,21 @@ def edit_save(
             payload.selected_filter.products
         )
 
-        selected_tab = payload.selected_tab
-        selected_view = payload.selected_table_view
-        selected_metric = payload.selected_metric
+        selected_tab = (
+            payload.selected_tab
+        )
 
-        # ================================================
-        # 1. Defensive tab validation
-        # ================================================
+        selected_view = (
+            payload.selected_table_view
+        )
+
+        selected_metric = (
+            payload.selected_metric
+        )
+
+        # ==================================================
+        # 1. Validate tab
+        # ==================================================
 
         if selected_tab not in {
             "market_event",
@@ -1249,9 +1358,9 @@ def edit_save(
                 ),
             )
 
-        # ================================================
-        # 2. Validate filters
-        # ================================================
+        # ==================================================
+        # 2. Validate dates
+        # ==================================================
 
         if (
             payload.selected_filter.start_date
@@ -1265,7 +1374,10 @@ def edit_save(
                 ),
             )
 
-        # Market Event edits require a selected product.
+        # ==================================================
+        # 3. Validate required filters
+        # ==================================================
+
         if (
             selected_tab == "market_event"
             and not selected_product
@@ -1278,8 +1390,6 @@ def edit_save(
                 ),
             )
 
-        # Product Level represents products against Overall,
-        # so a selected market is not required.
         if (
             selected_tab == "product_event"
             and selected_view != "product_level"
@@ -1293,9 +1403,9 @@ def edit_save(
                 ),
             )
 
-        # ================================================
-        # 3. Validate supported edit combinations
-        # ================================================
+        # ==================================================
+        # 4. Validate supported combinations
+        # ==================================================
 
         supported_views = {
             "market_event": {
@@ -1308,9 +1418,10 @@ def edit_save(
             },
         }
 
-        if selected_view not in supported_views[
-            selected_tab
-        ]:
+        if (
+            selected_view
+            not in supported_views[selected_tab]
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1333,8 +1444,6 @@ def edit_save(
                 ),
             )
 
-        # Product Level normalization is currently based
-        # on product shares summing to 100%.
         if (
             selected_tab == "product_event"
             and selected_view == "product_level"
@@ -1348,9 +1457,9 @@ def edit_save(
                 ),
             )
 
-        # ================================================
-        # 4. Load complete unfiltered scenario data
-        # ================================================
+        # ==================================================
+        # 5. Load complete scenario data
+        # ==================================================
 
         original_metrics = load_forecast_outputs(
             cursor=cursor,
@@ -1380,37 +1489,38 @@ def edit_save(
                 ),
             )
 
-        # ================================================
-        # 5. Build calculation tree
-        # ================================================
+        # ==================================================
+        # 6. Build calculation tree
+        # ==================================================
 
         tree = build_calculation_tree(
             original_metrics
         )
 
-        # ================================================
-        # 6. Resolve selected monthly range
-        # ================================================
+        # ==================================================
+        # 7. Resolve selected months
+        # ==================================================
 
-        selected_months, selected_indexes = (
-            resolve_selected_months(
-                tree=tree,
-                payload=payload,
-            )
+        (
+            selected_months,
+            selected_indexes,
+        ) = resolve_selected_months(
+            tree=tree,
+            payload=payload,
         )
 
         if not selected_indexes:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No months were resolved from the "
-                    "selected date range."
+                    "No months were resolved from "
+                    "the selected date range."
                 ),
             )
 
-        # ================================================
-        # 7. Validate submitted rows
-        # ================================================
+        # ==================================================
+        # 8. Validate submitted rows
+        # ==================================================
 
         validate_edited_rows(
             rows=payload.edited_table_rows,
@@ -1424,24 +1534,56 @@ def edit_save(
             payload=payload,
         )
 
-        # ================================================
-        # 8. Apply edits
-        # ================================================
+        # ==================================================
+        # 9. Resolve edit type
+        # ==================================================
 
         is_product_level_edit = (
-            payload.selected_tab == "product_event"
-            and payload.selected_table_view
-            == "product_level"
+            selected_tab == "product_event"
+            and selected_view == "product_level"
         )
 
         is_product_market_level_edit = (
-            payload.selected_tab == "market_event"
-            and payload.selected_table_view
+            selected_tab == "market_event"
+            and selected_view
             == "product_market_level"
         )
 
+        is_market_product_level_edit = (
+            selected_tab == "product_event"
+            and selected_view
+            == "market_product_level"
+        )
+
+        is_market_level_edit = (
+            selected_tab == "market_event"
+            and selected_view == "market_level"
+        )
+
+        # ==================================================
+        # 10A. PRODUCT LEVEL
+        #
+        # Overall
+        #     Biktarvy
+        #     Descovy
+        #     Truvada
+        #
+        # Product totals change.
+        # Existing Product -> Market distribution is preserved.
+        # ==================================================
+
         if is_product_level_edit:
 
+            # IMPORTANT:
+            # Build the current matrix BEFORE changing
+            # top-level product totals.
+            matrix = (
+                build_market_product_volume_matrix(
+                    tree
+                )
+            )
+
+            # Apply Product Level edit.
             apply_product_level_edits(
                 tree=tree,
                 payload=payload.model_dump(
@@ -1451,6 +1593,48 @@ def edit_save(
                 decimals=2,
             )
 
+            # Push new top-level product totals into
+            # Retail / Non-retail while preserving each
+            # product's existing market distribution.
+            matrix = sync_product_level_to_matrix(
+                tree=tree,
+                matrix=matrix,
+                selected_indexes=(
+                    selected_indexes
+                ),
+            )
+
+            # Push matrix back into canonical
+            # Market -> Product source nodes.
+            apply_matrix_to_tree(
+                tree=tree,
+                matrix=matrix,
+                selected_indexes=(
+                    selected_indexes
+                ),
+            )
+
+            # Recompute all dependent values.
+            recompute_tree(
+                tree=tree,
+                selected_indexes=(
+                    selected_indexes
+                ),
+                matrix=matrix,
+                normalize_matrix_to_overall=False,
+            )
+
+        # ==================================================
+        # 10B. PRODUCT -> MARKET
+        #
+        # Biktarvy
+        #     Retail
+        #     Non-retail
+        #
+        # Product total stays fixed.
+        # Markets normalize inside product.
+        # ==================================================
+
         elif is_product_market_level_edit:
 
             matrix = (
@@ -1459,41 +1643,49 @@ def edit_save(
                 )
             )
 
-            apply_product_market_level_edits(
-                tree=tree,
-                matrix=matrix,
-                payload=payload,
-                selected_indexes=selected_indexes,
-                decimals=2,
+            matrix = (
+                apply_product_market_level_edits(
+                    tree=tree,
+                    matrix=matrix,
+                    payload=payload,
+                    selected_indexes=(
+                        selected_indexes
+                    ),
+                    decimals=2,
+                )
             )
 
             apply_matrix_to_tree(
                 tree=tree,
                 matrix=matrix,
-                selected_indexes=selected_indexes,
+                selected_indexes=(
+                    selected_indexes
+                ),
             )
-
-            print("\n==== AFTER apply_matrix_to_tree ====")
-
-            for market_name, market in tree["markets"].items():
-
-                total = 0
-
-                for source in market["sources"].values():
-
-                    product = source["products"].get("Biktarvy")
-
-                    if product:
-                        total += product["volume"][selected_indexes[0]]
-
-                print(market_name, total)
 
             recompute_tree(
                 tree=tree,
-                selected_indexes=selected_indexes,
+                selected_indexes=(
+                    selected_indexes
+                ),
+                matrix=matrix,
+                normalize_matrix_to_overall=False,
             )
 
-        else:
+        # ==================================================
+        # 10C. MARKET -> PRODUCT
+        #
+        # Non-retail
+        #     Biktarvy
+        #     Descovy
+        #     Truvada
+        #
+        # Market total stays fixed.
+        # Edited product remains fixed.
+        # Sibling products normalize.
+        # ==================================================
+
+        elif is_market_product_level_edit:
 
             matrix = (
                 build_market_product_volume_matrix(
@@ -1501,38 +1693,93 @@ def edit_save(
                 )
             )
 
-            if payload.selected_tab == "market_event":
-
-                apply_market_event_edits(
+            matrix = (
+                apply_market_product_level_edits(
                     tree=tree,
                     matrix=matrix,
                     payload=payload,
-                    selected_indexes=selected_indexes,
+                    selected_indexes=(
+                        selected_indexes
+                    ),
+                    decimals=2,
                 )
-
-            elif payload.selected_tab == "product_event":
-
-                apply_product_event_edits(
-                    tree=tree,
-                    matrix=matrix,
-                    payload=payload,
-                    selected_indexes=selected_indexes,
-                )
+            )
 
             apply_matrix_to_tree(
                 tree=tree,
                 matrix=matrix,
-                selected_indexes=selected_indexes,
+                selected_indexes=(
+                    selected_indexes
+                ),
             )
 
             recompute_tree(
                 tree=tree,
-                selected_indexes=selected_indexes,
+                selected_indexes=(
+                    selected_indexes
+                ),
+                matrix=matrix,
+                normalize_matrix_to_overall=False,
             )
 
-        # ================================================
-        # 9. Save complete updated tree
-        # ================================================
+        # ==================================================
+        # 10D. MARKET LEVEL
+        #
+        # Overall
+        #     Retail
+        #     Non-retail
+        #
+        # Overall stays fixed.
+        # Markets normalize.
+        # ==================================================
+
+        elif is_market_level_edit:
+
+            matrix = (
+                build_market_product_volume_matrix(
+                    tree
+                )
+            )
+
+            apply_market_event_edits(
+                tree=tree,
+                matrix=matrix,
+                payload=payload,
+                selected_indexes=(
+                    selected_indexes
+                ),
+            )
+
+            apply_matrix_to_tree(
+                tree=tree,
+                matrix=matrix,
+                selected_indexes=(
+                    selected_indexes
+                ),
+            )
+
+            recompute_tree(
+                tree=tree,
+                selected_indexes=(
+                    selected_indexes
+                ),
+                matrix=matrix,
+                normalize_matrix_to_overall=False,
+            )
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unable to determine edit workflow "
+                    f"for tab={selected_tab!r}, "
+                    f"view={selected_view!r}."
+                ),
+            )
+
+        # ==================================================
+        # 11. Save complete updated tree
+        # ==================================================
 
         save_tree_to_forecast_outputs(
             cursor=cursor,
@@ -1542,11 +1789,15 @@ def edit_save(
             scenario_name=scenario_name,
         )
 
+        # ==================================================
+        # 12. Commit
+        # ==================================================
+
         db.commit()
 
-        # ================================================
-        # 10. Return refreshed response
-        # ================================================
+        # ==================================================
+        # 13. Return refreshed apply-filter response
+        # ==================================================
 
         return build_apply_filters_response(
             cursor=cursor,
@@ -1568,6 +1819,9 @@ def edit_save(
 
     except Exception as exc:
         db.rollback()
+
+        import traceback
+        traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
