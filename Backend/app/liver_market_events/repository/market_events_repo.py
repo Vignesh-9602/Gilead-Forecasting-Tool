@@ -295,6 +295,16 @@ def rename_product_in_impact_rows(cur, ta_name: str, old_name: str, new_name: st
     return touched
 
 
+def delete_scenario_impact_rows(cur, ta_name: str, scenario_name: str) -> int:
+    """Remove all market_events_impact_rows for a deleted scenario."""
+    _ensure_impact_rows_table(cur)
+    cur.execute(
+        "DELETE FROM raw_liver.market_events_impact_rows WHERE ta_name = %s AND scenario_name = %s",
+        (ta_name, scenario_name)
+    )
+    return cur.rowcount
+
+
 def delete_product_from_impact_rows(cur, ta_name: str, product_name: str) -> dict:
     """
     Cascade a product deletion into every persisted event row, across every
