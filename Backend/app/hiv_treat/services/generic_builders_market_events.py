@@ -3271,217 +3271,180 @@ def build_product_level_rows(
     decimals: int = 2,
 ) -> list:
     """
-    Build flat Product Level rows.
+    Build Product Level rows.
 
-    Output:
+    Structure
+    ---------
+    Overall
+    Biktarvy
+    Descovy
+    Truvada
 
-        Overall
-        Biktarvy
-        Descovy
-        Truvada
+    Canonical values
+    ----------------
+    Volume:
+        tree["products"][product]["volume"]
 
-    Data priority:
+    Share:
+        product volume / overall volume * 100
 
-    1. Prefer the original overall-product share stored in:
+    IMPORTANT:
+        Never aggregate source-product nodes here because
+        markets may contain overlapping source representations
+        such as:
 
-           tree["product_market_inputs"]
-               [product]["overall_share"]
+            ADAP
+            Federal
+            IQVIA
+            Kaiser
+            Unknown
 
-       This corresponds to:
-
-           market = ALL
-           source_of_market = ALL
-           product != ALL
-
-    2. Fall back to tree["products"][product]["volume"]
-       only when the original share row is unavailable.
-
-    For share:
-        Product value = overall product share.
-
-    For volume:
-        Product volume =
-            overall market volume
-            × overall product share
-            / 100
+        tree["products"] contains the canonical overall
+        product totals produced by recompute_tree().
     """
 
-    if metric not in {"share", "volume"}:
+    if metric not in {
+        "share",
+        "volume",
+    }:
         raise ValueError(
-            "metric must be either 'share' or 'volume'. "
-            f"Received {metric!r}."
+            "metric must be either 'share' or 'volume'."
         )
 
-    months = list(
-        tree.get("months", [])
-        or []
+    months = tree.get(
+        "months",
+        [],
     )
-    month_count = len(months)
 
-    overall_volume = list(
-        tree.get("overall", {}).get(
+    overall_values = list(
+        tree.get(
+            "overall",
+            {},
+        ).get(
             "volume",
             [],
         )
         or []
     )
 
-    if len(overall_volume) != month_count:
-        raise ValueError(
-            "Overall-volume length mismatch. "
-            f"Expected {month_count}, "
-            f"received {len(overall_volume)}."
-        )
-
-    product_market_inputs = (
-        tree.get("product_market_inputs", {})
-        or {}
+    products = tree.get(
+        "products",
+        {},
     )
-
-    aggregated_products = (
-        tree.get("products", {})
-        or {}
-    )
-
-    # Preserve the product order from tree["products"] first.
-    product_order = list(
-        aggregated_products.keys()
-    )
-
-    # Add products that exist only in product_market_inputs.
-    for product_name in product_market_inputs.keys():
-        if product_name not in product_order:
-            product_order.append(product_name)
 
     rows = []
 
     # =====================================================
-    # Overall row
+    # Overall
     # =====================================================
 
-    rows.append({
-        "label": "Overall",
-        "editable": False,
-        "values": (
-            [100.0] * month_count
-            if metric == "share"
-            else [
-                round(
-                    float(value or 0),
-                    decimals,
-                )
-                for value in overall_volume
-            ]
-        ),
-        "children": [],
-    })
+    if metric == "share":
 
-    # =====================================================
-    # Product rows
-    # =====================================================
-
-    for product_name in product_order:
-
-        product_input = (
-            product_market_inputs.get(
-                product_name,
-                {},
-            )
-            or {}
+        rows.append(
+            {
+                "label": "Overall",
+                "editable": False,
+                "values": [
+                    100.0
+                    if float(value or 0) > 0
+                    else 0.0
+                    for value in overall_values
+                ],
+            }
         )
 
-        original_share = list(
-            product_input.get(
-                "overall_share",
+    else:
+
+        rows.append(
+            {
+                "label": "Overall",
+                "editable": False,
+                "values": [
+                    round(
+                        float(value or 0),
+                        decimals,
+                    )
+                    for value in overall_values
+                ],
+            }
+        )
+
+    # =====================================================
+    # Products
+    # =====================================================
+
+    for product_name, product_node in (
+        products.items()
+    ):
+
+        product_volumes = list(
+            product_node.get(
+                "volume",
                 [],
             )
             or []
         )
 
-        # -------------------------------------------------
-        # Preferred path:
-        # ALL | ALL | Product share
-        # -------------------------------------------------
+        values = []
 
-        if len(original_share) == month_count:
-            product_share = [
-                float(value or 0)
-                for value in original_share
-            ]
+        for month_index in range(
+            len(months)
+        ):
 
-            product_volume = [
-                float(overall_value or 0)
-                * float(share_value or 0)
-                / 100
-                for overall_value, share_value in zip(
-                    overall_volume,
-                    product_share,
+            product_volume = (
+                float(
+                    product_volumes[
+                        month_index
+                    ]
+                    or 0
                 )
-            ]
-
-        # -------------------------------------------------
-        # Base fallback:
-        # derive from aggregated product volume
-        # -------------------------------------------------
-
-        else:
-            product_node = (
-                aggregated_products.get(
-                    product_name,
-                    {},
-                )
-                or {}
-            )
-
-            product_volume = list(
-                product_node.get(
-                    "volume",
-                    [],
-                )
-                or []
-            )
-
-            if len(product_volume) != month_count:
-                # Skip products without valid data.
-                continue
-
-            product_volume = [
-                float(value or 0)
-                for value in product_volume
-            ]
-
-            product_share = [
-                (
-                    float(product_value or 0)
-                    / float(overall_value or 0)
-                    * 100
-                )
-                if float(overall_value or 0) != 0
+                if month_index
+                < len(product_volumes)
                 else 0.0
-                for product_value, overall_value in zip(
+            )
+
+            if metric == "volume":
+
+                value = round(
                     product_volume,
-                    overall_volume,
-                )
-            ]
-
-        values = (
-            product_share
-            if metric == "share"
-            else product_volume
-        )
-
-        rows.append({
-            "label": product_name,
-            "editable": True,
-            "values": [
-                round(
-                    float(value or 0),
                     decimals,
                 )
-                for value in values
-            ],
-            "children": [],
-        })
+
+            else:
+
+                overall_volume = (
+                    float(
+                        overall_values[
+                            month_index
+                        ]
+                        or 0
+                    )
+                    if month_index
+                    < len(overall_values)
+                    else 0.0
+                )
+
+                if overall_volume == 0:
+                    value = 0.0
+                else:
+                    value = round(
+                        product_volume
+                        / overall_volume
+                        * 100.0,
+                        decimals,
+                    )
+
+            values.append(
+                value
+            )
+
+        rows.append(
+            {
+                "label": product_name,
+                "editable": True,
+                "values": values,
+            }
+        )
 
     return rows
 

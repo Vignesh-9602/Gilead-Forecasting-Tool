@@ -307,6 +307,88 @@ def load_scenario_events_payload(
 
     return all_events
 
+def debug_product_volume_consistency(
+    tree: dict,
+):
+    matrix = (
+        build_market_product_volume_matrix(
+            tree
+        )
+    )
+
+    markets = list(
+        tree.get(
+            "markets",
+            {}
+        ).keys()
+    )
+
+    products = list(
+        tree.get(
+            "products",
+            {}
+        ).keys()
+    )
+
+    overall = (
+        tree.get(
+            "overall",
+            {}
+        ).get(
+            "volume",
+            []
+        )
+    )
+
+    print(
+        "\n===== PRODUCT VOLUME CONSISTENCY ====="
+    )
+
+    for month_index, month in enumerate(
+        tree.get("months", [])
+    ):
+
+        product_totals = {}
+
+        for product_name in products:
+
+            product_totals[
+                product_name
+            ] = sum(
+                float(
+                    matrix[
+                        market_name
+                    ][
+                        product_name
+                    ][
+                        month_index
+                    ]
+                    or 0
+                )
+                for market_name in markets
+            )
+
+        matrix_total = sum(
+            product_totals.values()
+        )
+
+        overall_volume = float(
+            overall[month_index] or 0
+        )
+
+        print(
+            month,
+            {
+                "overall": overall_volume,
+                "products": product_totals,
+                "product_total": matrix_total,
+                "difference": (
+                    matrix_total
+                    - overall_volume
+                ),
+            },
+        )
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -477,6 +559,10 @@ def apply_market_event_filters(
 
         tree = build_calculation_tree(
             metrics
+        )
+
+        debug_product_volume_consistency(
+            tree
         )
 
         print("\n===== PRODUCT TOTALS =====")

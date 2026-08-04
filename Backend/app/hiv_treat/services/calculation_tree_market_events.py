@@ -101,6 +101,182 @@ def populate_product_market_inputs(
                 for value in values
             ]
 
+def normalize_market_volumes_to_overall(
+    tree: dict,
+    precision: int = 6,
+):
+    """
+    Normalize market volumes so that, for every month:
+
+        sum(markets) == overall
+
+    Existing market proportions are preserved.
+
+    Overall volume is treated as authoritative.
+    """
+
+    overall_volumes = (
+        tree.get("overall", {}).get("volume", [])
+        or []
+    )
+
+    markets = (
+        tree.get("markets", {})
+        or {}
+    )
+
+    market_names = list(markets.keys())
+
+    if not market_names:
+        return tree
+
+    month_count = len(overall_volumes)
+
+    for month_index in range(month_count):
+
+        overall_volume = round(
+            float(
+                overall_volumes[month_index]
+                or 0
+            ),
+            precision,
+        )
+
+        current_market_values = []
+
+        for market_name in market_names:
+
+            values = (
+                markets[
+                    market_name
+                ].get("volume", [])
+                or []
+            )
+
+            current_value = (
+                float(
+                    values[month_index]
+                    or 0
+                )
+                if month_index < len(values)
+                else 0.0
+            )
+
+            current_market_values.append(
+                max(0.0, current_value)
+            )
+
+        current_total = round(
+            sum(current_market_values),
+            precision,
+        )
+
+        # ---------------------------------------------
+        # Overall is zero
+        # ---------------------------------------------
+
+        if overall_volume == 0:
+
+            normalized_values = [
+                0.0
+                for _ in market_names
+            ]
+
+        # ---------------------------------------------
+        # Preserve existing market proportions
+        # ---------------------------------------------
+
+        elif current_total > 0:
+
+            scale_factor = (
+                overall_volume
+                / current_total
+            )
+
+            normalized_values = [
+                round(
+                    value * scale_factor,
+                    precision,
+                )
+                for value in current_market_values
+            ]
+
+        else:
+
+            raise ValueError(
+                "Cannot normalize market volumes because "
+                "Overall is positive but market total is zero. "
+                f"Month={month_index}, "
+                f"Overall={overall_volume:.6f}."
+            )
+
+        # ---------------------------------------------
+        # Fix rounding residual
+        # ---------------------------------------------
+
+        normalized_total = round(
+            sum(normalized_values),
+            precision,
+        )
+
+        residual = round(
+            overall_volume
+            - normalized_total,
+            precision,
+        )
+
+        if normalized_values:
+
+            correction_position = max(
+                range(len(normalized_values)),
+                key=lambda i: normalized_values[i],
+            )
+
+            normalized_values[
+                correction_position
+            ] = round(
+                normalized_values[
+                    correction_position
+                ]
+                + residual,
+                precision,
+            )
+
+        # ---------------------------------------------
+        # Write back market volumes + shares
+        # ---------------------------------------------
+
+        for position, market_name in enumerate(
+            market_names
+        ):
+
+            normalized_volume = (
+                normalized_values[position]
+            )
+
+            markets[
+                market_name
+            ]["volume"][
+                month_index
+            ] = normalized_volume
+
+            markets[
+                market_name
+            ]["share"][
+                month_index
+            ] = (
+                round(
+                    normalized_volume
+                    / overall_volume
+                    * 100.0,
+                    precision,
+                )
+                if overall_volume
+                else 0.0
+            )
+
+    return tree
+
 def build_calculation_tree(metrics):
 
     tree = {
@@ -121,6 +297,8 @@ def build_calculation_tree(metrics):
     populate_market_shares(tree, metrics)
 
     populate_market_volumes(tree)
+
+    normalize_market_volumes_to_overall(tree)
 
     populate_source_shares(tree, metrics)
 
