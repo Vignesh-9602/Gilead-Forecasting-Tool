@@ -49,6 +49,8 @@ import {
     getLiverMarketEventsFilters,
     getLiverMarketEventsProducts,
     addLiverMarketEventsProduct,
+    updateLiverMarketEventsProduct,
+    deleteLiverMarketEventsProduct,
     applyLiverMarketEventsFilters,
     refreshLiverMarketEventsTable,
     runLiverMarketEventsCalculation,
@@ -619,6 +621,7 @@ export default function HIVMarketEvent() {
         open: false,
         id: null,
         name: "",
+        error: "",
     });
 
     useEffect(() => {
@@ -1052,12 +1055,8 @@ export default function HIVMarketEvent() {
 
     // ---- Manage New Products handlers ----------------------------------
 
-    const openManageProductsDialog = async () => {
-        setManageProductsDialogOpen(true);
-        setShowAddProductForm(false);
-        setAddProductError("");
-        setManageProductsLoading(true);
-
+    const loadManageProductsList = async ({ silent = false } = {}) => {
+        if (!silent) setManageProductsLoading(true);
         try {
             const response = await getLiverMarketEventsProducts({
                 ta_name: "HCV",
@@ -1070,10 +1069,59 @@ export default function HIVMarketEvent() {
             setManageProductsList(products.map(normalizeManageProductRow));
         } catch (error) {
             console.error("Failed to load market event products", error);
-            setManageProductsList([]);
+            if (!silent) setManageProductsList([]);
         } finally {
-            setManageProductsLoading(false);
+            if (!silent) setManageProductsLoading(false);
         }
+    };
+
+    // Keep the product filter (currentConfig.products, shared across all event
+    // tabs) in sync when products are added / renamed / deleted here.
+    const mutateEventTabsProducts = (mutate) => {
+        skipEventRowsResetRef.current = true;
+        setEventTabsData((prev) => {
+            const next = {};
+            Object.keys(prev).forEach((tabKey) => {
+                const tab = prev[tabKey];
+                const cfg = tab?.impact_curve_configuration;
+                if (!cfg || !Array.isArray(cfg.products)) {
+                    next[tabKey] = tab;
+                    return;
+                }
+                next[tabKey] = {
+                    ...tab,
+                    impact_curve_configuration: { ...cfg, products: mutate(cfg.products) },
+                };
+            });
+            return next;
+        });
+    };
+
+    const addProductToFilters = (name) => {
+        mutateEventTabsProducts((products) =>
+            products.some((p) => getOptionValue(p) === name) ? products : [...products, name]
+        );
+    };
+
+    const removeProductFromFilters = (name) => {
+        mutateEventTabsProducts((products) =>
+            products.filter((p) => getOptionValue(p) !== name)
+        );
+        setSelectedProducts((prev) => prev.filter((value) => value !== name));
+    };
+
+    const renameProductInFilters = (oldName, newName) => {
+        mutateEventTabsProducts((products) =>
+            products.map((p) => (getOptionValue(p) === oldName ? newName : p))
+        );
+        setSelectedProducts((prev) => prev.map((value) => (value === oldName ? newName : value)));
+    };
+
+    const openManageProductsDialog = async () => {
+        setManageProductsDialogOpen(true);
+        setShowAddProductForm(false);
+        setAddProductError("");
+        await loadManageProductsList();
     };
 
     const closeManageProductsDialog = () => {
@@ -1126,19 +1174,7 @@ export default function HIVMarketEvent() {
         }
 
         try {
-            const response = await addLiverMarketEventsProduct({
-                product_name: trimmedName,
-            });
-
-            const apiData = response?.data || {};
-            const createdProduct = apiData.product || apiData;
-
-            setManageProductsList((prev) => [
-                ...prev,
-                normalizeManageProductRow(createdProduct),
-            ]);
-
-            closeAddProductForm();
+            await addLiverMarketEventsProduct({ product_name: trimmedName });
         } catch (error) {
             console.error("Failed to add market event product", error);
             setAddProductError(
@@ -1146,7 +1182,13 @@ export default function HIVMarketEvent() {
                 error?.response?.data?.message ||
                 "Failed to add product. Please try again."
             );
+            return;
         }
+
+        addProductToFilters(trimmedName);
+        closeAddProductForm();
+        // Refetch so the new row's date-added / added-by show on the first open.
+        loadManageProductsList({ silent: true });
     };
 
     const openRenameProductDialog = (item) => {
@@ -1188,55 +1230,86 @@ export default function HIVMarketEvent() {
             return;
         }
 
-        // TODO (backend integration): endpoint not confirmed yet. Once
-        // available (likely PATCH /api/liver-market-events/products/{id}),
-        // replace the local rename below with:
-        //   await renameLiverMarketEventsProduct(renameProductDialog.id, {
-        //       ta_name: "HCV",
-        //       scenario_name: appliedScenarioName,
-        //       name: trimmedName,
-        //   });
-        //   this should cascade server-side into data rows / event targets /
-        //   event impacts / event names, then re-fetch or merge the response.
-        setManageProductsList((prev) =>
-            prev.map((p) =>
-                p.id === renameProductDialog.id
-                    ? {
-                        ...p,
-                        name: trimmedName,
-                        modifiedBy: "Current User",
-                    }
-                    : p
-            )
-        );
+        // Skip the request if the name is unchanged.
+        if (
+            currentItem &&
+            trimmedName.toLowerCase() === currentItem.name.trim().toLowerCase()
+        ) {
+            closeRenameProductDialog();
+            return;
+        }
 
-        closeRenameProductDialog();
+        const originalName = currentItem?.name ?? renameProductDialog.name;
+
+        try {
+            const response = await updateLiverMarketEventsProduct(originalName, {
+                new_product_name: trimmedName,
+            });
+
+            const apiData = response?.data || {};
+            const updatedProduct = apiData.product || apiData;
+            const appliedName =
+                updatedProduct.name ||
+                updatedProduct.product_name ||
+                updatedProduct.new_product_name ||
+                trimmedName;
+
+            setManageProductsList((prev) =>
+                prev.map((p) =>
+                    p.id === renameProductDialog.id
+                        ? {
+                            ...p,
+                            name: appliedName,
+                            modifiedBy:
+                                updatedProduct.modifiedBy ||
+                                updatedProduct.modified_by ||
+                                "Current User",
+                        }
+                        : p
+                )
+            );
+
+            renameProductInFilters(originalName, appliedName);
+            closeRenameProductDialog();
+        } catch (error) {
+            console.error("Failed to rename market event product", error);
+            setRenameProductDialog((prev) => ({
+                ...prev,
+                error:
+                    error?.response?.data?.detail ||
+                    error?.response?.data?.message ||
+                    "Failed to update product. Please try again.",
+            }));
+        }
     };
 
     const openDeleteProductDialog = (item) => {
-        setDeleteProductDialog({ open: true, id: item.id, name: item.name });
+        setDeleteProductDialog({ open: true, id: item.id, name: item.name, error: "" });
     };
 
     const closeDeleteProductDialog = () => {
-        setDeleteProductDialog({ open: false, id: null, name: "" });
+        setDeleteProductDialog({ open: false, id: null, name: "", error: "" });
     };
 
     const handleConfirmDeleteProduct = async () => {
-        // TODO (backend integration): endpoint not confirmed yet. Once
-        // available (likely DELETE /api/liver-market-events/products/{id}),
-        // replace the local removal below with:
-        //   await deleteLiverMarketEventsProduct(deleteProductDialog.id, {
-        //       ta_name: "HCV",
-        //       scenario_name: appliedScenarioName,
-        //   });
-        //   this should cascade server-side (remove data rows / the product's
-        //   own launch event, and strip references from other events), then
-        //   re-fetch or merge the response.
-        setManageProductsList((prev) =>
-            prev.filter((p) => p.id !== deleteProductDialog.id)
-        );
+        const { id, name } = deleteProductDialog;
+        try {
+            await deleteLiverMarketEventsProduct(name);
 
-        closeDeleteProductDialog();
+            setManageProductsList((prev) => prev.filter((p) => p.id !== id));
+            removeProductFromFilters(name);
+
+            closeDeleteProductDialog();
+        } catch (error) {
+            console.error("Failed to delete market event product", error);
+            setDeleteProductDialog((prev) => ({
+                ...prev,
+                error:
+                    error?.response?.data?.detail ||
+                    error?.response?.data?.message ||
+                    "Failed to delete product. Please try again.",
+            }));
+        }
     };
 
     const handleRunCalculation = async () => {
@@ -3916,6 +3989,11 @@ export default function HIVMarketEvent() {
                             This will remove it from the forecast along with any
                             associated events. This action cannot be undone.
                         </Typography>
+                        {deleteProductDialog.error && (
+                            <Typography sx={{ mt: 1, fontSize: "12px", color: "#dc2626" }}>
+                                {deleteProductDialog.error}
+                            </Typography>
+                        )}
                     </DialogContent>
 
                     <DialogActions>

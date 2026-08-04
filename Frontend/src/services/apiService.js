@@ -309,6 +309,21 @@ export const addLiverMarketEventsProduct = (payload) => {
   return httpClient.post("/api/liver-market-events/products", payload);
 };
 
+// PUT — rename a product; payload: { new_product_name: "string" }
+export const updateLiverMarketEventsProduct = (productName, payload) => {
+  return httpClient.put(
+    `/api/liver-market-events/products/${encodeURIComponent(productName)}`,
+    payload,
+  );
+};
+
+// DELETE — remove a product.
+export const deleteLiverMarketEventsProduct = (productName) => {
+  return httpClient.delete(
+    `/api/liver-market-events/products/${encodeURIComponent(productName)}`,
+  );
+};
+
 export const applyLiverMarketEventsFilters = (payload) => {
   return httpClient.post("/api/liver-market-events/apply-filters", payload);
 };
