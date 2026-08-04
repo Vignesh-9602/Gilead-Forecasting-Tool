@@ -847,16 +847,26 @@ def apply_product_market_level_edits(
     """
     Apply Product -> Market edits.
 
+    Example
+    -------
+    Biktarvy
+        Retail       <- edited
+        Non-retail   <- normalized
+
     Rules
     -----
-    - Product total volume remains fixed.
-    - Only values that differ from the current matrix are
-      treated as actual edits.
-    - Old rows remaining in payload.edited_rows are ignored
-      when their submitted values match the latest matrix.
-    - Unedited markets are normalized.
-    - Matrix stores volumes.
+    - Product total remains FIXED.
+    - Edited market share remains EXACTLY fixed.
+    - Only unedited sibling markets are normalized.
+    - Existing unedited market proportions are preserved.
+    - Market volumes under each product sum exactly to
+      the fixed Product total.
+    - Matrix always stores high precision VOLUMES.
     """
+
+    # =====================================================
+    # 1. Validation
+    # =====================================================
 
     if payload.selected_metric != "market_share":
         raise ValueError(
@@ -864,10 +874,13 @@ def apply_product_market_level_edits(
             "market_share editing only."
         )
 
-    if payload.selected_table_view != "product_market_level":
+    if (
+        payload.selected_table_view
+        != "product_market_level"
+    ):
         raise ValueError(
-            "Unsupported table view for Product-Market editing: "
-            f"{payload.selected_table_view!r}."
+            "Unsupported table view for Product-Market "
+            f"editing: {payload.selected_table_view!r}."
         )
 
     if not selected_indexes:
@@ -895,7 +908,8 @@ def apply_product_market_level_edits(
 
     if len(markets) < 2:
         raise ValueError(
-            "Product-Market editing requires at least two markets."
+            "Product-Market editing requires at least "
+            "two markets."
         )
 
     submitted_rows = rows_by_label(
@@ -912,14 +926,27 @@ def apply_product_market_level_edits(
         )
 
     calculation_precision = 6
-    calculation_tolerance = 0.000001
-    validation_tolerance = 10 ** (-decimals)
+
+    comparison_tolerance = (
+        10 ** (-(decimals + 1))
+    )
+
+    validation_tolerance = 0.000001
 
     actual_edits_detected = False
+
+    # =====================================================
+    # 2. Selected months
+    # =====================================================
 
     for value_position, month_index in enumerate(
         selected_indexes
     ):
+
+        # =================================================
+        # 3. Each Product independently
+        # =================================================
+
         for product_name in products:
 
             product_row = submitted_rows.get(
@@ -933,25 +960,77 @@ def apply_product_market_level_edits(
                 product_row.children or []
             )
 
-            current_market_values = [
-                float(
-                    matrix[market_name][product_name][
-                        month_index
-                    ]
-                    or 0
-                )
-                for market_name in markets
-            ]
+            # =============================================
+            # Current Product -> Market volumes
+            # =============================================
 
-            fixed_product_total = sum(
-                current_market_values
+            current_market_values = []
+
+            for market_name in markets:
+
+                product_values = (
+                    matrix
+                    .get(market_name, {})
+                    .get(product_name, [])
+                    or []
+                )
+
+                if (
+                    month_index
+                    >= len(product_values)
+                ):
+                    raise ValueError(
+                        "Matrix series length mismatch. "
+                        f"Product={product_name!r}, "
+                        f"Market={market_name!r}, "
+                        f"month_index={month_index}."
+                    )
+
+                current_market_values.append(
+                    round(
+                        max(
+                            0.0,
+                            float(
+                                product_values[
+                                    month_index
+                                ]
+                                or 0
+                            ),
+                        ),
+                        calculation_precision,
+                    )
+                )
+
+            # =============================================
+            # Fixed Product total
+            # =============================================
+
+            fixed_product_total = round(
+                sum(current_market_values),
+                calculation_precision,
             )
 
-            edited_market_values: dict[int, float] = {}
+            # Product total remains fixed.
+            if fixed_product_total < 0:
+                raise ValueError(
+                    "Product total cannot be negative. "
+                    f"Product={product_name!r}, "
+                    f"month_index={month_index}."
+                )
 
-            for market_position, market_name in enumerate(
-                markets
-            ):
+            # =============================================
+            # Detect actual edited market occurrences
+            # =============================================
+
+            edited_market_values = {}
+            edited_market_positions = set()
+            submitted_share_values = {}
+
+            for (
+                market_position,
+                market_name,
+            ) in enumerate(markets):
+
                 if not is_row_edited(
                     edited_rows=edited_rows,
                     parent_label=product_name,
@@ -965,64 +1044,71 @@ def apply_product_market_level_edits(
 
                 if child_row is None:
                     raise ValueError(
-                        "Edited Product-Market row was not found. "
+                        "Edited Product-Market row "
+                        "was not found. "
                         f"Product={product_name!r}, "
-                        f"market={market_name!r}."
+                        f"Market={market_name!r}."
                     )
 
-                if value_position >= len(
-                    child_row.values
+                if (
+                    value_position
+                    >= len(child_row.values)
                 ):
                     raise ValueError(
-                        "Edited value count does not match the "
-                        "selected month count. "
+                        "Edited value count does not "
+                        "match selected months. "
                         f"Product={product_name!r}, "
-                        f"market={market_name!r}, "
-                        f"month_index={month_index}."
+                        f"Market={market_name!r}, "
+                        f"position={value_position}."
                     )
 
-                raw_value = child_row.values[
-                    value_position
-                ]
+                raw_value = (
+                    child_row.values[
+                        value_position
+                    ]
+                )
 
                 try:
                     submitted_share = float(
                         raw_value
                     )
-                except (TypeError, ValueError) as exc:
+
+                except (
+                    TypeError,
+                    ValueError,
+                ) as exc:
+
                     raise ValueError(
                         "Invalid Product-Market share. "
                         f"Product={product_name!r}, "
-                        f"market={market_name!r}, "
-                        f"month_index={month_index}, "
+                        f"Market={market_name!r}, "
                         f"value={raw_value!r}."
                     ) from exc
 
-                if not 0 <= submitted_share <= 100:
+                if not (
+                    0
+                    <= submitted_share
+                    <= 100
+                ):
                     raise ValueError(
-                        "Product-Market share must be between "
-                        "0 and 100. "
+                        "Product-Market share must be "
+                        "between 0 and 100. "
                         f"Product={product_name!r}, "
-                        f"market={market_name!r}, "
-                        f"month_index={month_index}, "
+                        f"Market={market_name!r}, "
                         f"value={submitted_share}."
                     )
 
-                # =============================================
-                # Detect whether this is an actual new edit
-                # =============================================
-
-                current_market_volume = (
+                current_volume = (
                     current_market_values[
                         market_position
                     ]
                 )
 
                 current_share = (
-                    current_market_volume
+                    current_volume
                     / fixed_product_total
                     * 100.0
-                    if fixed_product_total > 0
+                    if fixed_product_total
                     else 0.0
                 )
 
@@ -1036,10 +1122,16 @@ def apply_product_market_level_edits(
                     decimals,
                 )
 
-                # Ignore rows retained from previous saves.
+                # -----------------------------------------
+                # Ignore stale edited_rows entries.
+                # -----------------------------------------
+
                 if (
-                    submitted_display_share
-                    == current_display_share
+                    abs(
+                        submitted_display_share
+                        - current_display_share
+                    )
+                    <= comparison_tolerance
                 ):
                     continue
 
@@ -1054,141 +1146,343 @@ def apply_product_market_level_edits(
                     market_position
                 ] = submitted_volume
 
+                edited_market_positions.add(
+                    market_position
+                )
+
+                submitted_share_values[
+                    market_position
+                ] = submitted_display_share
+
             if not edited_market_values:
                 continue
 
             actual_edits_detected = True
 
-            total_edited_volume = sum(
-                edited_market_values.values()
+            # =============================================
+            # Validate edited values
+            # =============================================
+
+            edited_total = round(
+                sum(
+                    edited_market_values.values()
+                ),
+                calculation_precision,
             )
 
             if (
-                total_edited_volume
+                edited_total
                 > fixed_product_total
-                + calculation_tolerance
+                + validation_tolerance
             ):
-                edited_shares = {
-                    markets[position]: round(
-                        volume
-                        / fixed_product_total
-                        * 100.0,
-                        decimals,
-                    )
-                    if fixed_product_total > 0
-                    else 0.0
-                    for position, volume
-                    in edited_market_values.items()
-                }
-
                 raise ValueError(
-                    "Changed Product-Market values exceed the "
-                    "product total. This usually means multiple "
-                    "markets were changed for the same product "
-                    "and month and their shares exceed 100%. "
+                    "Edited Product-Market values exceed "
+                    "the fixed Product total. "
                     f"Product={product_name!r}, "
                     f"month_index={month_index}, "
-                    f"edited_shares={edited_shares}."
+                    f"Edited={edited_total:.6f}, "
+                    f"ProductTotal="
+                    f"{fixed_product_total:.6f}."
                 )
 
-            redistributed_market_values = (
-                redistribute_fixed_total(
-                    current_values=current_market_values,
-                    fixed_total=fixed_product_total,
-                    edited_values=edited_market_values,
-                )
+            # =============================================
+            # Remaining volume belongs ONLY to unedited
+            # markets.
+            # =============================================
+
+            remaining_volume = round(
+                fixed_product_total
+                - edited_total,
+                calculation_precision,
             )
 
-            for market_position, market_name in enumerate(
-                markets
-            ):
-                matrix[market_name][product_name][
-                    month_index
+            unedited_positions = [
+                position
+                for position in range(
+                    len(markets)
+                )
+                if position
+                not in edited_market_positions
+            ]
+
+            redistributed_values = list(
+                current_market_values
+            )
+
+            # =============================================
+            # LOCK edited markets
+            # =============================================
+
+            for (
+                position,
+                edited_volume,
+            ) in edited_market_values.items():
+
+                redistributed_values[
+                    position
                 ] = round(
-                    float(
-                        redistributed_market_values[
-                            market_position
+                    edited_volume,
+                    calculation_precision,
+                )
+
+            # =============================================
+            # Normalize ONLY unedited markets
+            # =============================================
+
+            if unedited_positions:
+
+                current_unedited_total = round(
+                    sum(
+                        current_market_values[
+                            position
                         ]
+                        for position
+                        in unedited_positions
                     ),
-                    decimals,
+                    calculation_precision,
                 )
 
+                allocated = 0.0
+
+                for (
+                    list_position,
+                    market_position,
+                ) in enumerate(
+                    unedited_positions
+                ):
+
+                    is_last = (
+                        list_position
+                        == len(
+                            unedited_positions
+                        ) - 1
+                    )
+
+                    if is_last:
+
+                        normalized_volume = round(
+                            remaining_volume
+                            - allocated,
+                            calculation_precision,
+                        )
+
+                    elif (
+                        current_unedited_total
+                        > 0
+                    ):
+
+                        ratio = (
+                            current_market_values[
+                                market_position
+                            ]
+                            / current_unedited_total
+                        )
+
+                        normalized_volume = round(
+                            remaining_volume
+                            * ratio,
+                            calculation_precision,
+                        )
+
+                    else:
+
+                        normalized_volume = round(
+                            remaining_volume
+                            / len(
+                                unedited_positions
+                            ),
+                            calculation_precision,
+                        )
+
+                    redistributed_values[
+                        market_position
+                    ] = normalized_volume
+
+                    allocated = round(
+                        allocated
+                        + normalized_volume,
+                        calculation_precision,
+                    )
+
+            else:
+
+                if (
+                    abs(
+                        edited_total
+                        - fixed_product_total
+                    )
+                    > validation_tolerance
+                ):
+                    raise ValueError(
+                        "All Product-Market children "
+                        "were edited, but their total "
+                        "does not equal the Product total. "
+                        f"Product={product_name!r}, "
+                        f"month_index={month_index}."
+                    )
+
             # =============================================
-            # Validate fixed product total
-            # =============================================
-
-            recalculated_product_total = sum(
-                float(
-                    matrix[market_name][product_name][
-                        month_index
-                    ]
-                    or 0
-                )
-                for market_name in markets
-            )
-
-            total_rounding_tolerance = (
-                len(markets)
-                * validation_tolerance
-            )
-
-            if abs(
-                recalculated_product_total
-                - fixed_product_total
-            ) > total_rounding_tolerance:
-                raise ValueError(
-                    "Product total changed during Product-Market "
-                    "redistribution. "
-                    f"Product={product_name!r}, "
-                    f"month_index={month_index}, "
-                    f"expected={fixed_product_total:.6f}, "
-                    f"received={recalculated_product_total:.6f}."
-                )
-
-            # =============================================
-            # Validate actual edited values
+            # Write HIGH PRECISION volumes to matrix
+            #
+            # IMPORTANT:
+            # Do NOT round matrix to UI decimals.
             # =============================================
 
             for (
                 market_position,
-                expected_volume,
-            ) in edited_market_values.items():
+                market_name,
+            ) in enumerate(markets):
 
-                market_name = markets[
-                    market_position
-                ]
-
-                actual_volume = float(
-                    matrix[market_name][product_name][
-                        month_index
-                    ]
-                    or 0
+                matrix[
+                    market_name
+                ][
+                    product_name
+                ][
+                    month_index
+                ] = round(
+                    redistributed_values[
+                        market_position
+                    ],
+                    calculation_precision,
                 )
 
-                if round(
-                    actual_volume,
-                    decimals,
-                ) != round(
-                    expected_volume,
-                    decimals,
+            # =============================================
+            # Validate Product total remained fixed
+            # =============================================
+
+            recalculated_total = round(
+                sum(
+                    float(
+                        matrix[
+                            market_name
+                        ][
+                            product_name
+                        ][
+                            month_index
+                        ]
+                        or 0
+                    )
+                    for market_name
+                    in markets
+                ),
+                calculation_precision,
+            )
+
+            if (
+                abs(
+                    recalculated_total
+                    - fixed_product_total
+                )
+                > validation_tolerance
+            ):
+                raise ValueError(
+                    "Product total changed during "
+                    "Product-Market redistribution. "
+                    f"Product={product_name!r}, "
+                    f"month_index={month_index}, "
+                    f"Expected="
+                    f"{fixed_product_total:.6f}, "
+                    f"Calculated="
+                    f"{recalculated_total:.6f}."
+                )
+
+            # =============================================
+            # Validate edited shares stayed exact
+            # =============================================
+
+            if fixed_product_total > 0:
+
+                for (
+                    market_position,
+                    expected_share,
+                ) in (
+                    submitted_share_values.items()
+                ):
+
+                    market_name = markets[
+                        market_position
+                    ]
+
+                    actual_volume = float(
+                        matrix[
+                            market_name
+                        ][
+                            product_name
+                        ][
+                            month_index
+                        ]
+                        or 0
+                    )
+
+                    actual_share = (
+                        actual_volume
+                        / fixed_product_total
+                        * 100.0
+                    )
+
+                    if (
+                        abs(
+                            actual_share
+                            - expected_share
+                        )
+                        > 0.0001
+                    ):
+                        raise ValueError(
+                            "Edited Product-Market share "
+                            "was not preserved. "
+                            f"Product={product_name!r}, "
+                            f"Market={market_name!r}, "
+                            f"Submitted="
+                            f"{expected_share:.6f}%, "
+                            f"Calculated="
+                            f"{actual_share:.6f}%."
+                        )
+
+            # =============================================
+            # Validate shares sum to 100%
+            # =============================================
+
+            if fixed_product_total > 0:
+
+                share_total = sum(
+                    (
+                        float(
+                            matrix[
+                                market_name
+                            ][
+                                product_name
+                            ][
+                                month_index
+                            ]
+                            or 0
+                        )
+                        / fixed_product_total
+                        * 100.0
+                    )
+                    for market_name
+                    in markets
+                )
+
+                if (
+                    abs(
+                        share_total
+                        - 100.0
+                    )
+                    > 0.0001
                 ):
                     raise ValueError(
-                        "Edited Product-Market value was not "
-                        "preserved. "
+                        "Product-Market shares do not "
+                        "total 100%. "
                         f"Product={product_name!r}, "
-                        f"market={market_name!r}, "
                         f"month_index={month_index}, "
-                        f"expected="
-                        f"{expected_volume:.{decimals}f}, "
-                        f"received="
-                        f"{actual_volume:.{decimals}f}."
+                        f"Total={share_total:.6f}%."
                     )
 
     if not actual_edits_detected:
         raise ValueError(
-            "No changed Product-Market values were detected. "
-            "The submitted values already match the current "
-            "forecast."
+            "No changed Product-Market values were "
+            "detected. The submitted values already "
+            "match the current forecast."
         )
 
     return matrix
@@ -5030,33 +5324,31 @@ def apply_matrix_to_tree(
     selected_indexes: list[int],
 ):
     """
-    Push canonical Market x Product volumes back into the tree.
+    Push Market x Product matrix back into the tree.
 
-    IMPORTANT
+    Behaviour
     ---------
-    If a market contains an "Unknown" source, that source represents
-    the canonical direct Market -> Product rows.
+    1. If Unknown exists:
+       - Unknown receives the exact canonical Market-Product value.
 
-    Therefore:
+    2. Named sources such as:
+           ADAP
+           Federal
+           IQVIA
+           Kaiser
 
-        matrix[market][product]
+       are ALSO updated proportionally.
 
-    must be written ONLY to:
+       This keeps Model Input and Market Event consistent.
 
-        market -> Unknown -> product
+    3. Existing source proportions for each product are preserved.
 
-    We must NOT distribute the same Market-Product volume across
-    ADAP/Federal/IQVIA/Kaiser/etc., because those source rows are
-    separate source-level representations and would cause the
-    Product-Channel value to drift/double-count.
+    4. The final source absorbs rounding residual.
 
-    If no Unknown source exists, fall back to proportional
-    distribution across the existing real source-product rows.
+    Important:
+        Unknown is NOT included in the named-source redistribution
+        because it represents the aggregate Market-Product row.
     """
-
-    month_count = len(
-        tree.get("months", [])
-    )
 
     markets = (
         tree.get("markets", {})
@@ -5068,123 +5360,124 @@ def apply_matrix_to_tree(
         or {}
     )
 
-    for market_name, market_node in markets.items():
+    month_count = len(
+        tree.get("months", [])
+    )
+
+    precision = 6
+
+    for market_name, market_node in (
+        markets.items()
+    ):
 
         sources = (
-            market_node.get("sources", {})
+            market_node.get(
+                "sources",
+                {},
+            )
             or {}
         )
 
         market_matrix = (
-            matrix.get(market_name, {})
+            matrix.get(
+                market_name,
+                {},
+            )
             or {}
         )
 
-        # ==================================================
-        # CASE 1:
-        # Canonical direct Product-Channel rows exist
-        # ==================================================
+        unknown_source = (
+            sources.get("Unknown")
+        )
 
-        unknown_source = sources.get("Unknown")
-
-        if unknown_source is not None:
-
-            unknown_products = (
-                unknown_source.get("products", {})
-                or {}
-            )
-
-            for product_name in products:
-
-                matrix_values = (
-                    market_matrix.get(product_name)
-                )
-
-                if matrix_values is None:
-                    continue
-
-                product_node = (
-                    unknown_products.get(product_name)
-                )
-
-                if product_node is None:
-                    continue
-
-                volume_values = product_node.setdefault(
-                    "volume",
-                    [0.0] * month_count,
-                )
-
-                for month_index in selected_indexes:
-
-                    if month_index >= len(
-                        matrix_values
-                    ):
-                        raise ValueError(
-                            "Matrix month index is outside "
-                            "the available range. "
-                            f"Market={market_name!r}, "
-                            f"product={product_name!r}, "
-                            f"month_index={month_index}."
-                        )
-
-                    if month_index >= len(
-                        volume_values
-                    ):
-                        raise ValueError(
-                            "Tree product-volume month index "
-                            "is outside the available range. "
-                            f"Market={market_name!r}, "
-                            f"product={product_name!r}, "
-                            f"month_index={month_index}."
-                        )
-
-                    volume_values[
-                        month_index
-                    ] = round(
-                        float(
-                            matrix_values[
-                                month_index
-                            ]
-                            or 0
-                        ),
-                        6,
-                    )
-
-            # IMPORTANT:
-            #
-            # Do not also distribute the same matrix values
-            # into ADAP/Federal/IQVIA/Kaiser.
-            #
-            # Unknown is the canonical Market-Product source.
-            continue
-
-        # ==================================================
-        # CASE 2:
-        # No canonical Unknown source
-        #
-        # Fall back to proportional source distribution.
-        # ==================================================
+        # Named/real sources only.
+        real_sources = {
+            source_name: source_node
+            for source_name, source_node
+            in sources.items()
+            if str(source_name).strip().lower()
+            != "unknown"
+        }
 
         for product_name in products:
 
             matrix_values = (
-                market_matrix.get(product_name)
+                market_matrix.get(
+                    product_name
+                )
             )
 
             if matrix_values is None:
                 continue
 
+            # =================================================
+            # 1. Update canonical Unknown product
+            # =================================================
+
+            if unknown_source is not None:
+
+                unknown_product = (
+                    unknown_source
+                    .get(
+                        "products",
+                        {},
+                    )
+                    .get(
+                        product_name
+                    )
+                )
+
+                if unknown_product is not None:
+
+                    unknown_volumes = (
+                        unknown_product.setdefault(
+                            "volume",
+                            [0.0] * month_count,
+                        )
+                    )
+
+                    for month_index in (
+                        selected_indexes
+                    ):
+
+                        if (
+                            month_index
+                            >= len(matrix_values)
+                        ):
+                            continue
+
+                        unknown_volumes[
+                            month_index
+                        ] = round(
+                            float(
+                                matrix_values[
+                                    month_index
+                                ]
+                                or 0
+                            ),
+                            precision,
+                        )
+
+            # =================================================
+            # 2. Collect real source-product nodes
+            # =================================================
+
             source_product_nodes = []
 
-            for source_name, source_node in (
-                sources.items()
-            ):
+            for (
+                source_name,
+                source_node,
+            ) in real_sources.items():
 
                 product_node = (
                     source_node
-                    .get("products", {})
-                    .get(product_name)
+                    .get(
+                        "products",
+                        {},
+                    )
+                    .get(
+                        product_name
+                    )
                 )
 
                 if product_node is None:
@@ -5197,26 +5490,46 @@ def apply_matrix_to_tree(
                     )
                 )
 
+            # Retail may have only Unknown.
+            # In that case there is nothing else to sync.
             if not source_product_nodes:
                 continue
 
-            for month_index in selected_indexes:
+            # =================================================
+            # 3. Redistribute canonical product volume across
+            #    real sources proportionally
+            # =================================================
 
-                new_market_product_volume = float(
-                    matrix_values[
-                        month_index
-                    ]
-                    or 0
+            for month_index in (
+                selected_indexes
+            ):
+
+                if (
+                    month_index
+                    >= len(matrix_values)
+                ):
+                    continue
+
+                target_market_product_volume = (
+                    round(
+                        float(
+                            matrix_values[
+                                month_index
+                            ]
+                            or 0
+                        ),
+                        precision,
+                    )
                 )
 
-                existing_values = []
+                existing_source_values = []
 
                 for (
                     source_name,
                     product_node,
                 ) in source_product_nodes:
 
-                    volumes = (
+                    volume_values = (
                         product_node.get(
                             "volume",
                             [],
@@ -5226,17 +5539,17 @@ def apply_matrix_to_tree(
 
                     existing_value = (
                         float(
-                            volumes[
+                            volume_values[
                                 month_index
                             ]
                             or 0
                         )
                         if month_index
-                        < len(volumes)
+                        < len(volume_values)
                         else 0.0
                     )
 
-                    existing_values.append(
+                    existing_source_values.append(
                         (
                             source_name,
                             product_node,
@@ -5246,11 +5559,8 @@ def apply_matrix_to_tree(
 
                 existing_total = sum(
                     value
-                    for (
-                        _,
-                        _,
-                        value,
-                    ) in existing_values
+                    for _, _, value
+                    in existing_source_values
                 )
 
                 allocated_total = 0.0
@@ -5260,26 +5570,29 @@ def apply_matrix_to_tree(
                     product_node,
                     existing_value,
                 ) in enumerate(
-                    existing_values
+                    existing_source_values
                 ):
 
-                    volumes = (
+                    volume_values = (
                         product_node.setdefault(
                             "volume",
                             [0.0] * month_count,
                         )
                     )
 
-                    # Last source receives rounding residual.
-                    if (
+                    is_last = (
                         position
-                        == len(existing_values) - 1
-                    ):
+                        == len(
+                            existing_source_values
+                        ) - 1
+                    )
+
+                    if is_last:
 
                         allocated_value = round(
-                            new_market_product_volume
+                            target_market_product_volume
                             - allocated_total,
-                            6,
+                            precision,
                         )
 
                     elif existing_total > 0:
@@ -5290,25 +5603,29 @@ def apply_matrix_to_tree(
                         )
 
                         allocated_value = round(
-                            new_market_product_volume
+                            target_market_product_volume
                             * ratio,
-                            6,
+                            precision,
                         )
 
                     else:
 
                         allocated_value = round(
-                            new_market_product_volume
-                            / len(existing_values),
-                            6,
+                            target_market_product_volume
+                            / len(
+                                existing_source_values
+                            ),
+                            precision,
                         )
 
-                    volumes[
+                    volume_values[
                         month_index
                     ] = allocated_value
 
-                    allocated_total += (
-                        allocated_value
+                    allocated_total = round(
+                        allocated_total
+                        + allocated_value,
+                        precision,
                     )
 
     return tree
@@ -5807,43 +6124,33 @@ def recompute_tree(
             )
 
         # =================================================
-        # 3. Synchronize source level
+        # Synchronize source level
         # =================================================
 
-        for market_name, market in (
-            markets.items()
-        ):
+        for market_name, market in markets.items():
 
             sources = (
-                market.get(
-                    "sources",
-                    {},
-                )
+                market.get("sources", {})
                 or {}
             )
 
             market_volume = float(
-                market["volume"][
-                    month_index
-                ]
+                market["volume"][month_index]
                 or 0
             )
 
             # =================================================
-            # CASE A:
-            # Unknown exists
-            #
-            # Unknown is canonical Market -> Product.
+            # 1. Update canonical Unknown source
             # =================================================
 
-            if "Unknown" in sources:
+            unknown_source = sources.get(
+                "Unknown"
+            )
 
-                unknown = sources[
-                    "Unknown"
-                ]
+            if unknown_source is not None:
 
                 unknown_volumes = (
-                    unknown.get(
+                    unknown_source.get(
                         "volume",
                         [],
                     )
@@ -5851,7 +6158,7 @@ def recompute_tree(
                 )
 
                 unknown_shares = (
-                    unknown.get(
+                    unknown_source.get(
                         "share",
                         [],
                     )
@@ -5861,7 +6168,9 @@ def recompute_tree(
                 if month_index < len(
                     unknown_volumes
                 ):
-                    unknown["volume"][
+                    unknown_source[
+                        "volume"
+                    ][
                         month_index
                     ] = round(
                         market_volume,
@@ -5871,7 +6180,9 @@ def recompute_tree(
                 if month_index < len(
                     unknown_shares
                 ):
-                    unknown["share"][
+                    unknown_source[
+                        "share"
+                    ][
                         month_index
                     ] = (
                         100.0
@@ -5880,19 +6191,12 @@ def recompute_tree(
                     )
 
                 unknown_products = (
-                    unknown.get(
+                    unknown_source.get(
                         "products",
                         {},
                     )
                     or {}
                 )
-
-                # -----------------------------------------
-                # Matrix is canonical.
-                #
-                # Push exact Market -> Product values into
-                # Unknown and recalculate product shares.
-                # -----------------------------------------
 
                 for product_name in product_names:
 
@@ -5927,19 +6231,14 @@ def recompute_tree(
                     ):
                         continue
 
+                    # Matrix is canonical for Market -> Product.
                     if matrix is not None:
 
                         product_volume = round(
                             get_matrix_volume(
-                                market_name=(
-                                    market_name
-                                ),
-                                product_name=(
-                                    product_name
-                                ),
-                                month_index=(
-                                    month_index
-                                ),
+                                market_name=market_name,
+                                product_name=product_name,
+                                month_index=month_index,
                             ),
                             calculation_precision,
                         )
@@ -5973,35 +6272,46 @@ def recompute_tree(
                             market_volume,
                         )
 
-                # -----------------------------------------
-                # IMPORTANT:
-                #
-                # Do not recompute the market from ADAP,
-                # Federal, IQVIA, Kaiser etc.
-                #
-                # They are not added to Unknown.
-                # -----------------------------------------
-
-                continue
-
             # =================================================
-            # CASE B:
-            # No Unknown
+            # 2. IMPORTANT:
+            # Recompute REAL named sources too
             #
-            # Recalculate actual source hierarchy.
+            # ADAP / Federal / IQVIA / Kaiser
+            #
+            # apply_matrix_to_tree() has already changed their
+            # product volumes. Now their totals and shares must
+            # be recalculated before saving.
             # =================================================
 
-            for source_name, source in (
-                sources.items()
-            ):
+            real_sources = {
+                source_name: source_node
+                for source_name, source_node
+                in sources.items()
+                if (
+                    str(source_name)
+                    .strip()
+                    .lower()
+                    != "unknown"
+                )
+            }
+
+            for (
+                source_name,
+                source_node,
+            ) in real_sources.items():
 
                 source_products = (
-                    source.get(
+                    source_node.get(
                         "products",
                         {},
                     )
                     or {}
                 )
+
+                # ---------------------------------------------
+                # Source total =
+                # sum(updated product volumes)
+                # ---------------------------------------------
 
                 source_volume = round(
                     sum(
@@ -6017,20 +6327,22 @@ def recompute_tree(
                         )
                         for product_node
                         in source_products.values()
-                        if month_index
-                        < len(
-                            product_node.get(
-                                "volume",
-                                [],
+                        if (
+                            month_index
+                            < len(
+                                product_node.get(
+                                    "volume",
+                                    [],
+                                )
+                                or []
                             )
-                            or []
                         )
                     ),
                     calculation_precision,
                 )
 
                 source_volumes = (
-                    source.get(
+                    source_node.get(
                         "volume",
                         [],
                     )
@@ -6038,29 +6350,43 @@ def recompute_tree(
                 )
 
                 source_shares = (
-                    source.get(
+                    source_node.get(
                         "share",
                         [],
                     )
                     or []
                 )
 
-                if month_index < len(
-                    source_volumes
+                if (
+                    month_index
+                    < len(source_volumes)
                 ):
-                    source["volume"][
+                    source_node[
+                        "volume"
+                    ][
                         month_index
                     ] = source_volume
 
-                if month_index < len(
-                    source_shares
+                # ---------------------------------------------
+                # Source share within market
+                # ---------------------------------------------
+
+                if (
+                    month_index
+                    < len(source_shares)
                 ):
-                    source["share"][
+                    source_node[
+                        "share"
+                    ][
                         month_index
                     ] = percentage(
                         source_volume,
                         market_volume,
                     )
+
+                # ---------------------------------------------
+                # Product share within source
+                # ---------------------------------------------
 
                 for (
                     product_name,
@@ -6091,17 +6417,19 @@ def recompute_tree(
                     ):
                         continue
 
+                    product_volume = float(
+                        product_volumes[
+                            month_index
+                        ]
+                        or 0
+                    )
+
                     product_node[
                         "share"
                     ][
                         month_index
                     ] = percentage(
-                        float(
-                            product_volumes[
-                                month_index
-                            ]
-                            or 0
-                        ),
+                        product_volume,
                         source_volume,
                     )
 
@@ -7436,7 +7764,291 @@ def save_tree_to_forecast_outputs(
                 full_values=product_node["share"],
             ),
         )
+    
 
+    # # ============================================================
+    # # Persist complete recalculated source hierarchy
+    # #
+    # # IMPORTANT:
+    # # Model Input reconstructs Product -> Market from these rows.
+    # #
+    # # Do not rely only on original_metrics rows because a custom
+    # # scenario may be missing source/product rows and the Model
+    # # Input code will otherwise fall back to BASE.
+    # # ============================================================
+
+    # original_row_lookup = {}
+
+    # for row in original_share_rows:
+
+    #     key = (
+    #         normalize_label(
+    #             row.get("market")
+    #         ),
+    #         normalize_label(
+    #             row.get("source_of_market")
+    #         ),
+    #         normalize_label(
+    #             row.get("product")
+    #         ),
+    #     )
+
+    #     original_row_lookup[key] = row
+
+
+    # def get_original_forecast_data(
+    #     market_name,
+    #     source_name,
+    #     product_name,
+    # ):
+    #     """
+    #     Return existing scenario forecast_data if the row exists.
+
+    #     If it does not exist in the scenario, use a compatible
+    #     existing forecast_data structure as the date template.
+    #     """
+
+    #     key = (
+    #         normalize_label(market_name),
+    #         normalize_label(source_name),
+    #         normalize_label(product_name),
+    #     )
+
+    #     existing = original_row_lookup.get(
+    #         key
+    #     )
+
+    #     if existing is not None:
+    #         return existing.get(
+    #             "forecast_data"
+    #         )
+
+    #     # --------------------------------------------------------
+    #     # Need a date/template structure for a brand-new scenario
+    #     # row.
+    #     #
+    #     # Any market-share row should have the same monthly dates.
+    #     # --------------------------------------------------------
+
+    #     if original_share_rows:
+    #         return original_share_rows[
+    #             0
+    #         ].get(
+    #             "forecast_data"
+    #         )
+
+    #     return None
+
+
+    # # ============================================================
+    # # A. Market totals
+    # #
+    # # Retail / ALL / ALL
+    # # Non-retail / ALL / ALL
+    # # ============================================================
+
+    # for market_name, market_node in (
+    #     tree.get(
+    #         "markets",
+    #         {},
+    #     ).items()
+    # ):
+
+    #     original_forecast_data = (
+    #         get_original_forecast_data(
+    #             market_name,
+    #             "ALL",
+    #             "ALL",
+    #         )
+    #     )
+
+    #     upsert_forecast_output(
+    #         cursor,
+    #         ta_name=ta_name,
+    #         scenario_name=scenario_name,
+    #         metric="market_share",
+    #         market=market_name,
+    #         source_of_market="ALL",
+    #         product="ALL",
+    #         forecast_data=build_updated_forecast_data(
+    #             original_forecast_data=(
+    #                 original_forecast_data
+    #             ),
+    #             full_values=(
+    #                 market_node.get(
+    #                     "share",
+    #                     [],
+    #                 )
+    #             ),
+    #         ),
+    #     )
+
+    #     sources = (
+    #         market_node.get(
+    #             "sources",
+    #             {},
+    #         )
+    #         or {}
+    #     )
+
+    #     # ========================================================
+    #     # B. Aggregate Market -> Product rows
+    #     #
+    #     # Retail / ALL / Biktarvy
+    #     # Non-retail / ALL / Biktarvy
+    #     #
+    #     # Prefer Unknown because it is our canonical
+    #     # Market -> Product representation.
+    #     # ========================================================
+
+    #     unknown_source = (
+    #         sources.get(
+    #             "Unknown"
+    #         )
+    #     )
+
+    #     if unknown_source is not None:
+
+    #         for (
+    #             product_name,
+    #             product_node,
+    #         ) in (
+    #             unknown_source.get(
+    #                 "products",
+    #                 {},
+    #             )
+    #             or {}
+    #         ).items():
+
+    #             original_forecast_data = (
+    #                 get_original_forecast_data(
+    #                     market_name,
+    #                     "ALL",
+    #                     product_name,
+    #                 )
+    #             )
+
+    #             upsert_forecast_output(
+    #                 cursor,
+    #                 ta_name=ta_name,
+    #                 scenario_name=scenario_name,
+    #                 metric="market_share",
+    #                 market=market_name,
+    #                 source_of_market="ALL",
+    #                 product=product_name,
+    #                 forecast_data=build_updated_forecast_data(
+    #                     original_forecast_data=(
+    #                         original_forecast_data
+    #                     ),
+    #                     full_values=(
+    #                         product_node.get(
+    #                             "share",
+    #                             [],
+    #                         )
+    #                     ),
+    #                 ),
+    #             )
+
+    #     # ========================================================
+    #     # C. REAL source rows
+    #     #
+    #     # Non-retail / ADAP / ALL
+    #     # Non-retail / Federal / ALL
+    #     # ...
+    #     # ========================================================
+
+    #     for source_name, source_node in (
+    #         sources.items()
+    #     ):
+
+    #         # Unknown is our aggregate representation.
+    #         # Do not persist it as a real source unless your DB
+    #         # intentionally stores an Unknown source row.
+    #         if (
+    #             str(source_name)
+    #             .strip()
+    #             .lower()
+    #             == "unknown"
+    #         ):
+    #             continue
+
+    #         original_forecast_data = (
+    #             get_original_forecast_data(
+    #                 market_name,
+    #                 source_name,
+    #                 "ALL",
+    #             )
+    #         )
+
+    #         upsert_forecast_output(
+    #             cursor,
+    #             ta_name=ta_name,
+    #             scenario_name=scenario_name,
+    #             metric="market_share",
+    #             market=market_name,
+    #             source_of_market=source_name,
+    #             product="ALL",
+    #             forecast_data=build_updated_forecast_data(
+    #                 original_forecast_data=(
+    #                     original_forecast_data
+    #                 ),
+    #                 full_values=(
+    #                     source_node.get(
+    #                         "share",
+    #                         [],
+    #                     )
+    #                 ),
+    #             ),
+    #         )
+
+    #         # ====================================================
+    #         # D. REAL Source -> Product rows
+    #         #
+    #         # Non-retail / ADAP / Biktarvy
+    #         # Non-retail / Federal / Biktarvy
+    #         # Non-retail / IQVIA / Biktarvy
+    #         # Non-retail / Kaiser / Biktarvy
+    #         # ====================================================
+
+    #         for (
+    #             product_name,
+    #             product_node,
+    #         ) in (
+    #             source_node.get(
+    #                 "products",
+    #                 {},
+    #             )
+    #             or {}
+    #         ).items():
+
+    #             original_forecast_data = (
+    #                 get_original_forecast_data(
+    #                     market_name,
+    #                     source_name,
+    #                     product_name,
+    #                 )
+    #             )
+
+    #             upsert_forecast_output(
+    #                 cursor,
+    #                 ta_name=ta_name,
+    #                 scenario_name=scenario_name,
+    #                 metric="market_share",
+    #                 market=market_name,
+    #                 source_of_market=source_name,
+    #                 product=product_name,
+    #                 forecast_data=build_updated_forecast_data(
+    #                     original_forecast_data=(
+    #                         original_forecast_data
+    #                     ),
+    #                     full_values=(
+    #                         product_node.get(
+    #                             "share",
+    #                             [],
+    #                         )
+    #                     ),
+    #                 ),
+    #             )
     # =====================================================
     # Overall market volume
     # =====================================================
