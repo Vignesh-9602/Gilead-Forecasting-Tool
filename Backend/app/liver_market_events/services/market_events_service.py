@@ -2189,17 +2189,35 @@ def _update_market_analysis_volumes(market_analysis: dict, snapshot: dict) -> di
     def _patch_chart(chart: dict, rows: list, fsi: int) -> None:
         row_map = {r["label"]: r["values"] for r in rows
                    if r.get("label", "").lower() not in ("total", "overall")}
-        for s in chart.get("series", []):
+        series = chart.setdefault("series", [])
+        existing_series_labels = {s.get("label", "") for s in series}
+        for s in series:
             vals = row_map.get(s.get("label", ""), [])
             if vals:
                 s["history"]  = vals[:fsi]
                 s["forecast"] = vals[fsi:]
+        # Add a chart series for any row that doesn't have one yet -- e.g. a
+        # brand-new product/payer added on the fly via Manage Products/Market
+        # Events, which Model Input's saved chart never had a series for.
+        for lbl, vals in row_map.items():
+            if lbl not in existing_series_labels:
+                series.append({"label": lbl, "history": vals[:fsi], "forecast": vals[fsi:]})
 
     def _update_flat_gran(gran_data: dict, vol_map: dict, is_yearly: bool) -> None:
         tbl  = gran_data.get("table", {})
-        rows = tbl.get("rows", [])
+        rows = tbl.setdefault("rows", [])
         fsi  = tbl.get("forecast_start_index",
                         gran_data.get("chart", {}).get("forecast_start_index", 0))
+        existing_labels = {r.get("label", "") for r in rows}
+        # Add a row for any product/payer Model Input doesn't have yet --
+        # e.g. a brand-new product added on the fly via Manage Products,
+        # never configured in Model Input (no liver_configurations/history
+        # behind it). Without this, its volume would exist only in the
+        # Market Events snapshot and silently never surface here.
+        for lbl, vals in vol_map.items():
+            if lbl not in existing_labels:
+                new_vals = _to_yearly(vals) if is_yearly else [round(float(v), 2) for v in vals]
+                rows.append({"label": lbl, "values": new_vals})
         non_total = [r for r in rows
                      if r.get("label", "").lower() not in ("total", "overall")]
         for row in rows:
@@ -2218,15 +2236,24 @@ def _update_market_analysis_volumes(market_analysis: dict, snapshot: dict) -> di
 
     def _update_hier_gran(gran_data: dict, parent_child_map: dict, is_yearly: bool) -> None:
         tbl  = gran_data.get("table", {})
-        rows = tbl.get("rows", [])
+        rows = tbl.setdefault("rows", [])
         fsi  = tbl.get("forecast_start_index",
                         gran_data.get("chart", {}).get("forecast_start_index", 0))
+        existing_parents = {r.get("label", "") for r in rows
+                             if r.get("label", "").lower() not in ("total", "overall")}
         for row in rows:
             parent = row.get("label", "")
             if parent.lower() in ("total", "overall"):
                 continue
             pmap     = parent_child_map.get(parent, {})
-            children = row.get("children", [])
+            children = row.setdefault("children", [])
+            existing_children = {c.get("label", "") for c in children}
+            # Add a child this parent doesn't have yet -- e.g. a brand-new
+            # payer never before seen under this product, or vice versa.
+            for clbl, vals in pmap.items():
+                if clbl not in existing_children:
+                    new_vals = _to_yearly(vals) if is_yearly else [round(float(v), 2) for v in vals]
+                    children.append({"label": clbl, "values": new_vals})
             for child in children:
                 clbl = child.get("label", "")
                 if clbl in pmap:
@@ -2239,6 +2266,20 @@ def _update_market_analysis_volumes(market_analysis: dict, snapshot: dict) -> di
                               for c in children), 2)
                     for i in range(k)
                 ]
+        # Add an entirely new PARENT row -- e.g. a brand-new product with no
+        # existing product_payer row at all -- with all of its children.
+        for parent, pmap in parent_child_map.items():
+            if parent in existing_parents:
+                continue
+            children = []
+            for clbl, vals in pmap.items():
+                new_vals = _to_yearly(vals) if is_yearly else [round(float(v), 2) for v in vals]
+                children.append({"label": clbl, "values": new_vals})
+            k = len(children[0].get("values", [])) if children else 0
+            parent_vals = [
+                round(sum(float(c["values"][i]) for c in children), 2) for i in range(k)
+            ]
+            rows.append({"label": parent, "values": parent_vals, "children": children})
         _patch_chart(gran_data.get("chart", {}), rows, fsi)
 
     # Transposed map: payer → {product → monthly values}
@@ -2304,12 +2345,12 @@ def _recompute_ma_shares_inplace(ma: dict) -> None:
             if not pv_g or not ps_g:
                 continue
             pv_rows = pv_g.get("table", {}).get("rows", [])
-            ps_rows = ps_g.get("table", {}).get("rows", [])
+            ps_rows = ps_g.setdefault("table", {}).setdefault("rows", [])
             fsi = (pv_g.get("table", {}).get("forecast_start_index")
                    or pv_g.get("chart", {}).get("forecast_start_index", 0))
             ps_row_map = {r.get("label", ""): r for r in ps_rows}
             ps_ser_map = {s.get("label", ""): s
-                         for s in ps_g.get("chart", {}).get("series", [])}
+                         for s in ps_g.setdefault("chart", {}).setdefault("series", [])}
 
             if tab_key == "total_market_volume":
                 n = max((len(r.get("values", [])) for r in pv_rows), default=0)
@@ -2331,6 +2372,7 @@ def _recompute_ma_shares_inplace(ma: dict) -> None:
                     sum(float(r["values"][i]) for r in non_total if i < len(r.get("values", [])))
                     for i in range(n)
                 ]
+                ps_series = ps_g.setdefault("chart", {}).setdefault("series", [])
                 for r in pv_rows:
                     lbl = r.get("label", "")
                     if lbl.lower() in ("total", "overall"):
@@ -2343,10 +2385,22 @@ def _recompute_ma_shares_inplace(ma: dict) -> None:
                           for i in range(n)]
                     if lbl in ps_row_map:
                         ps_row_map[lbl]["values"] = ms
+                    else:
+                        # Brand-new product/payer (its volume row was just
+                        # added by _update_market_analysis_volumes) -- add a
+                        # matching share row so it isn't left volume-only.
+                        new_row = {"label": lbl, "values": ms}
+                        ps_rows.append(new_row)
+                        ps_row_map[lbl] = new_row
                     if lbl in ps_ser_map:
                         ps_ser_map[lbl]["history"] = ms[:fsi]
                         ps_ser_map[lbl]["forecast"] = ms[fsi:]
+                    else:
+                        new_series = {"label": lbl, "history": ms[:fsi], "forecast": ms[fsi:]}
+                        ps_series.append(new_series)
+                        ps_ser_map[lbl] = new_series
             else:
+                ps_series = ps_g.setdefault("chart", {}).setdefault("series", [])
                 for pv_row in pv_rows:
                     parent_lbl = pv_row.get("label", "")
                     if parent_lbl.lower() in ("total", "overall"):
@@ -2355,28 +2409,41 @@ def _recompute_ma_shares_inplace(ma: dict) -> None:
                     if not children:
                         continue
                     ps_parent = ps_row_map.get(parent_lbl)
+                    if ps_parent is None:
+                        # Brand-new parent (its volume row was just added by
+                        # _update_market_analysis_volumes) -- add a matching
+                        # share row so it isn't left volume-only.
+                        ps_parent = {"label": parent_lbl, "values": [], "children": []}
+                        ps_rows.append(ps_parent)
+                        ps_row_map[parent_lbl] = ps_parent
                     hier_n = max((len(c.get("values", [])) for c in children), default=0)
                     col_sums = [
                         sum(float(c["values"][i]) for c in children if i < len(c.get("values", [])))
                         for i in range(hier_n)
                     ]
-                    if ps_parent:
-                        ps_parent["values"] = [100.0] * hier_n
+                    ps_parent["values"] = [100.0] * hier_n
+                    ps_children = ps_parent.setdefault("children", [])
+                    ps_child_map = {c.get("label", ""): c for c in ps_children}
                     for child in children:
                         clbl = child.get("label", "")
                         cv   = child.get("values", [])
                         cs   = [round(float(cv[i]) / col_sums[i] * 100, 4)
                                 if i < len(cv) and col_sums[i] != 0 else 0.0
                                 for i in range(hier_n)]
-                        if ps_parent:
-                            for c in ps_parent.get("children", []):
-                                if c.get("label") == clbl:
-                                    c["values"] = cs
-                                    break
+                        if clbl in ps_child_map:
+                            ps_child_map[clbl]["values"] = cs
+                        else:
+                            new_child = {"label": clbl, "values": cs}
+                            ps_children.append(new_child)
+                            ps_child_map[clbl] = new_child
                         chart_key = f"{parent_lbl} - {clbl}"
                         if chart_key in ps_ser_map:
                             ps_ser_map[chart_key]["history"] = cs[:fsi]
                             ps_ser_map[chart_key]["forecast"] = cs[fsi:]
+                        else:
+                            new_series = {"label": chart_key, "history": cs[:fsi], "forecast": cs[fsi:]}
+                            ps_series.append(new_series)
+                            ps_ser_map[chart_key] = new_series
 
 
 def _load_saved_event_tabs(cur, scenario_name: str, ta: str,

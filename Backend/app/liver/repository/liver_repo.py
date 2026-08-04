@@ -489,6 +489,14 @@ def scenario_exists(cur, scenario_name: str) -> bool:
     return cur.fetchone() is not None
 
 
+def delete_scenario(cur, scenario_name: str) -> int:
+    cur.execute(
+        "DELETE FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
+        (scenario_name,)
+    )
+    return cur.rowcount
+
+
 def _to_full_date(d: str) -> str:
     """Ensure date is YYYY-MM-DD; appends -01 if only YYYY-MM is given."""
     if d and len(d.strip()) == 7:
