@@ -289,6 +289,11 @@ export const activateLiverScenario = (payload) => {
   return axios.post(`/api/liver/activate-scenario`, payload);
 };
 
+// DELETE — remove a saved liver scenario
+export const deleteLiverScenario = (payload) => {
+  return axios.delete(`/api/liver/delete-scenario`, { data: payload });
+};
+
 export const getLiverMarketEventsFilters = (ta = "HCV") => {
   return httpClient.get("/api/liver-market-events/filters", {
     params: { ta },
@@ -307,6 +312,21 @@ export const getLiverMarketEventsProducts = (params = {}) => {
 // payload: { product_name: "string" }
 export const addLiverMarketEventsProduct = (payload) => {
   return httpClient.post("/api/liver-market-events/products", payload);
+};
+
+// PUT — rename a product; payload: { new_product_name: "string" }
+export const updateLiverMarketEventsProduct = (productName, payload) => {
+  return httpClient.put(
+    `/api/liver-market-events/products/${encodeURIComponent(productName)}`,
+    payload,
+  );
+};
+
+// DELETE — remove a product.
+export const deleteLiverMarketEventsProduct = (productName) => {
+  return httpClient.delete(
+    `/api/liver-market-events/products/${encodeURIComponent(productName)}`,
+  );
 };
 
 export const applyLiverMarketEventsFilters = (payload) => {
