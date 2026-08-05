@@ -16,6 +16,7 @@ import Tooltip from "@mui/material/Tooltip";
 import DownloadIcon from "@mui/icons-material/Download";
 import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import dayjs from "dayjs";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -75,7 +76,7 @@ const tagHierarchyWithScenario = (hierarchy, scenarioName) => {
 };
 
 // ─── MarketMetricsTable ───────────────────────────────────────────────────────
-export default function ModelInputTable({
+const ModelInputTable = React.memo(function ModelInputTable({
   // Data / derived inputs
   activeTab,
   activeTabLabel,
@@ -90,6 +91,7 @@ export default function ModelInputTable({
   compareScenarioOptions,
   currentlyAppliedScenario,
   tentativeRadioSelectedScenario,
+  appliedScenarioReady,
   userHasCustomizedCompare,
   savedScenarioRows,
   appliedProductFilter,
@@ -123,6 +125,8 @@ export default function ModelInputTable({
   handleCompareScenarioChange,
   handleActiveScenarioRadioChange,
   handleCellChange,
+  onDeleteScenario,
+  onDeleteScenarioClick,
 }) {
   const isPercentTab = metric === "market_share";
   const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
@@ -178,17 +182,19 @@ export default function ModelInputTable({
 
     const scenarioNames = selectedCompareScenarios.length
       ? selectedCompareScenarios
-      : (currentlyAppliedScenario ? [currentlyAppliedScenario] : []);
+      : (compareScenarioOptions.length
+        ? compareScenarioOptions
+        : (currentlyAppliedScenario ? [currentlyAppliedScenario] : []));
 
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
     const activeMetricKey = toApiMetricKey(metric);
     const fallbackMonths = chartData?.months || [];
 
-    const toMonthly = (values, monthsForThisScenario) => {
+    const toDisplayData = (values, labelsForThisScenario) => {
       const obj = {};
-      monthsForThisScenario.forEach((m, i) => {
+      labelsForThisScenario.forEach((label, i) => {
         const v = values?.[i];
-        obj[m] = v == null ? null : Number(v);
+        obj[label] = v == null ? null : Number(v);
       });
       return obj;
     };
@@ -221,26 +227,32 @@ export default function ModelInputTable({
       // Each scenario carries its own months — a newly created scenario can
       // have a different date range than the currently displayed one, so
       // use THIS scenario's own months rather than assuming a shared axis.
-      const months =
-        metricObj?.monthly?.chart?.months || metricObj?.chart?.months || fallbackMonths;
-      const rows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
+      const useYearlyData = totalMarketViewMode === "yearly";
+      const labels = useYearlyData
+        ? (metricObj?.yearly?.chart?.months || metricObj?.yearly?.table?.headers || metricObj?.monthly?.chart?.months || fallbackMonths)
+        : (metricObj?.monthly?.chart?.months || metricObj?.chart?.months || fallbackMonths);
+      const rows = useYearlyData
+        ? (metricObj?.yearly?.table?.rows || metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [])
+        : (metricObj?.monthly?.table?.rows || metricObj?.table?.rows || []);
 
       rows.forEach((r) => {
         const parentLabel = r.label || r.hierarchy || "";
         if (!parentLabel) return;
+        const values = Array.isArray(r.values) ? r.values : Array.isArray(r.total) ? r.total : [];
         out.push({
           hierarchy: tagHierarchyWithScenario(parentLabel, scenarioName),
           cleanHierarchy: parentLabel,
-          monthly_data: toMonthly(r.values || r.total || [], months),
+          monthly_data: toDisplayData(values, labels),
           is_applied: false,
           scenario: scenarioName,
         });
         (r.children || []).forEach((c) => {
           const cleanCombo = `${parentLabel} - ${c.label}`;
+          const childValues = Array.isArray(c.values) ? c.values : [];
           out.push({
             hierarchy: tagHierarchyWithScenario(cleanCombo, scenarioName),
             cleanHierarchy: cleanCombo,
-            monthly_data: toMonthly(c.values || [], months),
+            monthly_data: toDisplayData(childValues, labels),
             is_applied: false,
             scenario: scenarioName,
           });
@@ -507,10 +519,26 @@ export default function ModelInputTable({
     if (totalMarketViewMode !== "yearly") {
       return row?.monthly_data?.[col];
     }
-    // Yearly mode — try direct lookup first (backend yearly table)
+
+    // Yearly mode — try the normalized yearly lookup first.
     const direct = row?.monthly_data?.[col];
     if (direct != null) return direct;
-    // Fallback: sum monthly values that belong to this year
+
+    // Some yearly rows still arrive as a values array (aligned to the yearly
+    // headers) rather than a month-keyed object, so resolve them by index.
+    const values = Array.isArray(row?.values)
+      ? row.values
+      : Array.isArray(row?.total)
+        ? row.total
+        : [];
+    if (values.length) {
+      const idx = displayColumns.indexOf(col);
+      if (idx >= 0 && values[idx] != null) {
+        return Number(values[idx]);
+      }
+    }
+
+    // Fallback: sum monthly values that belong to this year.
     const monthsInYear = yearToMonthsMap[col] || [];
     let sum = 0, count = 0;
     monthsInYear.forEach((m) => {
@@ -731,7 +759,7 @@ export default function ModelInputTable({
                 onClick={handleConfirmSave}
                 sx={primaryButtonStyle}
               >
-                {isSavingEditChanges ? "Saving..." : "Save"}
+                Save
               </Button>
 
               <Button
@@ -739,11 +767,13 @@ export default function ModelInputTable({
                 onClick={handleEnterTableEdit}
                 disabled={
                   tableEditing ||
+                  !appliedScenarioReady ||
                   (activeTab !== "total_market" && metric === "market_volume")
                 }
                 sx={secondaryButtonStyle}
               >
-                {tableEditing ? "Editing..." : "Edit Changes"}
+                {/* {tableEditing ? "Editing..." : "Edit Changes"} */}
+                Edit Changes
               </Button>
 
               {tableEditing && (
@@ -753,10 +783,10 @@ export default function ModelInputTable({
                   onClick={handleSaveTableChanges}
                   sx={primaryButtonStyle}
                 >
-                  {savingTable ? "Refreshing..." : "Refresh"}
+                 Refresh
                 </Button>
               )}
-
+              {tableEditing && (
               <Button
                 variant="outlined"
                 onClick={handleCancelTableEdit}
@@ -765,6 +795,7 @@ export default function ModelInputTable({
               >
                 Cancel
               </Button>
+              )}
 
               {/* Apply Selected Scenario — total_market only */}
               {showScenarioControls && (
@@ -1159,13 +1190,17 @@ export default function ModelInputTable({
                     // total_market tab: only the radio-selected scenario row
                     // is editable. Other tabs: only leaf rows (no children,
                     // not a Total row) are editable.
+                    const isAppliedScenarioGroup =
+                      activeTab === "total_market"
+                        ? (group.brandName || "") === (currentlyAppliedScenario || "")
+                        : !group.isScenarioOverlay;
                     const isEditEligible = (() => {
                       if (!tableEditing) return false;
                       if (totalMarketViewMode !== "monthly") return false;
                       if (isTotalRow) return false;
-                      if (group.isScenarioOverlay) return false;
+                      if (!isAppliedScenarioGroup) return false;
                       if (activeTab === "total_market") {
-                        return isSelected && !hasChildren;
+                        return !hasChildren;
                       }
                       return !hasChildren;
                     })();
@@ -1185,9 +1220,10 @@ export default function ModelInputTable({
 
                             position: "relative",
                             isolation: "isolate",
+                            borderBottom: "1px solid #e2e8f0",
 
                             backgroundColor:
-                              (isSelected && activeTab === "total_market")
+                              (isAppliedScenarioGroup && activeTab === "total_market")
                                 ? "#fffbeb"
                                 : hasChildren
                                   ? "#f8fafc"
@@ -1195,7 +1231,7 @@ export default function ModelInputTable({
 
                             "&:hover": {
                               backgroundColor:
-                                (isSelected && activeTab === "total_market")
+                                (isAppliedScenarioGroup && activeTab === "total_market")
                                   ? "#fff3c4"
                                   : hasChildren
                                     ? "#f1f5f9"
@@ -1214,7 +1250,7 @@ export default function ModelInputTable({
 
                               backgroundColor: isAppliedParent
                                 ? "#fffbeb"
-                                : (isSelected && activeTab === "total_market")
+                                : (isAppliedScenarioGroup && activeTab === "total_market")
                                   ? "#fffbeb"
                                   : isTotalRow
                                     ? "#f1f5f9"
@@ -1235,7 +1271,9 @@ export default function ModelInputTable({
                               sx={{
                                 display: "flex",
                                 alignItems: "center",
+                                justifyContent: "space-between",
                                 gap: 1,
+                                width: "100%",
                               }}
                             >
                               {activeTab === "total_market" && (
@@ -1266,7 +1304,7 @@ export default function ModelInputTable({
                                     fontWeight: 700,
                                     width: "14px",
                                     flexShrink: 0,
-                                    color: (isAppliedParent || (isSelected && activeTab === "total_market"))
+                                    color: (isAppliedParent || (isAppliedScenarioGroup && activeTab === "total_market"))
                                       ? "#f59e0b"
                                       : "#64748b",
                                   }}
@@ -1275,27 +1313,49 @@ export default function ModelInputTable({
                                 </Typography>
                               )}
 
-                              <Typography
-                                sx={{
-                                  fontSize: "14px",
-                                  fontWeight: isTotalRow
-                                    ? 800
-                                    : hasChildren
-                                      ? 700
-                                      : (isSelected && activeTab === "total_market")
+                              <Box sx={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+                                <Typography
+                                  sx={{
+                                    fontSize: "14px",
+                                    fontWeight: isTotalRow
+                                      ? 800
+                                      : hasChildren
                                         ? 700
-                                        : 500,
-                                  color: isAppliedParent
-                                    ? "#f59e0b"
-                                    : (isSelected && activeTab === "total_market")
+                                        : (isSelected && activeTab === "total_market")
+                                          ? 700
+                                          : 500,
+                                    color: isAppliedParent
                                       ? "#f59e0b"
-                                      : isTotalRow
-                                        ? "#1e293b"
-                                        : "#334155",
-                                }}
-                              >
-                                {group.brandName}
-                              </Typography>
+                                      : (isAppliedScenarioGroup && activeTab === "total_market")
+                                        ? "#f59e0b"
+                                        : isTotalRow
+                                          ? "#1e293b"
+                                          : "#334155",
+                                  }}
+                                >
+                                  {group.brandName}
+                                </Typography>
+                              </Box>
+
+                              {activeTab === "total_market" && group.brandName !== "Base" && (
+                                <Tooltip title="Delete Scenario">
+                                  <IconButton
+                                    size="small"
+                                    data-testid="delete-scenario-button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (onDeleteScenarioClick) {
+                                        onDeleteScenarioClick(group.brandName);
+                                      } else if (onDeleteScenario) {
+                                        onDeleteScenario(group.brandName);
+                                      }
+                                    }}
+                                    sx={{ ml: "auto", mr: 0.25, color: "#dc2626" }}
+                                  >
+                                    <DeleteOutlineIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              )}
 
                             </Box>
                           </Box>
@@ -1318,10 +1378,10 @@ export default function ModelInputTable({
                                   fontWeight: isTotalRow ? 800 : hasChildren ? 700 : 500,
                                   backgroundColor: isEditableCell
                                     ? isF ? '#eff6ff' : '#f8fafc'
-                                    : (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                    : (isAppliedParent || (activeTab === 'total_market' && isAppliedScenarioGroup)) && isF
                                       ? '#fffbeb'
                                       : isF ? '#ffffff' : '#F1F5F9',
-                                  color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isSelected)) && isF
+                                  color: !isEditableCell && (isAppliedParent || (activeTab === 'total_market' && isAppliedScenarioGroup)) && isF
                                     ? '#f59e0b'
                                     : '#334155',
                                   borderRight: '1px solid #e2e8f0',
@@ -1391,7 +1451,7 @@ export default function ModelInputTable({
                             const isHighlightedChild = isAppliedChild;
 
                             return (
-                              <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate" }}>
+                              <Box component="tr" key={idx} sx={{ position: "relative", isolation: "isolate", borderBottom: "1px solid #e2e8f0" }}>
                                 {/* Sticky label cell */}
                                 <Box
                                   component="td"
@@ -1403,19 +1463,27 @@ export default function ModelInputTable({
                                     maxWidth: 220,
                                     backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
                                     borderRight: "2px solid #e2e8f0",
-                                    pl: "32px",
+                                    pl: 7,
                                     p: "10px 16px",
                                   }}
                                 >
-                                  <Typography
+                                  <Box
                                     sx={{
-                                      fontSize: "14px",
-                                      fontWeight: 500,
-                                      color: isHighlightedChild ? "#f59e0b" : "#334155",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      pl: 4,
                                     }}
                                   >
-                                    {childRow.cleanLabel}
-                                  </Typography>
+                                    <Typography
+                                      sx={{
+                                        fontSize: "14px",
+                                        fontWeight: 500,
+                                        color: isHighlightedChild ? "#f59e0b" : "#334155",
+                                      }}
+                                    >
+                                      {childRow.cleanLabel}
+                                    </Typography>
+                                  </Box>
                                 </Box>
 
                                 {/* Data cells */}
@@ -1427,7 +1495,7 @@ export default function ModelInputTable({
                                     totalMarketViewMode === "monthly" &&
                                     activeTab !== "total_market" &&
                                     !isTotalRow &&
-                                    !group.isScenarioOverlay;
+                                    isAppliedScenarioGroup;
 
                                   return (
                                     <Box
@@ -1523,7 +1591,9 @@ export default function ModelInputTable({
                             sx={{
                               display: "flex",
                               alignItems: "center",
+                              justifyContent: "space-between",
                               gap: 1.5,
+                              width: "100%",
                             }}
                           >
                             <input
@@ -1541,15 +1611,36 @@ export default function ModelInputTable({
                                 margin: 0,
                               }}
                             />
-                            <Typography
-                              sx={{
-                                fontSize: "14px",
-                                fontWeight: isSelected ? 700 : 600,
-                                color: isSelected ? "#f59e0b" : "#0f172a",
-                              }}
-                            >
-                              {name}
-                            </Typography>
+                            <Box sx={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+                              <Typography
+                                sx={{
+                                  fontSize: "14px",
+                                  fontWeight: isSelected ? 700 : 600,
+                                  color: isSelected ? "#f59e0b" : "#0f172a",
+                                }}
+                              >
+                                {name}
+                              </Typography>
+                            </Box>
+                            {name !== "Base" && (
+                              <Tooltip title="Delete Scenario">
+                                <IconButton
+                                  size="small"
+                                  data-testid="delete-scenario-button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onDeleteScenarioClick) {
+                                      onDeleteScenarioClick(name);
+                                    } else if (onDeleteScenario) {
+                                      onDeleteScenario(name);
+                                    }
+                                  }}
+                                  sx={{ ml: "auto", mr: 0.25, color: "#dc2626" }}
+                                >
+                                  <DeleteOutlineIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            )}
                           </Box>
                         </Box>
                         {displayColumns.map((col, i) => {
@@ -1581,4 +1672,6 @@ export default function ModelInputTable({
       </Box>
     </Paper>
   );
-}
+});
+
+export default ModelInputTable;

@@ -58,6 +58,7 @@ import {
 } from "../../../services/apiService";
 import HIVImpactCurveChart from "./MarketEventChart";
 import HIVImpactCurveTable from "./MarketEventTable";
+import { isProductNameDuplicate, mergeImpactCurveProducts } from "./productUtils";
 
 const globalConfigDateLocaleText = {
     fieldMonthPlaceholder: () => "MM",
@@ -136,6 +137,11 @@ const normalizeManageProductRow = (row = {}) => ({
     modifiedBy: row.modifiedBy || row.modified_by || "",
 });
 
+const getProductOptionValue = (option) =>
+    typeof option === "string"
+        ? option
+        : option?.value || option?.name || "";
+
 const sanitizeRunCalculationRow = (row = {}, selectedTab = "overall_event") => {
     const payloadRow = {
         event_name: row.event_name || "",
@@ -170,18 +176,29 @@ const sanitizeRunCalculationRow = (row = {}, selectedTab = "overall_event") => {
 
 const normalizeImpactCurveRowForUi = (row = {}) => ({
     ...row,
-    products: Array.isArray(row.products) ? row.products : [],
+    event_name: row.event_name || "",
+    start_date: row.start_date || "",
+    peak_percent: row.peak_percent ?? "",
+    months: row.months ?? "",
+    curve_type: row.curve_type || "",
+    factor: row.factor ?? "",
+    products: Array.isArray(row.products)
+        ? row.products
+        : Array.isArray(row.product_ids)
+            ? row.product_ids
+            : [],
     // The UI's internal field is `markets`, but sanitizeRunCalculationRow
     // above sends it back to the API as `payers` — so when reading rows
     // back (e.g. after a refresh), prefer `row.markets` if already in UI
-    // shape, but fall back to `row.payers` since that's what the API's
-    // saved rows actually come back as. Without this fallback, the payer
-    // selection silently reverts to empty on every refresh.
+    // shape, but fall back to `row.payers`/`row.payer_ids` since that's what
+    // the API's saved rows actually come back as.
     markets: Array.isArray(row.markets)
         ? row.markets
         : Array.isArray(row.payers)
             ? row.payers
-            : [],
+            : Array.isArray(row.payer_ids)
+                ? row.payer_ids
+                : [],
     impacted_items: Array.isArray(row.impacted_items)
         ? row.impacted_items
         : Array.isArray(row.impacted_payers)
@@ -382,6 +399,7 @@ export default function HIVMarketEvent() {
 
     const [selectedPayers, setSelectedPayers] = useState([]);
     const [selectedProducts, setSelectedProducts] = useState([]);
+    const [pendingImpactCurveProducts, setPendingImpactCurveProducts] = useState([]);
 
     const [fromDate, setFromDate] = useState("");
     const [toDate, setToDate] = useState("");
@@ -494,11 +512,20 @@ export default function HIVMarketEvent() {
         eventTabsData?.[activeTab]
             ?.impact_curve_configuration || {};
 
+    const appliedProductOptions = Array.isArray(currentConfig.products)
+        ? currentConfig.products
+        : [];
+
+    const impactCurveProductOptions = mergeImpactCurveProducts(
+        appliedProductOptions,
+        pendingImpactCurveProducts,
+    );
+
     const impactOptions =
         isPayerEvent
             ? currentConfig.impact_markets || currentConfig.markets || []
             : isProductEvent
-                ? currentConfig.impact_products || currentConfig.products || []
+                ? currentConfig.impact_products || impactCurveProductOptions
                 : [];
 
     const currentMetricData = getMetricViewData(
@@ -610,12 +637,9 @@ export default function HIVMarketEvent() {
     const [addProductError, setAddProductError] =
         useState("");
 
-    const [renameProductDialog, setRenameProductDialog] = useState({
-        open: false,
-        id: null,
-        name: "",
-        error: "",
-    });
+    const [editingProductId, setEditingProductId] = useState(null);
+    const [editingProductName, setEditingProductName] = useState("");
+    const [editingProductError, setEditingProductError] = useState("");
 
     const [deleteProductDialog, setDeleteProductDialog] = useState({
         open: false,
@@ -737,7 +761,9 @@ export default function HIVMarketEvent() {
     // responses, since the refresh API turns out to return the exact same
     // full-payload shape (ta_name, available_scenarios, event_tabs, ...) as
     // apply-filters rather than a scoped fragment.
-    const applyEventTabsApiResponse = (apiData = {}, fallbackSelectedFilter = {}) => {
+    const applyEventTabsApiResponse = (apiData = {}, fallbackSelectedFilter = {}, options = {}) => {
+        const { syncFilterSelections = true } = options;
+
         setAvailableScenarios(
             apiData.available_scenarios ||
             apiData.scenario_names ||
@@ -768,14 +794,16 @@ export default function HIVMarketEvent() {
                 : getDefaultMetricValue(effectiveMetricFilters);
         });
 
-        const appliedFilter = apiData.selected_filter || fallbackSelectedFilter;
+        if (syncFilterSelections) {
+            const appliedFilter = apiData.selected_filter || fallbackSelectedFilter;
 
-        setScenarioName(appliedFilter.scenario_name || scenarioName);
-        setAppliedScenarioName(appliedFilter.scenario_name || appliedScenarioName);
-        setSelectedPayers(appliedFilter.payers || selectedPayers);
-        setSelectedProducts(appliedFilter.products || selectedProducts);
-        setFromDate(appliedFilter.start_date || fromDate);
-        setToDate(appliedFilter.end_date || toDate);
+            setScenarioName(appliedFilter.scenario_name || scenarioName);
+            setAppliedScenarioName(appliedFilter.scenario_name || appliedScenarioName);
+            setSelectedPayers(appliedFilter.payers || selectedPayers);
+            setSelectedProducts(appliedFilter.products || selectedProducts);
+            setFromDate(appliedFilter.start_date || fromDate);
+            setToDate(appliedFilter.end_date || toDate);
+        }
 
         const normalizedTabs =
             apiData.event_tabs && Object.keys(apiData.event_tabs).length
@@ -789,7 +817,7 @@ export default function HIVMarketEvent() {
         );
     };
 
-    const handleApplyFilter = async () => {
+    const handleApplyFilter = async (options = {}) => {
 
         const taName = "HCV";
 
@@ -808,7 +836,7 @@ export default function HIVMarketEvent() {
             const response = await applyLiverMarketEventsFilters(payload);
             const apiData = response?.data || {};
 
-            applyEventTabsApiResponse(apiData, payload.selected_filter);
+            applyEventTabsApiResponse(apiData, payload.selected_filter, options);
         } catch (error) {
             console.error("Failed to apply liver market event filters", error);
         }
@@ -1075,46 +1103,38 @@ export default function HIVMarketEvent() {
         }
     };
 
-    // Keep the product filter (currentConfig.products, shared across all event
-    // tabs) in sync when products are added / renamed / deleted here.
-    const mutateEventTabsProducts = (mutate) => {
-        skipEventRowsResetRef.current = true;
-        setEventTabsData((prev) => {
-            const next = {};
-            Object.keys(prev).forEach((tabKey) => {
-                const tab = prev[tabKey];
-                const cfg = tab?.impact_curve_configuration;
-                if (!cfg || !Array.isArray(cfg.products)) {
-                    next[tabKey] = tab;
-                    return;
-                }
-                next[tabKey] = {
-                    ...tab,
-                    impact_curve_configuration: { ...cfg, products: mutate(cfg.products) },
-                };
-            });
-            return next;
+    // New products should appear immediately in Impact Curve controls, but
+    // Apply Filter product options must only reflect backend-applied data
+    // (after Run Calculation / Apply Filter responses).
+    const addProductToImpactCurve = (name) => {
+        setPendingImpactCurveProducts((prev) =>
+            prev.includes(name) ? prev : [...prev, name],
+        );
+    };
+
+    const removeProductFromImpactCurve = (name) => {
+        setPendingImpactCurveProducts((prev) => prev.filter((value) => value !== name));
+    };
+
+    const renameProductInImpactCurve = (oldName, newName) => {
+        setPendingImpactCurveProducts((prev) => {
+            const renamed = prev.map((value) => (value === oldName ? newName : value));
+            return renamed.filter((value, index) => renamed.indexOf(value) === index);
         });
-    };
-
-    const addProductToFilters = (name) => {
-        mutateEventTabsProducts((products) =>
-            products.some((p) => getOptionValue(p) === name) ? products : [...products, name]
+        setEventRows((prevRows) =>
+            prevRows.map((row) => ({
+                ...row,
+                products: (row.products || []).map((value) => (value === oldName ? newName : value)),
+                impacted_items: (row.impacted_items || []).map((value) => (value === oldName ? newName : value)),
+                source_percentages: Object.entries(row.source_percentages || {}).reduce(
+                    (acc, [key, value]) => {
+                        acc[key === oldName ? newName : key] = value;
+                        return acc;
+                    },
+                    {},
+                ),
+            })),
         );
-    };
-
-    const removeProductFromFilters = (name) => {
-        mutateEventTabsProducts((products) =>
-            products.filter((p) => getOptionValue(p) !== name)
-        );
-        setSelectedProducts((prev) => prev.filter((value) => value !== name));
-    };
-
-    const renameProductInFilters = (oldName, newName) => {
-        mutateEventTabsProducts((products) =>
-            products.map((p) => (getOptionValue(p) === oldName ? newName : p))
-        );
-        setSelectedProducts((prev) => prev.map((value) => (value === oldName ? newName : value)));
     };
 
     const openManageProductsDialog = async () => {
@@ -1143,22 +1163,13 @@ export default function HIVMarketEvent() {
         setAddProductError("");
     };
 
-    const isDuplicateProductName = (name) => {
-        const normalized = name.trim().toLowerCase();
-
-        const existingBaseProducts = Array.isArray(currentConfig.products)
-            ? currentConfig.products
-            : [];
-
-        return (
-            existingBaseProducts.some(
-                (p) => String(p).trim().toLowerCase() === normalized
-            ) ||
-            manageProductsList.some(
-                (p) => p.name.trim().toLowerCase() === normalized
-            )
+    const isDuplicateProductName = (name) =>
+        isProductNameDuplicate(
+            name,
+            manageProductsList,
+            appliedProductOptions,
+            pendingImpactCurveProducts,
         );
-    };
 
     const handleConfirmAddProduct = async () => {
         const trimmedName = newProductName.trim();
@@ -1185,36 +1196,33 @@ export default function HIVMarketEvent() {
             return;
         }
 
-        addProductToFilters(trimmedName);
+        addProductToImpactCurve(trimmedName);
         closeAddProductForm();
+        await handleApplyFilter({ syncFilterSelections: false });
         // Refetch so the new row's date-added / added-by show on the first open.
         loadManageProductsList({ silent: true });
     };
 
     const openRenameProductDialog = (item) => {
-        setRenameProductDialog({
-            open: true,
-            id: item.id,
-            name: item.name,
-            error: "",
-        });
+        setEditingProductId(item.id);
+        setEditingProductName(item.name);
+        setEditingProductError("");
     };
 
     const closeRenameProductDialog = () => {
-        setRenameProductDialog({ open: false, id: null, name: "", error: "" });
+        setEditingProductId(null);
+        setEditingProductName("");
+        setEditingProductError("");
     };
 
     const handleConfirmRenameProduct = async () => {
-        const trimmedName = renameProductDialog.name.trim();
+        const trimmedName = editingProductName.trim();
         const currentItem = manageProductsList.find(
-            (p) => p.id === renameProductDialog.id
+            (p) => p.id === editingProductId
         );
 
         if (!trimmedName) {
-            setRenameProductDialog((prev) => ({
-                ...prev,
-                error: "Please enter a product name.",
-            }));
+            setEditingProductError("Please enter a product name.");
             return;
         }
 
@@ -1223,10 +1231,7 @@ export default function HIVMarketEvent() {
             trimmedName.toLowerCase() !== currentItem.name.trim().toLowerCase() &&
             isDuplicateProductName(trimmedName)
         ) {
-            setRenameProductDialog((prev) => ({
-                ...prev,
-                error: "A product with this name already exists.",
-            }));
+            setEditingProductError("A product with this name already exists.");
             return;
         }
 
@@ -1239,7 +1244,7 @@ export default function HIVMarketEvent() {
             return;
         }
 
-        const originalName = currentItem?.name ?? renameProductDialog.name;
+        const originalName = currentItem?.name ?? editingProductName;
 
         try {
             const response = await updateLiverMarketEventsProduct(originalName, {
@@ -1256,7 +1261,7 @@ export default function HIVMarketEvent() {
 
             setManageProductsList((prev) =>
                 prev.map((p) =>
-                    p.id === renameProductDialog.id
+                    p.id === editingProductId
                         ? {
                             ...p,
                             name: appliedName,
@@ -1269,17 +1274,16 @@ export default function HIVMarketEvent() {
                 )
             );
 
-            renameProductInFilters(originalName, appliedName);
+            renameProductInImpactCurve(originalName, appliedName);
+            await handleApplyFilter({ syncFilterSelections: false });
             closeRenameProductDialog();
         } catch (error) {
             console.error("Failed to rename market event product", error);
-            setRenameProductDialog((prev) => ({
-                ...prev,
-                error:
-                    error?.response?.data?.detail ||
-                    error?.response?.data?.message ||
-                    "Failed to update product. Please try again.",
-            }));
+            setEditingProductError(
+                error?.response?.data?.detail ||
+                error?.response?.data?.message ||
+                "Failed to update product. Please try again."
+            );
         }
     };
 
@@ -1297,7 +1301,8 @@ export default function HIVMarketEvent() {
             await deleteLiverMarketEventsProduct(name);
 
             setManageProductsList((prev) => prev.filter((p) => p.id !== id));
-            removeProductFromFilters(name);
+            removeProductFromImpactCurve(name);
+            await handleApplyFilter({ syncFilterSelections: false });
 
             closeDeleteProductDialog();
         } catch (error) {
@@ -1988,7 +1993,7 @@ export default function HIVMarketEvent() {
 
                                         if (
                                             selectedProducts.length ===
-                                            (currentConfig.products || []).length
+                                            appliedProductOptions.length
                                         ) {
 
                                             setSelectedProducts(
@@ -1998,7 +2003,7 @@ export default function HIVMarketEvent() {
                                         } else {
 
                                             setSelectedProducts(
-                                                currentConfig.products || []
+                                                appliedProductOptions
                                             );
 
                                         }
@@ -2025,7 +2030,7 @@ export default function HIVMarketEvent() {
                                     >
                                         {renderOptionValue(
                                             selected,
-                                            currentConfig.products || [],
+                                            appliedProductOptions,
                                             "Select"
                                         )}
                                     </Box>
@@ -2038,13 +2043,13 @@ export default function HIVMarketEvent() {
 
                                         checked={
                                             selectedProducts.length ===
-                                            (currentConfig.products || []).length
+                                            appliedProductOptions.length
                                         }
                                         indeterminate={
                                             selectedProducts.length >
                                             0 &&
                                             selectedProducts.length <
-                                            (currentConfig.products || []).length
+                                            appliedProductOptions.length
                                         }
 
                                     />
@@ -2055,7 +2060,7 @@ export default function HIVMarketEvent() {
 
                                 </MenuItem>
 
-                                {(currentConfig.products || []).map((item) => {
+                                {appliedProductOptions.map((item) => {
                                     const optionValue = getOptionValue(item);
                                     const optionLabel = getOptionLabel(item);
                                     return (
@@ -2368,7 +2373,7 @@ export default function HIVMarketEvent() {
                                                     renderValue={(selected) =>
                                                         renderOptionValue(
                                                             selected,
-                                                            currentConfig.products || [],
+                                                            impactCurveProductOptions,
                                                             "Select"
                                                         )
                                                     }
@@ -2382,9 +2387,9 @@ export default function HIVMarketEvent() {
                                                                 index,
                                                                 "products",
                                                                 row.products.length ===
-                                                                    (currentConfig.products || []).length
+                                                                    impactCurveProductOptions.length
                                                                     ? []
-                                                                    : currentConfig.products || []
+                                                                    : impactCurveProductOptions
                                                             );
 
                                                         } else {
@@ -2405,12 +2410,12 @@ export default function HIVMarketEvent() {
                                                             size="small"
                                                             checked={
                                                                 row.products.length ===
-                                                                (currentConfig.products || []).length
+                                                                impactCurveProductOptions.length
                                                             }
                                                             indeterminate={
                                                                 row.products.length > 0 &&
                                                                 row.products.length <
-                                                                (currentConfig.products || []).length
+                                                                impactCurveProductOptions.length
                                                             }
                                                         />
 
@@ -2418,7 +2423,7 @@ export default function HIVMarketEvent() {
 
                                                     </MenuItem>
 
-                                                    {(currentConfig.products || []).map((item) => {
+                                                    {impactCurveProductOptions.map((item) => {
                                                         const optionValue = getOptionValue(item);
                                                         const optionLabel = getOptionLabel(item);
                                                         return (
@@ -2823,7 +2828,7 @@ export default function HIVMarketEvent() {
                                                     renderValue={(selected) =>
                                                         renderOptionValue(
                                                             selected,
-                                                            currentConfig.products || [],
+                                                            impactCurveProductOptions,
                                                             "Select"
                                                         )
                                                     }
@@ -2837,9 +2842,9 @@ export default function HIVMarketEvent() {
                                                                 index,
                                                                 "products",
                                                                 row.products.length ===
-                                                                    (currentConfig.products || []).length
+                                                                    impactCurveProductOptions.length
                                                                     ? []
-                                                                    : currentConfig.products || []
+                                                                    : impactCurveProductOptions
                                                             );
 
                                                         } else {
@@ -2861,12 +2866,12 @@ export default function HIVMarketEvent() {
                                                             size="small"
                                                             checked={
                                                                 row.products.length ===
-                                                                (currentConfig.products || []).length
+                                                                impactCurveProductOptions.length
                                                             }
                                                             indeterminate={
                                                                 row.products.length > 0 &&
                                                                 row.products.length <
-                                                                (currentConfig.products || []).length
+                                                                impactCurveProductOptions.length
                                                             }
                                                         />
 
@@ -2874,7 +2879,7 @@ export default function HIVMarketEvent() {
 
                                                     </MenuItem>
 
-                                                    {(currentConfig.products || []).map((item) => {
+                                                    {impactCurveProductOptions.map((item) => {
                                                         const optionValue = getOptionValue(item);
                                                         const optionLabel = getOptionLabel(item);
                                                         return (
@@ -3826,24 +3831,53 @@ export default function HIVMarketEvent() {
                                     ) : (
                                         manageProductsList.map((item) => (
                                             <TableRow key={item.id}>
-                                                <TableCell sx={{ fontSize: "12px" }}>
-                                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                                                        <Typography sx={{ fontSize: "12px", fontWeight: 700 }}>
-                                                            {item.name}
-                                                        </Typography>
+                                                <TableCell sx={{ fontSize: "12px", minWidth: 220 }}>
+                                                    {editingProductId === item.id ? (
+                                                        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                                                            <TextField
+                                                                autoFocus
+                                                                size="small"
+                                                                value={editingProductName}
+                                                                onChange={(e) => {
+                                                                    setEditingProductName(e.target.value);
+                                                                    setEditingProductError("");
+                                                                }}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === "Enter") {
+                                                                        handleConfirmRenameProduct();
+                                                                    }
+                                                                    if (e.key === "Escape") {
+                                                                        closeRenameProductDialog();
+                                                                    }
+                                                                }}
+                                                                error={Boolean(editingProductError)}
+                                                                helperText={editingProductError || ""}
+                                                                sx={{
+                                                                    "& .MuiOutlinedInput-root": {
+                                                                        borderRadius: "8px",
+                                                                    },
+                                                                }}
+                                                            />
+                                                        </Box>
+                                                    ) : (
+                                                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                                            <Typography sx={{ fontSize: "12px", fontWeight: 700 }}>
+                                                                {item.name}
+                                                            </Typography>
 
-                                                        <Chip
-                                                            label="NEW"
-                                                            size="small"
-                                                            sx={{
-                                                                height: "18px",
-                                                                fontSize: "9px",
-                                                                fontWeight: 700,
-                                                                backgroundColor: "#DBEAFE",
-                                                                color: "#1E40AF",
-                                                            }}
-                                                        />
-                                                    </Box>
+                                                            <Chip
+                                                                label="NEW"
+                                                                size="small"
+                                                                sx={{
+                                                                    height: "18px",
+                                                                    fontSize: "9px",
+                                                                    fontWeight: 700,
+                                                                    backgroundColor: "#DBEAFE",
+                                                                    color: "#1E40AF",
+                                                                }}
+                                                            />
+                                                        </Box>
+                                                    )}
                                                 </TableCell>
 
                                                 <TableCell sx={{ fontSize: "12px" }}>
@@ -3859,21 +3893,48 @@ export default function HIVMarketEvent() {
                                                 </TableCell>
 
                                                 <TableCell align="center">
-                                                    <IconButton
-                                                        size="small"
-                                                        title="Rename"
-                                                        onClick={() => openRenameProductDialog(item)}
-                                                    >
-                                                        <EditIcon fontSize="small" />
-                                                    </IconButton>
+                                                    {editingProductId === item.id ? (
+                                                        <Box sx={{ display: "flex", gap: 0.5, justifyContent: "center" }}>
+                                                            <Button
+                                                                size="small"
+                                                                variant="contained"
+                                                                onClick={handleConfirmRenameProduct}
+                                                                sx={{
+                                                                    textTransform: "none",
+                                                                    borderRadius: "8px",
+                                                                    backgroundColor: "#4F46E5",
+                                                                    minWidth: "56px",
+                                                                }}
+                                                            >
+                                                                Save
+                                                            </Button>
+                                                            <Button
+                                                                size="small"
+                                                                onClick={closeRenameProductDialog}
+                                                                sx={{ textTransform: "none", borderRadius: "8px" }}
+                                                            >
+                                                                Cancel
+                                                            </Button>
+                                                        </Box>
+                                                    ) : (
+                                                        <>
+                                                            <IconButton
+                                                                size="small"
+                                                                title="Rename"
+                                                                onClick={() => openRenameProductDialog(item)}
+                                                            >
+                                                                <EditIcon fontSize="small" />
+                                                            </IconButton>
 
-                                                    <IconButton
-                                                        size="small"
-                                                        title="Delete"
-                                                        onClick={() => openDeleteProductDialog(item)}
-                                                    >
-                                                        <DeleteIcon fontSize="small" sx={{ color: "#EF4444" }} />
-                                                    </IconButton>
+                                                            <IconButton
+                                                                size="small"
+                                                                title="Delete"
+                                                                onClick={() => openDeleteProductDialog(item)}
+                                                            >
+                                                                <DeleteIcon fontSize="small" sx={{ color: "#EF4444" }} />
+                                                            </IconButton>
+                                                        </>
+                                                    )}
                                                 </TableCell>
                                             </TableRow>
                                         ))
@@ -3890,85 +3951,6 @@ export default function HIVMarketEvent() {
                             sx={{ textTransform: "none" }}
                         >
                             Close
-                        </Button>
-                    </DialogActions>
-                </Dialog>
-
-                <Dialog
-                    open={renameProductDialog.open}
-                    onClose={closeRenameProductDialog}
-                    PaperProps={{
-                        sx: {
-                            width: "360px",
-                            maxWidth: "90vw",
-                            borderRadius: "12px",
-                        },
-                    }}
-                >
-                    <DialogTitle
-                        sx={{
-                            fontWeight: 700,
-                            fontSize: "16px",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            pr: 1,
-                        }}
-                    >
-                        Rename Product
-
-                        <IconButton size="small" onClick={closeRenameProductDialog}>
-                            <CloseIcon fontSize="small" />
-                        </IconButton>
-                    </DialogTitle>
-
-                    <DialogContent>
-                        <TextField
-                            autoFocus
-                            fullWidth
-                            size="small"
-                            placeholder="Product name"
-                            value={renameProductDialog.name}
-                            onChange={(e) =>
-                                setRenameProductDialog((prev) => ({
-                                    ...prev,
-                                    name: e.target.value,
-                                    error: "",
-                                }))
-                            }
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                    handleConfirmRenameProduct();
-                                }
-                            }}
-                            error={Boolean(renameProductDialog.error)}
-                            helperText={renameProductDialog.error || ""}
-                            sx={{
-                                "& .MuiOutlinedInput-root": {
-                                    borderRadius: "8px",
-                                },
-                            }}
-                        />
-                    </DialogContent>
-
-                    <DialogActions sx={{ px: 3, pb: 3 }}>
-                        <Button
-                            onClick={closeRenameProductDialog}
-                            sx={{ textTransform: "none" }}
-                        >
-                            Cancel
-                        </Button>
-
-                        <Button
-                            variant="contained"
-                            onClick={handleConfirmRenameProduct}
-                            sx={{
-                                textTransform: "none",
-                                borderRadius: "8px",
-                                backgroundColor: "#4F46E5",
-                            }}
-                        >
-                            Save
                         </Button>
                     </DialogActions>
                 </Dialog>

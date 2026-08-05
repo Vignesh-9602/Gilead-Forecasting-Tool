@@ -289,6 +289,11 @@ export const activateLiverScenario = (payload) => {
   return axios.post(`/api/liver/activate-scenario`, payload);
 };
 
+// DELETE — remove a saved liver scenario
+export const deleteLiverScenario = (payload) => {
+  return axios.delete(`/api/liver/delete-scenario`, { data: payload });
+};
+
 export const getLiverMarketEventsFilters = (ta = "HCV") => {
   return httpClient.get("/api/liver-market-events/filters", {
     params: { ta },
