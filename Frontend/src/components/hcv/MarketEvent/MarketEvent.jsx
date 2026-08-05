@@ -18,7 +18,13 @@ import {
     DialogActions,
     Checkbox,
     ListItemText,
-    IconButton
+    IconButton,
+    Table,
+    TableHead,
+    TableBody,
+    TableRow,
+    TableCell,
+    Chip,
 } from "@mui/material";
 
 import { LocalizationProvider } from "@mui/x-date-pickers";
@@ -28,6 +34,9 @@ import dayjs from "dayjs";
 
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import CloseIcon from "@mui/icons-material/Close";
+import EditIcon from "@mui/icons-material/EditOutlined";
+import DeleteIcon from "@mui/icons-material/DeleteOutline";
+import AddIcon from "@mui/icons-material/Add";
 
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 
@@ -38,6 +47,8 @@ import AccordionDetails from "@mui/material/AccordionDetails";
 import { GlobalContext } from "../../../context/Provider";
 import {
     getLiverMarketEventsFilters,
+    getLiverMarketEventsProducts,
+    addLiverMarketEventsProduct,
     applyLiverMarketEventsFilters,
     refreshLiverMarketEventsTable,
     runLiverMarketEventsCalculation,
@@ -105,6 +116,23 @@ const denormalizeMetricValue = (value) =>
         : value === "market_volume"
             ? "payer_volume"
             : value;
+
+const formatDateOnly = (value) => {
+    if (!value) return "";
+
+    const parsed = dayjs(value);
+
+    return parsed.isValid() ? parsed.format("YYYY-MM-DD") : String(value).split("T")[0];
+};
+
+const normalizeManageProductRow = (row = {}) => ({
+    id: row.id ?? row.product_id ?? row.name ?? row.product_name,
+    name: row.name || row.product_name || "",
+    isNew: row.isNew ?? row.is_new ?? true,
+    dateAdded: formatDateOnly(row.dateAdded || row.date_added || row.added_at),
+    addedBy: row.addedBy || row.added_by || "",
+    modifiedBy: row.modifiedBy || row.modified_by || "",
+});
 
 const sanitizeRunCalculationRow = (row = {}, selectedTab = "overall_event") => {
     const payloadRow = {
@@ -557,6 +585,42 @@ export default function HIVMarketEvent() {
 
     const [impactValues, setImpactValues] = useState({});
 
+    // ---- Manage New Products (modal opened via the "Manage New Products"
+    // button next to Run Calculation).
+    // GET /api/liver-market-events/products is wired to the real API.
+    // Add/rename/delete are still local-only (mocked) until their endpoints
+    // are confirmed — see TODO comments on each handler below.
+    const [manageProductsDialogOpen, setManageProductsDialogOpen] =
+        useState(false);
+
+    const [manageProductsLoading, setManageProductsLoading] =
+        useState(false);
+
+    const [manageProductsList, setManageProductsList] =
+        useState([]);
+
+    const [showAddProductForm, setShowAddProductForm] =
+        useState(false);
+
+    const [newProductName, setNewProductName] =
+        useState("");
+
+    const [addProductError, setAddProductError] =
+        useState("");
+
+    const [renameProductDialog, setRenameProductDialog] = useState({
+        open: false,
+        id: null,
+        name: "",
+        error: "",
+    });
+
+    const [deleteProductDialog, setDeleteProductDialog] = useState({
+        open: false,
+        id: null,
+        name: "",
+    });
+
     useEffect(() => {
         fetchFilters();
     }, []);
@@ -984,6 +1048,195 @@ export default function HIVMarketEvent() {
             ...prev,
             createEmptyRow(currentConfig)
         ]);
+    };
+
+    // ---- Manage New Products handlers ----------------------------------
+
+    const openManageProductsDialog = async () => {
+        setManageProductsDialogOpen(true);
+        setShowAddProductForm(false);
+        setAddProductError("");
+        setManageProductsLoading(true);
+
+        try {
+            const response = await getLiverMarketEventsProducts({
+                ta_name: "HCV",
+                scenario_name: appliedScenarioName,
+            });
+
+            const apiData = response?.data || {};
+            const products = Array.isArray(apiData.products) ? apiData.products : [];
+
+            setManageProductsList(products.map(normalizeManageProductRow));
+        } catch (error) {
+            console.error("Failed to load market event products", error);
+            setManageProductsList([]);
+        } finally {
+            setManageProductsLoading(false);
+        }
+    };
+
+    const closeManageProductsDialog = () => {
+        setManageProductsDialogOpen(false);
+        setShowAddProductForm(false);
+        setNewProductName("");
+        setAddProductError("");
+    };
+
+    const openAddProductForm = () => {
+        setNewProductName("");
+        setAddProductError("");
+        setShowAddProductForm(true);
+    };
+
+    const closeAddProductForm = () => {
+        setShowAddProductForm(false);
+        setNewProductName("");
+        setAddProductError("");
+    };
+
+    const isDuplicateProductName = (name) => {
+        const normalized = name.trim().toLowerCase();
+
+        const existingBaseProducts = Array.isArray(currentConfig.products)
+            ? currentConfig.products
+            : [];
+
+        return (
+            existingBaseProducts.some(
+                (p) => String(p).trim().toLowerCase() === normalized
+            ) ||
+            manageProductsList.some(
+                (p) => p.name.trim().toLowerCase() === normalized
+            )
+        );
+    };
+
+    const handleConfirmAddProduct = async () => {
+        const trimmedName = newProductName.trim();
+
+        if (!trimmedName) {
+            setAddProductError("Please enter a product name.");
+            return;
+        }
+
+        if (isDuplicateProductName(trimmedName)) {
+            setAddProductError("Product already exists.");
+            return;
+        }
+
+        try {
+            const response = await addLiverMarketEventsProduct({
+                product_name: trimmedName,
+            });
+
+            const apiData = response?.data || {};
+            const createdProduct = apiData.product || apiData;
+
+            setManageProductsList((prev) => [
+                ...prev,
+                normalizeManageProductRow(createdProduct),
+            ]);
+
+            closeAddProductForm();
+        } catch (error) {
+            console.error("Failed to add market event product", error);
+            setAddProductError(
+                error?.response?.data?.detail ||
+                error?.response?.data?.message ||
+                "Failed to add product. Please try again."
+            );
+        }
+    };
+
+    const openRenameProductDialog = (item) => {
+        setRenameProductDialog({
+            open: true,
+            id: item.id,
+            name: item.name,
+            error: "",
+        });
+    };
+
+    const closeRenameProductDialog = () => {
+        setRenameProductDialog({ open: false, id: null, name: "", error: "" });
+    };
+
+    const handleConfirmRenameProduct = async () => {
+        const trimmedName = renameProductDialog.name.trim();
+        const currentItem = manageProductsList.find(
+            (p) => p.id === renameProductDialog.id
+        );
+
+        if (!trimmedName) {
+            setRenameProductDialog((prev) => ({
+                ...prev,
+                error: "Please enter a product name.",
+            }));
+            return;
+        }
+
+        if (
+            currentItem &&
+            trimmedName.toLowerCase() !== currentItem.name.trim().toLowerCase() &&
+            isDuplicateProductName(trimmedName)
+        ) {
+            setRenameProductDialog((prev) => ({
+                ...prev,
+                error: "A product with this name already exists.",
+            }));
+            return;
+        }
+
+        // TODO (backend integration): endpoint not confirmed yet. Once
+        // available (likely PATCH /api/liver-market-events/products/{id}),
+        // replace the local rename below with:
+        //   await renameLiverMarketEventsProduct(renameProductDialog.id, {
+        //       ta_name: "HCV",
+        //       scenario_name: appliedScenarioName,
+        //       name: trimmedName,
+        //   });
+        //   this should cascade server-side into data rows / event targets /
+        //   event impacts / event names, then re-fetch or merge the response.
+        setManageProductsList((prev) =>
+            prev.map((p) =>
+                p.id === renameProductDialog.id
+                    ? {
+                        ...p,
+                        name: trimmedName,
+                        modifiedBy: "Current User",
+                    }
+                    : p
+            )
+        );
+
+        closeRenameProductDialog();
+    };
+
+    const openDeleteProductDialog = (item) => {
+        setDeleteProductDialog({ open: true, id: item.id, name: item.name });
+    };
+
+    const closeDeleteProductDialog = () => {
+        setDeleteProductDialog({ open: false, id: null, name: "" });
+    };
+
+    const handleConfirmDeleteProduct = async () => {
+        // TODO (backend integration): endpoint not confirmed yet. Once
+        // available (likely DELETE /api/liver-market-events/products/{id}),
+        // replace the local removal below with:
+        //   await deleteLiverMarketEventsProduct(deleteProductDialog.id, {
+        //       ta_name: "HCV",
+        //       scenario_name: appliedScenarioName,
+        //   });
+        //   this should cascade server-side (remove data rows / the product's
+        //   own launch event, and strip references from other events), then
+        //   re-fetch or merge the response.
+        setManageProductsList((prev) =>
+            prev.filter((p) => p.id !== deleteProductDialog.id)
+        );
+
+        closeDeleteProductDialog();
     };
 
     const handleRunCalculation = async () => {
@@ -1843,6 +2096,39 @@ export default function HIVMarketEvent() {
                                     gap: "12px",
                                 }}
                             >
+
+                                <Box
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        openManageProductsDialog();
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            openManageProductsDialog();
+                                        }
+                                    }}
+                                    sx={{
+                                        height: "33px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        textTransform: "none",
+                                        borderRadius: "8px",
+                                        border: "1px solid #4F46E5",
+                                        backgroundColor: "#fff",
+                                        px: 1.5,
+                                        fontWeight: 600,
+                                        color: "#4F46E5",
+                                        cursor: "pointer",
+                                        userSelect: "none",
+                                    }}
+                                >
+                                    Manage New Products
+                                </Box>
 
                                 <Box
                                     role="button"
@@ -3295,6 +3581,354 @@ export default function HIVMarketEvent() {
                             }}
                         >
                             OK
+                        </Button>
+                    </DialogActions>
+                </Dialog>
+
+                <Dialog
+                    open={manageProductsDialogOpen}
+                    onClose={closeManageProductsDialog}
+                    maxWidth="md"
+                    fullWidth
+                    PaperProps={{
+                        sx: {
+                            width: "650px",
+                            maxWidth: "90vw",
+                            borderRadius: "12px",
+                        },
+                    }}
+                >
+                    <DialogTitle
+                        sx={{
+                            fontWeight: 700,
+                            fontSize: "16px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            pr: 1,
+                        }}
+                    >
+                        Manage New Products
+
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                            <Button
+                                size="small"
+                                variant="contained"
+                                startIcon={<AddIcon fontSize="small" />}
+                                onClick={openAddProductForm}
+                                sx={{
+                                    textTransform: "none",
+                                    borderRadius: "8px",
+                                    backgroundColor: "#4F46E5",
+                                    fontWeight: 600,
+                                    fontSize: "12px",
+                                }}
+                            >
+                                Add Product
+                            </Button>
+
+                            <IconButton size="small" onClick={closeManageProductsDialog}>
+                                <CloseIcon fontSize="small" />
+                            </IconButton>
+                        </Box>
+                    </DialogTitle>
+
+                    <DialogContent>
+
+                        {showAddProductForm && (
+                            <Box
+                                sx={{
+                                    backgroundColor: "#f8fafc",
+                                    border: "1px solid #D8DEE8",
+                                    borderRadius: "8px",
+                                    p: 1.5,
+                                    mb: 2,
+                                }}
+                            >
+                                <Typography
+                                    sx={{
+                                        fontSize: "10px",
+                                        fontWeight: 700,
+                                        color: "#64748b",
+                                        textTransform: "uppercase",
+                                        letterSpacing: "0.05em",
+                                        mb: 0.5,
+                                    }}
+                                >
+                                    Product Name
+                                </Typography>
+
+                                <Box sx={{ display: "flex", gap: 1.5, alignItems: "flex-start" }}>
+                                    <TextField
+                                        autoFocus
+                                        fullWidth
+                                        size="small"
+                                        placeholder="e.g. Brand X"
+                                        value={newProductName}
+                                        onChange={(e) => {
+                                            setNewProductName(e.target.value);
+                                            setAddProductError("");
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                                handleConfirmAddProduct();
+                                            }
+                                        }}
+                                        error={Boolean(addProductError)}
+                                        helperText={addProductError || ""}
+                                        sx={{
+                                            "& .MuiOutlinedInput-root": {
+                                                borderRadius: "8px",
+                                                backgroundColor: "#fff",
+                                            },
+                                        }}
+                                    />
+
+                                    <Button
+                                        variant="contained"
+                                        onClick={handleConfirmAddProduct}
+                                        sx={{
+                                            textTransform: "none",
+                                            borderRadius: "8px",
+                                            backgroundColor: "#4F46E5",
+                                            height: "40px",
+                                        }}
+                                    >
+                                        Save
+                                    </Button>
+
+                                    <Button
+                                        onClick={closeAddProductForm}
+                                        sx={{
+                                            textTransform: "none",
+                                            borderRadius: "8px",
+                                            height: "40px",
+                                            color: "#64748b",
+                                        }}
+                                    >
+                                        Cancel
+                                    </Button>
+                                </Box>
+                            </Box>
+                        )}
+
+                        <Box sx={{ maxHeight: "320px", overflowY: "auto" }}>
+                            <Table size="small">
+                                <TableHead>
+                                    <TableRow>
+                                        <TableCell sx={{ fontWeight: 700, fontSize: "11px", color: "#64748b" }}>
+                                            Product Name
+                                        </TableCell>
+                                        <TableCell sx={{ fontWeight: 700, fontSize: "11px", color: "#64748b" }}>
+                                            Date Added
+                                        </TableCell>
+                                        <TableCell sx={{ fontWeight: 700, fontSize: "11px", color: "#64748b" }}>
+                                            Added By
+                                        </TableCell>
+                                        <TableCell sx={{ fontWeight: 700, fontSize: "11px", color: "#64748b" }}>
+                                            Modified By
+                                        </TableCell>
+                                        <TableCell
+                                            align="center"
+                                            sx={{ fontWeight: 700, fontSize: "11px", color: "#64748b" }}
+                                        >
+                                            Actions
+                                        </TableCell>
+                                    </TableRow>
+                                </TableHead>
+
+                                <TableBody>
+                                    {manageProductsLoading ? (
+                                        <TableRow>
+                                            <TableCell colSpan={5} align="center" sx={{ color: "#94a3b8", py: 3 }}>
+                                                Loading...
+                                            </TableCell>
+                                        </TableRow>
+                                    ) : manageProductsList.length === 0 ? (
+                                        <TableRow>
+                                            <TableCell colSpan={5} align="center" sx={{ color: "#94a3b8", py: 3 }}>
+                                                No new products added yet.
+                                            </TableCell>
+                                        </TableRow>
+                                    ) : (
+                                        manageProductsList.map((item) => (
+                                            <TableRow key={item.id}>
+                                                <TableCell sx={{ fontSize: "12px" }}>
+                                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                                        <Typography sx={{ fontSize: "12px", fontWeight: 700 }}>
+                                                            {item.name}
+                                                        </Typography>
+
+                                                        <Chip
+                                                            label="NEW"
+                                                            size="small"
+                                                            sx={{
+                                                                height: "18px",
+                                                                fontSize: "9px",
+                                                                fontWeight: 700,
+                                                                backgroundColor: "#DBEAFE",
+                                                                color: "#1E40AF",
+                                                            }}
+                                                        />
+                                                    </Box>
+                                                </TableCell>
+
+                                                <TableCell sx={{ fontSize: "12px" }}>
+                                                    {item.dateAdded}
+                                                </TableCell>
+
+                                                <TableCell sx={{ fontSize: "12px" }}>
+                                                    {item.addedBy}
+                                                </TableCell>
+
+                                                <TableCell sx={{ fontSize: "12px" }}>
+                                                    {item.modifiedBy}
+                                                </TableCell>
+
+                                                <TableCell align="center">
+                                                    <IconButton
+                                                        size="small"
+                                                        title="Rename"
+                                                        onClick={() => openRenameProductDialog(item)}
+                                                    >
+                                                        <EditIcon fontSize="small" />
+                                                    </IconButton>
+
+                                                    <IconButton
+                                                        size="small"
+                                                        title="Delete"
+                                                        onClick={() => openDeleteProductDialog(item)}
+                                                    >
+                                                        <DeleteIcon fontSize="small" sx={{ color: "#EF4444" }} />
+                                                    </IconButton>
+                                                </TableCell>
+                                            </TableRow>
+                                        ))
+                                    )}
+                                </TableBody>
+                            </Table>
+                        </Box>
+
+                    </DialogContent>
+
+                    <DialogActions sx={{ px: 3, pb: 3 }}>
+                        <Button
+                            onClick={closeManageProductsDialog}
+                            sx={{ textTransform: "none" }}
+                        >
+                            Close
+                        </Button>
+                    </DialogActions>
+                </Dialog>
+
+                <Dialog
+                    open={renameProductDialog.open}
+                    onClose={closeRenameProductDialog}
+                    PaperProps={{
+                        sx: {
+                            width: "360px",
+                            maxWidth: "90vw",
+                            borderRadius: "12px",
+                        },
+                    }}
+                >
+                    <DialogTitle
+                        sx={{
+                            fontWeight: 700,
+                            fontSize: "16px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            pr: 1,
+                        }}
+                    >
+                        Rename Product
+
+                        <IconButton size="small" onClick={closeRenameProductDialog}>
+                            <CloseIcon fontSize="small" />
+                        </IconButton>
+                    </DialogTitle>
+
+                    <DialogContent>
+                        <TextField
+                            autoFocus
+                            fullWidth
+                            size="small"
+                            placeholder="Product name"
+                            value={renameProductDialog.name}
+                            onChange={(e) =>
+                                setRenameProductDialog((prev) => ({
+                                    ...prev,
+                                    name: e.target.value,
+                                    error: "",
+                                }))
+                            }
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    handleConfirmRenameProduct();
+                                }
+                            }}
+                            error={Boolean(renameProductDialog.error)}
+                            helperText={renameProductDialog.error || ""}
+                            sx={{
+                                "& .MuiOutlinedInput-root": {
+                                    borderRadius: "8px",
+                                },
+                            }}
+                        />
+                    </DialogContent>
+
+                    <DialogActions sx={{ px: 3, pb: 3 }}>
+                        <Button
+                            onClick={closeRenameProductDialog}
+                            sx={{ textTransform: "none" }}
+                        >
+                            Cancel
+                        </Button>
+
+                        <Button
+                            variant="contained"
+                            onClick={handleConfirmRenameProduct}
+                            sx={{
+                                textTransform: "none",
+                                borderRadius: "8px",
+                                backgroundColor: "#4F46E5",
+                            }}
+                        >
+                            Save
+                        </Button>
+                    </DialogActions>
+                </Dialog>
+
+                <Dialog
+                    open={deleteProductDialog.open}
+                    onClose={closeDeleteProductDialog}
+                    maxWidth="xs"
+                    fullWidth
+                >
+                    <DialogTitle>
+                        Delete Product
+                    </DialogTitle>
+
+                    <DialogContent>
+                        <Typography sx={{ fontSize: "13px", color: "#334155" }}>
+                            Are you sure you want to delete "{deleteProductDialog.name}"?
+                            This will remove it from the forecast along with any
+                            associated events. This action cannot be undone.
+                        </Typography>
+                    </DialogContent>
+
+                    <DialogActions>
+                        <Button onClick={closeDeleteProductDialog}>
+                            Cancel
+                        </Button>
+
+                        <Button
+                            color="error"
+                            variant="contained"
+                            onClick={handleConfirmDeleteProduct}
+                        >
+                            Delete
                         </Button>
                     </DialogActions>
                 </Dialog>
