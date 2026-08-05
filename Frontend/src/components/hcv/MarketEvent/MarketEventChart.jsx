@@ -89,19 +89,26 @@ export default function MarketEventChart({
     const yMax =
         Math.ceil(maxValue * 1.15);
 
-    const COLORS = [
-        "#2563EB",
-        "#EF4444",
-        "#10B981",
-        "#F59E0B",
-        "#8B5CF6",
-        "#EC4899",
-    ];
+    const getScenarioColor = (index) =>
+        `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
 
-    series.forEach((item, index) => {
+    const scenarioColorMap = React.useMemo(() => {
+        const map = {};
 
-        const color =
-            COLORS[index % COLORS.length];
+        let index = 0;
+
+        series.forEach((item) => {
+            if (!map[item.scenario]) {
+                map[item.scenario] = getScenarioColor(index++);
+            }
+        });
+
+        return map;
+    }, [series]);
+
+    series.forEach((item) => {
+
+        const color = scenarioColorMap[item.scenario] || getScenarioColor(0);
 
         traces.push({
 
