@@ -19,6 +19,7 @@ from app.liver.services.liver_service import (
     recalculate_liver,
     save_liver_scenario,
     update_liver_scenario_new,
+    delete_liver_scenario,
     activate_liver_scenario,
     refresh_liver,
 )
@@ -119,6 +120,17 @@ def liver_update_scenario_new(payload: SaveScenarioRequest):
     """Update an existing scenario. Rejects if name == 'Base' or doesn't exist."""
     try:
         return update_liver_scenario_new(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/delete-scenario")
+def liver_delete_scenario(payload: ActivateScenarioRequest):
+    """Delete a scenario and cascade to market_events_impact_rows. Base cannot be deleted."""
+    try:
+        return delete_liver_scenario(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

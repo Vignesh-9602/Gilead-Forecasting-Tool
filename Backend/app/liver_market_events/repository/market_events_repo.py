@@ -50,6 +50,7 @@ def get_products_with_audit(cur) -> list:
     cur.execute("""
         SELECT product_name, active_flag, added_by, added_at, modified_by, modified_at
         FROM raw_liver.product_master
+        WHERE added_by IS NOT NULL
         ORDER BY added_at DESC NULLS LAST, product_name
     """)
     return cur.fetchall()
@@ -293,6 +294,16 @@ def rename_product_in_impact_rows(cur, ta_name: str, old_name: str, new_name: st
             """, (json.dumps(rows), ta_name, scenario_name, tab))
             touched += 1
     return touched
+
+
+def delete_scenario_impact_rows(cur, ta_name: str, scenario_name: str) -> int:
+    """Remove all market_events_impact_rows for a deleted scenario."""
+    _ensure_impact_rows_table(cur)
+    cur.execute(
+        "DELETE FROM raw_liver.market_events_impact_rows WHERE ta_name = %s AND scenario_name = %s",
+        (ta_name, scenario_name)
+    )
+    return cur.rowcount
 
 
 def delete_product_from_impact_rows(cur, ta_name: str, product_name: str) -> dict:

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useContext, useMemo, useRef } from "react";
 import {
   Box,
   Paper,
@@ -33,6 +33,7 @@ import {
   updateScenario,
   getConfigurationByTherapyAreaHCV,
   activateLiverScenario,
+  deleteLiverScenario,
 } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
@@ -158,6 +159,8 @@ export default function PBCModelInput() {
   const [isSavingEditChanges, setIsSavingEditChanges] = useState(false);
   // true only after Refresh succeeds — gates the Save button
   const [isRefreshed, setIsRefreshed] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [scenarioToDelete, setScenarioToDelete] = useState("");
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const metricUnit = useMemo(() => {
@@ -266,7 +269,7 @@ export default function PBCModelInput() {
   // ── HCV tab mapper ────────────────────────────────────────────────────────
   function normalizeLiverResponse(data, currentMetric) {
     if (!data) return { months: [], forecast_start_index: 0, tabs: {} };
-    if (!currentMetric) currentMetric = metric;
+    const resolvedMetric = currentMetric || metric;
 
     if (data.months || data.tabs) {
       return {
@@ -353,7 +356,7 @@ export default function PBCModelInput() {
         return tabObj.payer_volume || Object.values(tabObj)[0];
       }
 
-      const apiMetricKey = currentMetric ? toApiMetricKey(currentMetric) : null;
+      const apiMetricKey = resolvedMetric ? toApiMetricKey(resolvedMetric) : null;
       if (apiMetricKey && tabObj[apiMetricKey]) {
         return tabObj[apiMetricKey];
       }
@@ -390,6 +393,7 @@ export default function PBCModelInput() {
           train_values: parseValues(s.history || s.train_values, asPercent),
           forecast_values: parseValues(s.forecast || s.forecast_values, asPercent),
           lot: s.lot || s.label || "",
+          scenario: s.scenario || "",
         })),
       };
     };
@@ -584,7 +588,10 @@ export default function PBCModelInput() {
             scenarioIsPercent,
           );
           if (scenarioParsed.series?.length) {
-            scenarioSeries[scenarioName] = scenarioParsed.series;
+            scenarioSeries[scenarioName] = scenarioParsed.series.map((seriesItem) => ({
+              ...seriesItem,
+              scenario: scenarioName,
+            }));
           }
         });
         if (Object.keys(scenarioSeries).length) {
@@ -676,11 +683,18 @@ export default function PBCModelInput() {
               yearlyVals = yearlyChartMonthsRef.map((m) => yearToVal[(m || "").substring(0, 4)] ?? null);
             }
 
+            const yearlyMonthlyData = {};
+            yearlyChartMonthsRef.forEach((m, i) => {
+              const val = yearlyVals[i];
+              yearlyMonthlyData[m] = val == null ? null : Number(val);
+            });
+
             yearlyScenarioRows.push({
               hierarchy: scenarioName,
               label: scenarioName,
               total: undefined,
               values: yearlyVals,
+              monthly_data: yearlyMonthlyData,
               children: [],
             });
           });
@@ -795,7 +809,7 @@ export default function PBCModelInput() {
     };
   };
 
-  const mapLiverTabToView = (tabsPayload, uiTabKey, viewMode = "monthly") => {
+  const mapLiverTabToView = (tabsPayload, uiTabKey, viewMode = "monthly", metricKey = metric) => {
     if (!tabsPayload) return { chart: null, table: [] };
     const {
       months = [],
@@ -804,6 +818,7 @@ export default function PBCModelInput() {
     } = tabsPayload;
     const backendKey = TAB_KEY_MAP[uiTabKey] || uiTabKey;
     const tab = tabs[backendKey] || tabs[Object.keys(tabs)[0]] || null;
+    const activeMetricKey = toApiMetricKey(metricKey);
     if (!tab)
       return {
         chart: { months, forecast_start_index: fsi, series: [] },
@@ -823,7 +838,40 @@ export default function PBCModelInput() {
       ? (tab.yearlyChart.forecast_start_index || 0)
       : fsi;
 
-    const series = (activeChartData?.series || [])
+    const buildSeriesFromTableRows = (rows = []) => {
+      const out = [];
+      (rows || []).forEach((row) => {
+        const rowLabel = row?.hierarchy || row?.label || "";
+        if (!rowLabel) return;
+
+        const rowValues = Array.isArray(row?.total)
+          ? row.total
+          : (Array.isArray(row?.values) ? row.values : []);
+        if (rowValues.length) {
+          out.push({
+            label: rowLabel,
+            lot: rowLabel,
+            train_values: rowValues.slice(0, activeFsi),
+            forecast_values: rowValues.slice(activeFsi),
+          });
+        }
+
+        (row?.children || []).forEach((child) => {
+          const childLabel = `${rowLabel} - ${child?.label || ""}`;
+          const childValues = Array.isArray(child?.values) ? child.values : [];
+          if (!childValues.length) return;
+          out.push({
+            label: childLabel,
+            lot: childLabel,
+            train_values: childValues.slice(0, activeFsi),
+            forecast_values: childValues.slice(activeFsi),
+          });
+        });
+      });
+      return out;
+    };
+
+    let series = (activeChartData?.series || [])
       .filter((s) => {
         const lbl = (s.label || "").toLowerCase();
         if (
@@ -845,6 +893,10 @@ export default function PBCModelInput() {
           ? s.forecast_values
           : [],
       }));
+
+    if (!series.length && (activeTableData?.rows || []).length) {
+      series = buildSeriesFromTableRows(activeTableData.rows);
+    }
 
     const isAllZeroSeries = (arr) => {
       if (!arr?.length) return true;
@@ -1252,7 +1304,7 @@ export default function PBCModelInput() {
     fetchMetricFilters();
   }, [therapyArea]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!filtersLoaded) return;
 
     let targetMetric = "market_volume";
@@ -1281,14 +1333,24 @@ export default function PBCModelInput() {
     if (metric !== targetMetric) {
       setMetric(targetMetric);
       if (targetMetric !== "market_share") setBrand("");
-
-      if (isHCV && liverRawData) {
-        setLiverTabsRaw(normalizeLiverResponse(liverRawData, targetMetric));
-      } else {
-        handleApplyFilterWithMetric(targetMetric);
-      }
     }
-  }, [activeTab, filtersLoaded]);
+
+    if (isHCV && liverRawData) {
+      const nextLiverTabsRaw = normalizeLiverResponse(liverRawData, targetMetric);
+      setLiverTabsRaw(nextLiverTabsRaw);
+
+      const { chart, table } = mapLiverTabToView(
+        nextLiverTabsRaw,
+        activeTab,
+        totalMarketViewMode,
+        targetMetric,
+      );
+      setChartData(chart);
+      setTableData(table);
+    } else if (metric !== targetMetric) {
+      handleApplyFilterWithMetric(targetMetric);
+    }
+  }, [activeTab, filtersLoaded, isHCV, liverRawData, totalMarketViewMode]);
 
 
 
@@ -1328,38 +1390,43 @@ export default function PBCModelInput() {
 
   useEffect(() => {
     if (!liverTabsRaw) return;
-    const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode);
-    console.log("[ModelInput chartData debug]", {
-      activeTab,
-      totalMarketViewMode,
-      chartMonths: chart?.months,
-      chartSeriesCount: chart?.series?.length ?? 0,
-      chartSeriesLabels: (chart?.series || []).map((s) => s.label),
-    });
+
+    // Keep the chart/table in sync for all non-tab-switch updates too, but
+    // avoid the extra tab-switch render chain by letting the tab-change path
+    // handle the transformation first.
+    const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode, metric);
     setChartData(chart);
     setTableData(table);
+
     // Auto-expand the applied/filtered parent row so it doesn't collapse
     // back to nothing on every data change (tab switch, apply filter,
     // refresh, etc.) — the user shouldn't have to manually re-open it
     // each time.
+    let nextExpandedBrands = {};
     if (activeTab === "payer_prod") {
       const key = appliedPayerFilter || payerFilter;
-      // Parent labels are always scenario-tagged now, even for the applied
-      // scenario (e.g. "PayerA (Base Case)") — match that format.
       const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
-      setExpandedBrands(taggedKey ? { [taggedKey]: true } : {});
+      nextExpandedBrands = taggedKey ? { [taggedKey]: true } : {};
     } else if (activeTab === "prod_payer") {
       const key = appliedProductFilter || productFilter;
       const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
-      setExpandedBrands(taggedKey ? { [taggedKey]: true } : {});
+      nextExpandedBrands = taggedKey ? { [taggedKey]: true } : {};
     } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
-      // These group by scenario (collapsible) — auto-expand whichever
-      // scenario is currently applied.
-      setExpandedBrands(currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {});
-    } else {
-      setExpandedBrands({});
+      nextExpandedBrands = currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {};
     }
-  }, [activeTab, liverTabsRaw, totalMarketViewMode, currentlyAppliedScenario]);
+
+    setExpandedBrands((prev) => {
+      const prevKeys = Object.keys(prev || {});
+      const nextKeys = Object.keys(nextExpandedBrands || {});
+      if (
+        prevKeys.length === nextKeys.length &&
+        prevKeys.every((key) => prev[key] === nextExpandedBrands[key])
+      ) {
+        return prev;
+      }
+      return nextExpandedBrands;
+    });
+  }, [activeTab, liverTabsRaw, totalMarketViewMode, currentlyAppliedScenario, appliedPayerFilter, appliedProductFilter, payerFilter, productFilter]);
 
   useEffect(() => {
     if (filterOptions?.scenario_names?.length) {
@@ -2191,8 +2258,10 @@ export default function PBCModelInput() {
         }
       }
       setEditedHierarchies({});
-      setIsRefreshed(true);
-      showSnackbar("Table refreshed successfully. You can now Save.", "success");
+      setIsRefreshed(false);
+      setTableEditing(false);
+      setEditable(false);
+      showSnackbar("Table refreshed successfully.", "success");
     } catch (error) {
       const msg = error?.response?.data || error?.message || "Unknown error";
       showSnackbar(
@@ -2300,6 +2369,53 @@ export default function PBCModelInput() {
   const handleActiveScenarioRadioChange = (name) => {
     setTentativeRadioSelectedScenario(name);
   };
+
+  const handleDeleteScenarioClick = (scenarioName) => {
+    setScenarioToDelete(scenarioName);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDeleteScenario = async (scenarioName) => {
+    if (!scenarioName) return;
+
+    try {
+      setLoading(true);
+      const payload = {
+        ta_name: therapyArea || "HCV",
+        selected_filter: {
+          start_date: resolveFromDate() || liverRawData?.selected_filter?.start_date || "",
+          end_date: toDate || liverRawData?.selected_filter?.end_date || "",
+          payer: appliedPayerFilter || payerFilter || liverRawData?.selected_filter?.payer || getFirstOption(payerOptions) || "",
+          product: appliedProductFilter || productFilter || liverRawData?.selected_filter?.product || getFirstOption(productOptions) || "",
+        },
+        scenario_name: scenarioName,
+      };
+
+      const response = await deleteLiverScenario(payload);
+      const respData = response?.data || {};
+
+      if (respData && Object.keys(respData).length) {
+        const normalized = normalizeLiverResponse(respData, metric);
+        setLiverTabsRaw(normalized);
+        setLiverRawData(respData);
+        initializeCompareScenarios(respData, respData?.active_scenario || "Base");
+        setCurrentlyAppliedScenario(respData?.active_scenario || "Base");
+        setTentativeRadioSelectedScenario(respData?.active_scenario || "Base");
+        setSavedScenarioRows((prev) => prev.filter((name) => name !== scenarioName));
+      }
+
+      showSnackbar("Scenario deleted successfully", "success");
+    } catch (error) {
+      console.error("Failed to delete scenario:", error);
+      const msg = error?.response?.data || error?.message || "Unknown error";
+      showSnackbar(typeof msg === "string" ? msg : "Failed to delete scenario", "error");
+    } finally {
+      setLoading(false);
+      setDeleteDialogOpen(false);
+      setScenarioToDelete("");
+    }
+  };
+
   const clickTableEdit = () => setEditable(true);
  const applySelectedScenario = async () => {
     const chosenScenario = tentativeRadioSelectedScenario;
@@ -3329,6 +3445,7 @@ export default function PBCModelInput() {
             compareScenarioOptions={compareScenarioOptions}
             currentlyAppliedScenario={currentlyAppliedScenario}
             tentativeRadioSelectedScenario={tentativeRadioSelectedScenario}
+            appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
             userHasCustomizedCompare={userHasCustomizedCompare}
             savedScenarioRows={savedScenarioRows}
             appliedProductFilter={appliedProductFilter}
@@ -3360,9 +3477,51 @@ export default function PBCModelInput() {
             handleCompareScenarioChange={handleCompareScenarioChange}
             handleActiveScenarioRadioChange={handleActiveScenarioRadioChange}
             handleCellChange={handleCellChange}
+            onDeleteScenario={handleDeleteScenario}
+            onDeleteScenarioClick={handleDeleteScenarioClick}
           />
         </Box>
       </Paper>
+
+      {/* ── Delete Scenario Dialog ── */}
+      <Dialog
+        open={deleteDialogOpen}
+        onClose={() => {
+          setDeleteDialogOpen(false);
+          setScenarioToDelete("");
+        }}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: "12px" } }}
+      >
+        <DialogTitle sx={{ fontWeight: 700, fontSize: "16px", color: "#0f172a", pb: 1 }}>
+          Delete Scenario
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: "13px", color: "#64748b" }}>
+            Are you sure you want to delete <b>{scenarioToDelete}</b>?
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setDeleteDialogOpen(false);
+              setScenarioToDelete("");
+            }}
+            sx={{ textTransform: "none", borderRadius: "8px", color: "#64748b", borderColor: "#e2e8f0" }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => handleDeleteScenario(scenarioToDelete)}
+            sx={{ textTransform: "none", borderRadius: "8px", backgroundColor: "#dc2626" }}
+          >
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* ── Save Scenario Dialog ── */}
       <Dialog

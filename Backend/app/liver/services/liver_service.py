@@ -32,7 +32,7 @@ from app.liver.schemas.liver_schema import (
     ActivateScenarioRequest,
 )
 from app.liver_market_events.services.market_events_service import extract_snapshot_from_market_analysis
-from app.liver_market_events.repository.market_events_repo import save_market_events_scenario
+from app.liver_market_events.repository.market_events_repo import save_market_events_scenario, delete_scenario_impact_rows
 from app.liver.repository.liver_repo import (
     get_liver_configs_for_ta,
     get_liver_config_by_payer_brand,
@@ -54,6 +54,7 @@ from app.liver.repository.liver_repo import (
     get_product_wise_payer_yearly,
     save_scenario,
     scenario_exists,
+    delete_scenario,
     save_filter_state,
     load_filter_state,
 )
@@ -2568,8 +2569,10 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         if not ms_data:
             continue
 
-        ms_row_map = {r.get("label", ""): r for r in ms_data.get("table", {}).get("rows", [])}
-        ms_ser_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
+        ms_rows   = ms_data.setdefault("table", {}).setdefault("rows", [])
+        ms_series = ms_data.setdefault("chart", {}).setdefault("series", [])
+        ms_row_map = {r.get("label", ""): r for r in ms_rows}
+        ms_ser_map = {s.get("label", ""): s for s in ms_series}
 
         # Use column sum of non-Total rows as denominator so shares always sum to 100%
         non_total_rows = [
@@ -2597,9 +2600,22 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
             ]
             if lbl in ms_row_map:
                 ms_row_map[lbl]["values"] = ms_vals
+            else:
+                # Brand-new product/payer (e.g. one added on the fly via
+                # Manage Products, never seen here before) -- its volume
+                # row already exists (added by market_events_service.py's
+                # own sync), but there's no share row for it yet. Add one
+                # instead of silently leaving it volume-only.
+                new_row = {"label": lbl, "values": ms_vals}
+                ms_rows.append(new_row)
+                ms_row_map[lbl] = new_row
             if lbl in ms_ser_map:
                 ms_ser_map[lbl]["history"]  = ms_vals[:fsi]
                 ms_ser_map[lbl]["forecast"] = ms_vals[fsi:]
+            else:
+                new_series = {"label": lbl, "history": ms_vals[:fsi], "forecast": ms_vals[fsi:]}
+                ms_series.append(new_series)
+                ms_ser_map[lbl] = new_series
 
     # ── Hierarchical cross-tabs (4, 5): child / sum(children) * 100 ─────────
     for tab in ("payer_product", "product_payer"):
@@ -2610,19 +2626,30 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
         if not ms_data:
             continue
 
-        ms_hier_map  = {r.get("label", ""): r for r in ms_data.get("table", {}).get("rows", [])}
-        ms_chart_map = {s.get("label", ""): s for s in ms_data.get("chart", {}).get("series", [])}
+        ms_rows      = ms_data.setdefault("table", {}).setdefault("rows", [])
+        ms_series    = ms_data.setdefault("chart", {}).setdefault("series", [])
+        ms_hier_map  = {r.get("label", ""): r for r in ms_rows}
+        ms_chart_map = {s.get("label", ""): s for s in ms_series}
 
         for mv_row in mv_data.get("table", {}).get("rows", []):
             parent_lbl = mv_row.get("label", "")
             children   = mv_row.get("children", [])
-            ms_parent  = ms_hier_map.get(parent_lbl, {})
+            ms_parent  = ms_hier_map.get(parent_lbl)
 
             if not children:
                 # "Total" header row — set share to 100 so it's always consistent
                 if ms_parent:
                     ms_parent["values"] = [100.0] * n
                 continue
+
+            if ms_parent is None:
+                # Brand-new parent (product or payer) with no existing share
+                # row at all -- its volume row already exists, but there's
+                # nowhere for its (or its children's) share to land. Add one
+                # instead of silently leaving it volume-only.
+                ms_parent = {"label": parent_lbl, "values": [], "children": []}
+                ms_rows.append(ms_parent)
+                ms_hier_map[parent_lbl] = ms_parent
 
             # Derive length and per-period column sum directly from children
             # to avoid rounding drift when parent_vals used to_int=True
@@ -2632,8 +2659,9 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                 for i in range(hier_n)
             ]
 
-            if ms_parent:
-                ms_parent["values"] = [100.0] * hier_n
+            ms_parent["values"] = [100.0] * hier_n
+            ms_children  = ms_parent.setdefault("children", [])
+            ms_child_map = {c.get("label", ""): c for c in ms_children}
 
             for child in children:
                 child_lbl  = child.get("label", "")
@@ -2644,15 +2672,20 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                     else 0.0
                     for i in range(hier_n)
                 ]
-                if ms_parent:
-                    for c in ms_parent.get("children", []):
-                        if c.get("label") == child_lbl:
-                            c["values"] = child_ms
-                            break
+                if child_lbl in ms_child_map:
+                    ms_child_map[child_lbl]["values"] = child_ms
+                else:
+                    new_child = {"label": child_lbl, "values": child_ms}
+                    ms_children.append(new_child)
+                    ms_child_map[child_lbl] = new_child
                 chart_key = f"{parent_lbl} - {child_lbl}"
                 if chart_key in ms_chart_map:
                     ms_chart_map[chart_key]["history"]  = child_ms[:fsi]
                     ms_chart_map[chart_key]["forecast"] = child_ms[fsi:]
+                else:
+                    new_series = {"label": chart_key, "history": child_ms[:fsi], "forecast": child_ms[fsi:]}
+                    ms_series.append(new_series)
+                    ms_chart_map[chart_key] = new_series
 
     return market_analysis
 
@@ -3187,6 +3220,84 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
 
         conn.commit()
         return _build_scenario_response(cur, name, ta, flt, factors, payload.market_analysis)
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_liver_scenario(payload: ActivateScenarioRequest) -> dict:
+    """DELETE /liver/delete-scenario — remove a scenario and cascade to market_events_impact_rows."""
+    name = payload.scenario_name.strip()
+    if name.lower() == "base":
+        raise ValueError("The Base scenario cannot be deleted.")
+
+    ta  = payload.ta_name
+    flt = payload.selected_filter
+
+    conn = get_connection()
+    cur  = conn.cursor()
+    try:
+        if not scenario_exists(cur, name):
+            raise ValueError(f"Scenario '{name}' does not exist.")
+
+        delete_scenario(cur, name)
+
+        try:
+            delete_scenario_impact_rows(cur, ta, name)
+        except Exception as _me_err:
+            print(f"[liver] market_events impact rows delete skipped: {_me_err}")
+
+        conn.commit()
+
+        all_names = get_scenarios(cur)
+        if "Base" in all_names:
+            all_names.remove("Base")
+        available_scenarios = ["Base"] + all_names
+
+        cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
+        saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
+
+        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+        from_year, from_month = _parse_ym(flt.start_date)
+        forecast_periods = _resolve_forecast_periods(
+            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
+        granularity = cfg.get("model_granularity", "monthly")
+
+        base_factors = _estimate_default_factors(
+            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+        )
+        _base_ma, _ = _build_market_analysis_both_granularities(
+            cur, ta, from_year, from_month,
+            train_end_year, train_end_month, forecast_periods, base_factors,
+            scenario_name="Base",
+        )
+
+        scenarios = {}
+        for sc in available_scenarios:
+            if sc == "Base":
+                scenarios[sc] = {"market_analysis": _base_ma}
+            else:
+                cd     = saved.get(sc, {})
+                raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+                scenarios[sc] = {"market_analysis": raw_ma}
+
+        return {
+            "status": "success",
+            "message": "Scenario deleted successfully",
+            "ta_name": ta,
+            "selected_filter": {
+                "start_date": flt.start_date,
+                "end_date": flt.end_date,
+                "payer": flt.payer,
+                "product": flt.product,
+            },
+            "available_scenarios": available_scenarios,
+            "active_scenario": "Base",
+            "deleted_scenario": name,
+            "scenarios": scenarios,
+        }
     finally:
         cur.close()
         conn.close()
@@ -3823,6 +3934,29 @@ def refresh_liver(payload):
                         "children": new_children})
         return out
 
+    def _backfill_flat(hier_tab, flat_tab, g):
+        """Sync flat distribution volumes from hier parent totals to the flat tab."""
+        hier_rows = _rows(hier_tab, "payer_volume", g)
+        flat_rows = _rows(flat_tab, "payer_volume", g)
+        if not hier_rows or not flat_rows:
+            return
+        hier_map = {r.get("label", ""): [int(round(float(v))) for v in r.get("values", [])]
+                    for r in hier_rows}
+        n = max((len(r.get("values", [])) for r in flat_rows), default=0)
+        new_non_total = [
+            {"label": r.get("label", ""),
+             "values": hier_map.get(r.get("label", ""),
+                                    [int(round(float(v))) for v in r.get("values", [])])}
+            for r in flat_rows if r.get("label", "").lower() != "total"
+        ]
+        total_vals = [
+            sum(r["values"][i] if i < len(r["values"]) else 0 for r in new_non_total)
+            for i in range(n)
+        ]
+        _put_flat(flat_tab, "payer_volume", g,
+                  [{"label": "Total", "values": total_vals}] + new_non_total,
+                  to_int=True)
+
     # ── Core propagation ─────────────────────────────────────────────────────
 
     for gran in ("monthly", "yearly"):
@@ -3990,15 +4124,25 @@ def refresh_liver(payload):
                     })
                 _put_hier(tab, "payer_volume", gran, new_hier_rows, to_int=True)
 
-            # Top-to-bottom rule:
-            # Tab4 (payer_product) edit → propagates down to Tab5 (transpose)
-            # Tab5 (product_payer) edit → affects only Tab5, no propagation
+            # Propagate between payer_product ↔ product_payer bidirectionally
+            # then backfill flat distribution tabs from the updated hier parent totals.
+            # payer_product parents (payers)   → payer_distribution rows
+            # product_payer parents (products) → product_distribution rows
             if tab == "payer_product":
                 updated_vol = _rows("payer_product", "payer_volume", gran)
                 tab5_seed   = _rows("product_payer", "payer_volume", gran)
                 if updated_vol and tab5_seed:
                     _put_hier("product_payer", "payer_volume", gran,
                               _transpose_hier(updated_vol, tab5_seed), to_int=True)
+            elif tab == "product_payer":
+                updated_vol = _rows("product_payer", "payer_volume", gran)
+                tab4_seed   = _rows("payer_product", "payer_volume", gran)
+                if updated_vol and tab4_seed:
+                    _put_hier("payer_product", "payer_volume", gran,
+                              _transpose_hier(updated_vol, tab4_seed), to_int=True)
+
+            _backfill_flat("payer_product", "payer_distribution", gran)
+            _backfill_flat("product_payer", "product_distribution", gran)
 
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).

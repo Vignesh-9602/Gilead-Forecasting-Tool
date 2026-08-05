@@ -23,23 +23,15 @@ const DATE_INPUT_FORMATS = [
   "YYYY-MM-DDTHH:mm:ssZ",
 ];
 
-// Same palette as HIV's SCENARIO_COLORS (HIVMarketChart.jsx), used for
-// index-based coloring on Total Market Volume, and cycled per distinct
-// product/payer identity on the other tabs (see getSeriesColor below).
-const SCENARIO_COLORS = [
-  "#2563EB", // Blue
-  "#F59E0B", // Orange
-  "#16A34A", // Green
-  "#9333EA", // Purple
-  "#DC2626", // Red
-  "#0891B2", // Cyan
-  "#D97706", // Amber
-  "#4F46E5", // Indigo
-];
+// Use the same deterministic scenario-color approach as HIV's chart so each
+// distinct scenario gets a stable color regardless of render order.
 const NEUTRAL_COLOR = "#64748B"; // HIV's fallback for an unmatched label
 
+const getScenarioColor = (index) =>
+  `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
+
 // ─── ForecastChart ────────────────────────────────────────────────────────────
-const ForecastChart = ({
+const ForecastChart = React.memo(function ForecastChart({
   chartData,
   productFilter,
   payerFilter,
@@ -53,7 +45,7 @@ const ForecastChart = ({
   filterFromYM,
   filterToYM,
   viewMode = "monthly",
-}) => {
+}) {
   if (!chartData?.months?.length || !chartData?.series?.length) {
     return (
       <Box
@@ -70,13 +62,26 @@ const ForecastChart = ({
 
   const formatMonths = (rawMonths) =>
     (rawMonths || []).map((m) => {
+      if (typeof m === "string" && /^\d{4}$/.test(m.trim())) {
+        return m.trim();
+      }
+
       const parsed = dayjs(m, DATE_INPUT_FORMATS, true);
-      return parsed.isValid()
-        ? parsed.format("MMM-YY")
-        : new Date(m).toLocaleDateString("en-US", {
+      if (!parsed.isValid()) {
+        if (typeof m === "string" && /^\d{4}-\d{2}$/.test(m.trim())) {
+          return m.trim();
+        }
+        return new Date(m).toLocaleDateString("en-US", {
           month: "short",
           year: "2-digit",
         });
+      }
+
+      if (viewMode === "yearly") {
+        return parsed.format("YYYY");
+      }
+
+      return parsed.format("MMM-YY");
     });
 
   const allMonths = formatMonths(months);
@@ -91,7 +96,9 @@ const ForecastChart = ({
   // applied scenario if the dropdown is somehow empty.
   const scenarioNamesToShow = selectedCompareScenarios.length
     ? selectedCompareScenarios
-    : (appliedScenario ? [appliedScenario] : []);
+    : (compareScenarioOptions.length
+      ? compareScenarioOptions
+      : (appliedScenario ? [appliedScenario] : []));
 
   let filteredSeries;
   if (isTotalMarket) {
@@ -236,7 +243,10 @@ const ForecastChart = ({
         });
       })
       : null;
-    filteredSeries = overlaySeries && overlaySeries.length ? overlaySeries : series;
+    const fallbackSeries = (series || []).map((s) => ({ ...s, scenario: s.scenario || appliedScenario || "" }));
+    filteredSeries = overlaySeries && overlaySeries.length
+      ? overlaySeries
+      : fallbackSeries;
   }
 
   // When a specific product/payer is focused via the page filters, narrow
@@ -259,59 +269,39 @@ const ForecastChart = ({
     });
   }
 
-  // Stable per-scenario color map for filter-focus mode: built from the
-  // full scenario list (not the narrowed filteredSeries), so a given
-  // scenario keeps the same color regardless of which product/payer is
-  // currently focused.
-  const focusModeScenarioColorMap = {};
-  (compareScenarioOptions.length ? compareScenarioOptions : scenarioNamesToShow).forEach(
-    (name, i) => {
-      focusModeScenarioColorMap[name] = SCENARIO_COLORS[i % SCENARIO_COLORS.length];
-    },
+  // Stable per-scenario color map for the comparison overlay. Build it from
+  // the full ordered list of scenarios to show, then reuse those colors for
+  // every trace so the same scenario never gets a different color later.
+  const scenarioNamesForColoring = Array.from(
+    new Set([
+      ...(compareScenarioOptions.length ? compareScenarioOptions : []),
+      ...scenarioNamesToShow,
+      ...(appliedScenario ? [appliedScenario] : []),
+    ].filter(Boolean)),
   );
 
-  // Mirrors HIV's getSeriesColor (HIVMarketChart.jsx): Total Market colors
-  // by index into the SCENARIO_COLORS palette; the other tabs color by
-  // identity instead of array position, so the same product/payer always
-  // gets the same color. On the two cross tabs (Payer-Product,
-  // Product-Payer) HIV colors by the CHILD dimension specifically
-  // (market_product colors by product, product_market colors by market) —
-  // mirrored here the same way. HIV hardcodes a small known set of names
-  // (Biktarvy, Retail, ...); HCV's products/payers are dynamic, so instead
-  // of a hardcoded map, colors are assigned to whichever distinct
-  // identities are actually present, in order of first appearance.
-  const buildIdentityColorMap = (labels) => {
+  const scenarioColorMap = React.useMemo(() => {
     const map = {};
-    let i = 0;
-    labels.forEach((label) => {
-      if (!label || map[label] != null) return;
-      map[label] = SCENARIO_COLORS[i % SCENARIO_COLORS.length];
-      i += 1;
+    let index = 0;
+    scenarioNamesForColoring.forEach((name) => {
+      if (!map[name]) {
+        map[name] = getScenarioColor(index++);
+      }
     });
     return map;
-  };
-  const childLabelOf = (label) =>
-    label.includes(" - ") ? label.split(" - ").slice(1).join(" - ").trim() : label;
-
-  const flatLabelColorMap = buildIdentityColorMap(series.map((s) => s.label || ""));
-  const childLabelColorMap = buildIdentityColorMap(
-    series.map((s) => childLabelOf(s.label || "")),
-  );
+  }, [scenarioNamesForColoring]);
 
   const getSeriesColor = (item, index) => {
-    const label = item.label || "";
-    switch (activeTab) {
-      case "total_market":
-        return SCENARIO_COLORS[index % SCENARIO_COLORS.length];
-      case "prod_dist":
-      case "payer_dist":
-        return flatLabelColorMap[label] || NEUTRAL_COLOR;
-      case "payer_prod":
-      case "prod_payer":
-        return childLabelColorMap[childLabelOf(label)] || NEUTRAL_COLOR;
-      default:
-        return "#2563EB";
+    const scenarioName = item?.scenario || item?.label || "";
+    if (scenarioName && scenarioColorMap[scenarioName]) {
+      return scenarioColorMap[scenarioName];
     }
+
+    if (activeTab === "total_market") {
+      return getScenarioColor(index);
+    }
+
+    return NEUTRAL_COLOR;
   };
 
   const traces = filteredSeries.flatMap((s, idx) => {
@@ -342,19 +332,11 @@ const ForecastChart = ({
 
     const width = isSelectedTrace ? 3.5 : 1.5;
 
-    // Selected trace stays amber; every other trace uses HIV's identity/
-    // index-based color scheme above. In filter-focus mode, every visible
-    // trace already matches the focused product/payer (everything else was
-    // filtered out above) — color each one by its own scenario instead, so
-    // the different scenarios being compared are distinguishable, while
-    // still keeping the applied scenario's line amber.
-    const color = isFilterFocusMode
-      ? isSelectedTrace
-        ? "#f59e0b"
-        : focusModeScenarioColorMap[s.scenario] || SCENARIO_COLORS[idx % SCENARIO_COLORS.length]
-      : isSelectedTrace
-        ? "#f59e0b"
-        : getSeriesColor(s, idx);
+    // Keep the applied scenario highlighted, while all comparison scenarios
+    // use a distinct per-scenario color so they remain visually separate.
+    const color = isSelectedTrace
+      ? "#f59e0b"
+      : getSeriesColor(s, idx);
 
     // Suffix the scenario name onto the legend label when overlaying more
     // than one scenario, so e.g. "Biktarvy (Base Case)" vs "Biktarvy (High
@@ -452,6 +434,6 @@ const ForecastChart = ({
       />
     </Box>
   );
-};
+});
 
 export default ForecastChart;
