@@ -469,9 +469,9 @@ export const deleteHIVScenario = (payload) =>
 // HIV Prep API's
 
 export const getHIVPrepConfigurationByTherapyArea = (taName) => {
-  return httpClient.get(`/api/hiv_treat/configurations/${taName}`);
+  return httpClient.get(`/api/hiv_prep/configurations/${taName}`);
 };
 
 export const saveHIVPrepConfigurations = (payload) => {
-  return httpClient.post(`/api/hiv_treat/save-configurations`, payload);
+  return httpClient.post(`/api/hiv_prep/save-configurations`, payload);
 };
