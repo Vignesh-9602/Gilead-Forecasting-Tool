@@ -3008,7 +3008,7 @@ def recompute_from_market_product(
         )
 
     # =========================================================
-    # 2. Recompute Market Distribution
+    # 2. Recompute product Distribution
     #
     # Overall stays FIXED.
     #
@@ -3019,7 +3019,7 @@ def recompute_from_market_product(
     #     market volume / fixed Overall * 100
     # =========================================================
 
-    sync_market_distribution_from_market_product(
+    sync_product_distribution_from_product_market(
         market_analysis
     )
 
@@ -3691,15 +3691,17 @@ def recompute_from_product_market(
     )
 
     # =========================================================
-    # 3. Recompute Product Distribution
+    # 3. Recompute market Distribution
     #
     # Product Distribution should now be derived from the
     # updated Product -> Market volumes.
     # =========================================================
-
-    sync_product_distribution_from_product_market(
+	
+    sync_market_distribution_from_market_product(
         market_analysis
     )
+	
+    
 
     # =========================================================
     # 4. Rebuild monthly charts
