@@ -12,6 +12,7 @@ export default function Header({ tabs, activeTab, setActiveTab }) {
         localStorage.removeItem("activeTab");
         localStorage.removeItem("hcvActiveTab");
         localStorage.removeItem("hivActiveTab");
+        localStorage.removeItem("hivPrepActiveTab");
 
         favDispatch({
             type: "SELECTED_THERAPY_AREA",

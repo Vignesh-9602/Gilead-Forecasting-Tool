@@ -230,16 +230,6 @@ export default function HIVMarketTable({
         setOriginalRows(JSON.parse(JSON.stringify(cloned)));
         setEditedRows([]);
 
-        const expanded = {};
-
-        cloned.forEach((row) => {
-            if (row.children?.length) {
-                expanded[row.label] = false;
-            }
-        });
-
-        setExpandedRows(expanded);
-
     }, [
         mergedRows,
         tableData,
@@ -509,35 +499,19 @@ export default function HIVMarketTable({
         setEditable(false);
     }, [activeTab, selectedMetric]);
 
-    // useEffect(() => {
-    //     if (!isExpandable) return;
+    useEffect(() => {
+        if (!isExpandable) return;
 
-    //     const expanded = {};
+        const expanded = {};
 
-    //     tableRows.forEach((row) => {
-    //         if (row.children?.length) {
-    //             expanded[row.label] = false;
-    //         }
-    //     });
+        tableRows.forEach((row) => {
+            if (row.children?.length) {
+                expanded[row.label] = false;
+            }
+        });
 
-    //     setExpandedRows(expanded);
-    // }, [tableRows, isExpandable]);
-
-    // the below also fine for by default collapsed view
-
-    // useEffect(() => {
-    //     if (!isExpandable) return;
-
-    //     const expanded = {};
-
-    //     tableRows.forEach((row) => {
-    //         if (row.children?.length) {
-    //             expanded[row.label] = false;
-    //         }
-    //     });
-
-    //     setExpandedRows(expanded);
-    // }, [tableData, isExpandable, activeTab, selectedMetric, viewMode]);
+        setExpandedRows(expanded);
+    }, [tableRows, isExpandable]);
 
     const toggleRow = (label) => {
         setExpandedRows((prev) => ({
@@ -1180,24 +1154,11 @@ export default function HIVMarketTable({
                                                     )}
                                                     {row.label}
                                                 </Box>
-                                                {/* {row.label !== "Base" && isTotalMarketVolume && (
+                                                {row.label !== "Base" && (
                                                     <Tooltip title="Delete Scenario">
                                                         <IconButton
                                                             size="small"
                                                             onClick={() => handleDeleteClick(row.label)}
-                                                        >
-                                                            <DeleteOutlineIcon
-                                                                fontSize="small"
-                                                                color="error"
-                                                            />
-                                                        </IconButton>
-                                                    </Tooltip>
-                                                )} */}
-                                                {isTotalMarketVolume && row.scenario !== "Base" && (
-                                                    <Tooltip title="Delete Scenario">
-                                                        <IconButton
-                                                            size="small"
-                                                            onClick={() => handleDeleteClick(row.scenario)}
                                                         >
                                                             <DeleteOutlineIcon
                                                                 fontSize="small"
