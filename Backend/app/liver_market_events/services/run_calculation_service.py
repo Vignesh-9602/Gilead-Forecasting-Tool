@@ -219,6 +219,52 @@ def _apply_product_delta(data: dict, y: int, m: int,
             prod_data[payer] *= scale
 
 
+def _distribute_capped_loss(current_vols: dict, weights: dict, total_needed: float) -> dict:
+    """
+    Split `total_needed` units of LOSS across the entities in `weights`
+    (proportional to their weight), capping each entity's loss at its own
+    current volume -- an entity can never be pushed below zero.
+
+    Without this, a weighted split (e.g. 60/40 across two impacted entities)
+    silently drops any share assigned to an entity that has little/nothing
+    to give (a brand-new zero-history product/payer): _apply_payer_delta/
+    _apply_product_delta's own zero-floor clamps that entity's loss to 0,
+    but nothing else picks up the slack, so the TOTAL loss extracted falls
+    short of what the selected entity gained. The renormalization safety net
+    then "fixes" that mismatch by shrinking the whole touched group back
+    down -- including the selected entity itself -- so it lands short of its
+    own peak_percent target instead of exactly on it.
+
+    Any shortfall from a capped entity is redistributed among the remaining
+    entities that still have room, iterating until either the full amount is
+    placed or every entity is fully drained (a genuine capacity limit: the
+    impacted set collectively doesn't have enough volume to fund the
+    selected entity's target, which is not fixable by redistribution alone).
+    """
+    result = {name: 0.0 for name in weights}
+    active = {name: w for name, w in weights.items() if w > 0}
+    need = total_needed
+    while active and need > 1e-9:
+        weight_sum = sum(active.values())
+        if weight_sum <= 0:
+            break
+        newly_capped = {}
+        for name, w in active.items():
+            share = need * (w / weight_sum)
+            available = max(0.0, current_vols.get(name, 0.0) - result[name])
+            if share >= available - 1e-9:
+                newly_capped[name] = available
+        if not newly_capped:
+            for name, w in active.items():
+                result[name] += need * (w / weight_sum)
+            break
+        for name, amount in newly_capped.items():
+            result[name] += amount
+            need -= amount
+            del active[name]
+    return result
+
+
 # ---------------------------------------------------------------------------
 # EventInput builder
 # ---------------------------------------------------------------------------
@@ -579,12 +625,38 @@ def _apply_events_to_data(
                 # zero-sum by construction, regardless of any such drift.
                 sum_d = sum(eff_impacted.values())
                 if eff_impacted and delta_vol != 0.0 and sum_d != 0.0:
-                    for imp, d in eff_impacted.items():
-                        if d != 0.0:
-                            _apply_payer_delta(data, y, m, imp, ctx_products,
-                                               -delta_vol * (d / sum_d))
-                            ctx_changed = True
-                            event_touched_forecast = True
+                    if delta_vol > 0:
+                        # Impacted payers must LOSE volume to fund Cash's
+                        # gain -- cap each at its own current volume (can't
+                        # go below zero) and redistribute any shortfall
+                        # among the payers that still have room, so Cash
+                        # reliably reaches its target even when one impacted
+                        # payer (e.g. a brand-new zero-history payer) has
+                        # little/nothing to give. See _distribute_capped_loss.
+                        current_vols = {
+                            imp: sum(
+                                data.get((y, m), {}).get(prod, {}).get(imp, 0.0)
+                                for prod in ctx_products
+                            )
+                            for imp in eff_impacted
+                        }
+                        # eff_impacted's values are NEGATIVE percentage-point
+                        # deltas (loss); _distribute_capped_loss wants
+                        # POSITIVE weights to split delta_vol proportionally.
+                        weights = {imp: abs(d) for imp, d in eff_impacted.items()}
+                        losses = _distribute_capped_loss(current_vols, weights, delta_vol)
+                        for imp, loss in losses.items():
+                            if loss != 0.0:
+                                _apply_payer_delta(data, y, m, imp, ctx_products, -loss)
+                                ctx_changed = True
+                                event_touched_forecast = True
+                    else:
+                        for imp, d in eff_impacted.items():
+                            if d != 0.0:
+                                _apply_payer_delta(data, y, m, imp, ctx_products,
+                                                   -delta_vol * (d / sum_d))
+                                ctx_changed = True
+                                event_touched_forecast = True
                 if ctx_changed and renorm_orig_total > 0:
                     _renormalize_context(data, y, m, ctx_products, renorm_payers, renorm_orig_total)
 
@@ -622,12 +694,34 @@ def _apply_events_to_data(
                 # exactly zero-sum regardless of organic drift.
                 sum_d = sum(eff_impacted.values())
                 if eff_impacted and delta_vol != 0.0 and sum_d != 0.0:
-                    for imp, d in eff_impacted.items():
-                        if d != 0.0:
-                            _apply_product_delta(data, y, m, imp, -delta_vol * (d / sum_d),
-                                                 show_payers=ctx_payers)
-                            ctx_changed = True
-                            event_touched_forecast = True
+                    if delta_vol > 0:
+                        # See the identical reasoning in the payer_event
+                        # branch above: cap each impacted product's loss at
+                        # its own current volume and redistribute any
+                        # shortfall, so the selected product reliably
+                        # reaches its target even when an impacted product
+                        # is a brand-new zero-history one.
+                        current_vols = {
+                            imp: sum(
+                                data.get((y, m), {}).get(imp, {}).get(py, 0.0)
+                                for py in ctx_payers
+                            )
+                            for imp in eff_impacted
+                        }
+                        weights = {imp: abs(d) for imp, d in eff_impacted.items()}
+                        losses = _distribute_capped_loss(current_vols, weights, delta_vol)
+                        for imp, loss in losses.items():
+                            if loss != 0.0:
+                                _apply_product_delta(data, y, m, imp, -loss, show_payers=ctx_payers)
+                                ctx_changed = True
+                                event_touched_forecast = True
+                    else:
+                        for imp, d in eff_impacted.items():
+                            if d != 0.0:
+                                _apply_product_delta(data, y, m, imp, -delta_vol * (d / sum_d),
+                                                     show_payers=ctx_payers)
+                                ctx_changed = True
+                                event_touched_forecast = True
                 if ctx_changed and renorm_orig_total > 0:
                     _renormalize_context(data, y, m, renorm_products, ctx_payers, renorm_orig_total)
 
@@ -885,6 +979,15 @@ def run_market_events_calculation(payload) -> dict:
                     tot, show_products, show_payers,
                     filter_products=sf.products, filter_payers=sf.payers,
                     touched_pairs=touched_pairs,
+                    # mod_data was zero-seeded (every product x payer cell
+                    # populated for every month, see the seeding loop above)
+                    # and then event-applied -- any cell that's exactly 0
+                    # here (e.g. a fully-drained impacted product) is the
+                    # event's own deliberate result, not missing data. The
+                    # default flat-forecast-fallback-for-zeros behavior
+                    # would silently overwrite it, corrupting both the
+                    # displayed value and any share computed from it.
+                    treat_zero_as_missing=False,
                 )
             if t == "product_event":
                 return _build_product_event_metrics(
@@ -892,6 +995,7 @@ def run_market_events_calculation(payload) -> dict:
                     tot, show_products, show_payers,
                     filter_products=sf.products, filter_payers=sf.payers,
                     touched_pairs=touched_pairs,
+                    treat_zero_as_missing=False,
                 )
             return _build_overall_event_metrics(
                 mt, ch, fsi, tot,

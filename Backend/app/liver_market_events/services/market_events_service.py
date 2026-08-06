@@ -499,7 +499,7 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
 def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
                                 total_all, show_products, show_payers, forecast_fn=None,
                                 filter_products=None, filter_payers=None,
-                                touched_pairs=None) -> dict:
+                                touched_pairs=None, treat_zero_as_missing=True) -> dict:
     """
     Payer event — two view levels per metric/period:
       payer_level         : Overall + flat payer rows, read-only
@@ -539,7 +539,8 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
     for payer in show_payers:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn
+            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn,
+            treat_zero_as_missing=treat_zero_as_missing,
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         payer_vol_m[payer]   = (hist, fcast, all_vals)
@@ -551,7 +552,8 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
     for product in show_products:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn
+            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn,
+            treat_zero_as_missing=treat_zero_as_missing,
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         prod_vol_m[product]   = (hist, fcast, all_vals)
@@ -565,7 +567,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         for payer in show_payers:
             h, f, av = build_values_for_series(
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
-                forecast_fn=forecast_fn,
+                forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
             )
             sh_all = [compute_share(av[i], prod_vol_m[product][2][i]) for i in range(len(av))]
             pp_vol_m[(product, payer)]   = (h, f, av)
@@ -750,7 +752,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_start_index,
                                    total_all, show_products, show_payers, forecast_fn=None,
                                    filter_products=None, filter_payers=None,
-                                   touched_pairs=None) -> dict:
+                                   touched_pairs=None, treat_zero_as_missing=True) -> dict:
     """
     Product event — two view levels per metric/period:
       product_level       : Overall + flat product rows, read-only
@@ -791,7 +793,8 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     for product in show_products:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn
+            data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn,
+            treat_zero_as_missing=treat_zero_as_missing,
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         prod_vol_m[product]   = (hist, fcast, all_vals)
@@ -803,7 +806,8 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     for payer in show_payers:
         hist, fcast, all_vals = build_values_for_series(
-            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn
+            data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn,
+            treat_zero_as_missing=treat_zero_as_missing,
         )
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
         payer_vol_m[payer]   = (hist, fcast, all_vals)
@@ -817,7 +821,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         for product in show_products:
             h, f, av = build_values_for_series(
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
-                forecast_fn=forecast_fn,
+                forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
             )
             sh_all = [compute_share(av[i], payer_vol_m[payer][2][i]) for i in range(len(av))]
             pp_vol_m[(payer, product)]   = (h, f, av)
