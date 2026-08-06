@@ -6,26 +6,66 @@ import json
 # ---------------------------------------------------------------------------
 
 def get_liver_configs_for_ta(cur, ta_name: str) -> list:
-    """Returns all (payer, brand, config, updated_at) rows for a TA, ordered payer→brand."""
+    """Returns all (payment_type, payer, brand, config, updated_at) rows for a TA."""
     cur.execute("""
-        SELECT payer, brand, config, updated_at
+        SELECT payment_type, payer, brand, config, updated_at
         FROM raw_liver.liver_configurations
         WHERE LOWER(TRIM(ta_name)) = LOWER(TRIM(%s))
-        ORDER BY payer, brand
+        ORDER BY payment_type, payer, brand
     """, (ta_name,))
     return cur.fetchall()
 
 
-def get_liver_config_by_payer_brand(cur, ta_name: str, payer: str, brand: str):
-    """Returns (config,) for a specific (ta, payer, brand) combination, or None."""
+def get_liver_config_by_payment_type_payer_brand(
+    cur, ta_name: str, payment_type: str, payer: str, brand: str
+):
+    """Returns (config,) for a specific (ta, payment_type, payer, brand) combination, or None."""
     cur.execute("""
         SELECT config
         FROM raw_liver.liver_configurations
-        WHERE LOWER(TRIM(ta_name)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(payer))   = LOWER(TRIM(%s))
-          AND LOWER(TRIM(brand))   = LOWER(TRIM(%s))
-    """, (ta_name, payer, brand))
+        WHERE LOWER(TRIM(ta_name))      = LOWER(TRIM(%s))
+          AND LOWER(TRIM(payment_type)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(payer))        = LOWER(TRIM(%s))
+          AND LOWER(TRIM(brand))        = LOWER(TRIM(%s))
+    """, (ta_name, payment_type, payer, brand))
     return cur.fetchone()
+
+
+def get_payment_types_and_payers(cur, ta: str) -> dict:
+    """
+    Returns {payment_type: [payer, ...]} from transaction_data for a TA.
+    Falls back to the old single-column schema (payer = payment_type, no sub-payer)
+    when transaction_data has not yet been migrated to include a payment_type column.
+    """
+    cur.execute("""
+        SELECT COUNT(*) FROM information_schema.columns
+        WHERE table_schema = 'raw_liver'
+          AND table_name   = 'transaction_data'
+          AND column_name  = 'payment_type'
+    """)
+    has_payment_type_col = cur.fetchone()[0] > 0
+
+    if has_payment_type_col:
+        cur.execute("""
+            SELECT DISTINCT payment_type, payer
+            FROM raw_liver.transaction_data
+            WHERE LOWER(TRIM(ta)) = LOWER(TRIM(%s))
+            ORDER BY payment_type, payer
+        """, (ta,))
+        result: dict = {}
+        for payment_type, payer in cur.fetchall():
+            result.setdefault(payment_type, []).append(payer)
+        return result
+
+    # Old schema: payer column holds what will become payment_type values.
+    # Return each value with an empty sub-payer list so callers stay consistent.
+    cur.execute("""
+        SELECT DISTINCT payer
+        FROM raw_liver.transaction_data
+        WHERE LOWER(TRIM(ta)) = LOWER(TRIM(%s))
+        ORDER BY payer
+    """, (ta,))
+    return {r[0]: [] for r in cur.fetchall()}
 
 
 # ---------------------------------------------------------------------------
@@ -63,16 +103,16 @@ def load_filter_state(cur, ta_name: str) -> dict | None:
     return row[0] if row else None
 
 
-def upsert_liver_config(cur, ta_name: str, payer: str, brand: str, config: dict):
-    """Upsert one (ta_name, payer, brand) row with the given config."""
+def upsert_liver_config(cur, ta_name: str, payment_type: str, payer: str, brand: str, config: dict):
+    """Upsert one (ta_name, payment_type, payer, brand) row with the given config."""
     cur.execute("""
-        INSERT INTO raw_liver.liver_configurations (ta_name, payer, brand, config)
-        VALUES (%s, %s, %s, %s::jsonb)
-        ON CONFLICT (ta_name, payer, brand)
+        INSERT INTO raw_liver.liver_configurations (ta_name, payment_type, payer, brand, config)
+        VALUES (%s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (ta_name, payment_type, payer, brand)
         DO UPDATE SET
             config     = EXCLUDED.config,
             updated_at = CURRENT_TIMESTAMP
-    """, (ta_name, payer, brand, json.dumps(config)))
+    """, (ta_name, payment_type, payer, brand, json.dumps(config)))
 
 
 # ---------------------------------------------------------------------------
