@@ -35,7 +35,8 @@ from app.liver_market_events.services.market_events_service import extract_snaps
 from app.liver_market_events.repository.market_events_repo import save_market_events_scenario, delete_scenario_impact_rows
 from app.liver.repository.liver_repo import (
     get_liver_configs_for_ta,
-    get_liver_config_by_payer_brand,
+    get_liver_config_by_payment_type_payer_brand,
+    get_payment_types_and_payers,
     upsert_liver_config,
     get_payers,
     get_products,
@@ -347,30 +348,40 @@ def get_liver_configuration(ta_name: str) -> dict:
             date_type(int(r[0]), int(r[1]), 1).isoformat() for r in month_rows
         ]
 
+        # Available payment_types and their sub-payers from transaction_data
+        pt_payer_map    = get_payment_types_and_payers(cur, ta_name)
+        available_pt    = sorted(pt_payer_map.keys())
+        available_brands = get_products(cur)
+
         db_rows = get_liver_configs_for_ta(cur, ta_name)
         if not db_rows:
-            # Compute default pre-fill: Medicaid + GILD, 5yr data + 1yr forecast
             _, _, max_year, max_month = get_transaction_date_range(cur)
             max_dt      = date_type(max_year, max_month, 1)
-            start_dt    = _add_months(max_dt, -60)       # 5 years back
-            forecast_dt = _add_months(max_dt, 12)        # 1 year forecast
+            start_dt    = _add_months(max_dt, -60)
+            forecast_dt = _add_months(max_dt, 12)
+            default_pt  = available_pt[0] if available_pt else "Commercial"
+            default_payer = pt_payer_map.get(default_pt, [""])[0]
             return {
-                "ta_name": ta_name,
-                "exists":  False,
-                "entries": [],
+                "ta_name":                ta_name,
+                "exists":                 False,
+                "entries":                [],
                 "available_train_months": available_train_months,
+                "available_payment_types": available_pt,
+                "available_payers":        pt_payer_map,
+                "available_brands":        available_brands,
                 "default_config": {
-                    "payer":             "Medicaid",
-                    "brand":             "GILD",
+                    "payment_type":      default_pt,
+                    "payer":             default_payer,
+                    "brand":             available_brands[0] if available_brands else "GILD",
                     "train_start_date":  start_dt.isoformat(),
                     "train_end_date":    max_dt.isoformat(),
                     "model_granularity": "monthly",
                     "forecast_periods":  forecast_dt.isoformat(),
                 },
-                # `config` key for frontend compatibility
                 "config": {
-                    "payer":             ["Medicaid"],
-                    "brand":             ["GILD"],
+                    "payment_type":      [default_pt],
+                    "payer":             [default_payer],
+                    "brand":             [available_brands[0]] if available_brands else ["GILD"],
                     "train_start_date":  start_dt.isoformat(),
                     "train_end_date":    max_dt.isoformat(),
                     "model_granularity": "monthly",
@@ -379,10 +390,11 @@ def get_liver_configuration(ta_name: str) -> dict:
             }
 
         entries = []
-        for payer, brand, config, updated_at in db_rows:
+        for payment_type, payer, brand, config, updated_at in db_rows:
             train_end    = date_type.fromisoformat(config["train_end_date"][:10])
             forecast_end = _add_months(train_end, int(config["forecast_periods"]))
             entries.append({
+                "payment_type":       payment_type,
                 "payer":              payer,
                 "brand":              brand,
                 "train_start_date":   config["train_start_date"][:10],
@@ -392,20 +404,22 @@ def get_liver_configuration(ta_name: str) -> dict:
                 "updated_at":         updated_at,
             })
 
-        # Use updated_at to find rows from the most recent save.
-        # Those rows' payer/brand values represent the user's latest selection.
-        latest_ts = max(e["updated_at"] for e in entries)
+        latest_ts      = max(e["updated_at"] for e in entries)
         latest_entries = [e for e in entries if e["updated_at"] == latest_ts]
-        first = latest_entries[0]
+        first          = latest_entries[0]
 
         return {
-            "ta_name": ta_name,
-            "exists": True,
-            "entries": entries,
+            "ta_name":                ta_name,
+            "exists":                 True,
+            "entries":                entries,
             "available_train_months": available_train_months,
+            "available_payment_types": available_pt,
+            "available_payers":        pt_payer_map,
+            "available_brands":        available_brands,
             "config": {
-                "payer":             list(dict.fromkeys(e["payer"] for e in latest_entries)),
-                "brand":             list(dict.fromkeys(e["brand"] for e in latest_entries)),
+                "payment_type":      list(dict.fromkeys(e["payment_type"] for e in latest_entries)),
+                "payer":             list(dict.fromkeys(e["payer"]         for e in latest_entries)),
+                "brand":             list(dict.fromkeys(e["brand"]         for e in latest_entries)),
                 "train_start_date":  first["train_start_date"],
                 "train_end_date":    first["train_end_date"],
                 "model_granularity": first["model_granularity"],
@@ -451,7 +465,7 @@ def save_liver_configuration(payload) -> dict:
                 f"({_month_label(min_year, min_month)} – {_month_label(max_year, max_month)})"
             )
 
-        # Config stored without payer/brand (those are DB columns)
+        # Config stored without payment_type/payer/brand (those are DB columns)
         config_to_save = {
             "ta_name":           cfg.ta_name,
             "train_start_date":  cfg.train_start_date[:10],
@@ -460,19 +474,42 @@ def save_liver_configuration(payload) -> dict:
             "forecast_periods":  forecast_periods_int,
         }
 
-        # Fan out: one DB row per (payer, brand) combination
-        payers = cfg.payer or []
-        brands = cfg.brand or []
-        for payer in payers:
-            for brand in brands:
-                upsert_liver_config(cur, cfg.ta_name, payer, brand, config_to_save)
+        # Resolve valid (payment_type, payer) combos from transaction_data so that
+        # selecting Cash + [CVS, Non CVS] doesn't silently create dead rows.
+        pt_payer_map   = get_payment_types_and_payers(cur, cfg.ta_name)
+        payment_types  = cfg.payment_type or []
+        selected_payers = cfg.payer or []
+        brands         = cfg.brand or []
+
+        saved = 0
+        for pt in payment_types:
+            available_payers = pt_payer_map.get(pt, [])
+            # Intersect selected payers with those that actually exist for this payment_type.
+            # If the intersection is empty fall back to all available payers for this payment_type.
+            if available_payers:
+                # transaction_data is migrated — intersect to only valid combos.
+                # If intersection is empty (e.g. Cash has no CVS/Non-CVS) fall back
+                # to all real payers for that payment_type (e.g. NA for Cash).
+                resolved_payers = [p for p in selected_payers if p in available_payers]
+                if not resolved_payers:
+                    resolved_payers = available_payers
+            else:
+                # transaction_data not yet migrated — no sub-payer info available.
+                # Cannot determine which payers are valid per payment_type, so store
+                # '' (no sub-payer) for every payment_type to avoid cross-contamination
+                # (e.g. Cash getting CVS/Non-CVS rows that don't belong to it).
+                resolved_payers = [""]
+            for payer in resolved_payers:
+                for brand in brands:
+                    upsert_liver_config(cur, cfg.ta_name, pt, payer, brand, config_to_save)
+                    saved += 1
 
         conn.commit()
 
         return {
-            "ta_name":  cfg.ta_name,
-            "status":   "config_saved",
-            "saved_combinations": len(payers) * len(brands),
+            "ta_name":            cfg.ta_name,
+            "status":             "config_saved",
+            "saved_combinations": saved,
         }
     finally:
         cur.close()
@@ -1915,15 +1952,13 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
 # Helper: load config or fall back to DB defaults
 # ---------------------------------------------------------------------------
 
-def _load_config(cur, ta: str, payer: str = None, brand: str = None) -> dict:
+def _load_config(cur, ta: str, payment_type: str = None, payer: str = None, brand: str = None) -> dict:
     """
-    Returns config dict for the given (ta, payer, brand).
+    Returns config dict for the given (ta, payment_type, payer, brand).
     Falls back to any saved config for the TA, then to 5-year defaults.
     """
-    # Exact match (only attempted when both are non-None; NULL = NULL is always
-    # false in SQL so passing None would never match any row).
-    if payer is not None and brand is not None:
-        row = get_liver_config_by_payer_brand(cur, ta, payer, brand)
+    if payment_type is not None and payer is not None and brand is not None:
+        row = get_liver_config_by_payment_type_payer_brand(cur, ta, payment_type, payer, brand)
         if row:
             return row[0]
 
@@ -1933,7 +1968,7 @@ def _load_config(cur, ta: str, payer: str = None, brand: str = None) -> dict:
     if all_cfgs:
         best_cfg, best_end = None, -1
         for row in all_cfgs:
-            cfg = row[2] if isinstance(row[2], dict) else {}
+            cfg = row[3] if isinstance(row[3], dict) else {}
             te  = cfg.get("train_end_date", "")
             fp  = int(cfg.get("forecast_periods", 0))
             try:
@@ -1983,7 +2018,7 @@ def get_liver_filters(ta: str = "HCV") -> dict:
         all_cfgs = get_liver_configs_for_ta(cur, ta)
         avail_end_ym = None
         for _row in all_cfgs:
-            _cfg = _row[2] if isinstance(_row[2], dict) else {}
+            _cfg = _row[3] if isinstance(_row[3], dict) else {}
             _te = _cfg.get("train_end_date", "")
             _fp = int(_cfg.get("forecast_periods", 24))
             try:
@@ -2070,7 +2105,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
     cur = conn.cursor()
     try:
         cfg = _load_config(cur, payload.ta,
-                           payer=_first(payload.payer),
+                           payment_type=_first(payload.payer),
                            brand=_first(payload.brand))
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
@@ -2402,7 +2437,7 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cfg = _load_config(cur, payload.ta_name, payer=market, brand=product)
+        cfg = _load_config(cur, payload.ta_name, payment_type=market, brand=product)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
             sf.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
@@ -2767,7 +2802,7 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
         # Load config so we can compute Base TMV
-        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -3066,7 +3101,7 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
     wide_forecast_periods = None
     granularity = "monthly"
     try:
-        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         # Same reasoning as apply_liver_filters' Base-persist block: the
         # selected (payer, brand) combo's own forecast_periods isn't
@@ -3257,7 +3292,7 @@ def delete_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
         saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -3313,7 +3348,7 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -3470,7 +3505,7 @@ def refresh_liver(payload):
     cur  = conn.cursor()
     try:
         from_year, from_month = _parse_ym(flt.start_date)
-        cfg = _load_config(cur, payload.ta_name, flt.payer or None, flt.product or None)
+        cfg = _load_config(cur, payload.ta_name, payment_type=flt.payer or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
             flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]

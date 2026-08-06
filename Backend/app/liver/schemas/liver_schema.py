@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 class LiverConfiguration(BaseModel):
     ta_name: str = "HCV"
+    payment_type: List[str] = []
     payer: List[str] = []
     brand: List[str] = []
     train_start_date: str           # "2020-04-01"
@@ -21,7 +22,8 @@ class SaveLiverConfigRequest(BaseModel):
 
 
 class ConfigEntry(BaseModel):
-    """One saved (payer, brand) combination with its date config."""
+    """One saved (payment_type, payer, brand) combination with its date config."""
+    payment_type: str
     payer: str
     brand: str
     train_start_date: str
@@ -33,9 +35,12 @@ class ConfigEntry(BaseModel):
 class LiverConfigResponse(BaseModel):
     ta_name: str
     exists: bool
-    entries: List[ConfigEntry]          # one entry per saved (payer, brand) combination
+    entries: List[ConfigEntry]
     available_train_months: List[str]
-    default_config: Optional[ConfigEntry] = None  # pre-filled values when exists=False
+    available_payment_types: List[str]
+    available_payers: Dict[str, List[str]]   # {payment_type: [payer, ...]}
+    available_brands: List[str]
+    default_config: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
