@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, date as date_type
 from dateutil.relativedelta import relativedelta
 
@@ -45,14 +46,18 @@ from app.liver.repository.liver_repo import (
     get_transaction_distinct_months,
     get_total_market_volume,
     get_product_distribution,
-    get_payer_distribution,
+    get_payer_distribution,  # kept for refresh_liver backward compat
     get_payer_wise_product,
     get_product_wise_payer,
+    get_payment_type_wise_product,
+    get_payment_type_payer_product,
     get_total_market_volume_yearly,
     get_product_distribution_yearly,
-    get_payer_distribution_yearly,
+    get_payer_distribution_yearly,  # kept for refresh_liver backward compat
     get_payer_wise_product_yearly,
     get_product_wise_payer_yearly,
+    get_payment_type_wise_product_yearly,
+    get_payment_type_payer_product_yearly,
     save_scenario,
     scenario_exists,
     delete_scenario,
@@ -65,7 +70,7 @@ from app.liver.repository.liver_repo import (
 # Key normalisation — convert pre-rename DB keys to current names
 # ---------------------------------------------------------------------------
 
-_TAB_KEY_MAP    = {"market_distribution": "payer_distribution"}
+_TAB_KEY_MAP    = {"market_distribution": "payment_type_distribution", "payer_distribution": "payment_type_distribution"}
 _METRIC_KEY_MAP = {"market_volume": "payer_volume", "market_share": "payer_share"}
 
 def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
@@ -215,6 +220,22 @@ def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
                     "chart": _clip_chart(chart),
                     "table": clipped_tbl,
                 }
+            elif not any(k in metric for k in ("monthly", "yearly", "chart", "table")):
+                # Sub-view: metric = {inner_metric: {monthly: ..., yearly: ...}}
+                result[tab_key][metric_key] = {}
+                for inner_key, inner_data in metric.items():
+                    inner_monthly = inner_data.get("monthly", {}) if isinstance(inner_data, dict) else {}
+                    if inner_monthly:
+                        ic    = inner_monthly.get("chart", {})
+                        it    = inner_monthly.get("table", {})
+                        ci    = _find_clip_idx(ic.get("months", [])) if ic.get("months") else 0
+                        ct    = _clip_table(it, _table_clip_idx(ic, it, ci))
+                        result[tab_key][metric_key][inner_key] = {
+                            "monthly": {"chart": _clip_chart(ic), "table": ct},
+                            "yearly":  inner_data.get("yearly", {}),
+                        }
+                    else:
+                        result[tab_key][metric_key][inner_key] = inner_data
             else:
                 result[tab_key][metric_key] = metric
     return result
@@ -1391,11 +1412,13 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   scenario_name="Base",
                                   auto_model="moving_average"):
     """
-    Build all 5 tabs for BOTH market_volume and market_share.
+    Build all tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
-    market_analysis_dict keys: total_market_volume, product_distribution,
-      payer_distribution, payer_product, product_payer.
-    Each key maps to { market_volume: {chart, table}, market_share: {chart, table} }.
+    market_analysis_dict keys:
+      total_market_volume, product_distribution, payment_type_distribution (flat tabs),
+      payment_type_product (nested: payment_type_product / product_payment_type),
+      payment_type_payer_product (nested: payment_type_payer / payment_type_product / product_payment_type),
+      event_management (empty dict placeholder for Tab 6).
     """
     is_yearly = granularity == "yearly"
 
@@ -1425,14 +1448,18 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     _config_map: dict = {}
     _wide_from_year, _wide_from_month = train_end_year, train_end_month  # sentinel: high
     for _row in _all_cfgs:
-        _p, _b, _cfg = _row[0], _row[1], (_row[2] if isinstance(_row[2], dict) else {})
+        # Row is now (payment_type, payer, brand, config, updated_at)
+        _pt, _b, _cfg = _row[0], _row[2], (_row[3] if isinstance(_row[3], dict) else {})
         _ts = _cfg.get("train_start_date", "")
         _te = _cfg.get("train_end_date", "")
         if _ts and _te:
             try:
                 _ts_y, _ts_m = _parse_ym(_ts)
                 _te_y, _te_m = _parse_ym(_te)
-                _config_map[(_p.strip().lower(), _b.strip().lower())] = (_ts_y, _ts_m, _te_y, _te_m)
+                _key = (_pt.strip().lower(), _b.strip().lower())
+                # Take the earliest train_start for this (payment_type, brand) pair
+                if _key not in _config_map or _ts_y * 100 + _ts_m < _config_map[_key][0] * 100 + _config_map[_key][1]:
+                    _config_map[_key] = (_ts_y, _ts_m, _te_y, _te_m)
                 if _ts_y * 100 + _ts_m < _wide_from_year * 100 + _wide_from_month:
                     _wide_from_year, _wide_from_month = _ts_y, _ts_m
             except Exception:
@@ -1538,21 +1565,36 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     if is_yearly:
         pd_mv   = get_product_distribution_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
         pd_ms   = get_product_distribution_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_share")
-        pyd_mv  = get_payer_distribution_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
-        pyd_ms  = get_payer_distribution_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_share")
-        pwp_mv  = get_payer_wise_product_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
-        pwp_ms  = get_payer_wise_product_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_share")
-        pwpy_mv = get_product_wise_payer_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
-        pwpy_ms = get_product_wise_payer_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_share")
+        # Tab 4: payment_type × product (2-level); Tab 5: payment_type × payer × product (3-level)
+        pt_mv   = get_payment_type_wise_product_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
+        pt_ms   = get_payment_type_wise_product_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_share")
+        ptpp_mv = get_payment_type_payer_product_yearly(cur, ta, _min_from_year, train_end_year, None, "payer_volume")
     else:
         pd_mv   = get_product_distribution(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
         pd_ms   = get_product_distribution(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_share")
-        pyd_mv  = get_payer_distribution(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
-        pyd_ms  = get_payer_distribution(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_share")
-        pwp_mv  = get_payer_wise_product(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
-        pwp_ms  = get_payer_wise_product(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_share")
-        pwpy_mv = get_product_wise_payer(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
-        pwpy_ms = get_product_wise_payer(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_share")
+        # Tab 4: payment_type × product (2-level); Tab 5: payment_type × payer × product (3-level)
+        pt_mv   = get_payment_type_wise_product(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
+        pt_ms   = get_payment_type_wise_product(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_share")
+        ptpp_mv = get_payment_type_payer_product(cur, ta, _min_from_year, _min_from_month, train_end_year, train_end_month, None, "payer_volume")
+
+    # Tab 3: payment_type distribution derived from pt_mv by summing across products
+    def _flat_dist_from_2level(rows):
+        vol: dict = defaultdict(float)
+        for r in rows:
+            vol[(r[0], r[1], r[2])] += float(r[-1]) if r[-1] is not None else 0.0
+        grand: dict = defaultdict(float)
+        for (y, m, pt), v in vol.items():
+            grand[(y, m)] += v
+        vrows, msrows = [], []
+        for key in sorted(vol):
+            y, m, pt = key
+            v = vol[key]
+            vrows.append((y, m, pt, v))
+            g = grand[(y, m)]
+            msrows.append((y, m, pt, round(v / g * 100, 4) if g else 0.0))
+        return vrows, msrows
+
+    _ptd_mv, _ptd_ms = _flat_dist_from_2level(pt_mv)
 
     # _wide_actual_range is the candidate pool for per-series model training months.
     # Tab 2 (product distribution): series label = product, config key = (sel_payer, product)
@@ -1560,20 +1602,15 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         lbl: _series_model_months(_config_map, sel_payer or "", lbl, _wide_actual_range)
         for lbl in {r[2] for r in pd_mv}
     }
-    # Tab 3 (payer distribution): series label = payer, config key = (payer, sel_product)
+    # Tab 3 (payment_type distribution): series label = payment_type, config key = (payment_type, sel_product)
     _tab3_mmbl = {
         lbl: _series_model_months(_config_map, lbl, sel_product or "", _wide_actual_range)
-        for lbl in {r[2] for r in pyd_mv}
+        for lbl in {r[2] for r in _ptd_mv}
     }
-    # Tab 4 (payer_product): parent=payer r[2], child=product r[3]
+    # Tab 4 (payment_type_product): parent=payment_type r[2], child=product r[3]
     _tab4_mmbp = {
         (r[2], r[3]): _series_model_months(_config_map, r[2], r[3], _wide_actual_range)
-        for r in pwp_mv
-    }
-    # Tab 5 (product_payer): parent=product r[2], child=payer r[3]; config key = (payer=r[3], brand=r[2])
-    _tab5_mmbp = {
-        (r[2], r[3]): _series_model_months(_config_map, r[3], r[2], _wide_actual_range)
-        for r in pwpy_mv
+        for r in pt_mv
     }
 
     # TMV forecast values used to scale Tabs 2-5.
@@ -1631,53 +1668,235 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             month_labels, fsi, chart_parent_filter=parent_lbl, chart_child_filter=child_lbl,
         )
 
+    # ── Helper: swap parent/child columns in 2-level rows (y, m, parent, child, val) ──
+    def _swap_pc(rows):
+        return [(r[0], r[1], r[3], r[2]) + tuple(r[4:]) for r in rows]
+
+    # ── Helper: true 3-level hierarchy builder for Tab 5 ─────────────────────
+    # ptpp rows: (year[0], month[1], payment_type[2], payer[3], product[4], value[5])
+    #
+    # Level 1 : r[dim1_col]                    (standalone label, e.g. "Cash")
+    # Level 2 : "dim1 - dim2" composite        (e.g. "Cash - GILD", "Medicaid - CVS")
+    #            Special: if dim2 == "NA" (Cash payer) → its children collapse up to
+    #            become level-2 entries directly under dim1 (no composite label)
+    # Level 3 : r[dim3_col], skipped if "NA"   (e.g. CVS/Non-CVS; absent for Cash)
+    #
+    # Forecasting: proportional share distribution from _tmv_fc using a 6-period
+    # trailing average.  Uses the closure variables month_range / month_labels / fsi
+    # / _tmv_fc / tab25_factors that are already in scope.
+    def _build_tab5_3level(ptpp_rows, dim1_col, dim2_col, dim3_col, to_int=False, as_share=False):
+        n     = len(month_range)
+        n_fc  = n - fsi
+        w     = min(6, fsi)
+
+        # aggregate
+        vol3: dict = defaultdict(float)
+        for r in ptpp_rows:
+            d1, d2, d3 = r[dim1_col], r[dim2_col], r[dim3_col]
+            vol3[(r[0], r[1], d1, d2, d3)] += float(r[-1]) if r[-1] is not None else 0.0
+
+        vol2: dict = defaultdict(float)
+        vol1: dict = defaultdict(float)
+        vol0: dict = defaultdict(float)
+        for (y, m, d1, d2, d3), v in vol3.items():
+            vol2[(y, m, d1, d2)] += v
+            vol1[(y, m, d1)]     += v
+            vol0[(y, m)]         += v
+
+        # unique label sets
+        all_d1: list      = sorted({d1 for (_, _, d1, d2, d3) in vol3})
+        dim2_by_d1: dict  = defaultdict(set)
+        dim3_by_d1d2: dict = defaultdict(set)
+        for (_, _, d1, d2, d3) in vol3:
+            dim2_by_d1[d1].add(d2)
+            if d3 != "NA":
+                dim3_by_d1d2[(d1, d2)].add(d3)
+
+        # historical vector helper
+        def _h(vol, key):
+            return [float(vol.get((y, m) + key, 0.0)) for y, m in month_range[:fsi]]
+
+        # proportional share: sum(last-w numerator) / sum(last-w denominator)
+        def _sh(num_h, den_h):
+            tn = sum(num_h[-w:])
+            td = sum(den_h[-w:])
+            return tn / td if td else 0.0
+
+        # ── forecast ────────────────────────────────────────────────────────
+        gt_h = [float(vol0.get((y, m), 0.0)) for y, m in month_range[:fsi]]
+
+        def _h_pct(vol, key):
+            return [
+                vol.get((y, m) + key, 0.0) / gt_h[i] * 100 if gt_h[i] else 0.0
+                for i, (y, m) in enumerate(month_range[:fsi])
+            ]
+
+        l1_fc: dict = {}
+        for d1 in all_d1:
+            s = _sh(_h(vol1, (d1,)), gt_h)
+            l1_fc[d1] = [s * t for t in _tmv_fc] if _tmv_fc else [0.0] * n_fc
+
+        l2_fc: dict = {}
+        for d1 in all_d1:
+            h1 = _h(vol1, (d1,))
+            for d2 in dim2_by_d1[d1]:
+                s = _sh(_h(vol2, (d1, d2)), h1)
+                l2_fc[(d1, d2)] = [s * v for v in l1_fc[d1]]
+
+        l3_fc: dict = {}
+        for (d1, d2), d3_set in dim3_by_d1d2.items():
+            h2 = _h(vol2, (d1, d2))
+            for d3 in d3_set:
+                s = _sh(_h(vol3, (d1, d2, d3)), h2)
+                l3_fc[(d1, d2, d3)] = [s * v for v in l2_fc.get((d1, d2), [0.0] * n_fc)]
+
+        # full (history + forecast) value series
+        def _full(vol, key, fc_dict):
+            if as_share:
+                hist   = _h_pct(vol, key)
+                fc_val = sum(hist[-w:]) / w if w and hist else 0.0
+                return [round(v, 4) for v in hist + [fc_val] * n_fc]
+            hist = _h(vol, key)
+            fc   = fc_dict.get(key, [0.0] * n_fc)
+            vals = hist + list(fc)
+            if to_int:
+                return [int(round(v)) for v in vals]
+            return [round(v, 4) for v in vals]
+
+        # ── build table ──────────────────────────────────────────────────────
+        table_rows = []
+        for d1 in all_d1:
+            l1_vals     = _full(vol1, (d1,), l1_fc)
+            children_l2 = []
+
+            for d2 in sorted(dim2_by_d1[d1]):
+                if d2 == "NA":
+                    # dim2 is payer "NA" (Cash): products become direct level-2 children
+                    for d3 in sorted(dim3_by_d1d2.get((d1, d2), set())):
+                        children_l2.append({
+                            "label":    d3,
+                            "values":   _full(vol3, (d1, d2, d3), l3_fc),
+                            "children": [],
+                        })
+                else:
+                    lbl2     = f"{d1} - {d2}"
+                    d3_set   = sorted(dim3_by_d1d2.get((d1, d2), set()))
+                    children_l2.append({
+                        "label":  lbl2,
+                        "values": _full(vol2, (d1, d2), l2_fc),
+                        "children": [
+                            {
+                                "label":    d3,
+                                "values":   _full(vol3, (d1, d2, d3), l3_fc),
+                                "children": [],
+                            }
+                            for d3 in d3_set
+                        ],
+                    })
+
+            table_rows.append({"label": d1, "values": l1_vals, "children": children_l2})
+
+        # ── build chart (leaf-level series only) ─────────────────────────────
+        # No parent-total series — the chart shows only the most granular level.
+        # _aggregate_monthly_to_yearly is told to skip parent recomputation for
+        # any hierarchy whose monthly chart has no parent-labelled series.
+        #
+        # Leaf label rules:
+        # • d3 exists (non-NA): "d1 - d3" if d2=="NA" else "d1 - d2 - d3"
+        # • d3 absent (all NA, Cash in sub-views 2/3): "d1 - d2" (level-2)
+        chart_series: list = []
+
+        for d1 in all_d1:
+            for d2 in sorted(dim2_by_d1[d1]):
+                d3_set = sorted(dim3_by_d1d2.get((d1, d2), set()))
+                if d3_set:
+                    for d3 in d3_set:
+                        lbl = f"{d1} - {d3}" if d2 == "NA" else f"{d1} - {d2} - {d3}"
+                        if as_share:
+                            h_vals = _h_pct(vol3, (d1, d2, d3))
+                            fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
+                            fc     = [round(fc_val, 4)] * n_fc
+                        else:
+                            h_vals = _h(vol3, (d1, d2, d3))
+                            fc     = list(l3_fc.get((d1, d2, d3), [0.0] * n_fc))
+                        chart_series.append({
+                            "label":    lbl,
+                            "history":  [round(v, 4) for v in h_vals],
+                            "forecast": [round(v, 4) for v in fc],
+                        })
+                else:
+                    # No valid d3 (Cash with no sub-payer): fall back to level-2
+                    lbl = d1 if d2 == "NA" else f"{d1} - {d2}"
+                    if as_share:
+                        h_vals = _h_pct(vol2, (d1, d2))
+                        fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
+                        fc     = [round(fc_val, 4)] * n_fc
+                    else:
+                        h_vals = _h(vol2, (d1, d2))
+                        fc     = list(l2_fc.get((d1, d2), [0.0] * n_fc))
+                    chart_series.append({
+                        "label":    lbl,
+                        "history":  [round(v, 4) for v in h_vals],
+                        "forecast": [round(v, 4) for v in fc],
+                    })
+
+        return {
+            "chart": {
+                "months":               month_labels,
+                "forecast_start_index": fsi,
+                "series":               chart_series,
+            },
+            "table": {
+                "type": "hierarchy",
+                "rows": table_rows,
+            },
+        }
+
     market_analysis = {
         "total_market_volume": {
             "payer_volume": _fmt_flat(tab1_mv_data, month_labels, fsi, to_int=True),
             "payer_share":  tab1_ms,
         },
         "product_distribution": {
-            "payer_volume": bflat_mv(pd_mv,   pd_ms,   tab2_label, to_int=True, mmbl=_tab2_mmbl),
-            "payer_share":  bflat_ms(pd_ms,   tab2_label),
+            "payer_volume": bflat_mv(pd_mv,  pd_ms,  tab2_label, to_int=True, mmbl=_tab2_mmbl),
+            "payer_share":  bflat_ms(pd_ms,  tab2_label),
         },
-        "payer_distribution": {
-            "payer_volume": bflat_mv(pyd_mv,  pyd_ms,  tab3_label, to_int=True, mmbl=_tab3_mmbl),
-            "payer_share":  bflat_ms(pyd_ms,  tab3_label),
+        "payment_type_distribution": {
+            "payer_volume": bflat_mv(_ptd_mv, _ptd_ms, None, to_int=True, mmbl=_tab3_mmbl),
+            "payer_share":  bflat_ms(_ptd_ms, None),
         },
-        "payer_product": {
-            "payer_volume": bhier_mv(pwp_mv,  pwp_ms,  tab3_label, tab2_label, to_int=True, mmbp=_tab4_mmbp),
-            "payer_share":  bhier_ms(pwp_ms,  tab3_label, tab2_label),
+        # Tab 4: payment_type × product (2-level); two orderings.
+        # Each sub-view contains payer_volume and payer_share as metric keys.
+        "payment_type_product": {
+            "payment_type_product": {
+                "payer_volume": bhier_mv(pt_mv,           pt_ms,          None,       tab2_label, to_int=True, mmbp=_tab4_mmbp),
+                "payer_share":  bhier_ms(pt_ms,           None,           tab2_label),
+            },
+            "product_payment_type": {
+                "payer_volume": bhier_mv(_swap_pc(pt_mv), _swap_pc(pt_ms), tab2_label, None,       to_int=True),
+                "payer_share":  bhier_ms(_swap_pc(pt_ms), tab2_label,      None),
+            },
         },
-        "product_payer": {
-            "payer_volume": bhier_mv(pwpy_mv, pwpy_ms, tab2_label, tab3_label, to_int=True, mmbp=_tab5_mmbp),
-            "payer_share":  bhier_ms(pwpy_ms, tab2_label, tab3_label),
+        # Tab 5: three 3-level views of payment_type × payer × product.
+        # Each sub-view contains payer_volume and payer_share as metric keys.
+        "payment_type_payer_product": {
+            "payment_type_payer_product": {
+                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 3, 4, to_int=True),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 3, 4, as_share=True),
+            },
+            "payment_type_product_payer": {
+                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 4, 3, to_int=True),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 4, 3, as_share=True),
+            },
+            "product_payment_type_payer": {
+                "payer_volume": _build_tab5_3level(ptpp_mv, 4, 2, 3, to_int=True),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 4, 2, 3, as_share=True),
+            },
         },
+        "event_management": {},
     }
 
-    # Align Tab4 (payer_product) and Tab5 (product_payer) so their parent totals match
-    # Tab2 (product_distribution) and Tab3 (payer_distribution) respectively.
-    # Tab2/Tab3 forecast from share → volume; IPF corrects Tab4/Tab5 absolute levels.
-    _tab2_mv_rows = market_analysis["product_distribution"]["payer_volume"]["table"]["rows"]
-    _tab3_mv_rows = market_analysis["payer_distribution"]["payer_volume"]["table"]["rows"]
-    _tab4_mv = market_analysis["payer_product"]["payer_volume"]
-    _tab5_mv = market_analysis["product_payer"]["payer_volume"]
-    _col_tgts = {
-        r["label"]: [float(v) for v in r["values"]]
-        for r in _tab2_mv_rows if r.get("label", "").lower() != "total"
-    }
-    _row_tgts = {
-        r["label"]: [float(v) for v in r["values"]]
-        for r in _tab3_mv_rows if r.get("label", "").lower() != "total"
-    }
-    if _tab4_mv.get("table", {}).get("rows") and _col_tgts and _row_tgts:
-        _new4 = _ipf_hier_rows(_tab4_mv["table"]["rows"], _row_tgts, _col_tgts)
-        _tab4_mv["table"]["rows"] = _new4
-        _sync_hier_mv_chart(_tab4_mv, fsi, chart_parent_filter=tab3_label)
-        if _tab5_mv.get("table", {}).get("rows"):
-            _tab5_mv["table"]["rows"] = _transpose_hier_rows(_new4, _tab5_mv["table"]["rows"])
-            _sync_hier_mv_chart(_tab5_mv, fsi, chart_parent_filter=tab2_label)
-
-    # Recompute market_share from scaled market_volume so all tabs are consistent
+    # Recompute market_share from market_volume for Tabs 1-3 so all flat tabs are consistent
     market_analysis = _recompute_all_market_shares(market_analysis)
 
     return month_labels, forecast_start_index, market_analysis, tab1_ets
@@ -1703,110 +1922,123 @@ def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
     def _vsum(series_list, key, idx):
         return sum(s.get(key, [])[idx] if idx < len(s.get(key, [])) else 0.0 for s in series_list)
 
+    def _agg_metric(data):
+        """Aggregate a single {chart, table} monthly metric dict to yearly."""
+        chart  = data.get("chart", {})
+        table  = data.get("table", {})
+        months = chart.get("months", [])
+        fsi    = chart.get("forecast_start_index", 0)
+
+        hist_months = months[:fsi]
+        fc_months   = months[fsi:]
+
+        hist_years, _ = _group_sum(hist_months, [])
+        fc_years,   _ = _group_sum(fc_months,   [])
+        yearly_months  = hist_years + fc_years
+        yearly_fsi     = len(hist_years)
+        n_yrs          = len(yearly_months)
+
+        table_type = table.get("type", "flat")
+
+        if table_type == "flat":
+            non_tot, tot_row_out = [], None
+            for r in table.get("rows", []):
+                vals = r.get("values", [])
+                _, h = _group_sum(hist_months, vals[:fsi])
+                _, f = _group_sum(fc_months,   vals[fsi:])
+                nr = {"label": r["label"], "values": h + f}
+                if r["label"].lower() == "total":
+                    tot_row_out = nr
+                else:
+                    non_tot.append(nr)
+            if tot_row_out:
+                tot_row_out["values"] = [
+                    sum(r["values"][i] for r in non_tot if i < len(r["values"]))
+                    for i in range(n_yrs)
+                ]
+            new_rows  = ([tot_row_out] if tot_row_out else []) + non_tot
+            new_table = {"type": "flat", "rows": new_rows}
+
+            non_tot_ser, tot_ser_out = [], None
+            for s in chart.get("series", []):
+                _, h = _group_sum(hist_months, s.get("history",  []))
+                _, f = _group_sum(fc_months,   s.get("forecast", []))
+                ns = {"label": s["label"], "history": h, "forecast": f}
+                if s["label"].lower() == "total":
+                    tot_ser_out = ns
+                else:
+                    non_tot_ser.append(ns)
+            if tot_ser_out:
+                tot_ser_out["history"]  = [_vsum(non_tot_ser, "history",  i) for i in range(yearly_fsi)]
+                tot_ser_out["forecast"] = [_vsum(non_tot_ser, "forecast", i) for i in range(len(fc_years))]
+            new_series = ([tot_ser_out] if tot_ser_out else []) + non_tot_ser
+
+        else:  # hierarchy
+            new_rows   = []
+            new_series = []
+            plabels    = set()
+
+            def _agg_node(node):
+                children = node.get("children", [])
+                if not children:
+                    cv = node.get("values", [])
+                    _, ch = _group_sum(hist_months, cv[:fsi])
+                    _, cf = _group_sum(fc_months,   cv[fsi:])
+                    return {"label": node["label"], "values": ch + cf, "children": []}
+                new_ch = [_agg_node(c) for c in children]
+                pv = [
+                    sum(c["values"][i] for c in new_ch if i < len(c["values"]))
+                    for i in range(n_yrs)
+                ]
+                return {"label": node["label"], "values": pv, "children": new_ch}
+
+            for r in table.get("rows", []):
+                plabels.add(r["label"])
+            new_rows  = [_agg_node(r) for r in table.get("rows", [])]
+            new_table = {"type": "hierarchy", "rows": new_rows}
+
+            monthly_series_labels = {s["label"] for s in chart.get("series", [])}
+            child_ser_map = {}
+            for s in chart.get("series", []):
+                if s["label"] in plabels:
+                    continue
+                _, h = _group_sum(hist_months, s.get("history",  []))
+                _, f = _group_sum(fc_months,   s.get("forecast", []))
+                ns = {"label": s["label"], "history": h, "forecast": f}
+                parent = next((pl for pl in plabels if s["label"].startswith(f"{pl} - ")), None)
+                if parent:
+                    child_ser_map.setdefault(parent, []).append(ns)
+                new_series.append(ns)
+
+            for pl in plabels:
+                if pl not in monthly_series_labels:
+                    continue
+                ch_ser = child_ser_map.get(pl, [])
+                n_h = max((len(s.get("history",  [])) for s in ch_ser), default=0)
+                n_f = max((len(s.get("forecast", [])) for s in ch_ser), default=0)
+                new_series.insert(0, {
+                    "label":    pl,
+                    "history":  [_vsum(ch_ser, "history",  i) for i in range(n_h)],
+                    "forecast": [_vsum(ch_ser, "forecast", i) for i in range(n_f)],
+                })
+
+        return {
+            "chart": {"months": yearly_months, "forecast_start_index": yearly_fsi, "series": new_series},
+            "table": new_table,
+        }
+
     ma_yearly = {}
     for tab_key, metrics in ma_monthly.items():
         ma_yearly[tab_key] = {}
-        for metric, data in metrics.items():
-            chart  = data.get("chart", {})
-            table  = data.get("table", {})
-            months = chart.get("months", [])
-            fsi    = chart.get("forecast_start_index", 0)
-
-            hist_months = months[:fsi]
-            fc_months   = months[fsi:]
-
-            hist_years, _ = _group_sum(hist_months, [])
-            fc_years,   _ = _group_sum(fc_months,   [])
-            yearly_months  = hist_years + fc_years
-            yearly_fsi     = len(hist_years)
-            n_yrs          = len(yearly_months)
-
-            table_type = table.get("type", "flat")
-
-            if table_type == "flat":
-                # Aggregate non-Total rows; recompute Total from them
-                non_tot, tot_row_out = [], None
-                for r in table.get("rows", []):
-                    vals = r.get("values", [])
-                    _, h = _group_sum(hist_months, vals[:fsi])
-                    _, f = _group_sum(fc_months,   vals[fsi:])
-                    nr = {"label": r["label"], "values": h + f}
-                    if r["label"].lower() == "total":
-                        tot_row_out = nr
-                    else:
-                        non_tot.append(nr)
-                if tot_row_out:
-                    tot_row_out["values"] = [
-                        sum(r["values"][i] for r in non_tot if i < len(r["values"]))
-                        for i in range(n_yrs)
-                    ]
-                new_rows  = ([tot_row_out] if tot_row_out else []) + non_tot
-                new_table = {"type": "flat", "rows": new_rows}
-
-                # Chart: aggregate each series; Total series recomputed from non-Total
-                non_tot_ser, tot_ser_out = [], None
-                for s in chart.get("series", []):
-                    _, h = _group_sum(hist_months, s.get("history",  []))
-                    _, f = _group_sum(fc_months,   s.get("forecast", []))
-                    ns = {"label": s["label"], "history": h, "forecast": f}
-                    if s["label"].lower() == "total":
-                        tot_ser_out = ns
-                    else:
-                        non_tot_ser.append(ns)
-                if tot_ser_out:
-                    tot_ser_out["history"]  = [_vsum(non_tot_ser, "history",  i) for i in range(yearly_fsi)]
-                    tot_ser_out["forecast"] = [_vsum(non_tot_ser, "forecast", i) for i in range(len(fc_years))]
-                new_series = ([tot_ser_out] if tot_ser_out else []) + non_tot_ser
-
-            else:  # hierarchy
-                new_rows   = []
-                new_series = []
-                plabels    = set()
-
-                for r in table.get("rows", []):
-                    plabels.add(r["label"])
-                    new_children = []
-                    for c in r.get("children", []):
-                        cv = c.get("values", [])
-                        _, ch = _group_sum(hist_months, cv[:fsi])
-                        _, cf = _group_sum(fc_months,   cv[fsi:])
-                        new_children.append({"label": c["label"], "values": ch + cf})
-                    # Parent = sum of children (not stored parent — avoids int() drift)
-                    parent_vals = [
-                        sum(c["values"][i] for c in new_children if i < len(c["values"]))
-                        for i in range(n_yrs)
-                    ]
-                    new_rows.append({"label": r["label"], "values": parent_vals, "children": new_children})
-                new_table = {"type": "hierarchy", "rows": new_rows}
-
-                # Chart: aggregate child series; parent series = sum of their children
-                child_ser_map = {}  # parent_label → [child series]
-                for s in chart.get("series", []):
-                    if s["label"] in plabels:
-                        continue  # skip old parent series; we'll recompute
-                    _, h = _group_sum(hist_months, s.get("history",  []))
-                    _, f = _group_sum(fc_months,   s.get("forecast", []))
-                    ns = {"label": s["label"], "history": h, "forecast": f}
-                    # Determine parent by matching "Parent - Child" label format
-                    parent = next((pl for pl in plabels if s["label"].startswith(f"{pl} - ")), None)
-                    if parent:
-                        child_ser_map.setdefault(parent, []).append(ns)
-                    new_series.append(ns)
-
-                for pl in plabels:
-                    ch_ser = child_ser_map.get(pl, [])
-                    n_h = max((len(s.get("history",  [])) for s in ch_ser), default=0)
-                    n_f = max((len(s.get("forecast", [])) for s in ch_ser), default=0)
-                    new_series.insert(0, {
-                        "label":    pl,
-                        "history":  [_vsum(ch_ser, "history",  i) for i in range(n_h)],
-                        "forecast": [_vsum(ch_ser, "forecast", i) for i in range(n_f)],
-                    })
-
-            ma_yearly[tab_key][metric] = {
-                "chart": {"months": yearly_months, "forecast_start_index": yearly_fsi, "series": new_series},
-                "table": new_table,
-            }
+        for level2_key, level2_data in metrics.items():
+            if "chart" in level2_data or "table" in level2_data:
+                # Standard metric: level2_data is {chart, table}
+                ma_yearly[tab_key][level2_key] = _agg_metric(level2_data)
+            else:
+                # Sub-view: level2_data is {metric_key: {chart, table}}
+                ma_yearly[tab_key][level2_key] = {
+                    mk: _agg_metric(md) for mk, md in level2_data.items()
+                }
 
     # Re-scale flat and hierarchical market_volume tabs to match yearly TMV
     # (removes residual int() truncation drift accumulated from 12-month summation)
@@ -1817,7 +2049,7 @@ def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
     tmv_ser        = tmv_chart.get("series", [{}])[0] if tmv_chart.get("series") else {}
     tmv_fc_yearly  = tmv_ser.get("forecast", [])
 
-    for tab_key in ("product_distribution", "payer_distribution"):
+    for tab_key in ("product_distribution", "payment_type_distribution"):
         mv = ma_yearly.get(tab_key, {}).get("payer_volume", {})
         if mv and tmv_fc_yearly:
             chart  = mv["chart"]
@@ -1907,36 +2139,71 @@ def _build_market_analysis_both_granularities(
     merged = {}
     for tab_key, metrics in ma_monthly.items():
         merged[tab_key] = {}
-        for metric, monthly_data in metrics.items():
-            merged[tab_key][metric] = {
-                "monthly": monthly_data,
-                "yearly":  ma_yearly.get(tab_key, {}).get(metric, {}),
-            }
+        for level2_key, level2_data in metrics.items():
+            if "chart" in level2_data or "table" in level2_data:
+                # Standard metric
+                merged[tab_key][level2_key] = {
+                    "monthly": level2_data,
+                    "yearly":  ma_yearly.get(tab_key, {}).get(level2_key, {}),
+                }
+            else:
+                # Sub-view: level2_data = {metric_key: {chart, table}}
+                yearly_sv = ma_yearly.get(tab_key, {}).get(level2_key, {})
+                merged[tab_key][level2_key] = {
+                    mk: {
+                        "monthly": md,
+                        "yearly":  yearly_sv.get(mk, {}),
+                    }
+                    for mk, md in level2_data.items()
+                }
 
     return merged, tab1_ets
 
 
 def _split_by_granularity(ma_nested: dict):
-    """Split {tab: {metric: {monthly: ..., yearly: ...}}} into two flat dicts."""
+    """Split {tab: {key: {monthly: ..., yearly: ...}}} into two flat dicts.
+    Handles sub-view tabs where key maps to {metric: {monthly, yearly}}."""
     monthly, yearly = {}, {}
     for tab, metrics in ma_nested.items():
         monthly[tab], yearly[tab] = {}, {}
-        for metric, grans in metrics.items():
-            monthly[tab][metric] = grans.get("monthly", {})
-            yearly[tab][metric]  = grans.get("yearly", {})
+        for key, grans in metrics.items():
+            if "monthly" in grans or "yearly" in grans:
+                # Standard metric
+                monthly[tab][key] = grans.get("monthly", {})
+                yearly[tab][key]  = grans.get("yearly", {})
+            else:
+                # Sub-view: grans = {metric: {monthly, yearly}}
+                monthly[tab][key], yearly[tab][key] = {}, {}
+                for mk, mg in grans.items():
+                    monthly[tab][key][mk] = mg.get("monthly", {})
+                    yearly[tab][key][mk]  = mg.get("yearly", {})
     return monthly, yearly
 
 
 def _merge_granularities(ma_monthly: dict, ma_yearly: dict) -> dict:
-    """Merge two flat dicts into {tab: {metric: {monthly: ..., yearly: ...}}}."""
+    """Merge two flat dicts into {tab: {key: {monthly: ..., yearly: ...}}}.
+    Handles sub-view tabs where key maps to {metric: {chart, table}}."""
     merged = {}
     for tab in ma_monthly:
         merged[tab] = {}
-        for metric in ma_monthly[tab]:
-            merged[tab][metric] = {
-                "monthly": ma_monthly[tab][metric],
-                "yearly":  ma_yearly.get(tab, {}).get(metric, {}),
-            }
+        for key in ma_monthly[tab]:
+            val = ma_monthly[tab][key]
+            if "chart" in val or "table" in val:
+                # Standard metric
+                merged[tab][key] = {
+                    "monthly": val,
+                    "yearly":  ma_yearly.get(tab, {}).get(key, {}),
+                }
+            else:
+                # Sub-view: val = {metric: {chart, table}}
+                yearly_sv = ma_yearly.get(tab, {}).get(key, {})
+                merged[tab][key] = {
+                    mk: {
+                        "monthly": mv,
+                        "yearly":  yearly_sv.get(mk, {}),
+                    }
+                    for mk, mv in val.items()
+                }
     return merged
 
 
@@ -2596,7 +2863,7 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
             s["forecast"] = [100.0] * (n - fsi)
 
     # ── Flat distribution tabs (2, 3) ─────────────────────────────────────
-    for tab in ("product_distribution", "payer_distribution"):
+    for tab in ("product_distribution", "payment_type_distribution"):
         if tab not in market_analysis:
             continue
         mv_data = market_analysis[tab].get("payer_volume", {})
@@ -2721,6 +2988,69 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                     new_series = {"label": chart_key, "history": child_ms[:fsi], "forecast": child_ms[fsi:]}
                     ms_series.append(new_series)
                     ms_chart_map[chart_key] = new_series
+
+    # ── Sub-view cross-tabs (Tab 4): each sub-view is a 2-level hierarchy ────
+    for tab in ("payment_type_product",):
+        if tab not in market_analysis:
+            continue
+        for subview_data in market_analysis[tab].values():
+            mv_data = subview_data.get("payer_volume", {})
+            ms_data = subview_data.get("payer_share", {})
+            if not ms_data or not mv_data:
+                continue
+
+            ms_rows      = ms_data.setdefault("table", {}).setdefault("rows", [])
+            ms_series    = ms_data.setdefault("chart", {}).setdefault("series", [])
+            ms_hier_map  = {r.get("label", ""): r for r in ms_rows}
+            ms_chart_map = {s.get("label", ""): s for s in ms_series}
+
+            for mv_row in mv_data.get("table", {}).get("rows", []):
+                parent_lbl = mv_row.get("label", "")
+                children   = mv_row.get("children", [])
+                ms_parent  = ms_hier_map.get(parent_lbl)
+
+                if not children:
+                    if ms_parent:
+                        ms_parent["values"] = [100.0] * n
+                    continue
+
+                if ms_parent is None:
+                    ms_parent = {"label": parent_lbl, "values": [], "children": []}
+                    ms_rows.append(ms_parent)
+                    ms_hier_map[parent_lbl] = ms_parent
+
+                hier_n = max((len(c.get("values", [])) for c in children), default=0)
+                child_col_sums = [
+                    sum(float(c["values"][i]) for c in children if i < len(c.get("values", [])))
+                    for i in range(hier_n)
+                ]
+                ms_parent["values"] = [100.0] * hier_n
+                ms_children  = ms_parent.setdefault("children", [])
+                ms_child_map = {c.get("label", ""): c for c in ms_children}
+
+                for child in children:
+                    child_lbl  = child.get("label", "")
+                    child_vals = child.get("values", [])
+                    child_ms   = [
+                        round(float(child_vals[i]) / child_col_sums[i] * 100, 4)
+                        if i < len(child_vals) and i < hier_n and child_col_sums[i] != 0
+                        else 0.0
+                        for i in range(hier_n)
+                    ]
+                    if child_lbl in ms_child_map:
+                        ms_child_map[child_lbl]["values"] = child_ms
+                    else:
+                        new_child = {"label": child_lbl, "values": child_ms}
+                        ms_children.append(new_child)
+                        ms_child_map[child_lbl] = new_child
+                    chart_key = f"{parent_lbl} - {child_lbl}"
+                    if chart_key in ms_chart_map:
+                        ms_chart_map[chart_key]["history"]  = child_ms[:fsi]
+                        ms_chart_map[chart_key]["forecast"] = child_ms[fsi:]
+                    else:
+                        new_ser = {"label": chart_key, "history": child_ms[:fsi], "forecast": child_ms[fsi:]}
+                        ms_series.append(new_ser)
+                        ms_chart_map[chart_key] = new_ser
 
     return market_analysis
 
