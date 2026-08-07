@@ -34,6 +34,7 @@ import {
   getConfigurationByTherapyAreaHCV,
   activateLiverScenario,
   deleteLiverScenario,
+  addLiverMarketEventsProduct,
 } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
@@ -42,22 +43,42 @@ import Tooltip from "@mui/material/Tooltip";
 import dayjs from "dayjs";
 import ModelInputChart from "./ModelInputChart";
 import ModelInputTable from "./ModelInputTable";
+import MarketEventsPanel from "./MarketEventsPanel";
+import PaymentPayerProductTable from "./PaymentPayerProductTable";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+// payer_prod / prod_payer stay as two internal tab values (everything else in
+// this file and in ModelInputChart/ModelInputTable already branches on both)
+// but are shown as a single merged tab with a Hierarchy Order dropdown.
 const TABS = [
   { label: "Total Market Volume", value: "total_market" },
   { label: "Product Distribution (%)", value: "prod_dist" },
-  { label: "Payer Distribution (%)", value: "payer_dist" },
-  { label: "Payer-Product", value: "payer_prod" },
-  { label: "Product-Payer", value: "prod_payer" },
+  { label: "Payment Type Distribution (%)", value: "payer_dist" },
+  { label: "Payment Type / Product", value: "payer_prod" },
+  // Real 3-level hierarchy tab (Payment Type / Payer / Product) — backend
+  // data comes from market_analysis.payment_type_payer_product, mapped in
+  // normalizeLiverResponse and passed to PaymentPayerProductTable below.
+  { label: "Payment type-Payer-Product", value: "payment_payer_prod" },
+  { label: "Events Management", value: "manage_events" },
 ];
+
+// Tab values that share the merged "Payment Type / Product" tab slot in the tab bar.
+const HIERARCHY_TAB_VALUES = ["payer_prod", "prod_payer"];
 
 const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
-  payer_dist: "payer_distribution",
+  // Backend key is "payment_type_distribution" (payer = payment type: Cash /
+  // Commercial / Medicaid / Medicare). Older responses used
+  // "payer_distribution" — normalizeLiverResponse() aliases that key onto
+  // "payment_type_distribution" too, so either shape works.
+  payer_dist: "payment_type_distribution",
   payer_prod: "payer_product",
   prod_payer: "product_payer",
+  // Real 3-level hierarchy tab (Payment Type / Payer / Product). Backend key
+  // holds three pre-computed orderings — see normalizeLiverResponse's
+  // "payment_type_payer_product" handling below.
+  payment_payer_prod: "payment_type_payer_product",
 };
 
 const COMPARE_OPTIONS = ["ETS 13M", "ETS 26M", "Exponential"];
@@ -134,6 +155,9 @@ export default function PBCModelInput() {
   const [autoAppliedOnMount, setAutoAppliedOnMount] = useState(false);
   const [payerOptions, setPayerOptions] = useState([]);
   const [productOptions, setProductOptions] = useState([]);
+  // Session-only market events, shared between the Total Market Volume
+  // compact panel and the Events Management tab's table (see MarketEventsPanel).
+  const [marketEvents, setMarketEvents] = useState([]);
   const [indication, setIndication] = useState("");
   const [lot, setLot] = useState("");
   const [brand, setBrand] = useState("");
@@ -172,7 +196,8 @@ export default function PBCModelInput() {
 
   const isPercentTab = metric === "market_share";
   const activeTabLabel =
-    TABS.find((t) => t.value === activeTab)?.label || "Total Market Volume";
+    TABS.find((t) => t.value === activeTab)?.label ||
+    (HIERARCHY_TAB_VALUES.includes(activeTab) ? "Payment Type / Product" : "Total Market Volume");
   const showScenarioControls = activeTab === "total_market";
   // Compare Scenarios (chart-only comparison) is useful on every tab now
   // that the API sends per-scenario chart data for all of them — gated
@@ -283,7 +308,7 @@ export default function PBCModelInput() {
       data.active_scenario ||
       (data.scenarios && Object.keys(data.scenarios || {})[0]);
     const sc = data.scenarios && data.scenarios[active];
-    const ma = sc && sc.market_analysis;
+    let ma = sc && sc.market_analysis;
 
     // The active scenario (e.g. a newly saved one) may only carry table data
     // and no chart. Fall back to the first scenario that has chart data so
@@ -306,6 +331,55 @@ export default function PBCModelInput() {
     }
 
     if (!ma && !chartMa) return { months: [], forecast_start_index: 0, tabs: {} };
+
+    // ── Reconcile backend key/shape differences across scenarios ─────────────
+    // Different scenarios in the same apply-filters response can shape
+    // market_analysis differently. E.g. "Base" nests the Payment Type /
+    // Product hierarchy tab self-keyed with only one ordering
+    // (payment_type_product.payment_type_product) and may only expose
+    // "payment_type_distribution" (not "payer_distribution"), while other
+    // scenarios already use the flat payer_product / product_payer /
+    // payer_distribution shape this function (and TAB_KEY_MAP) expects.
+    // Normalize every scenario's market_analysis into that flat shape before
+    // building tabs, so switching scenarios/tabs never silently loses data.
+    const reconcileMarketAnalysisShape = (maObj) => {
+      if (!maObj) return maObj;
+      const out = { ...maObj };
+
+      // Unwrap self-nested single-ordering container:
+      // { payment_type_product: { payment_type_product: { payer_volume, payer_share } } }
+      // -> { payment_type_product: { payer_volume, payer_share } }
+      if (
+        out.payment_type_product &&
+        out.payment_type_product.payment_type_product &&
+        !out.payment_type_product.payer_volume &&
+        !out.payment_type_product.payer_share
+      ) {
+        out.payment_type_product = out.payment_type_product.payment_type_product;
+      }
+
+      // Alias the payment-type breakdown tab so it works under either name.
+      if (!out.payment_type_distribution && out.payer_distribution) {
+        out.payment_type_distribution = out.payer_distribution;
+      }
+      if (!out.payer_distribution && out.payment_type_distribution) {
+        out.payer_distribution = out.payment_type_distribution;
+      }
+
+      // When only the single "payment_type_product" ordering is present,
+      // reuse it for both Hierarchy Order variants so the dropdown toggle in
+      // the Payment Type / Product tab always has data instead of going
+      // blank for whichever ordering the backend didn't compute.
+      if (out.payment_type_product) {
+        if (!out.payer_product) out.payer_product = out.payment_type_product;
+        if (!out.product_payer) out.product_payer = out.payment_type_product;
+      }
+
+      return out;
+    };
+
+    ma = reconcileMarketAnalysisShape(ma);
+    chartMa = reconcileMarketAnalysisShape(chartMa);
 
     const parseNumber = (x, asPercent = false) => {
       if (x == null || x === "") return null;
@@ -363,7 +437,9 @@ export default function PBCModelInput() {
       const isVolumeTab =
         tabKey === "payer_product" || tabKey === "product_payer";
       const isDefaultShareTab =
-        tabKey === "product_distribution" || tabKey === "payer_distribution";
+        tabKey === "product_distribution" ||
+        tabKey === "payer_distribution" ||
+        tabKey === "payment_type_distribution";
 
       if (isVolumeTab)
         return (
@@ -424,7 +500,61 @@ export default function PBCModelInput() {
       ...Object.keys(ma || {}),
     ]);
     const tabs = {};
+
+    // ── Real 3-level hierarchy tab: Payment Type / Payer / Product ─────────
+    // Unlike every other tab, "payment_type_payer_product" doesn't hold a
+    // single payer_volume/payer_share pair directly — it holds THREE
+    // pre-computed orderings (payment_type_payer_product,
+    // payment_type_product_payer, product_payment_type_payer), one per
+    // Hierarchy Order option in PaymentPayerProductTable. Parse each
+    // ordering with the same chart/table helpers used everywhere else and
+    // store them under tabs["payment_type_payer_product"].orders so
+    // PaymentPayerProductTable can render real backend data instead of
+    // mock/seeded values.
+    const buildHierarchyOrderTab = () => {
+      const chartOrdersObj = (chartMa || {}).payment_type_payer_product || {};
+      const tableOrdersObj = (ma || {}).payment_type_payer_product || chartOrdersObj;
+      const orderKeys = new Set([
+        ...Object.keys(chartOrdersObj),
+        ...Object.keys(tableOrdersObj),
+      ]);
+      if (!orderKeys.size) return null;
+
+      const orders = {};
+      orderKeys.forEach((orderKey) => {
+        const chartOrderObj = chartOrdersObj[orderKey] || {};
+        const tableOrderObj = tableOrdersObj[orderKey] || chartOrderObj;
+
+        const chartMetric = selectMetricForTab("payment_type_payer_product", chartOrderObj);
+        const tableMetric = selectMetricForTab("payment_type_payer_product", tableOrderObj);
+        const isPct = chartMetric === chartOrderObj.payer_share;
+
+        const rawMChart = getMonthlyChart(chartMetric);
+        const rawMTable = getMonthlyTable(tableMetric);
+        const rawYChart = getYearlyChart(chartMetric);
+        const rawYTable = getYearlyTable(tableMetric);
+
+        const chart = parseChartObj(rawMChart, months, fsi, isPct);
+        const table = parseTableObj(rawMTable, chart.months, isPct);
+        const yearlyChart = rawYChart ? parseChartObj(rawYChart, [], 0, isPct) : null;
+        const yearlyTable = rawYTable
+          ? parseTableObj(rawYTable, yearlyChart?.months || [], isPct)
+          : null;
+
+        orders[orderKey] = { chart, table, yearlyChart, yearlyTable };
+      });
+
+      return { orders };
+    };
+
     allTabKeys.forEach((tabKey) => {
+      if (tabKey === "payment_type_payer_product") {
+        const built = buildHierarchyOrderTab();
+        if (built) tabs[tabKey] = built;
+        return;
+      }
+      if (tabKey === "event_management") return; // no chart/table data on this key
+
       // Chart source: prefer chartMa (scenario with full chart data)
       const chartTabObj = (chartMa || {})[tabKey] || {};
       const chartSelectedMetric = selectMetricForTab(tabKey, chartTabObj);
@@ -1306,6 +1436,8 @@ export default function PBCModelInput() {
 
   useLayoutEffect(() => {
     if (!filtersLoaded) return;
+    // Events Management / the mock 3-level tab have no chart/metric/table of their own.
+    if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
 
     let targetMetric = "market_volume";
     if (activeTab === "total_market") {
@@ -1390,6 +1522,8 @@ export default function PBCModelInput() {
 
   useEffect(() => {
     if (!liverTabsRaw) return;
+    // Events Management / the mock 3-level tab have no chart/table of their own.
+    if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
 
     // Keep the chart/table in sync for all non-tab-switch updates too, but
     // avoid the extra tab-switch render chain by letting the tab-change path
@@ -1398,19 +1532,19 @@ export default function PBCModelInput() {
     setChartData(chart);
     setTableData(table);
 
-    // Auto-expand the applied/filtered parent row so it doesn't collapse
-    // back to nothing on every data change (tab switch, apply filter,
-    // refresh, etc.) — the user shouldn't have to manually re-open it
-    // each time.
+    // Auto-expand every parent row for the Payer/Product hierarchy tabs —
+    // the wireframe always shows the full nested Payment Type -> Product
+    // (or Product -> Payment Type) grid at once, never collapsed by
+    // default. Individual rows / Collapse All still work afterwards.
     let nextExpandedBrands = {};
-    if (activeTab === "payer_prod") {
-      const key = appliedPayerFilter || payerFilter;
-      const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
-      nextExpandedBrands = taggedKey ? { [taggedKey]: true } : {};
-    } else if (activeTab === "prod_payer") {
-      const key = appliedProductFilter || productFilter;
-      const taggedKey = key && currentlyAppliedScenario ? `${key} (${currentlyAppliedScenario})` : key;
-      nextExpandedBrands = taggedKey ? { [taggedKey]: true } : {};
+    if (activeTab === "payer_prod" || activeTab === "prod_payer") {
+      const parentNames = Array.from(
+        new Set(table.filter((r) => !(r.hierarchy || "").includes(" - ")).map((r) => r.hierarchy)),
+      );
+      parentNames.forEach((name) => {
+        nextExpandedBrands[name] = true;
+        if (currentlyAppliedScenario) nextExpandedBrands[`${name} (${currentlyAppliedScenario})`] = true;
+      });
     } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
       nextExpandedBrands = currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {};
     }
@@ -2373,6 +2507,28 @@ export default function PBCModelInput() {
   const handleDeleteScenarioClick = (scenarioName) => {
     setScenarioToDelete(scenarioName);
     setDeleteDialogOpen(true);
+  };
+
+  // ── Market Events (Total Market Volume panel + Events Management tab) ─────
+  const handleSaveMarketEvent = (event) => {
+    setMarketEvents((prev) => {
+      const idx = prev.findIndex((e) => e.id === event.id);
+      if (idx === -1) return [...prev, event];
+      const next = [...prev];
+      next[idx] = event;
+      return next;
+    });
+  };
+
+  const handleDeleteMarketEvent = (eventId) => {
+    setMarketEvents((prev) => prev.filter((e) => e.id !== eventId));
+  };
+
+  // Keeps the app-wide product master in sync when a new product is added
+  // from the Add Event modal's "+ Add new product" option.
+  const handleAddMarketEventProduct = async (productName) => {
+    await addLiverMarketEventsProduct({ product_name: productName });
+    setProductOptions((prev) => (prev.includes(productName) ? prev : [...prev, productName]));
   };
 
   const handleDeleteScenario = async (scenarioName) => {
@@ -3355,43 +3511,106 @@ export default function PBCModelInput() {
             gap: 0.5,
           }}
         >
-          {TABS.map((tab) => (
-            <Box
-              key={tab.value}
-              onClick={() => setActiveTab(tab.value)}
-              sx={{
-                px: 2,
-                py: 1,
-                cursor: "pointer",
-                fontSize: "12px",
-                fontWeight: 600,
-                borderRadius: "6px 6px 0 0",
-                color: activeTab === tab.value ? "#4F46E5" : "#64748b",
-                backgroundColor:
-                  activeTab === tab.value ? "white" : "transparent",
-                border:
-                  activeTab === tab.value
+          {TABS.map((tab) => {
+            // "Payment Type / Product" is one displayed tab but maps to two internal
+            // activeTab values (payer_prod / prod_payer) toggled via the
+            // Hierarchy Order dropdown inside ModelInputTable.
+            const isActive =
+              tab.value === "payer_prod"
+                ? HIERARCHY_TAB_VALUES.includes(activeTab)
+                : activeTab === tab.value;
+            return (
+              <Box
+                key={tab.value}
+                onClick={() => {
+                  if (tab.value === "payer_prod" && HIERARCHY_TAB_VALUES.includes(activeTab)) return;
+                  setActiveTab(tab.value);
+                }}
+                sx={{
+                  px: 2,
+                  py: 1,
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  borderRadius: "6px 6px 0 0",
+                  color: isActive ? "#4F46E5" : "#64748b",
+                  backgroundColor: isActive ? "white" : "transparent",
+                  border: isActive
                     ? "1px solid #D8DEE8"
                     : "1px solid transparent",
-                borderBottom:
-                  activeTab === tab.value
+                  borderBottom: isActive
                     ? "1px solid white"
                     : "1px solid transparent",
-                mb: activeTab === tab.value ? "-1px" : 0,
-                userSelect: "none",
-                "&:hover": {
-                  backgroundColor:
-                    activeTab === tab.value ? "white" : "#f1f5f9",
-                },
-              }}
-            >
-              {tab.label}
-            </Box>
-          ))}
+                  mb: isActive ? "-1px" : 0,
+                  userSelect: "none",
+                  "&:hover": {
+                    backgroundColor: isActive ? "white" : "#f1f5f9",
+                  },
+                }}
+              >
+                {tab.label}
+              </Box>
+            );
+          })}
         </Box>
 
         {/* ── TAB CONTENT ── */}
         <Box sx={{ p: 3 }}>
+          {/* Market Events — compact panel matching the wireframe, shown only on Total Market Volume */}
+          {activeTab === "total_market" && (
+            <MarketEventsPanel
+              variant="compact"
+              events={marketEvents}
+              onSave={handleSaveMarketEvent}
+              onDelete={handleDeleteMarketEvent}
+              productOptions={productOptions}
+              payerOptions={payerOptions}
+              availableDates={availableDates}
+            />
+          )}
+
+          {activeTab === "manage_events" ? (
+            <MarketEventsPanel
+              variant="table"
+              events={marketEvents}
+              onSave={handleSaveMarketEvent}
+              onDelete={handleDeleteMarketEvent}
+              productOptions={productOptions}
+              payerOptions={payerOptions}
+              availableDates={availableDates}
+            />
+          ) : activeTab === "payment_payer_prod" ? (
+            <PaymentPayerProductTable
+              activeTabLabel={activeTabLabel}
+              payerOptions={payerOptions}
+              productOptions={productOptions}
+              months={availableDates}
+              metric={metric}
+              metricUnit={metricUnit}
+              filterOptions={filterOptions}
+              handleMetricChange={handleMetricChange}
+              totalMarketViewMode={totalMarketViewMode}
+              setTotalMarketViewMode={setTotalMarketViewMode}
+              appliedPayerFilter={appliedPayerFilter}
+              appliedProductFilter={appliedProductFilter}
+              // Real backend data for the 3 pre-computed hierarchy orderings
+              // (falls back to the mock generator inside the component when
+              // a given ordering isn't present in the response).
+              hierarchyData={liverTabsRaw?.tabs?.payment_type_payer_product?.orders}
+              handleDownloadTable={handleDownloadTable}
+              handleConfirmSave={handleConfirmSave}
+              handleEnterTableEdit={handleEnterTableEdit}
+              handleSaveTableChanges={handleSaveTableChanges}
+              handleCancelTableEdit={handleCancelTableEdit}
+              tableEditing={tableEditing}
+              isRefreshed={isRefreshed}
+              savingTable={savingTable}
+              isSavingEditChanges={isSavingEditChanges}
+              editedHierarchies={editedHierarchies}
+              appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+            />
+          ) : (
+            <>
           {/* Chart — collapsible, matches HIV's Market Analysis Chart accordion */}
           <Accordion
             defaultExpanded
@@ -3434,6 +3653,7 @@ export default function PBCModelInput() {
           <ModelInputTable
             activeTab={activeTab}
             activeTabLabel={activeTabLabel}
+            onActiveTabChange={setActiveTab}
             tableData={tableData}
             chartData={chartData}
             liverRawData={liverRawData}
@@ -3480,6 +3700,8 @@ export default function PBCModelInput() {
             onDeleteScenario={handleDeleteScenario}
             onDeleteScenarioClick={handleDeleteScenarioClick}
           />
+            </>
+          )}
         </Box>
       </Paper>
 
