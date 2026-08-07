@@ -10,7 +10,7 @@ from typing import List, Optional
 class SelectedFilter(BaseModel):
     """The filter values the user has selected."""
     scenario_name: str
-    payers: List[str]       # multiple payers can be selected
+    payment_type: List[str]       # multiple payment types can be selected
     products: List[str]     # multiple products can be selected
     start_date: str         # "YYYY-MM-DD"
     end_date: str           # "YYYY-MM-DD"
@@ -24,7 +24,7 @@ class MarketEventsFiltersResponse(BaseModel):
     """Full response shape for GET /api/liver-market-events/filters."""
     ta_name: str
     available_scenarios: List[str]
-    payers: List[str]
+    payment_type: List[str]
     products: List[str]
     available_months: List[str]
     selected_filter: SelectedFilter
@@ -75,9 +75,9 @@ class ImpactCurveRow(BaseModel):
     event_id: Optional[int] = None
     event_name: str = "Event"
     # Entity selections (which fields are populated depends on the tab)
-    payers: Optional[List[str]] = None          # payer_event: selected payer
+    payment_type: Optional[List[str]] = None          # payer_event: selected payment type
     products: Optional[List[str]] = None        # product_event: selected product / payer_event: context
-    impacted_payers: Optional[List[str]] = None
+    impacted_payment_type: Optional[List[str]] = None
     impacted_products: Optional[List[str]] = None
     # Curve parameters
     start_date: str

@@ -31,7 +31,7 @@ from app.liver_market_events.repository.market_events_repo import (
     get_all_configs_for_ta,
     get_payers,
     get_products,
-    get_volume_by_product_payer,
+    get_volume_by_product_payment_type,
     save_impact_rows,
     load_impact_rows,
 )
@@ -43,6 +43,10 @@ from app.liver_market_events.services.market_events_service import (
     _build_overall_event_metrics,
     _build_payer_event_metrics,
     _build_product_event_metrics,
+    _build_payment_type_product_metrics,        # NEW
+    _build_payment_type_payer_product_metrics,  # NEW
+    _fetch_pt_payer_history,                      # NEW
+    build_market_analysis_response,              # NEW
     _clamp_min_start_to_transaction_floor,
     _get_date_range_from_configs,
     _get_scenarios_with_base,
@@ -304,13 +308,15 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
     # Default to k=5 (visible sigmoid) when no meaningful factor is provided.
     if curve_type == CurveType.SCURVE and (raw_factor is None or float(raw_factor) == 1.0):
         factor = 5.0
+    elif raw_factor is None or float(raw_factor) <= 0:
+        factor = 1.0
     else:
-        factor = float(raw_factor if raw_factor is not None else 1.0)
+        factor = float(raw_factor)
 
     if tab == "payer_event":
-        payers_list = event_row.get("payers") or []
+        payers_list = event_row.get("payment_type") or []
         selected = payers_list[0] if payers_list else None
-        impacted_names = [n for n in (event_row.get("impacted_payers") or []) if n != selected]
+        impacted_names = [n for n in (event_row.get("impacted_payment_types") or []) if n != selected]
     elif tab == "product_event":
         products_list = event_row.get("products") or []
         selected = products_list[0] if products_list else None
@@ -376,8 +382,10 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
             contexts=["context"] if scope != EventScope.OVERALL_EVENT else None,
             selected_entity=selected,
         )
-    except Exception:
-        return None
+    except Exception as e:
+        raise ValueError(
+            f"Event '{event_row.get('event_name', 'Event')}' has an invalid configuration: {e}"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +439,8 @@ def _apply_events_to_data(
             if row_products:
                 ctx_products = [p for p in show_products if p in row_products] or show_products
         elif tab == "product_event":
-            row_payers = event_row.get("payers") or []
+            row_payers = event_row.get("payment_type") or []
+            print(f"[DEBUG] row_payers={row_payers} show_payers={show_payers}")   # ← ADD
             if row_payers:
                 ctx_payers = [p for p in show_payers if p in row_payers] or show_payers
 
@@ -464,7 +473,7 @@ def _apply_events_to_data(
                     last_ctx_total = _context_total(data, last_y, last_m, show_products, ctx_payers)
                 if last_ctx_total > 0:
                     if tab == "payer_event":
-                        entity = (event_row.get("payers") or [None])[0]
+                        entity = (event_row.get("payment_type") or [None])[0]
                         if entity:
                             entity_vol = sum(
                                 data.get((last_y, last_m), {}).get(prod, {}).get(entity, 0.0)
@@ -491,8 +500,11 @@ def _apply_events_to_data(
         event_input = _build_event_input(event_row, tab)
         if event_input is None:
             continue
-
+        print(f"[DEBUG] baseline_pct={baseline_share}, peak_pct={event_input.peak_pct}, "
+        f"duration_months={event_input.duration_months}, factor={event_input.factor}, "
+        f"curve_type={event_input.curve_type}")
         result = compute_event_forecast(event_input, baseline_pct=baseline_share)
+        print(f"[DEBUG] selected_curve: {result.selected_curve}")
 
         # Selected entity: ABSOLUTE target share per month (baseline -> peak_percent
         # for payer/product events; a pure growth delta for overall_event, since
@@ -513,12 +525,14 @@ def _apply_events_to_data(
         }
 
         event_touched_forecast = False
+        skipped_zero_total = False  
 
         for i in range(forecast_start_index, len(month_tuples)):
             y, m = month_tuples[i]
             month_str = month_iso[i]
             total_vol = total_all[i]
             if total_vol <= 0:
+                skipped_zero_total = True
                 continue
 
             before_window = event_start_month is not None and month_str < event_start_month
@@ -687,6 +701,10 @@ def _apply_events_to_data(
                         _apply_product_delta(data, y, m, sel_prod, delta_vol, show_payers=ctx_payers)
                         ctx_changed = True
                     event_touched_forecast = True
+                if month_str == "2026-03-01":                                   # ← ADD
+                    print(f"[DEBUG] month={month_str} target_share={target_share} "
+                          f"ctx_total_vol={ctx_total_vol} current_vol={current_vol} "
+                          f"target_vol={target_vol} delta_vol={delta_vol}")  
                 # See the identical reasoning in the payer_event branch above:
                 # size impacted products' loss off the selected product's
                 # ACTUAL delta_vol this month, not the curve's theoretical
@@ -710,6 +728,11 @@ def _apply_events_to_data(
                         }
                         weights = {imp: abs(d) for imp, d in eff_impacted.items()}
                         losses = _distribute_capped_loss(current_vols, weights, delta_vol)
+                        if month_str == "2026-03-01":                            # ← ADD
+                            print(f"[DEBUG] current_vols={current_vols} weights={weights} "
+                                  f"losses={losses} "
+                                  f"shortfall={delta_vol - sum(losses.values())}")  # ← ADD
+
                         for imp, loss in losses.items():
                             if loss != 0.0:
                                 _apply_product_delta(data, y, m, imp, -loss, show_payers=ctx_payers)
@@ -728,6 +751,14 @@ def _apply_events_to_data(
         if not event_touched_forecast:
             event_name = event_row.get("event_name", "Event")
             start_date = event_row.get("start_date", "")
+            if skipped_zero_total:                                    # ← ADD THIS BRANCH
+                raise ValueError(
+                    f"Event '{event_name}' could not be applied: the market total "
+                    f"volume is zero for every forecast month in range "
+                    f"({month_iso[forecast_start_index]} to {month_iso[-1]}) for this "
+                    f"scenario/filter combination. Check that the selected products/"
+                    f"payers have historical data to forecast from."
+                )
             raise ValueError(
                 f"Event '{event_name}' (start_date={start_date}) does not overlap "
                 f"the forecast window — every affected month falls in history and "
@@ -769,10 +800,10 @@ def _compute_touched_entities(event_rows: list, tab: str):
     if tab == "payer_event":
         pairs = set()
         for row in event_rows:
-            payers_list = row.get("payers") or []
+            payers_list = row.get("payment_type") or []
             if not payers_list:
                 continue
-            touched_payers = {payers_list[0]} | set(row.get("impacted_payers") or [])
+            touched_payers = {payers_list[0]} | set(row.get("impacted_payment_types") or [])
             for product in (row.get("products") or []):
                 for payer in touched_payers:
                     pairs.add((product, payer))
@@ -784,7 +815,7 @@ def _compute_touched_entities(event_rows: list, tab: str):
             if not products_list:
                 continue
             touched_prod = {products_list[0]} | set(row.get("impacted_products") or [])
-            for payer in (row.get("payers") or []):
+            for payer in (row.get("payment_type") or []):
                 for product in touched_prod:
                     pairs.add((payer, product))
         return pairs
@@ -814,11 +845,11 @@ def run_market_events_calculation(payload) -> dict:
         sf = payload.selected_filter
         tab = payload.selected_tab
 
-        if sf.scenario_name.strip().upper() == "BASE":
-            raise ValueError(
-                "Run Calculation cannot be run on the Base scenario. "
-                "Please select or create a scenario first."
-            )
+        # if sf.scenario_name.strip().upper() == "BASE":
+        #     raise ValueError(
+        #         "Run Calculation cannot be run on the Base scenario. "
+        #         "Please select or create a scenario first."
+        #     )
 
         payers = get_payers(cur)
         products = get_products(cur)
@@ -891,9 +922,9 @@ def run_market_events_calculation(payload) -> dict:
             base_data = {mt: snap_data.get(mt, {}) for mt in month_tuples}
             base_total_raw = [snap_total_by_month.get(mt, 0.0) for mt in month_tuples]
         else:
-            raw_rows = get_volume_by_product_payer(
+            raw_rows = get_volume_by_product_payment_type(
                 cur, ta, from_year, from_month, to_year, to_month,
-                payers=None, products=None,
+                payment_types=None, products=None,
             )
             base_data = organize_raw_data(raw_rows)
             base_total_raw = None  # computed below, after the zero-history seeding
@@ -922,7 +953,10 @@ def run_market_events_calculation(payload) -> dict:
             for pd in ym.values()
             for py in pd
         })
-
+        hist_to_idx = max(0, forecast_start_index - 1)
+        leaf_hist_monthly, pt_payer_map, leaf_totals = _fetch_pt_payer_history(
+            cur, ta, *month_tuples[0], *month_tuples[hist_to_idx]
+        )
         if base_total_raw is None:
             # Fallback path only -- the scenario-snapshot path above already
             # set this from the snapshot's own stored total, which stays
@@ -965,45 +999,43 @@ def run_market_events_calculation(payload) -> dict:
         # grid as parameters (rather than closing over fixed outer values) so
         # it can be built once for the full computed range (persistence) and
         # again for a narrower, display-only slice (the HTTP response) below.
+        _ALL_TABS = ("payer_event", "product_event", "overall_event",
+             "payment_type_product", "payment_type_payer_product")
+
         def _metrics(t: str, mt: list, ch: list, fsi: int, tot: list) -> dict:
-            # Only the tab actually being edited this run gets its hierarchy
-            # chart scoped to what the event rows touched; the other two tabs
-            # keep the plain selected_filter-based scoping (no rows exist for
-            # them this run anyway).
             touched_pairs = (
                 _compute_touched_entities(event_rows, t) if (t == tab and event_rows) else None
             )
             if t == "payer_event":
                 return _build_payer_event_metrics(
-                    mod_data, mt, ch, fsi,
-                    tot, show_products, show_payers,
-                    filter_products=sf.products, filter_payers=sf.payers,
-                    touched_pairs=touched_pairs,
-                    # mod_data was zero-seeded (every product x payer cell
-                    # populated for every month, see the seeding loop above)
-                    # and then event-applied -- any cell that's exactly 0
-                    # here (e.g. a fully-drained impacted product) is the
-                    # event's own deliberate result, not missing data. The
-                    # default flat-forecast-fallback-for-zeros behavior
-                    # would silently overwrite it, corrupting both the
-                    # displayed value and any share computed from it.
-                    treat_zero_as_missing=False,
+                    mod_data, mt, ch, fsi, tot, show_products, show_payers,
+                    filter_products=sf.products, filter_payers=sf.payment_type,
+                    touched_pairs=touched_pairs, treat_zero_as_missing=False,
                 )
             if t == "product_event":
                 return _build_product_event_metrics(
-                    mod_data, mt, ch, fsi,
-                    tot, show_products, show_payers,
-                    filter_products=sf.products, filter_payers=sf.payers,
-                    touched_pairs=touched_pairs,
+                    mod_data, mt, ch, fsi, tot, show_products, show_payers,
+                    filter_products=sf.products, filter_payers=sf.payment_type,
+                    touched_pairs=touched_pairs, treat_zero_as_missing=False,
+                )
+            if t == "payment_type_product":
+                return _build_payment_type_product_metrics(
+                    mod_data, mt, ch, fsi, tot, show_products, show_payers,
+                    filter_products=sf.products, filter_payment_types=sf.payment_type,
                     treat_zero_as_missing=False,
                 )
-            return _build_overall_event_metrics(
-                mt, ch, fsi, tot,
-            )
+            if t == "payment_type_payer_product":
+                return _build_payment_type_payer_product_metrics(
+                    mod_data, mt, ch, fsi, tot, show_products, show_payers,
+                    leaf_hist_monthly, pt_payer_map, leaf_totals,                # ← new
+                    filter_products=sf.products, filter_payment_types=sf.payment_type,
+                    treat_zero_as_missing=False,
+                )
+            return _build_overall_event_metrics(mt, ch, fsi, tot)
 
         saved_tabs = {
             t: {"metrics_views": _metrics(t, month_tuples, chart_headers, forecast_start_index, mod_total)}
-            for t in ("payer_event", "product_event", "overall_event")
+            for t in _ALL_TABS
         }
 
         # A narrower, display-only slice of the SAME computed data, scoped to
@@ -1028,7 +1060,7 @@ def run_market_events_calculation(payload) -> dict:
         disp_saved_tabs = {
             t: {"metrics_views": _metrics(t, disp_month_tuples, disp_chart_headers,
                                            disp_forecast_start_index, disp_mod_total)}
-            for t in ("payer_event", "product_event", "overall_event")
+            for t in _ALL_TABS
         }
 
         # Persist this run's event rows for the active tab (whole-array
@@ -1039,8 +1071,8 @@ def run_market_events_calculation(payload) -> dict:
         # Persisted even when empty (0 rows): that correctly captures "the
         # user deleted their last event and reran," not "leave whatever was
         # there before."
-        save_impact_rows(cur, ta, sf.scenario_name, tab, event_rows)
-        conn.commit()
+        # save_impact_rows(cur, ta, sf.scenario_name, tab, event_rows)
+        # conn.commit()
 
         # The other two tabs weren't touched by this run -- load their own
         # independently-persisted rows instead of blanking them to [].
@@ -1074,24 +1106,13 @@ def run_market_events_calculation(payload) -> dict:
             "rows":                overall_rows,
         }
 
-        event_tabs_wide = _merge_config_with_saved_data(
-            payer_event_cfg, product_event_cfg, overall_event_cfg, saved_tabs
-        )
-        event_tabs = _merge_config_with_saved_data(
-            payer_event_cfg, product_event_cfg, overall_event_cfg, disp_saved_tabs
-        )
+        event_tabs_wide = _merge_config_with_saved_data(payer_event_cfg, product_event_cfg, overall_event_cfg, saved_tabs)
+        event_tabs      = _merge_config_with_saved_data(payer_event_cfg, product_event_cfg, overall_event_cfg, disp_saved_tabs)
 
-        # Auto-save the computed result directly into this (non-Base, already
-        # confirmed to exist above) scenario -- same persistence Save Scenario
-        # already does manually (see _persist_market_events_result), so
-        # running a calculation no longer requires a separate explicit save
-        # step to make its result durable. Always persists the FULL computed
-        # range (event_tabs_wide), never the display-filtered event_tabs
-        # returned below -- matching save_market_events' identical "always
-        # save the wide range" rule, so a narrower FROM/TO filter active at
-        # calculation time can never truncate history out of the saved
-        # scenario.
-        _persist_market_events_result(cur, conn, sf.scenario_name, event_tabs_wide)
+        _persist_market_events_result(cur, conn, sf.scenario_name, event_tabs_wide)  # unchanged — still reads
+                                                                                    # from overall_event/payer_event keys only
+
+        market_analysis = build_market_analysis_response(event_tabs)
 
         return {
             "ta_name":             ta,
@@ -1100,7 +1121,12 @@ def run_market_events_calculation(payload) -> dict:
             "selected_filter":     sf.model_dump(),
             "selected_tab":        tab,
             "metric_filters":      METRIC_FILTERS,
-            "event_tabs":          event_tabs,
+            "market_analysis":     market_analysis,
+            "impact_curve_configuration": {
+                "payer_event":   payer_event_cfg,
+                "product_event": product_event_cfg,
+                "overall_event": overall_event_cfg,
+            },
         }
     finally:
         cur.close()
