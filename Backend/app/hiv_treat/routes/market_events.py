@@ -119,11 +119,11 @@ def get_market_event_filters(
         # Available Products
         cursor.execute(
             """
-            SELECT DISTINCT product
-            FROM raw_hiv_treat.forecast_outputs
+            SELECT DISTINCT product_id as product
+            FROM raw_hiv_treat.product_master_hiv_treat
             WHERE ta_name = %s
-            AND product IS NOT NULL
-            AND UPPER(TRIM(product)) <> 'ALL'
+            AND product_id IS NOT NULL
+            AND UPPER(TRIM(product_id)) <> 'ALL'
             ORDER BY product
             """,
             (ta_name,),
@@ -389,6 +389,59 @@ def debug_product_volume_consistency(
             },
         )
 
+PRODUCT_MASTER_TABLE = "raw_hiv_treat.product_master_hiv_treat"
+
+# Tabs that carry product pickers, and which keys in their
+# impact_curve_configuration hold a product list. overall_event has neither.
+PRODUCT_LIST_KEYS = {
+    "market_event": ("products",),                     # Channel Event: Products column
+    "product_event": ("products", "impact_products"),  # Product Event: Products + Impacted Products
+}
+
+
+def fetch_master_products(cursor, ta_name):
+    """Every active product registered for the TA.
+
+    product_id holds the display name here (product_name holds a short
+    code, e.g. Truvada / Tru123), and product_id is also what
+    forecast_outputs stores in its `product` column -- so it's the value
+    the pickers must use. NULL active_flag counts as active: rows created
+    before the flag was being set would otherwise disappear."""
+    cursor.execute(
+        f"""
+        SELECT DISTINCT TRIM(product_id) AS product
+        FROM {PRODUCT_MASTER_TABLE}
+        WHERE ta_name = %s
+          AND product_id IS NOT NULL
+          AND UPPER(TRIM(product_id)) <> 'ALL'
+          AND UPPER(COALESCE(NULLIF(TRIM(active_flag), ''), 'Y')) <> 'N'
+        ORDER BY 1
+        """,
+        (ta_name,),
+    )
+    return [row["product"] for row in cursor.fetchall() if row["product"]]
+
+
+def apply_master_products_to_events(event_tabs, master_products):
+    """Union the master product list into each tab's pickers.
+
+    Union rather than replace: a product that has forecast data but is
+    missing from (or deactivated in) the master table stays selectable,
+    so this can only ever add options, never silently remove one that
+    already works."""
+    if not master_products:
+        return
+
+    for tab_name, keys in PRODUCT_LIST_KEYS.items():
+        config = (event_tabs.get(tab_name) or {}).get("impact_curve_configuration")
+        if not isinstance(config, dict):
+            continue
+        for key in keys:
+            existing = config.get(key) or []
+            config[key] = sorted(set(existing) | set(master_products))
+
+BASELINE_SCENARIO = "Base"   # module level, next to the table constants
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -651,6 +704,44 @@ def apply_market_event_filters(
             event_name="product_event",
             event=product_event,
         )
+
+        
+        # =====================================================
+        # 6b. Product pickers from the master table
+        # =====================================================
+        # The tree only knows products that have rows in forecast_outputs,
+        # so a newly registered product never reaches the dropdowns. The
+        # pickers list what's selectable, not what has data -- take them
+        # from the master table instead.
+        #
+        # Except in Base. Nothing materializes a product there (seeding
+        # skips the baseline) and nothing persists an event against it, so
+        # offering a product with no rows would only produce a selection
+        # that silently does nothing. Base shows what it actually has.
+
+        is_baseline = scenario_name.strip().lower() == BASELINE_SCENARIO.lower()
+
+        if is_baseline:
+            print(
+                "SKIPPING master product injection -- "
+                f"scenario {scenario_name!r} is the baseline"
+            )
+        else:
+            master_products = fetch_master_products(
+                cursor=cursor,
+                ta_name=payload.ta_name,
+            )
+
+            print("MASTER PRODUCTS:", master_products)
+
+            apply_master_products_to_events(
+                event_tabs={
+                    "overall_event": overall_event,
+                    "market_event": market_event,
+                    "product_event": product_event,
+                },
+                master_products=master_products,
+            )
 
         # =====================================================
         # 7. Response
@@ -2046,21 +2137,41 @@ def get_products(db=Depends(get_connection)):
         cursor.close()
 
 
+PRODUCT_MASTER_TABLE = "raw_hiv_treat.product_master_hiv_treat"
+
+
+class AddProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    company: Optional[str] = None
+
+
 @router.post("/products")
 def add_product(
     payload: AddProductRequest,
     db=Depends(get_connection)
 ):
+    """Registers a product. Nothing is written to forecast_outputs here --
+    the product is materialized into a scenario the first time
+    run_calculation is called for it (see seed_missing_products in
+    Market_Events_Run_Calculation), with zero history and zero forecast.
+
+    That keeps creation cheap and scenario-agnostic: a product added today
+    lands in scenarios that don't exist yet, without a backfill step.
+    """
     cursor = db.cursor(cursor_factory=RealDictCursor)
 
     try:
         user_id = "system"  # Replace with actual logged-in user
 
-        # Check if product already exists
+        # product_id holds the display name in this table (product_name
+        # holds a short code, e.g. Truvada / Tru123), so the uniqueness
+        # check belongs on product_id -- it's also what forecast_outputs
+        # stores in its `product` column.
         cursor.execute(
-            """
+            f"""
             SELECT 1
-            FROM raw_hiv_treat.product_master_hiv_treat
+            FROM {PRODUCT_MASTER_TABLE}
             WHERE ta_name = %s
               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
             """,
@@ -2073,22 +2184,27 @@ def add_product(
                 detail="Product already exists."
             )
 
-        # Insert product
+        # active_flag is set explicitly -- left NULL, the product is
+        # excluded by anything filtering on 'Y'.
         cursor.execute(
-            """
-            INSERT INTO raw_hiv_treat.product_master_hiv_treat
+            f"""
+            INSERT INTO {PRODUCT_MASTER_TABLE}
             (
                 ta_name,
                 product_id,
                 product_name,
+                active_flag,
+                company,
                 date_added,
                 added_by,
                 modified_by
             )
-            VALUES (%s, %s, %s, CURRENT_DATE, %s, %s)
+            VALUES (%s, %s, %s, 'Y', %s, CURRENT_DATE, %s, %s)
             RETURNING
                 product_id,
                 product_name,
+                active_flag,
+                company,
                 date_added,
                 added_by,
                 modified_by
@@ -2097,6 +2213,7 @@ def add_product(
                 payload.ta_name,
                 payload.product_name,
                 payload.product_name,
+                payload.company,
                 user_id,
                 user_id,
             )
@@ -2109,11 +2226,15 @@ def add_product(
             "message": "Product added successfully",
             "product": {
                 "product_id": product["product_id"],
+                # product_id is the display name here.
                 "product_name": product["product_id"],
+                "product_code": product["product_name"],
+                "active_flag": product["active_flag"],
+                "company": product["company"],
                 "date_added": product["date_added"].strftime("%Y-%m-%d"),
                 "added_by": product["added_by"],
-                "modified_by": product["modified_by"]
-            }
+                "modified_by": product["modified_by"],
+            },
         }
 
     except Exception:
@@ -2287,3 +2408,111 @@ def delete_product(
 
     finally:
         cursor.close()
+
+
+# FORECAST_TABLE = "raw_hiv_treat.forecast_outputs"
+# @router.delete("/products")
+# def delete_product(
+#     payload: DeleteProductRequest,
+#     db=Depends(get_connection)
+# ):
+#     cursor = db.cursor(cursor_factory=RealDictCursor)
+ 
+#     try:
+#         # Check if product exists
+#         cursor.execute(
+#             f"""
+#             SELECT product_id
+#             FROM {PRODUCT_MASTER_TABLE}
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#             """,
+#             (
+#                 payload.ta_name,
+#                 payload.product_name
+#             )
+#         )
+ 
+#         product = cursor.fetchone()
+ 
+#         if not product:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Product not found."
+#             )
+ 
+#         # The name as stored, not as typed -- forecast_outputs.product holds
+#         # the same value as product_master.product_id, and the lookup above
+#         # was case-insensitive.
+#         stored_name = product["product_id"]
+ 
+#         # --------------------------------------------------
+#         # Forecast rows
+#         # --------------------------------------------------
+#         # Deleted first and in the SAME transaction as the master row:
+#         # leaving these behind would keep the product in every dropdown
+#         # (fetch_available_entities reads DISTINCT product from this table)
+#         # and in every chart, with no master row to manage it by.
+#         #
+#         # All metrics, markets, sources and scenarios go -- including Base.
+#         # Base is never WRITTEN to by the calculation, but a deleted product
+#         # has to leave the baseline too or it reappears the moment anyone
+#         # runs a calculation, since seeding models new products on whatever
+#         # rows already exist.
+#         forecast_params = [payload.ta_name, stored_name]
+#         scenario_clause = ""
+#         if payload.scenario_name:
+#             scenario_clause = "AND scenario_name = %s"
+#             forecast_params.append(payload.scenario_name)
+ 
+#         cursor.execute(
+#             f"""
+#             DELETE FROM {FORECAST_TABLE}
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+#               {scenario_clause}
+#             """,
+#             forecast_params,
+#         )
+#         forecast_rows_deleted = cursor.rowcount
+ 
+#         # --------------------------------------------------
+#         # Master row
+#         # --------------------------------------------------
+#         # Kept when the caller scoped the delete to one scenario -- the
+#         # product still exists, it just no longer participates there.
+#         master_rows_deleted = 0
+#         if not payload.scenario_name:
+#             cursor.execute(
+#                 f"""
+#                 DELETE FROM {PRODUCT_MASTER_TABLE}
+#                 WHERE ta_name = %s
+#                   AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#                 """,
+#                 (
+#                     payload.ta_name,
+#                     payload.product_name
+#                 )
+#             )
+#             master_rows_deleted = cursor.rowcount
+ 
+#         db.commit()
+ 
+#         return {
+#             "message": "Product deleted successfully",
+#             "deleted_product": stored_name,
+#             "scenario_name": payload.scenario_name,
+#             "forecast_rows_deleted": forecast_rows_deleted,
+#             "master_rows_deleted": master_rows_deleted,
+#             # Removing a product that held share leaves the remaining
+#             # products in each market summing to less than 100 until a
+#             # calculation renormalizes them (build_write_set does this).
+#             "shares_need_recalculation": forecast_rows_deleted > 0,
+#         }
+ 
+#     except Exception:
+#         db.rollback()
+#         raise
+ 
+#     finally:
+#         cursor.close()

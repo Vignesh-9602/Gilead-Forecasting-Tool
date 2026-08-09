@@ -74,12 +74,31 @@ def get_sources(cur, ta, market):
     return [r[0] for r in cur.fetchall()]
 
 
-def get_products(cur, ta):
-    cur.execute("""
+# def get_products(cur, ta):
+#     cur.execute("""
+#         SELECT DISTINCT product
+#         FROM raw_hiv_treat.forecast_outputs
+#         WHERE ta_name = %s AND product != 'ALL'
+#     """, (ta,))
+#     return [r[0] for r in cur.fetchall()]
+
+def get_products(cur, ta, scenario=None):
+    """Products with rows in this TA. Pass `scenario` to restrict to the
+    ones that actually have data in it -- unscoped, a product materialized
+    in one scenario appears in every other scenario's tables at 0%, which
+    reads as a real product with no share rather than as absent."""
+    query = """
         SELECT DISTINCT product
         FROM raw_hiv_treat.forecast_outputs
         WHERE ta_name = %s AND product != 'ALL'
-    """, (ta,))
+    """
+    params = [ta]
+
+    if scenario:
+        query += " AND scenario_name = %s"
+        params.append(scenario)
+
+    cur.execute(query, params)
     return [r[0] for r in cur.fetchall()]
 
 
@@ -4141,7 +4160,8 @@ def build_scenario_market_analysis(cur, ta, scenario, start, end,
     split_idx  = total["split_idx"]
 
     markets  = get_markets(cur, ta)
-    products = get_products(cur, ta)
+    # products = get_products(cur, ta)
+    products = get_products(cur, ta, scenario)
 
     return {
         "total_market_volume": build_total_market_volume(total_vals, months, split_idx, scenario),
