@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import {
   Box,
   Paper,
@@ -67,6 +67,29 @@ const seededRandom = (seedStr) => {
 
 const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4"];
 
+// Same scenario-color convention ModelInputChart uses for Compare
+// Scenarios on the other tabs, so a scenario reads as the same color
+// everywhere in the app.
+const getScenarioColor = (index) => `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
+
+// Collects every row key that has children (used both to auto-expand the
+// table on first load / whenever the Hierarchy Order or Monthly-Yearly
+// toggle changes the underlying data, and by the "Expand All" toolbar
+// button). Pure — depends only on its argument — so it lives outside the
+// component and never needs to be in a useEffect/useMemo dependency array.
+const collectParentKeys = (rowsIn, ancestorLabels = []) => {
+  const keys = [];
+  (rowsIn || []).forEach((r) => {
+    const label = r.label || r.hierarchy || "";
+    const path = [...ancestorLabels, label];
+    if (r.children?.length) {
+      keys.push(path.join(" > "));
+      keys.push(...collectParentKeys(r.children, path));
+    }
+  });
+  return keys;
+};
+
 export default function PaymentPayerProductTable({
   activeTabLabel,
   payerOptions = [],
@@ -79,17 +102,28 @@ export default function PaymentPayerProductTable({
   setTotalMarketViewMode,
   appliedPayerFilter,
   appliedProductFilter,
+  appliedSubPayerFilter,
   // Real backend data keyed by ordering (see ORDER_TO_BACKEND_KEY). Each
   // entry is { chart, table, yearlyChart, yearlyTable } — same shape every
   // other tab in this app uses. Falls back to the seeded mock below when a
   // given ordering has no real data.
   hierarchyData = {},
+  // Compare Scenarios support for the chart: other selected scenarios'
+  // full orders maps (see ModelInput's otherScenarioHierarchyData),
+  // keyed by scenario name — { [scenarioName]: { [backendOrderKey]: {...} } }.
+  otherScenarioHierarchyData = {},
+  appliedScenario,
+  selectedCompareScenarios = [],
   // Toolbar action handlers (passed from ModelInput)
   handleDownloadTable,
   handleConfirmSave,
   handleEnterTableEdit,
   handleSaveTableChanges,
   handleCancelTableEdit,
+  // Saves this tab's own edited cells (3-level hierarchy — doesn't fit the
+  // shared tableData/editedHierarchies flow the standard tabs use). Falls
+  // back to handleSaveTableChanges if not provided.
+  onSaveHierarchyChanges,
   tableEditing,
   isRefreshed,
   savingTable,
@@ -103,10 +137,27 @@ export default function PaymentPayerProductTable({
 }) {
   const [hierarchyOrder, setHierarchyOrder] = useState(HIERARCHY_ORDERS[0].value);
   // Collapsible rows — same convention as ModelInputTable's expandedBrands:
-  // keyed map of { [rowKey]: true } for expanded rows, collapsed by default.
+  // keyed map of { [rowKey]: true } for expanded rows. Starts expanded (see
+  // the auto-expand effect below), not collapsed — the user can collapse
+  // individual rows or hit "Collapse All" if they want a tighter view.
   const [expandedRows, setExpandedRows] = useState({});
   const toggleRowExpand = (key) =>
     setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // Local edit tracking — this tab's row/column shape (a real nested
+  // hierarchy keyed by label path, not the flat "hierarchy" strings
+  // ModelInputTable's tableData/editedHierarchies use) doesn't fit the
+  // standard tabs' shared edit state, so edits are tracked here instead:
+  // { [rowKey::colKey]: newNumericValue }. Cleared whenever edit mode is
+  // (re-)entered.
+  const [editedCells, setEditedCells] = useState({});
+  const wasEditingRef = useRef(false);
+  useEffect(() => {
+    if (tableEditing && !wasEditingRef.current) {
+      setEditedCells({});
+    }
+    wasEditingRef.current = tableEditing;
+  }, [tableEditing]);
 
   const paymentTypes = payerOptions.length ? payerOptions : DEFAULT_PAYERS;
   const subPayers = paymentTypes;
@@ -182,17 +233,26 @@ export default function PaymentPayerProductTable({
   const columns = useMemo(() => {
     // Real data: columns come straight from the backend table's own headers
     // (monthly dates or yearly labels) — one value per column already.
+    // NOTE: backend yearly headers can legitimately repeat a year label
+    // (e.g. "2023" appearing twice — once for the historical portion up to
+    // forecast_start_index, once for the forecast portion of that same
+    // year, with genuinely different values in each). `key` here is a
+    // unique per-column identifier (index-based) separate from the display
+    // `label`, so React never sees two columns with the same key — reusing
+    // the duplicate label as the key was causing React's reconciliation to
+    // misbehave across repeated Monthly/Yearly toggles (a stale extra
+    // column would stick around instead of being replaced cleanly).
     if (realTableSrc?.headers?.length) {
-      return realTableSrc.headers.map((label, idx) => ({ label, indices: [idx] }));
+      return realTableSrc.headers.map((label, idx) => ({ label, indices: [idx], key: `h-${idx}` }));
     }
-    if (totalMarketViewMode !== "yearly") return monthLabels.map((label, idx) => ({ label, indices: [idx] }));
+    if (totalMarketViewMode !== "yearly") return monthLabels.map((label, idx) => ({ label, indices: [idx], key: `m-${idx}` }));
     const byYear = {};
     monthLabels.forEach((label, idx) => {
       const yr = yearOfLabel(label);
       if (!byYear[yr]) byYear[yr] = [];
       byYear[yr].push(idx);
     });
-    return Object.entries(byYear).map(([yr, indices]) => ({ label: yr, indices }));
+    return Object.entries(byYear).map(([yr, indices], idx) => ({ label: yr, indices, key: `y-${idx}` }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monthLabels, totalMarketViewMode, realTableSrc]);
 
@@ -203,12 +263,15 @@ export default function PaymentPayerProductTable({
   // Collapsible: a row's children are only included in the output when the
   // row itself is expanded (same behavior as ModelInputTable's
   // expandedBrands), so collapsing a parent hides its whole subtree.
-  const flattenRealRows = (rowsIn, level = 0, ancestorLabels = []) => {
+  // keyPrefix namespaces the expand/collapse keys — used when flattening
+  // an OTHER (Compare Scenarios) scenario's rows, so collapsing/expanding
+  // those doesn't collide with the applied scenario's own row keys.
+  const flattenRealRows = (rowsIn, level = 0, ancestorLabels = [], keyPrefix = "") => {
     const out = [];
     (rowsIn || []).forEach((r) => {
       const label = r.label || r.hierarchy || "";
       const path = [...ancestorLabels, label];
-      const key = path.join(" > ");
+      const key = keyPrefix + path.join(" > ");
       const hasChildren = !!(r.children && r.children.length);
       const isExpanded = !!expandedRows[key];
       out.push({
@@ -221,7 +284,7 @@ export default function PaymentPayerProductTable({
         highlighted: dimMatchesPath(path),
       });
       if (hasChildren && isExpanded) {
-        out.push(...flattenRealRows(r.children, level + 1, path));
+        out.push(...flattenRealRows(r.children, level + 1, path, keyPrefix));
       }
     });
     return out;
@@ -246,25 +309,20 @@ export default function PaymentPayerProductTable({
   const dimValues = { pt: paymentTypes, payer: subPayers, product: products };
 
   // Expand All / Collapse All — same toolbar affordance ModelInputTable uses
-  // for its own expandable tabs. Collects every row key that has children
-  // (from whichever data source — real or mock — is currently active) and
-  // marks them all expanded/collapsed at once.
-  const collectParentKeys = (rowsIn, ancestorLabels = []) => {
-    const keys = [];
-    (rowsIn || []).forEach((r) => {
-      const label = r.label || r.hierarchy || "";
-      const path = [...ancestorLabels, label];
-      if (r.children?.length) {
-        keys.push(path.join(" > "));
-        keys.push(...collectParentKeys(r.children, path));
-      }
-    });
-    return keys;
-  };
+  // for its own expandable tabs.
   const handleExpandAllRows = () => {
     let parentKeys;
     if (useRealData) {
       parentKeys = collectParentKeys(realTableSrc.rows);
+      (selectedCompareScenarios || [])
+        .filter((name) => name && name !== appliedScenario)
+        .forEach((name) => {
+          const scenarioOrder = otherScenarioHierarchyData[name]?.[backendOrderKey];
+          const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder?.yearlyTable : scenarioOrder?.table;
+          if (scenarioTableSrc?.rows?.length) {
+            collectParentKeys(scenarioTableSrc.rows).forEach((k) => parentKeys.push(`${name}::${k}`));
+          }
+        });
     } else {
       // Mock data: every level-0 and level-1 combination has children.
       parentKeys = [];
@@ -277,21 +335,52 @@ export default function PaymentPayerProductTable({
   };
   const handleCollapseAllRows = () => setExpandedRows({});
 
+  // Starts fully expanded on first load, and again whenever the Hierarchy
+  // Order dropdown or Monthly/Yearly toggle changes the underlying data —
+  // matching ModelInputTable's Payer/Product tabs, which also default to
+  // expanded rather than collapsed. The user can still collapse individual
+  // rows, or hit "Collapse All", afterward; this only sets the starting
+  // point each time the data changes. Also expands each OTHER Compare
+  // Scenarios scenario's rows (scenario-prefixed keys) the same way, so
+  // they don't default to collapsed just because they're not the applied
+  // scenario.
+  useEffect(() => {
+    if (!useRealData) return;
+    const keys = collectParentKeys(realTableSrc.rows);
+    (selectedCompareScenarios || [])
+      .filter((name) => name && name !== appliedScenario)
+      .forEach((name) => {
+        const scenarioOrder = otherScenarioHierarchyData[name]?.[backendOrderKey];
+        const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder?.yearlyTable : scenarioOrder?.table;
+        if (scenarioTableSrc?.rows?.length) {
+          collectParentKeys(scenarioTableSrc.rows).forEach((k) => keys.push(`${name}::${k}`));
+        }
+      });
+    setExpandedRows(Object.fromEntries(keys.map((k) => [k, true])));
+  }, [backendOrderKey, totalMarketViewMode, useRealData, realTableSrc, selectedCompareScenarios, appliedScenario, otherScenarioHierarchyData]);
+
   // Same highlighting convention as ModelInputTable's Payer/Product tab:
   // a row is highlighted only if every dimension already fixed on it (pt /
-  // product — the mock Payer dimension isn't filterable) matches the
-  // page's applied Payment Type / Product filter, cascading down so a leaf
-  // only lights up once every ancestor level also matched.
+  // payer / product) matches the page's applied Payment Type / Payer /
+  // Product filter, cascading down so a leaf only lights up once every
+  // ancestor level also matched.
   const currentPayer = (appliedPayerFilter || "").toLowerCase();
   const currentBrand = (appliedProductFilter || "").toLowerCase();
+  const currentSubPayer = (appliedSubPayerFilter || "").toLowerCase();
+  // True whenever ANY of the three filters is applied — same
+  // isFilterFocusMode convention ModelInputChart uses on the other tabs to
+  // decide whether to narrow the chart down to just the matching line(s)
+  // instead of showing everything.
+  const isFilterFocusMode = !!currentPayer || !!currentSubPayer || !!currentBrand;
   const dimMatches = (dimKey, val) => {
     if (val === undefined) return true;
     if (dimKey === "pt") return !!currentPayer && val.toLowerCase() === currentPayer;
+    if (dimKey === "payer") return !!currentSubPayer && val.toLowerCase() === currentSubPayer;
     if (dimKey === "product") return !!currentBrand && val.toLowerCase() === currentBrand;
     return true;
   };
   const isRowHighlighted = (row) => {
-    if (!currentPayer && !currentBrand) return false;
+    if (!isFilterFocusMode) return false;
     return (
       dimMatches(dim1, row.fixed[dim1]) &&
       dimMatches(dim2, row.fixed[dim2]) &&
@@ -301,31 +390,94 @@ export default function PaymentPayerProductTable({
 
   // Same highlight rule as isRowHighlighted, but for real backend rows where
   // we only have a label path (e.g. ["Commercial", "CVS", "ASGA"]) rather
-  // than a { pt, payer, product } fixed map — matches if the applied payer
-  // filter and/or applied product filter both appear somewhere on the path.
-  const dimMatchesPath = (path) => {
-    if (!currentPayer && !currentBrand) return false;
+  // than a { pt, payer, product } fixed map — matches if every filter
+  // that's actually applied (payment type / payer / product) appears
+  // somewhere on the path. A filter that isn't set is treated as already
+  // satisfied, so e.g. filtering by payer alone still matches every
+  // payment type/product combo under that payer.
+  const pathMatchesAppliedFilters = (path) => {
+    // Exact match only — path is always an array of individual, already-
+    // separate labels (e.g. ["Commercial", "CVS"]), never a single
+    // compound "Parent - Child" string, so there's no need for substring
+    // matching here. That matters specifically because "Non CVS" contains
+    // "CVS" as a substring — a .includes() check would incorrectly treat
+    // a "CVS" filter as matching "Non CVS" rows too.
     const lower = path.map((p) => String(p || "").toLowerCase());
-    const payerOk = !currentPayer || lower.some((p) => p === currentPayer || p.includes(currentPayer));
-    const brandOk = !currentBrand || lower.some((p) => p === currentBrand || p.includes(currentBrand));
-    return payerOk && brandOk;
+    const payerOk = !currentPayer || lower.some((p) => p === currentPayer);
+    const subPayerOk = !currentSubPayer || lower.some((p) => p === currentSubPayer);
+    const brandOk = !currentBrand || lower.some((p) => p === currentBrand);
+    return payerOk && subPayerOk && brandOk;
+  };
+  const dimMatchesPath = (path) => {
+    if (!isFilterFocusMode) return false;
+    return pathMatchesAppliedFilters(path);
+  };
+
+  // Chart-only variant of the filter check above. The chart only ever
+  // plots the current Hierarchy Order's top TWO levels (dim1/dim2) — e.g.
+  // "Payment type-Payer-Product" only shows Payment Type + Payer, never
+  // Product. If a Product filter were checked against those 2-level paths
+  // anyway, it would never find a match and the chart would go completely
+  // blank even though the filtered data genuinely exists one level deeper
+  // (visible in the table, just not chartable at this order — confirmed
+  // e.g. filtering Payment Type=Commercial + Product=ASGA on that order:
+  // "Commercial > CVS > ASGA" is real data, but neither "Commercial" nor
+  // "CVS" contains "asga"). Filters on a dimension the chart can't
+  // represent at the current order are ignored here instead of hiding
+  // every line.
+  const visibleChartDims = new Set([dim1, dim2]);
+  const chartPathMatchesAppliedFilters = (path) => {
+    const lower = path.map((p) => String(p || "").toLowerCase());
+    const payerOk = !visibleChartDims.has("pt") || !currentPayer || lower.some((p) => p === currentPayer);
+    const subPayerOk = !visibleChartDims.has("payer") || !currentSubPayer || lower.some((p) => p === currentSubPayer);
+    const brandOk = !visibleChartDims.has("product") || !currentBrand || lower.some((p) => p === currentBrand);
+    return payerOk && subPayerOk && brandOk;
   };
 
   // Row styling matches ModelInputTable's existing hasChildren/leaf convention
   // (background #f8fafc + #1e293b bold for parent rows, white + #334155 for
-  // leaf children). Only the top level (level 0) is bold — every level below
-  // it is plain "normal" weight (400), never medium/semibold, so children
-  // never read as bold regardless of depth; color still steps down per level
-  // so the hierarchy remains visually readable. Left padding increases by a
-  // full 48px per level — set via explicit pl (not the "p" shorthand) so
-  // there's no ambiguity about which wins — much larger than a single
-  // level's step in ModelInputTable, since this tab goes one level deeper. A matched row
-  // switches to the app's shared "applied" amber highlight regardless of level.
-  const rowStyle = (level, highlighted) => ({
-    backgroundColor: highlighted ? "#fffbeb" : level === 0 ? "#f8fafc" : "white",
-    fontWeight: level === 0 ? 700 : 400,
-    color: highlighted ? "#f59e0b" : level === 0 ? "#1e293b" : level === 1 ? "#334155" : "#64748b",
-  });
+  // leaf children). The top level (level 0) is always bold (700).
+  // Below level 0, two SEPARATE rules apply depending on how many siblings
+  // a row has under its own parent (not on depth):
+  //   - Single-child case: that one child is always plain/light (400) —
+  //     never bold, since there's no sibling to visually rank it against.
+  //   - Multi-child case (2+): only the FIRST child is bold, one step
+  //     lighter than its parent (600); every other sibling stays light
+  //     (400) — matching "first child bold-but-subordinate, rest plain".
+  // Color still steps down per level too so the hierarchy stays readable.
+  // Left padding increases by a full 48px per level — set via explicit pl
+  // (not the "p" shorthand) so there's no ambiguity about which wins —
+  // much larger than a single level's step in ModelInputTable, since this
+  // tab goes one level deeper. A matched row switches to the app's shared
+  // "applied" amber highlight regardless of level.
+  const rowStyle = (level, highlighted, hasChildren) => {
+    // Data under this tab isn't a uniform depth — some branches are only
+    // 2 levels deep (e.g. "Cash" -> "ASGA"/"GILD"/"Other", straight to
+    // leaves), others are 3 levels deep (e.g. "Commercial" -> "CVS"/"Non
+    // CVS" -> "ASGA"/"GILD"/"Other"). The two cases get a different bold
+    // falloff instead of one fixed rule per depth number:
+    //   - 2-level branch: top (700) -> leaf (400). Two steps.
+    //   - 3-level branch: top (700) -> intermediate parent (600, since
+    //     "CVS"/"Non CVS" are themselves parents of something) -> leaf
+    //     (400). Three steps.
+    // Driven by hasChildren rather than a fixed level number, so it
+    // naturally adapts per branch: a row that itself has children is
+    // always bold-ish; a leaf is always plain, whether it's one level
+    // down (2-level branch) or two levels down (3-level branch).
+    let fontWeight;
+    if (level === 0) {
+      fontWeight = 700;
+    } else if (hasChildren) {
+      fontWeight = 600;
+    } else {
+      fontWeight = 400;
+    }
+    return {
+      backgroundColor: highlighted ? "#fffbeb" : level === 0 ? "#f8fafc" : "white",
+      fontWeight,
+      color: highlighted ? "#f59e0b" : level === 0 ? "#1e293b" : level === 1 ? "#334155" : "#64748b",
+    };
+  };
   const indentPx = (level) => (level === 0 ? "16px" : level === 1 ? "64px" : "112px");
 
   const rows = useRealData ? flattenRealRows(realTableSrc.rows) : [];
@@ -354,33 +506,172 @@ export default function PaymentPayerProductTable({
     });
   }
 
-  // ── Chart: one line per top-level dimension value, full monthly resolution ──
+  // Compare Scenarios for the TABLE: append each OTHER selected scenario's
+  // own tree as additional top-level groups, right after the applied
+  // scenario's rows — this tab previously had no scenario-comparison
+  // support at all in its table (unlike the standard tabs' tables), so
+  // switching on another scenario never showed anything here either.
+  // Top-level rows get a "(Scenario)" suffix so they're distinguishable
+  // from the applied scenario's own rows; each scenario's rows use a
+  // scenario-prefixed key namespace so their expand/collapse state can't
+  // collide with the applied scenario's.
+  if (useRealData) {
+    const otherScenarioNames = (selectedCompareScenarios || []).filter(
+      (name) => name && name !== appliedScenario,
+    );
+    otherScenarioNames.forEach((name) => {
+      const scenarioOrders = otherScenarioHierarchyData[name];
+      const scenarioOrder = scenarioOrders && scenarioOrders[backendOrderKey];
+      if (!scenarioOrder) return;
+      const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder.yearlyTable : scenarioOrder.table;
+      if (!scenarioTableSrc?.rows?.length) return;
+      const scenarioRows = flattenRealRows(scenarioTableSrc.rows, 0, [], `${name}::`);
+      scenarioRows.forEach((r) => {
+        if (r.level === 0) r.label = `${r.label} (${name})`;
+        r.scenario = name;
+      });
+      rows.push(...scenarioRows);
+    });
+  }
+
+  // ── Chart: one line per top-level dimension value ──────────────────────
   // Real data: the backend's chart.series only contains fully-flattened leaf
   // combinations (e.g. "Cash - ASGA", "Commercial - CVS - ASGA") — there's no
-  // separate top-level-only series to filter for. Use the top-level (level 0)
-  // rows of the MONTHLY table instead: each already carries the correctly
-  // pre-aggregated total for that dim1 value across every month, independent
-  // of the Monthly/Yearly toggle (chart always shows monthly resolution).
-  const realMonthlyTable = realOrder?.table;
-  const realChartMonths = realOrder?.chart?.months;
+  // separate top-level-only series to filter for. Use the table instead:
+  // each row already carries the correctly pre-aggregated total for that
+  // path across every column. Flattens level 0 (top) AND level 1 (its
+  // direct children) into separate lines — level 0 alone isn't enough: two
+  // of the three Hierarchy Order options share the same top-level dimension
+  // ("Payment type-Payer-Product" and "Payment type-Product-Payer" both
+  // have Payment Type at level 0), so their top-level totals are
+  // mathematically identical and the chart wouldn't visibly change when
+  // switching between them — only the level-1 breakdown actually differs
+  // between those two. Level 2+ stays table-only to avoid overcrowding the
+  // chart with too many lines.
+  // Switches between monthly/yearly chart+table together with the
+  // Monthly/Yearly toggle (realTableSrc above already does this for the
+  // table; the chart previously stayed hardcoded to monthly regardless of
+  // the toggle — this mirrors ModelInputChart/ModelInputTable, which both
+  // switch chart data on totalMarketViewMode too).
+  const activeChartForOrder = totalMarketViewMode === "yearly" ? realOrder?.yearlyChart : realOrder?.chart;
+  const activeTableForChart = totalMarketViewMode === "yearly" ? realOrder?.yearlyTable : realOrder?.table;
+  const chartMonths = activeChartForOrder?.months;
+  const chartFsi = activeChartForOrder?.forecast_start_index ?? 0;
   const chartTraces = (() => {
-    if (realMonthlyTable?.rows?.length && realChartMonths?.length) {
-      const realLabels = realChartMonths.map(formatDateLabel);
-      return realMonthlyTable.rows.map((r, idx) => {
-        const label = r.label || r.hierarchy || "";
-        const highlighted = dimMatchesPath([label]);
-        const values = Array.isArray(r.total) ? r.total : r.values || [];
-        return {
-          x: realLabels,
-          y: values,
-          type: "scatter",
-          mode: "lines",
-          name: label,
-          line: {
-            color: highlighted ? "#f59e0b" : CHART_PALETTE[idx % CHART_PALETTE.length],
-            width: highlighted ? 3.5 : 1.5,
+    if (activeTableForChart?.rows?.length && chartMonths?.length) {
+      // Yearly months are already plain year strings ("2023") — formatting
+      // them through formatDateLabel (which assumes a real date and always
+      // outputs "MMM-YY") turned "2023" into "Jan-23". Only monthly labels
+      // need that MMM-YY formatting; yearly labels are used as-is, matching
+      // the table header's same totalMarketViewMode check just below.
+      const realLabels = totalMarketViewMode === "yearly" ? chartMonths : chartMonths.map(formatDateLabel);
+
+      // One line per (parent) row, and one per (parent's) direct child —
+      // never deeper than that.
+      const buildLineDefsFromTable = (tableObj) => {
+        const out = [];
+        (tableObj?.rows || []).forEach((r) => {
+          const parentLabel = r.label || r.hierarchy || "";
+          out.push({
+            label: parentLabel,
+            path: [parentLabel],
+            values: Array.isArray(r.total) ? r.total : r.values || [],
+          });
+          (r.children || []).forEach((c) => {
+            const childLabel = c.label || c.hierarchy || "";
+            out.push({
+              label: `${parentLabel} - ${childLabel}`,
+              path: [parentLabel, childLabel],
+              values: Array.isArray(c.total) ? c.total : c.values || [],
+            });
+          });
+        });
+        return out;
+      };
+      const lineDefs = buildLineDefsFromTable(activeTableForChart);
+
+      // Compare Scenarios: this tab previously had no scenario-comparison
+      // support at all in its chart (unlike every other tab), so switching
+      // on another scenario never showed anything for it here. Add each
+      // OTHER selected scenario's equivalent lines for the SAME hierarchy
+      // ordering currently selected, tagged with the scenario name so they
+      // get their own color (matching ModelInputChart's convention) and
+      // label suffix instead of being mistaken for the applied scenario's
+      // own lines.
+      const otherScenarioNames = (selectedCompareScenarios || []).filter(
+        (name) => name && name !== appliedScenario,
+      );
+      const scenarioColorMap = {};
+      otherScenarioNames.forEach((name, idx) => {
+        scenarioColorMap[name] = getScenarioColor(idx);
+      });
+      const otherScenarioLineDefs = [];
+      otherScenarioNames.forEach((name) => {
+        const scenarioOrders = otherScenarioHierarchyData[name];
+        const scenarioOrder = scenarioOrders && scenarioOrders[backendOrderKey];
+        if (!scenarioOrder) return;
+        const scenarioTable = totalMarketViewMode === "yearly" ? scenarioOrder.yearlyTable : scenarioOrder.table;
+        buildLineDefsFromTable(scenarioTable).forEach((ld) => {
+          otherScenarioLineDefs.push({ ...ld, scenario: name });
+        });
+      });
+      const allLineDefs = [...lineDefs, ...otherScenarioLineDefs];
+
+      // Once a Payment Type / Payer / Product filter is applied, narrow the
+      // chart down to only the line(s) that actually match it — same
+      // "isFilterFocusMode" behavior ModelInputChart applies on the other
+      // tabs (a filtered view showing every line was confusing: the filter
+      // looked like it only did highlighting instead of actually
+      // narrowing what's plotted).
+      const visibleLineDefs = isFilterFocusMode
+        ? allLineDefs.filter(({ path }) => chartPathMatchesAppliedFilters(path))
+        : allLineDefs;
+
+      // Split each row's combined values into a solid "train" segment and a
+      // dotted "forecast" segment (forecast segment starts one point early,
+      // at the last train point, so the two lines connect visually) — same
+      // convention ModelInputChart uses for every other tab's forecast line.
+      return visibleLineDefs.flatMap(({ label, path, values, scenario }, idx) => {
+        const highlighted = dimMatchesPath(path);
+        // Other-scenario lines get their scenario's color (and a "(Scenario)"
+        // suffix on the name) instead of the default palette, matching
+        // ModelInputChart's convention — a highlighted match still wins
+        // (amber) regardless of which scenario it came from.
+        const color = highlighted
+          ? "#f59e0b"
+          : scenario && scenarioColorMap[scenario]
+            ? scenarioColorMap[scenario]
+            : CHART_PALETTE[idx % CHART_PALETTE.length];
+        const width = highlighted ? 3.5 : 1.5;
+        const traceName = scenario ? `${label} (${scenario})` : label;
+
+        const trainX = realLabels.slice(0, chartFsi);
+        const trainY = values.slice(0, chartFsi);
+        const forecastX = chartFsi > 0 ? [realLabels[chartFsi - 1], ...realLabels.slice(chartFsi)] : realLabels.slice(chartFsi);
+        const lastTrain = trainY.length ? trainY[trainY.length - 1] : null;
+        const forecastY = chartFsi > 0 ? [lastTrain ?? null, ...values.slice(chartFsi)] : values.slice(chartFsi);
+
+        return [
+          {
+            x: trainX,
+            y: trainY,
+            type: "scatter",
+            mode: "lines",
+            name: traceName,
+            legendgroup: traceName,
+            line: { color, width },
           },
-        };
+          {
+            x: forecastX,
+            y: forecastY,
+            type: "scatter",
+            mode: "lines",
+            name: traceName,
+            legendgroup: traceName,
+            showlegend: false,
+            line: { color, width, dash: "dot" },
+          },
+        ];
       });
     }
     const chartLabels = monthLabels.map(formatDateLabel);
@@ -628,11 +919,22 @@ export default function PaymentPayerProductTable({
             </Button>
           )}
 
-          {tableEditing && handleSaveTableChanges && (
+          {tableEditing && (onSaveHierarchyChanges || handleSaveTableChanges) && (
             <Button
               variant="contained"
-              disabled={savingTable || Object.keys(editedHierarchies).length === 0}
-              onClick={handleSaveTableChanges}
+              disabled={savingTable || Object.keys(editedCells).length === 0}
+              onClick={() => {
+                if (onSaveHierarchyChanges) {
+                  onSaveHierarchyChanges({
+                    editedCells,
+                    backendOrderKey,
+                    columns,
+                    rows,
+                  });
+                } else {
+                  handleSaveTableChanges();
+                }
+              }}
               sx={primaryBtnSx}
             >
               Refresh
@@ -642,7 +944,10 @@ export default function PaymentPayerProductTable({
           {tableEditing && handleCancelTableEdit && (
             <Button
               variant="outlined"
-              onClick={handleCancelTableEdit}
+              onClick={() => {
+                setEditedCells({});
+                handleCancelTableEdit();
+              }}
               disabled={!tableEditing || totalMarketViewMode === "yearly"}
               sx={secondaryBtnSx}
             >
@@ -674,7 +979,7 @@ export default function PaymentPayerProductTable({
               </Box>
               {columns.map((col) => (
                 <Box
-                  key={col.label}
+                  key={col.key}
                   component="th"
                   sx={{
                     position: "sticky", top: 0, zIndex: 2, backgroundColor: "#f8fafc", color: "#64748b",
@@ -689,7 +994,7 @@ export default function PaymentPayerProductTable({
           <Box component="tbody">
             {rows.map((row, i) => {
               const highlighted = useRealData ? !!row.highlighted : isRowHighlighted(row);
-              const style = rowStyle(row.level, highlighted);
+              const style = rowStyle(row.level, highlighted, row.hasChildren);
               return (
                 <Box
                   component="tr"
@@ -713,7 +1018,7 @@ export default function PaymentPayerProductTable({
                   >
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                       {row.hasChildren && (
-                        <Box
+                        <Typography
                           component="span"
                           sx={{
                             fontSize: "9px",
@@ -724,11 +1029,11 @@ export default function PaymentPayerProductTable({
                           }}
                         >
                           {row.isExpanded ? "▼" : "▶"}
-                        </Box>
+                        </Typography>
                       )}
-                      <Box component="span" sx={{ fontWeight: style.fontWeight, color: style.color }}>
+                      <Typography sx={{ fontSize: "14px", fontWeight: style.fontWeight, color: style.color }}>
                         {row.label}
-                      </Box>
+                      </Typography>
                     </Box>
                   </Box>
                   {columns.map((col) => {
@@ -742,16 +1047,56 @@ export default function PaymentPayerProductTable({
                           const parentVal = row.level === 0 ? columnValue({}, col) : parentColumnValue(row.parentFixed, col);
                           return isPercent ? (parentVal ? (ownVal / parentVal) * 100 : 0) : ownVal;
                         })();
+
+                    // Same eligibility rule ModelInputTable uses (isEditEligible):
+                    // edit mode on, monthly view only, leaf rows only. Real
+                    // data only — the mock fallback has no backend row to
+                    // patch values into on save.
+                    const isEditableCell =
+                      tableEditing && totalMarketViewMode === "monthly" && useRealData && !row.hasChildren;
+                    const cellKey = `${row.key}::${col.key}`;
+                    const editedVal = editedCells[cellKey];
+                    const shownVal = editedVal !== undefined ? editedVal : displayVal;
+
                     return (
                       <Box
-                        key={col.label}
+                        key={col.key}
                         component="td"
+                        onClick={(e) => isEditableCell && e.stopPropagation()}
                         sx={{
-                          textAlign: "center", p: "10px 8px", fontSize: "14px", fontWeight: style.fontWeight,
-                          color: style.color, backgroundColor: style.backgroundColor, borderRight: "1px solid #e2e8f0",
+                          textAlign: "center",
+                          p: isEditableCell ? "4px 3px" : "10px 8px",
+                          fontSize: "14px",
+                          fontWeight: style.fontWeight,
+                          color: style.color,
+                          backgroundColor: isEditableCell ? "#eff6ff" : style.backgroundColor,
+                          borderRight: "1px solid #e2e8f0",
                         }}
                       >
-                        {formatValue(displayVal)}
+                        {isEditableCell ? (
+                          <input
+                            value={editedVal !== undefined ? editedVal : String(Math.round(Number(shownVal)))}
+                            onChange={(e) => {
+                              if (!/^-?\d*\.?\d*$/.test(e.target.value)) return;
+                              setEditedCells((prev) => ({ ...prev, [cellKey]: e.target.value }));
+                            }}
+                            style={{
+                              width: "72px",
+                              height: "22px",
+                              boxSizing: "border-box",
+                              border: "1px solid #93c5fd",
+                              borderRadius: "4px",
+                              outline: "none",
+                              background: "#eff6ff",
+                              color: "#1e293b",
+                              textAlign: "center",
+                              fontSize: "12px",
+                              padding: "1px 4px",
+                            }}
+                          />
+                        ) : (
+                          formatValue(shownVal)
+                        )}
                       </Box>
                     );
                   })}

@@ -853,10 +853,10 @@ const ModelInputTable = React.memo(function ModelInputTable({
                   >
                     Scenario
                   </Box>
-                  {displayColumns.map((col) => (
+                  {displayColumns.map((col, colIdx) => (
                     <Box
                       component="th"
-                      key={col}
+                      key={colIdx}
                       sx={{
                         position: "sticky",
                         top: 0,
@@ -1277,7 +1277,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                 </Box>
                               </Box>
 
-                              {displayColumns.map((col) => {
+                              {displayColumns.map((col, colIdx) => {
                                 const val = getColumnValue(group.mainRow, col);
                                 const isF = isForecastColumn(col);
                                 const isEditableCell = isEditEligible;
@@ -1285,7 +1285,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                 return (
                                   <Box
                                     component='td'
-                                    key={col}
+                                    key={colIdx}
                                     onClick={(e) => isEditableCell && e.stopPropagation()}
                                     sx={{
                                       p: isEditableCell ? '4px 3px' : '10px 8px',
@@ -1392,14 +1392,14 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                       </Typography>
                                     </Box>
 
-                                    {displayColumns.map((col) => {
+                                    {displayColumns.map((col, colIdx) => {
                                       const isFChild = isForecastColumn(col);
                                       const childVal = childRow?.monthly_data?.[col];
 
                                       return (
                                         <Box
                                           component='td'
-                                          key={col}
+                                          key={colIdx}
                                           sx={{
                                             p: isEditableChild ? '4px 3px' : '10px 8px',
                                             textAlign: 'center',

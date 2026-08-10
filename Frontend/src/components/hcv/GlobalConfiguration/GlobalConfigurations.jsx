@@ -157,10 +157,19 @@ export default function GlobalConfiguration() {
   const therapyArea = favState?.selectedTherapyArea;
   const fetchedTaRef = useRef(null);
 
+  const isCashOnlySelected = useMemo(
+    () => paymentType.length === 1 && String(paymentType[0]).trim().toLowerCase() === "cash",
+    [paymentType]
+  );
+
   const derivedPayerOptions = useMemo(() => {
     if (!paymentType.length || !Object.keys(availablePayers).length) return [];
     const merged = new Set();
-    paymentType.forEach((pt) => (availablePayers[pt] || []).forEach((p) => merged.add(p)));
+    paymentType.forEach((pt) =>
+      (availablePayers[pt] || [])
+        .filter((p) => p && String(p).trim().toLowerCase() !== "na")
+        .forEach((p) => merged.add(p))
+    );
     return [...merged];
   }, [paymentType, availablePayers]);
 
@@ -168,6 +177,11 @@ export default function GlobalConfiguration() {
     if (!derivedPayerOptions.length) return setPayer([]);
     setPayer((prev) => prev.filter((p) => derivedPayerOptions.includes(p)));
   }, [derivedPayerOptions]);
+
+  // Clear Payer only when Cash is the sole selected Payment Type
+  useEffect(() => {
+    if (isCashOnlySelected) setPayer([]);
+  }, [isCashOnlySelected]);
 
   // Reset train end date if it's no longer after the start date
   const handleTrainStartChange = (value) => {
@@ -319,7 +333,7 @@ export default function GlobalConfiguration() {
               onChange={setPayer}
               options={derivedPayerOptions}
               placeholder="Select Payer"
-              disabled={!derivedPayerOptions.length}
+              disabled={isCashOnlySelected || !derivedPayerOptions.length}
               error={errors.payer}
               helperText={errors.payer}
             />
