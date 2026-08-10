@@ -172,6 +172,7 @@ def delete_product_route(product_name: str):
 from app.liver_market_events.services.Events_Management import (
     SaveEventRequest,
     EventType,
+    get_all_market_events,
     save_market_events,
     delete_market_event,
 )
@@ -186,13 +187,17 @@ def save_market_events_route(payload: SaveEventRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/{event_id}")
+@router.delete("/{event_name}")
 def delete_market_event_route(
-    event_id: int,
+    event_name: str,
     ta_name: str = Query(...),
     event_type: EventType = Query(...),
 ):
     try:
-        return delete_market_event(event_id, ta_name, event_type)
+        return delete_market_event(event_name, ta_name, event_type)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@router.get("/market-events/{ta_name}")
+def get_all_events(ta_name: str):
+    return get_all_market_events(ta_name)

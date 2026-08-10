@@ -18,6 +18,38 @@ class SelectedFilter(BaseModel):
     start_date: str
     end_date: str
 
+# ============================================================
+# Get all events (all event types) for a ta_name
+# ============================================================
+ALL_EVENT_TYPES: tuple[EventType, ...] = (
+    "product_event",
+    "payer_event",
+    "payment_type_payer_product_event",
+)
+
+
+def get_all_market_events(ta_name: str) -> dict:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        events_management: dict[str, dict] = {}
+        for event_type in ALL_EVENT_TYPES:
+            cur.execute(SELECT_ROWS_SQL, (ta_name, event_type))
+            db_rows = cur.fetchall()
+            events_management[event_type] = {
+                "impact_curve_configuration": {
+                    "rows": _rows_to_response(db_rows, event_type)
+                }
+            }
+
+        return {"events_management": events_management}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
 
 class EventRow(BaseModel):
     """event_id present = existing row to update, absent/None = new row to insert.
@@ -58,12 +90,12 @@ class SaveEventRequest(BaseModel):
 # SQL (psycopg2 style, %s placeholders)
 # ============================================================
 SELECT_EXISTING_IDS_SQL = """
-    SELECT id FROM raw.market_event_configuration
+    SELECT id FROM raw_liver_liver.market_event_configuration
     WHERE ta_name = %s AND event_type = %s;
 """
 
 UPDATE_ROW_SQL = """
-    UPDATE raw.market_event_configuration
+    UPDATE raw_liver_liver.market_event_configuration
        SET event_name = %s, start_date = %s, peak_percent = %s, months = %s,
            curve_type = %s, factor = %s, payment_type = %s, payment_types = %s,
            payers = %s, products = %s, source_percentages = %s, impacted_entities = %s
@@ -71,7 +103,7 @@ UPDATE_ROW_SQL = """
 """
 
 INSERT_ROW_SQL = """
-    INSERT INTO raw.market_event_configuration (
+    INSERT INTO raw_liver.market_event_configuration (
         ta_name, event_type, event_name, start_date, peak_percent, months,
         curve_type, factor, payment_type, payment_types, payers, products,
         source_percentages, impacted_entities, created_by
@@ -80,17 +112,17 @@ INSERT_ROW_SQL = """
 """
 
 DELETE_REMOVED_SQL = """
-    DELETE FROM raw.market_event_configuration WHERE id = ANY(%s);
+    DELETE FROM raw_liver.market_event_configuration WHERE id = ANY(%s);
 """
 
 DELETE_SINGLE_SQL = """
-    DELETE FROM raw.market_event_configuration WHERE id = %s AND ta_name = %s AND event_type = %s;
+    DELETE FROM raw_liver.market_event_configuration WHERE event_name = %s AND ta_name = %s AND event_type = %s;
 """
 
 SELECT_ROWS_SQL = """
     SELECT id, event_name, start_date, peak_percent, months, curve_type, factor,
            payment_type, payment_types, payers, products, source_percentages, impacted_entities
-    FROM raw.market_event_configuration
+    FROM raw_liver.market_event_configuration
     WHERE ta_name = %s AND event_type = %s
     ORDER BY id;
 """

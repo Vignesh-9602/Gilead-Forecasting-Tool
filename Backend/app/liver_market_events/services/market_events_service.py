@@ -428,13 +428,13 @@ def _compute_base_event_tabs(cur, ta: str, selected_filter: dict, forecast_start
             month_tuples, chart_headers, forecast_start_index, total_all
         )
     },
-    "payment_type_product": {
-        "metrics_views": _build_payment_type_product_metrics(
-            data, month_tuples, chart_headers, forecast_start_index, total_all,
-            show_products, show_payers, forecast_fn=_ets_forecast,
-            filter_products=filter_products, filter_payment_types=filter_payers,
-        )
-    },
+    # "payment_type_product": {
+    #     "metrics_views": _build_payment_type_product_metrics(
+    #         data, month_tuples, chart_headers, forecast_start_index, total_all,
+    #         show_products, show_payers, forecast_fn=_ets_forecast,
+    #         filter_products=filter_products, filter_payment_types=filter_payers,
+    #     )
+    # },
     "payment_type_payer_product": {
     "metrics_views": _build_payment_type_payer_product_metrics(
         data, month_tuples, chart_headers, forecast_start_index, total_all,
@@ -492,6 +492,68 @@ def _fetch_pt_payer_history(cur, ta: str, from_year: int, from_month: int,
     pt_payer_map = {pt: sorted(payers) for pt, payers in pt_payer_set.items()}
     return leaf_hist_monthly, pt_payer_map, leaf_totals
 
+def _load_scenario_raw_series(cur, scenario_name: str, start_date: str | None = None,
+                               end_date: str | None = None):
+    """
+    Return this scenario's own persisted, properly-forecasted volumes as raw
+    ingredients (same shape _snapshot_to_raw_series returns), using the exact
+    same source priority _load_saved_event_tabs uses for the metrics-building
+    path: a market_events snapshot first, then one derived from
+    market_analysis. Returns None if neither exists yet (caller -- currently
+    only run_market_events_calculation -- should fall back to its own
+    from-scratch computation, e.g. raw transaction_data, in that case).
+
+    This is what lets run-calculation start from the SAME baseline
+    apply_market_events_filters/refresh_market_events would show for this
+    scenario, instead of a separately-sourced (and much cruder, flat-forecast)
+    reconstruction from transaction_data -- otherwise every product/payer an
+    event doesn't touch would visibly diverge from what every other screen
+    shows for that same scenario.
+    """
+    raw = load_scenario_event_tabs(cur, scenario_name)
+    snapshot = None
+    if raw is not None and "series" in raw and raw.get("series"):
+        snapshot = raw
+    else:
+        ma = load_market_analysis(cur, scenario_name)
+        if ma:
+            snapshot = extract_snapshot_from_market_analysis(ma)
+
+    if not snapshot:
+        return None
+    return _snapshot_to_raw_series(snapshot, start_date, end_date)
+
+def _build_payer_leaf(data, month_tuples, forecast_start_index,
+                       leaf_hist_monthly, pt_payer_map, leaf_totals,
+                       show_products, forecast_fn=None, treat_zero_as_missing=True) -> dict:
+    """
+    payer_leaf[(y,m)][payment_type][payer][product] = volume.
+    History months: real values from leaf_hist_monthly.
+    Forecast months: (product, payment_type) cell from `data` (already
+    reflecting any payer_event/product_event changes applied before this),
+    split by the fixed historical ratio.
+    """
+    payer_leaf: dict = {}
+    n_hist = forecast_start_index
+    for pt, payers in pt_payer_map.items():
+        for prod in show_products:
+            hist_map = leaf_hist_monthly.get((pt, payers[0], prod), {})  # placeholder, real per-payer below
+    # Build per (pt, payer, prod) full series, then transpose into payer_leaf
+    for pt, payers in pt_payer_map.items():
+        for payer in payers:
+            for prod in show_products:
+                hist_map = leaf_hist_monthly.get((pt, payer, prod), {})
+                hist_vals = [hist_map.get(mt, 0.0) for mt in month_tuples[:n_hist]]
+                _h, fcast_pt, _av = build_values_for_series(
+                    data, month_tuples, forecast_start_index, product=prod, payer=pt,
+                    forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
+                )
+                ratio = _ratio_for(leaf_totals, pt_payer_map, prod, pt).get(payer, 0.0)
+                fcast_vals = [v * ratio for v in fcast_pt]
+                full = hist_vals + fcast_vals
+                for i, mt in enumerate(month_tuples):
+                    payer_leaf.setdefault(mt, {}).setdefault(pt, {}).setdefault(payer, {})[prod] = full[i]
+    return payer_leaf
 
 def _ratio_for(leaf_totals: dict, pt_payer_map: dict, prod: str, pt: str) -> dict:
     """
@@ -1080,135 +1142,135 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         },
     }
 
-def _build_payment_type_product_metrics(data, month_tuples, chart_headers, forecast_start_index,
-                                         total_all, show_products, show_payment_types,
-                                         forecast_fn=None, filter_products=None,
-                                         filter_payment_types=None, touched_pairs=None,
-                                         treat_zero_as_missing=True) -> dict:
-    """
-    Mirrors liver's payment_type_product tab: two orderings of the same
-    2-level hierarchy (payment_type -> product, and product -> payment_type).
-    `data` here is the SAME shape run_calculation already uses:
-    data[(y,m)][product][payment_type] = volume  (payer == payment_type today).
-    """
-    n_hist = forecast_start_index
-    _prod_filter = {str(p).strip().lower() for p in (filter_products or []) if p}
-    _pt_filter   = {str(p).strip().lower() for p in (filter_payment_types or []) if p}
-    chart_products = [p for p in show_products if not _prod_filter or p.strip().lower() in _prod_filter]
-    chart_pts      = [p for p in show_payment_types if not _pt_filter or p.strip().lower() in _pt_filter]
+# def _build_payment_type_product_metrics(data, month_tuples, chart_headers, forecast_start_index,
+#                                          total_all, show_products, show_payment_types,
+#                                          forecast_fn=None, filter_products=None,
+#                                          filter_payment_types=None, touched_pairs=None,
+#                                          treat_zero_as_missing=True) -> dict:
+#     """
+#     Mirrors liver's payment_type_product tab: two orderings of the same
+#     2-level hierarchy (payment_type -> product, and product -> payment_type).
+#     `data` here is the SAME shape run_calculation already uses:
+#     data[(y,m)][product][payment_type] = volume  (payer == payment_type today).
+#     """
+#     n_hist = forecast_start_index
+#     _prod_filter = {str(p).strip().lower() for p in (filter_products or []) if p}
+#     _pt_filter   = {str(p).strip().lower() for p in (filter_payment_types or []) if p}
+#     chart_products = [p for p in show_products if not _prod_filter or p.strip().lower() in _prod_filter]
+#     chart_pts      = [p for p in show_payment_types if not _pt_filter or p.strip().lower() in _pt_filter]
 
-    if touched_pairs is not None:
-        chart_pairs_pt_prod = sorted(
-            (pt, pr) for (pr, pt) in touched_pairs
-            if pr in show_products and pt in show_payment_types
-        )
-    else:
-        chart_pairs_pt_prod = [(pt, pr) for pt in chart_pts for pr in chart_products]
+#     if touched_pairs is not None:
+#         chart_pairs_pt_prod = sorted(
+#             (pt, pr) for (pr, pt) in touched_pairs
+#             if pr in show_products and pt in show_payment_types
+#         )
+#     else:
+#         chart_pairs_pt_prod = [(pt, pr) for pt in chart_pts for pr in chart_products]
 
-    def _series(product=None, payment_type=None):
-        return build_values_for_series(
-            data, month_tuples, forecast_start_index,
-            product=product, payer=payment_type, forecast_fn=forecast_fn,
-            treat_zero_as_missing=treat_zero_as_missing,
-        )
+#     def _series(product=None, payment_type=None):
+#         return build_values_for_series(
+#             data, month_tuples, forecast_start_index,
+#             product=product, payer=payment_type, forecast_fn=forecast_fn,
+#             treat_zero_as_missing=treat_zero_as_missing,
+#         )
 
-    prod_vol, pt_vol, cell_vol = {}, {}, {}
-    for pr in show_products:
-        prod_vol[pr] = _series(product=pr)
-    for pt in show_payment_types:
-        pt_vol[pt] = _series(payment_type=pt)
-    for pr in show_products:
-        for pt in show_payment_types:
-            cell_vol[(pr, pt)] = _series(product=pr, payment_type=pt)
+#     prod_vol, pt_vol, cell_vol = {}, {}, {}
+#     for pr in show_products:
+#         prod_vol[pr] = _series(product=pr)
+#     for pt in show_payment_types:
+#         pt_vol[pt] = _series(payment_type=pt)
+#     for pr in show_products:
+#         for pt in show_payment_types:
+#             cell_vol[(pr, pt)] = _series(product=pr, payment_type=pt)
 
-    def _sh(vals, denom):
-        return [compute_share(vals[i], denom[i]) for i in range(len(vals))]
+#     def _sh(vals, denom):
+#         return [compute_share(vals[i], denom[i]) for i in range(len(vals))]
 
-    year_labels, y_tot_h, y_tot_f, y_fsi = aggregate_monthly_to_yearly(
-        month_tuples, total_all, forecast_start_index
-    )
-    y_total_all = y_tot_h + y_tot_f
+#     year_labels, y_tot_h, y_tot_f, y_fsi = aggregate_monthly_to_yearly(
+#         month_tuples, total_all, forecast_start_index
+#     )
+#     y_total_all = y_tot_h + y_tot_f
 
-    def _yearly(series_map):
-        out = {}
-        for k, (h, f, av) in series_map.items():
-            _, yh, yf, _ = aggregate_monthly_to_yearly(month_tuples, av, forecast_start_index)
-            out[k] = (yh, yf, yh + yf)
-        return out
+#     def _yearly(series_map):
+#         out = {}
+#         for k, (h, f, av) in series_map.items():
+#             _, yh, yf, _ = aggregate_monthly_to_yearly(month_tuples, av, forecast_start_index)
+#             out[k] = (yh, yf, yh + yf)
+#         return out
 
-    prod_vol_y, pt_vol_y, cell_vol_y = _yearly(prod_vol), _yearly(pt_vol), _yearly(cell_vol)
+#     prod_vol_y, pt_vol_y, cell_vol_y = _yearly(prod_vol), _yearly(pt_vol), _yearly(cell_vol)
 
-    def _vi(vals): return [int(round(v)) for v in vals]
+#     def _vi(vals): return [int(round(v)) for v in vals]
 
-    def _build_ordering(parent_keys, child_keys, parent_vol, cell_vol_map, is_yearly,
-                         orient):
-        """orient: 'payment_type_product' (parent=payment_type, child=product)
-                    'product_payment_type' (parent=product, child=payment_type)"""
-        hkey = "years" if is_yearly else "months"
-        hdr  = year_labels if is_yearly else chart_headers
-        fsi  = y_fsi if is_yearly else forecast_start_index
-        n    = len(hdr)
-        total_vals = _vi(y_tot_h + y_tot_f) if is_yearly else _vi(total_all)
+#     def _build_ordering(parent_keys, child_keys, parent_vol, cell_vol_map, is_yearly,
+#                          orient):
+#         """orient: 'payment_type_product' (parent=payment_type, child=product)
+#                     'product_payment_type' (parent=product, child=payment_type)"""
+#         hkey = "years" if is_yearly else "months"
+#         hdr  = year_labels if is_yearly else chart_headers
+#         fsi  = y_fsi if is_yearly else forecast_start_index
+#         n    = len(hdr)
+#         total_vals = _vi(y_tot_h + y_tot_f) if is_yearly else _vi(total_all)
 
-        vol_rows = [{"label": "Total", "values": total_vals}]
-        share_rows = [{"label": "Total", "values": [100.0] * n}]
-        vol_series, share_series = [], []
+#         vol_rows = [{"label": "Total", "values": total_vals}]
+#         share_rows = [{"label": "Total", "values": [100.0] * n}]
+#         vol_series, share_series = [], []
 
-        for parent in parent_keys:
-            children_v, children_s = [], []
-            for child in child_keys:
-                key = (child, parent) if orient == "payment_type_product" else (parent, child)
-                # cell_vol_map keyed (product, payment_type)
-                ck = (key[1], key[0]) if orient == "payment_type_product" else key
-                h, f, av = cell_vol_map[ck if ck in cell_vol_map else (child, parent)]
-                if is_yearly:
-                    h, f = h, f  # already yearly tuples via _yearly()
-                vol = _vi(h) + _vi(f) if not is_yearly else _vi(h + f)
-                par_h, par_f, par_av = parent_vol[parent]
-                par_all = _vi(par_h) + _vi(par_f) if not is_yearly else _vi(par_h + par_f)
-                sh = _sh([v for v in (av if not is_yearly else (h + f))], par_all if is_yearly else par_all)
-                children_v.append({"label": child, "values": vol})
-                children_s.append({"label": child, "values": [round(v, 4) for v in sh]})
-                lbl = f"{parent} - {child}"
-                vol_series.append({"label": lbl, "history": vol[:fsi], "forecast": vol[fsi:]})
-                share_series.append({"label": lbl, "history": sh[:fsi], "forecast": sh[fsi:]})
+#         for parent in parent_keys:
+#             children_v, children_s = [], []
+#             for child in child_keys:
+#                 key = (child, parent) if orient == "payment_type_product" else (parent, child)
+#                 # cell_vol_map keyed (product, payment_type)
+#                 ck = (key[1], key[0]) if orient == "payment_type_product" else key
+#                 h, f, av = cell_vol_map[ck if ck in cell_vol_map else (child, parent)]
+#                 if is_yearly:
+#                     h, f = h, f  # already yearly tuples via _yearly()
+#                 vol = _vi(h) + _vi(f) if not is_yearly else _vi(h + f)
+#                 par_h, par_f, par_av = parent_vol[parent]
+#                 par_all = _vi(par_h) + _vi(par_f) if not is_yearly else _vi(par_h + par_f)
+#                 sh = _sh([v for v in (av if not is_yearly else (h + f))], par_all if is_yearly else par_all)
+#                 children_v.append({"label": child, "values": vol})
+#                 children_s.append({"label": child, "values": [round(v, 4) for v in sh]})
+#                 lbl = f"{parent} - {child}"
+#                 vol_series.append({"label": lbl, "history": vol[:fsi], "forecast": vol[fsi:]})
+#                 share_series.append({"label": lbl, "history": sh[:fsi], "forecast": sh[fsi:]})
 
-            par_h, par_f, _ = parent_vol[parent]
-            par_all = _vi(par_h) + _vi(par_f) if not is_yearly else _vi(par_h + par_f)
-            vol_rows.append({"label": parent, "values": par_all, "children": children_v})
-            share_rows.append({"label": parent, "values": [100.0] * n, "children": children_s})
+#             par_h, par_f, _ = parent_vol[parent]
+#             par_all = _vi(par_h) + _vi(par_f) if not is_yearly else _vi(par_h + par_f)
+#             vol_rows.append({"label": parent, "values": par_all, "children": children_v})
+#             share_rows.append({"label": parent, "values": [100.0] * n, "children": children_s})
 
-        return (
-            {"chart": build_chart(hkey, hdr, fsi, vol_series), "table": build_hierarchy_table(hdr, fsi, vol_rows)},
-            {"chart": build_chart(hkey, hdr, fsi, share_series), "table": build_hierarchy_table(hdr, fsi, share_rows)},
-        )
+#         return (
+#             {"chart": build_chart(hkey, hdr, fsi, vol_series), "table": build_hierarchy_table(hdr, fsi, vol_rows)},
+#             {"chart": build_chart(hkey, hdr, fsi, share_series), "table": build_hierarchy_table(hdr, fsi, share_rows)},
+#         )
 
-    def _wrap(orient, parent_keys_m, child_keys_m, parent_vol_m,
-              parent_keys_y, child_keys_y, parent_vol_y_):
-        vol_m, share_m = _build_ordering(parent_keys_m, child_keys_m, parent_vol_m, cell_vol, False, orient)
-        vol_y, share_y = _build_ordering(parent_keys_y, child_keys_y, parent_vol_y_, cell_vol_y, True, orient)
-        return {
-            "payer_volume": {"monthly": vol_m, "yearly": vol_y},
-            "payer_share":  {"monthly": share_m, "yearly": share_y},
-        }
+#     def _wrap(orient, parent_keys_m, child_keys_m, parent_vol_m,
+#               parent_keys_y, child_keys_y, parent_vol_y_):
+#         vol_m, share_m = _build_ordering(parent_keys_m, child_keys_m, parent_vol_m, cell_vol, False, orient)
+#         vol_y, share_y = _build_ordering(parent_keys_y, child_keys_y, parent_vol_y_, cell_vol_y, True, orient)
+#         return {
+#             "payer_volume": {"monthly": vol_m, "yearly": vol_y},
+#             "payer_share":  {"monthly": share_m, "yearly": share_y},
+#         }
 
-    return {
-        "payment_type_product": _wrap(
-            "payment_type_product",
-            show_payment_types, show_products, pt_vol,
-            show_payment_types, show_products, pt_vol_y,
-        ),
-        "product_payment_type": _wrap(
-            "product_payment_type",
-            show_products, show_payment_types, prod_vol,
-            show_products, show_payment_types, prod_vol_y,
-        ),
-    }
+#     return {
+#         "payment_type_product": _wrap(
+#             "payment_type_product",
+#             show_payment_types, show_products, pt_vol,
+#             show_payment_types, show_products, pt_vol_y,
+#         ),
+#         "product_payment_type": _wrap(
+#             "product_payment_type",
+#             show_products, show_payment_types, prod_vol,
+#             show_products, show_payment_types, prod_vol_y,
+#         ),
+#     }
 def _build_payment_type_payer_product_metrics(
     data, month_tuples, chart_headers, forecast_start_index, total_all,
     show_products, show_payment_types, leaf_hist_monthly, pt_payer_map, leaf_totals,
     forecast_fn=None, filter_products=None, filter_payment_types=None,
-    touched_pairs=None, treat_zero_as_missing=True,
+    touched_pairs=None, treat_zero_as_missing=True, payer_leaf_override=None,
 ) -> dict:
     """
     payment_type_payer_product tab: three orderings of the same 3-level
@@ -1217,12 +1279,20 @@ def _build_payment_type_payer_product_metrics(
     pt_payer_map; Cash, whose DB payer value is "NA", has none).
 
     History months use REAL leaf volumes from liver_repo.get_payment_type_
-    payer_product (leaf_hist_monthly) -- no approximation. Forecast months
-    take the already-forecasted (product, payment_type) cell from `data`
-    (post-event, if any) and split it by a FIXED historical ratio
-    (leaf_totals via _ratio_for) -- events never target the payer level
-    directly, so this never needs run_calculation_service.py's event math
-    touched.
+    payer_product (leaf_hist_monthly) -- no approximation.
+
+    Forecast months: if payer_leaf_override is given (run_calculation_
+    service.py's mod_payer_leaf, built when THIS tab's own events were just
+    applied), use its actual simulated (payment_type, payer, product)
+    volumes directly -- the real result of whatever event ran, including
+    any redistribution among products within a targeted (payment_type,
+    payer) slice. Otherwise (no event on this tab, or a display-only call),
+    fall back to taking the already-forecasted (product, payment_type) cell
+    from `data` and splitting it by a FIXED historical ratio (leaf_totals
+    via _ratio_for), same as before -- this remains correct for payer_event/
+    product_event's own effects rolling through, since those tabs still
+    only ever change the (product, payment_type) cell, never the payer
+    split directly.
 
     Shares are HIERARCHICAL: payment_type row = 100%, payer row = % of its
     payment_type's total, product leaf = % of its payer's total (matching
@@ -1239,13 +1309,19 @@ def _build_payment_type_payer_product_metrics(
         hist_map = leaf_hist_monthly.get(hist_key, {})
         hist_vals = [hist_map.get(mt, 0.0) for mt in month_tuples[:n_hist]]
 
-        # Forecast: split the (product, payment_type) forecast cell by ratio
-        _h, fcast_pt, _av = build_values_for_series(
-            data, month_tuples, forecast_start_index, product=prod, payer=pt,
-            forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
-        )
-        r = _ratio_for(leaf_totals, pt_payer_map, prod, pt).get(payer, 0.0)
-        fcast_vals = [v * r for v in fcast_pt]
+        if payer_leaf_override is not None:
+            fcast_vals = [
+                payer_leaf_override.get(mt, {}).get(pt, {}).get(payer, {}).get(prod, 0.0)
+                for mt in month_tuples[forecast_start_index:]
+            ]
+        else:
+            # Forecast: split the (product, payment_type) forecast cell by ratio
+            _h, fcast_pt, _av = build_values_for_series(
+                data, month_tuples, forecast_start_index, product=prod, payer=pt,
+                forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
+            )
+            r = _ratio_for(leaf_totals, pt_payer_map, prod, pt).get(payer, 0.0)
+            fcast_vals = [v * r for v in fcast_pt]
         return hist_vals + fcast_vals
 
     # Series for every (product, pt[, payer]) leaf
@@ -1338,6 +1414,7 @@ def _build_payment_type_payer_product_metrics(
                     for prod in show_products:
                         vol = leaf_vol[(prod, pt, None)]
                         l2_vol.append({"label": prod, "values": _vi(vol), "children": []})
+                        l2_share.append({"label": prod, "values": None, "children": []})
                         if (prod, pt, None) in chart_keys:
                             lbl = f"{pt} - {prod}"
                             vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
@@ -1368,6 +1445,7 @@ def _build_payment_type_payer_product_metrics(
                             lbl = f"{pt} - {prod}"
                             vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l2_vol.append({"label": prod, "values": _vi(vol), "children": []})
+                        l2_share.append({"label": prod, "values": None, "children": []})
 
             else:  # product_payment_type_payer
                 prod = l1
@@ -1395,6 +1473,7 @@ def _build_payment_type_payer_product_metrics(
                             lbl = f"{prod} - {pt}"
                             vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l2_vol.append({"label": pt, "values": _vi(vol), "children": []})
+                        l2_share.append({"label": pt, "values": None, "children": []})
 
             l1_total = [sum(c["values"][i] for c in l2_vol) for i in range(n)]
             vol_rows.append({"label": l1, "values": l1_total, "children": l2_vol})
@@ -2551,38 +2630,8 @@ def _snapshot_to_raw_series(snapshot: dict, start_date: str | None = None,
     return data, months, month_tuples, forecast_start_index, total_all, show_products, show_payers
 
 
-def _load_scenario_raw_series(cur, scenario_name: str, start_date: str | None = None,
-                               end_date: str | None = None):
-    """
-    Return this scenario's own persisted, properly-forecasted volumes as raw
-    ingredients (same shape _snapshot_to_raw_series returns), using the exact
-    same source priority _load_saved_event_tabs uses for the metrics-building
-    path: a market_events snapshot first, then one derived from
-    market_analysis. Returns None if neither exists yet (caller -- currently
-    only run_market_events_calculation -- should fall back to its own
-    from-scratch computation, e.g. raw transaction_data, in that case).
 
-    This is what lets run-calculation start from the SAME baseline
-    apply_market_events_filters/refresh_market_events would show for this
-    scenario, instead of a separately-sourced (and much cruder, flat-forecast)
-    reconstruction from transaction_data -- otherwise every product/payer an
-    event doesn't touch would visibly diverge from what every other screen
-    shows for that same scenario.
-    """
-    raw = load_scenario_event_tabs(cur, scenario_name)
-    snapshot = None
-    if raw is not None and "series" in raw and raw.get("series"):
-        snapshot = raw
-    else:
-        ma = load_market_analysis(cur, scenario_name)
-        if ma:
-            snapshot = extract_snapshot_from_market_analysis(ma)
-
-    if not snapshot:
-        return None
-    return _snapshot_to_raw_series(snapshot, start_date, end_date)
-
-
+    
 def _reconstruct_event_tabs_from_snapshot(cur, ta, snapshot, filter_products=None, filter_payers=None,
                                            start_date=None, end_date=None) -> dict:
     data, months, month_tuples, forecast_start_index, total_all, show_products, show_payers = (
@@ -2614,13 +2663,13 @@ def _reconstruct_event_tabs_from_snapshot(cur, ta, snapshot, filter_products=Non
                 month_tuples, months, forecast_start_index, total_all
             )
         },
-        "payment_type_product": {
-            "metrics_views": _build_payment_type_product_metrics(
-                data, month_tuples, months, forecast_start_index, total_all,
-                show_products, show_payers,
-                filter_products=filter_products, filter_payment_types=filter_payers,
-            )
-        },
+        # "payment_type_product": {
+        #     "metrics_views": _build_payment_type_product_metrics(
+        #         data, month_tuples, months, forecast_start_index, total_all,
+        #         show_products, show_payers,
+        #         filter_products=filter_products, filter_payment_types=filter_payers,
+        #     )
+        # },
         "payment_type_payer_product": {
             "metrics_views": _build_payment_type_payer_product_metrics(
                 data, month_tuples, months, forecast_start_index, total_all,

@@ -43,7 +43,7 @@ from app.liver_market_events.services.market_events_service import (
     _build_overall_event_metrics,
     _build_payer_event_metrics,
     _build_product_event_metrics,
-    _build_payment_type_product_metrics,        # NEW
+    # _build_payment_type_product_metrics,        # NEW
     _build_payment_type_payer_product_metrics,  # NEW
     _fetch_pt_payer_history,                      # NEW
     build_market_analysis_response,              # NEW
@@ -270,6 +270,84 @@ def _distribute_capped_loss(current_vols: dict, weights: dict, total_needed: flo
 
 
 # ---------------------------------------------------------------------------
+# payment_type_payer_product: mutable 3-level leaf + rollup
+# ---------------------------------------------------------------------------
+
+def _build_payer_leaf(data: dict, month_tuples: list, forecast_start_index: int,
+                       leaf_hist_monthly: dict, pt_payer_map: dict, leaf_totals: dict,
+                       show_products: list, forecast_fn=None,
+                       treat_zero_as_missing: bool = True) -> dict:
+    """
+    payer_leaf[(y, m)][payment_type][payer][product] = volume.
+
+    History months: real values from leaf_hist_monthly (from
+    get_payment_type_payer_product), never approximated.
+
+    Forecast months: the (product, payment_type) cell from `data` -- which
+    by this point already reflects any payer_event/product_event changes
+    applied earlier in the same run, per the agreed sequential ordering --
+    split by the FIXED historical ratio (leaf_totals via _ratio_for). This
+    is the same construction _build_payment_type_payer_product_metrics uses
+    for display; here it's built once as a genuinely mutable structure so
+    payment_type_payer_product's OWN events can be applied directly to it.
+
+    Only produced for payment types that carry a real payer split
+    (pt_payer_map) -- Cash (or any payment type with no CVS/Non-CVS rows)
+    has no leaf here, matching the display convention elsewhere.
+    """
+    from app.liver_market_events.services.market_events_service import _ratio_for, build_values_for_series
+
+    payer_leaf: dict = {}
+    n_hist = forecast_start_index
+    for pt, payer_list in pt_payer_map.items():
+        for payer in payer_list:
+            for prod in show_products:
+                hist_map = leaf_hist_monthly.get((pt, payer, prod), {})
+                hist_vals = [hist_map.get(mt, 0.0) for mt in month_tuples[:n_hist]]
+                _h, fcast_pt, _av = build_values_for_series(
+                    data, month_tuples, forecast_start_index, product=prod, payer=pt,
+                    forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
+                )
+                ratio = _ratio_for(leaf_totals, pt_payer_map, prod, pt).get(payer, 0.0)
+                fcast_vals = [v * ratio for v in fcast_pt]
+                full = hist_vals + fcast_vals
+                for i, mt in enumerate(month_tuples):
+                    payer_leaf.setdefault(mt, {}).setdefault(pt, {}).setdefault(payer, {})[prod] = full[i]
+    return payer_leaf
+
+
+def _leaf_slice_total(payer_leaf: dict, y: int, m: int, prod: str, ctx_slice: list) -> float:
+    """Sum of one product's volume across the given (payment_type, payer) pairs for one month."""
+    cell = payer_leaf.get((y, m), {})
+    return sum(cell.get(pt, {}).get(py, {}).get(prod, 0.0) for pt, py in ctx_slice)
+
+
+def _apply_leaf_delta(payer_leaf: dict, y: int, m: int, prod: str, delta_vol: float,
+                       ctx_slice: list, current_total: float) -> None:
+    """
+    Change one product's total volume (summed across ctx_slice's (payment_type,
+    payer) pairs) by delta_vol, distributing the change across those pairs
+    proportional to each pair's current share -- same proportional-scaling
+    principle as _apply_product_delta, with the same zero-current bootstrap
+    (even split) when the product has no existing volume across the slice.
+    """
+    cell = payer_leaf.setdefault((y, m), {})
+    if current_total <= 0:
+        if not ctx_slice:
+            return
+        even_share = delta_vol / len(ctx_slice)
+        for pt, py in ctx_slice:
+            slot = cell.setdefault(pt, {}).setdefault(py, {})
+            slot[prod] = max(0.0, slot.get(prod, 0.0) + even_share)
+        return
+    for pt, py in ctx_slice:
+        slot = cell.setdefault(pt, {}).setdefault(py, {})
+        cur = slot.get(prod, 0.0)
+        frac = cur / current_total
+        slot[prod] = max(0.0, cur + delta_vol * frac)
+
+
+# ---------------------------------------------------------------------------
 # EventInput builder
 # ---------------------------------------------------------------------------
 
@@ -318,6 +396,14 @@ def _build_event_input(event_row: dict, tab: str) -> EventInput | None:
         selected = payers_list[0] if payers_list else None
         impacted_names = [n for n in (event_row.get("impacted_payment_types") or []) if n != selected]
     elif tab == "product_event":
+        products_list = event_row.get("products") or []
+        selected = products_list[0] if products_list else None
+        impacted_names = [n for n in (event_row.get("impacted_products") or []) if n != selected]
+    elif tab == "payment_type_payer_product":
+        # Selected entity is the target product, same convention as
+        # product_event -- context here is which (payment_type, payer)
+        # slice(s) it applies within, handled by the caller directly from
+        # event_row (payment_type + payer fields), not through this field.
         products_list = event_row.get("products") or []
         selected = products_list[0] if products_list else None
         impacted_names = [n for n in (event_row.get("impacted_products") or []) if n != selected]
@@ -401,6 +487,8 @@ def _apply_events_to_data(
     tab: str,
     show_products: list,
     show_payers: list,
+    payer_leaf: dict | None = None,
+    pt_payer_map: dict | None = None,
 ) -> list:
     """
     Apply each event row's curve to `data` (forecast months only), the same
@@ -440,10 +528,21 @@ def _apply_events_to_data(
                 ctx_products = [p for p in show_products if p in row_products] or show_products
         elif tab == "product_event":
             row_payers = event_row.get("payment_type") or []
-            print(f"[DEBUG] row_payers={row_payers} show_payers={show_payers}")   # ← ADD
             if row_payers:
                 ctx_payers = [p for p in show_payers if p in row_payers] or show_payers
 
+        ctx_slice = None
+        if tab == "payment_type_payer_product":
+            pt_map = pt_payer_map or {}
+            sel_pts = event_row.get("payment_type") or list(pt_map.keys())
+            sel_payers = event_row.get("payer") or None
+            ctx_slice = [
+                (pt, py)
+                for pt in sel_pts
+                for py in (sel_payers or pt_map.get(pt, []))
+                if py in pt_map.get(pt, [])
+            ]
+            print(f"[DEBUG] ctx_slice={ctx_slice!r} pt_map={pt_map!r} sel_pts={sel_pts!r} sel_payers={sel_payers!r}")
         # Anchor month: the month just before THIS row's own start_date, not
         # always the last history month -- when a later-starting row is
         # stacked on the same entity/market after an earlier row already ran
@@ -464,7 +563,18 @@ def _apply_events_to_data(
 
         baseline_share = 0.0
         baseline_total = 0.0
-        if tab != "overall_event":
+        if tab == "payment_type_payer_product":
+            if baseline_idx >= 0 and ctx_slice:
+                last_y, last_m = month_tuples[baseline_idx]
+                last_ctx_total = sum(
+                    _leaf_slice_total(payer_leaf, last_y, last_m, p, ctx_slice) for p in show_products
+                )
+                if last_ctx_total > 0:
+                    entity = (event_row.get("products") or [None])[0]
+                    if entity:
+                        entity_vol = _leaf_slice_total(payer_leaf, last_y, last_m, entity, ctx_slice)
+                        baseline_share = entity_vol / last_ctx_total * 100.0
+        elif tab != "overall_event":
             if baseline_idx >= 0:
                 last_y, last_m = month_tuples[baseline_idx]
                 if tab == "payer_event":
@@ -500,11 +610,7 @@ def _apply_events_to_data(
         event_input = _build_event_input(event_row, tab)
         if event_input is None:
             continue
-        print(f"[DEBUG] baseline_pct={baseline_share}, peak_pct={event_input.peak_pct}, "
-        f"duration_months={event_input.duration_months}, factor={event_input.factor}, "
-        f"curve_type={event_input.curve_type}")
         result = compute_event_forecast(event_input, baseline_pct=baseline_share)
-        print(f"[DEBUG] selected_curve: {result.selected_curve}")
 
         # Selected entity: ABSOLUTE target share per month (baseline -> peak_percent
         # for payer/product events; a pure growth delta for overall_event, since
@@ -701,10 +807,6 @@ def _apply_events_to_data(
                         _apply_product_delta(data, y, m, sel_prod, delta_vol, show_payers=ctx_payers)
                         ctx_changed = True
                     event_touched_forecast = True
-                if month_str == "2026-03-01":                                   # ← ADD
-                    print(f"[DEBUG] month={month_str} target_share={target_share} "
-                          f"ctx_total_vol={ctx_total_vol} current_vol={current_vol} "
-                          f"target_vol={target_vol} delta_vol={delta_vol}")  
                 # See the identical reasoning in the payer_event branch above:
                 # size impacted products' loss off the selected product's
                 # ACTUAL delta_vol this month, not the curve's theoretical
@@ -728,11 +830,6 @@ def _apply_events_to_data(
                         }
                         weights = {imp: abs(d) for imp, d in eff_impacted.items()}
                         losses = _distribute_capped_loss(current_vols, weights, delta_vol)
-                        if month_str == "2026-03-01":                            # ← ADD
-                            print(f"[DEBUG] current_vols={current_vols} weights={weights} "
-                                  f"losses={losses} "
-                                  f"shortfall={delta_vol - sum(losses.values())}")  # ← ADD
-
                         for imp, loss in losses.items():
                             if loss != 0.0:
                                 _apply_product_delta(data, y, m, imp, -loss, show_payers=ctx_payers)
@@ -748,10 +845,95 @@ def _apply_events_to_data(
                 if ctx_changed and renorm_orig_total > 0:
                     _renormalize_context(data, y, m, renorm_products, ctx_payers, renorm_orig_total)
 
+            elif tab == "payment_type_payer_product":
+                if not ctx_slice:
+                    continue
+                sel_prod = event_input.selected_entity
+                print(f"[DEBUG] sel_prod={sel_prod!r}")   
+                # Same reasoning as product_event, narrowed one level further:
+                # the selected product's target AND the impacted products'
+                # compensating loss are both sized against the SAME context
+                # total -- the sum of the selected product-slice's own volume
+                # across exactly the (payment_type, payer) pairs this row
+                # selected -- never touching that product's volume in any
+                # other payment_type/payer pair.
+                ctx_total_vol = sum(_leaf_slice_total(payer_leaf, y, m, p, ctx_slice) for p in show_products)
+                touched_products = [sel_prod] + [p for p in eff_impacted if p != sel_prod]
+                print(f"[DEBUG] touched_products={touched_products!r} eff_impacted={eff_impacted!r}")  # ← ADD
+                renorm_products = touched_products if eff_impacted else show_products
+                renorm_orig_total = (
+                    sum(_leaf_slice_total(payer_leaf, y, m, p, ctx_slice) for p in renorm_products)
+                    if eff_impacted else ctx_total_vol
+                )
+                
+                ctx_changed = False
+                delta_vol = 0.0
+                if target_share is not None:
+                    current_vol = _leaf_slice_total(payer_leaf, y, m, sel_prod, ctx_slice)
+                    target_vol = max(0.0, target_share / 100.0 * ctx_total_vol)
+                    delta_vol = target_vol - current_vol
+                    if abs(delta_vol) > 1e-9:
+                        _apply_leaf_delta(payer_leaf, y, m, sel_prod, delta_vol, ctx_slice, current_vol)
+                        ctx_changed = True
+                    event_touched_forecast = True
+                sum_d = sum(eff_impacted.values())
+                if eff_impacted and delta_vol != 0.0 and sum_d != 0.0:
+                    if delta_vol > 0:
+                        # See _distribute_capped_loss: cap each impacted
+                        # product's loss at its own current volume WITHIN
+                        # this slice, redistributing any shortfall so the
+                        # selected product reliably reaches its target.
+                        current_vols = {
+                            imp: _leaf_slice_total(payer_leaf, y, m, imp, ctx_slice)
+                            for imp in eff_impacted
+                        }
+                        weights = {imp: abs(d) for imp, d in eff_impacted.items()}
+                        losses = _distribute_capped_loss(current_vols, weights, delta_vol)
+                        for imp, loss in losses.items():
+                            if loss != 0.0:
+                                _apply_leaf_delta(payer_leaf, y, m, imp, -loss, ctx_slice, current_vols[imp])
+                                ctx_changed = True
+                                event_touched_forecast = True
+                    else:
+                        for imp, d in eff_impacted.items():
+                            if d != 0.0:
+                                imp_current = _leaf_slice_total(payer_leaf, y, m, imp, ctx_slice)
+                                _apply_leaf_delta(payer_leaf, y, m, imp, -delta_vol * (d / sum_d),
+                                                  ctx_slice, imp_current)
+                                ctx_changed = True
+                                event_touched_forecast = True
+                if ctx_changed and renorm_orig_total > 0:
+                    # Renormalize each touched product back to its own
+                    # pre-delta total WITHIN this slice -- same safety net as
+                    # product_event's _renormalize_context, applied directly
+                    # to payer_leaf instead of `data`.
+                    print(f"[DEBUG] about to rollup, touched_products={touched_products!r}")
+                    current_group_total = sum(
+                        _leaf_slice_total(payer_leaf, y, m, p, ctx_slice) for p in renorm_products
+                    )
+                    if current_group_total > 0 and abs(current_group_total - renorm_orig_total) > 1e-6:
+                        scale = renorm_orig_total / current_group_total
+                        cell = payer_leaf.get((y, m), {})
+                        for pt, py in ctx_slice:
+                            slot = cell.get(pt, {}).get(py, {})
+                            for prod in renorm_products:
+                                if prod in slot and slot[prod] > 0:
+                                    slot[prod] = max(0.0, slot[prod] * scale)
+                    # Roll this month's touched products back up into `data`
+                    # so payer_event/product_event/Total Market Volume (all
+                    # built from `data`) reflect the change too.
+                    for prod in touched_products:
+                        for pt in (pt_payer_map or {}):
+                            total = sum(
+                                payer_leaf.get((y, m), {}).get(pt, {}).get(py, {}).get(prod, 0.0)
+                                for py in (pt_payer_map or {}).get(pt, [])
+                            )
+                            data.setdefault((y, m), {}).setdefault(prod, {})[pt] = total
+
         if not event_touched_forecast:
             event_name = event_row.get("event_name", "Event")
             start_date = event_row.get("start_date", "")
-            if skipped_zero_total:                                    # ← ADD THIS BRANCH
+            if skipped_zero_total:
                 raise ValueError(
                     f"Event '{event_name}' could not be applied: the market total "
                     f"volume is zero for every forecast month in range "
@@ -976,6 +1158,7 @@ def run_market_events_calculation(payload) -> dict:
             for idx, row in enumerate(payload.impact_curve_configuration.rows)
         ]
 
+        mod_payer_leaf = None
         if event_rows:
             mod_data = copy.deepcopy(base_data)
             _fill_forecast_data(mod_data, month_tuples, forecast_start_index)
@@ -983,10 +1166,24 @@ def run_market_events_calculation(payload) -> dict:
             mod_total = _recompute_total_all(mod_data, month_tuples)
             # Keep history months aligned with base
             mod_total[:forecast_start_index] = list(base_total_all[:forecast_start_index])
+
+            if tab == "payment_type_payer_product":
+                # Build the mutable 3-level leaf from mod_data as it stands
+                # right now (base data + forecast fill; payer_event/product_
+                # event only mutate `data` when THEY are the active tab, per
+                # the current one-tab-per-request architecture) so this
+                # tab's own events land on top of that.
+                mod_payer_leaf = _build_payer_leaf(
+                    mod_data, month_tuples, forecast_start_index,
+                    leaf_hist_monthly, pt_payer_map, leaf_totals,
+                    show_products, forecast_fn=None, treat_zero_as_missing=False,
+                )
+
             mod_total = _apply_events_to_data(
                 mod_data, month_tuples, forecast_start_index,
                 mod_total, event_rows, tab,
                 show_products, show_payers,
+                payer_leaf=mod_payer_leaf, pt_payer_map=pt_payer_map,
             )
         else:
             mod_data = base_data
@@ -1000,7 +1197,8 @@ def run_market_events_calculation(payload) -> dict:
         # it can be built once for the full computed range (persistence) and
         # again for a narrower, display-only slice (the HTTP response) below.
         _ALL_TABS = ("payer_event", "product_event", "overall_event",
-             "payment_type_product", "payment_type_payer_product")
+            #  "payment_type_product",
+               "payment_type_payer_product")
 
         def _metrics(t: str, mt: list, ch: list, fsi: int, tot: list) -> dict:
             touched_pairs = (
@@ -1018,18 +1216,19 @@ def run_market_events_calculation(payload) -> dict:
                     filter_products=sf.products, filter_payers=sf.payment_type,
                     touched_pairs=touched_pairs, treat_zero_as_missing=False,
                 )
-            if t == "payment_type_product":
-                return _build_payment_type_product_metrics(
-                    mod_data, mt, ch, fsi, tot, show_products, show_payers,
-                    filter_products=sf.products, filter_payment_types=sf.payment_type,
-                    treat_zero_as_missing=False,
-                )
+            # if t == "payment_type_product":
+            #     return _build_payment_type_product_metrics(
+            #         mod_data, mt, ch, fsi, tot, show_products, show_payers,
+            #         filter_products=sf.products, filter_payment_types=sf.payment_type,
+            #         treat_zero_as_missing=False,
+            #     )
             if t == "payment_type_payer_product":
                 return _build_payment_type_payer_product_metrics(
                     mod_data, mt, ch, fsi, tot, show_products, show_payers,
-                    leaf_hist_monthly, pt_payer_map, leaf_totals,                # ← new
+                    leaf_hist_monthly, pt_payer_map, leaf_totals,
                     filter_products=sf.products, filter_payment_types=sf.payment_type,
                     treat_zero_as_missing=False,
+                    payer_leaf_override=(mod_payer_leaf if t == tab else None),
                 )
             return _build_overall_event_metrics(mt, ch, fsi, tot)
 
