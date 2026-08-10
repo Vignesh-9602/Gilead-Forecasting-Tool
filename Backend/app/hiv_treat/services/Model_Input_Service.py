@@ -82,11 +82,21 @@ def get_sources(cur, ta, market):
 #     """, (ta,))
 #     return [r[0] for r in cur.fetchall()]
 
+BASELINE_SCENARIO = "Base"
+
+
 def get_products(cur, ta, scenario=None):
-    """Products with rows in this TA. Pass `scenario` to restrict to the
-    ones that actually have data in it -- unscoped, a product materialized
-    in one scenario appears in every other scenario's tables at 0%, which
-    reads as a real product with no share rather than as absent."""
+    """Products with rows in this TA.
+
+    Scoped to `scenario` for the baseline only -- unscoped, a product
+    materialized in another scenario shows up in Base's tables at 0%.
+    Every other scenario keeps the TA-wide list.
+
+    `scenario` is an explicit argument on purpose. It was previously read
+    from a context variable so call sites could stay unchanged, and that
+    silently returned the WRONG scenario's product list on any path that
+    didn't set it -- which is how t11 ended up rendering Base's three
+    products instead of its own four."""
     query = """
         SELECT DISTINCT product
         FROM raw_hiv_treat.forecast_outputs
@@ -94,12 +104,14 @@ def get_products(cur, ta, scenario=None):
     """
     params = [ta]
 
-    if scenario:
+    if scenario and str(scenario).strip().lower() == BASELINE_SCENARIO.lower():
         query += " AND scenario_name = %s"
         params.append(scenario)
 
     cur.execute(query, params)
-    return [r[0] for r in cur.fetchall()]
+    result = [r[0] for r in cur.fetchall()]
+    # print("GET_PRODUCTS", repr(scenario), "scoped:", "scenario_name" in query, "->", result)
+    return result
 
 
 def get_scenarios(cur, ta):
@@ -539,10 +551,10 @@ def build_factors(cur, ta, scenario):
     if not isinstance(factors_data, dict):
         factors_data = {}
 
-    print("================================")
-    print("Market-volume factors:", volume_factors)
-    print("Market-share factors:", factors_data)
-    print("================================")
+    # print("================================")
+    # print("Market-volume factors:", volume_factors)
+    # print("Market-share factors:", factors_data)
+    # print("================================")
 
     # Support either:
     # {"window": 3}
@@ -681,10 +693,10 @@ def build_total_market_volume(total_vals, months, split_idx,scenario_label="Base
     total_vals: raw floats from build_series.
     Monthly display rounds to int. Yearly sums raws then rounds once.
     """
-    print(
-        "build_total_market_volume called, scenario_label=",
-        scenario_label
-    )
+    # print(
+    #     "build_total_market_volume called, scenario_label=",
+    #     scenario_label
+    # )
     int_vals = round_volume(total_vals)   # display-only rounding
     n        = len(int_vals)
     h, f     = split_series(int_vals, split_idx)
@@ -1909,6 +1921,22 @@ def build_product_distribution(
     }
 
 
+# =========================================================
+# Shared rules for both breakdowns
+# =========================================================
+# 1. Every product gets a child in every market, even with no row behind
+#    it. A market whose product list differs from its neighbour's is what
+#    breaks callers indexing children[1] (and it made test prod visible in
+#    Non-retail but not Retail purely because the two branches handled a
+#    missing row differently).
+# 2. A parent total of zero is not an error. A product that hasn't
+#    launched, or a market with no volume in a month, has no split to
+#    compute -- its children are zero and its shares are undefined.
+# 3. Normalization never raises. A month where everything is zero is
+#    reported and skipped; raising takes down the whole response for one
+#    unpopulated month.
+
+
 def build_market_product(
     cur,
     ta,
@@ -1941,22 +1969,15 @@ def build_market_product(
     Rules
     -----
     1. Overall volume is authoritative.
-
-    2. Market totals are reconciled so that:
-
-           sum(markets) == Overall
-
-    3. Products inside each market are normalized so that:
-
-           sum(products in market) == market total
-
-    4. Existing product proportions inside each market
-       are preserved.
-
-    5. Display rounding is corrected so displayed children
-       also sum exactly to the displayed market parent.
-
+    2. Market totals are reconciled so sum(markets) == Overall.
+    3. Products inside each market are normalized so
+       sum(products in market) == market total.
+    4. Existing product proportions inside each market are preserved.
+    5. Display rounding is corrected so displayed children also sum
+       exactly to the displayed market parent.
     6. Yearly calculations use raw normalized volumes.
+    7. Every product appears under every market -- at zero where it has
+       no data. See the note at the top of this module.
     """
 
     n = len(total_vals)
@@ -1978,48 +1999,18 @@ def build_market_product(
         # -----------------------------------------------------
 
         mkt_d = fetch_forecast_scenario(
-            cur,
-            ta,
-            mkt,
-            None,
-            "ALL",
-            "market_share",
-            scenario,
+            cur, ta, mkt, None, "ALL", "market_share", scenario,
         )
 
         if mkt_d:
-
-            market_series = build_series(
-                mkt_d,
-                start,
-                end,
-            )
-
-            min_len = min(
-                n,
-                len(
-                    market_series[
-                        "values"
-                    ]
-                ),
-            )
-
+            market_series = build_series(mkt_d, start, end)
+            min_len = min(n, len(market_series["values"]))
             mkt_vol = build_volume_from_share(
                 total_vals[:min_len],
-                market_series[
-                    "values"
-                ][:min_len],
+                market_series["values"][:min_len],
             )
-
-            mkt_vol = (
-                mkt_vol
-                + [0.0] * (
-                    n - len(mkt_vol)
-                )
-            )[:n]
-
+            mkt_vol = (mkt_vol + [0.0] * (n - len(mkt_vol)))[:n]
         else:
-
             mkt_vol = [0.0] * n
 
         market_totals[mkt] = mkt_vol
@@ -2037,41 +2028,20 @@ def build_market_product(
             if mkt == "Retail":
 
                 product_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario,
+                    cur, ta, mkt, None, prod, "market_share", scenario,
                 )
 
                 if not product_d:
-                    continue
-
-                product_series = build_series(
-                    product_d,
-                    start,
-                    end,
-                )
-
-                min_len = min(
-                    n,
-                    len(
-                        product_series[
-                            "values"
-                        ]
-                    ),
-                )
-
-                volume = build_volume_from_share(
-                    market_totals[
-                        mkt
-                    ][:min_len],
-                    product_series[
-                        "values"
-                    ][:min_len],
-                )
+                    # Shown at zero rather than dropped, so this market's
+                    # product list matches every other market's.
+                    volume = [0.0] * n
+                else:
+                    product_series = build_series(product_d, start, end)
+                    min_len = min(n, len(product_series["values"]))
+                    volume = build_volume_from_share(
+                        market_totals[mkt][:min_len],
+                        product_series["values"][:min_len],
+                    )
 
             # =================================================
             # Non-retail / source hierarchy
@@ -2079,261 +2049,112 @@ def build_market_product(
 
             else:
 
-                total_product_volume = [
-                    0.0
-                ] * n
+                total_product_volume = [0.0] * n
 
-                sources = get_sources(
-                    cur,
-                    ta,
-                    mkt,
-                )
+                sources = get_sources(cur, ta, mkt)
 
                 for src in sources:
 
-                    source_d = (
-                        fetch_forecast_scenario_with_fallback(
-                            cur,
-                            ta,
-                            mkt,
-                            src,
-                            "ALL",
-                            "market_share",
-                            scenario,
-                        )
+                    source_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario,
                     )
 
                     if not source_d:
                         continue
 
-                    source_series = build_series(
-                        source_d,
-                        start,
-                        end,
-                    )
+                    source_series = build_series(source_d, start, end)
 
-                    product_d = (
-                        fetch_forecast_scenario_with_fallback(
-                            cur,
-                            ta,
-                            mkt,
-                            src,
-                            prod,
-                            "market_share",
-                            scenario,
-                        )
+                    product_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario,
                     )
 
                     if not product_d:
                         continue
 
-                    product_series = build_series(
-                        product_d,
-                        start,
-                        end,
-                    )
+                    product_series = build_series(product_d, start, end)
 
                     min_len = min(
-                        len(
-                            market_totals[
-                                mkt
-                            ]
-                        ),
-                        len(
-                            source_series[
-                                "values"
-                            ]
-                        ),
-                        len(
-                            product_series[
-                                "values"
-                            ]
-                        ),
+                        len(market_totals[mkt]),
+                        len(source_series["values"]),
+                        len(product_series["values"]),
                     )
 
-                    source_volume = (
-                        build_volume_from_share(
-                            market_totals[
-                                mkt
-                            ][:min_len],
-                            source_series[
-                                "values"
-                            ][:min_len],
-                        )
+                    source_volume = build_volume_from_share(
+                        market_totals[mkt][:min_len],
+                        source_series["values"][:min_len],
                     )
 
-                    product_volume = (
-                        build_volume_from_share(
-                            source_volume,
-                            product_series[
-                                "values"
-                            ][:min_len],
-                        )
+                    product_volume = build_volume_from_share(
+                        source_volume,
+                        product_series["values"][:min_len],
                     )
 
                     for i in range(min_len):
+                        total_product_volume[i] += product_volume[i]
 
-                        total_product_volume[
-                            i
-                        ] += (
-                            product_volume[
-                                i
-                            ]
-                        )
+                volume = total_product_volume
 
-                volume = (
-                    total_product_volume
-                )
+            volume = (volume + [0.0] * (n - len(volume)))[:n]
 
-            volume = (
-                volume
-                + [0.0] * (
-                    n - len(volume)
-                )
-            )[:n]
+            mp_vol[mkt][prod] = volume
 
-            mp_vol[
-                mkt
-            ][
-                prod
-            ] = volume
+            # print("MP_VOL", scenario, mkt, "->", sorted(mp_vol[mkt].keys()))
 
     # =========================================================
     # 2. Normalize MARKET totals to Overall
-    #
-    # Guarantees:
-    #
-    #     Retail + Non-retail = Overall
     # =========================================================
 
     for t in range(n):
 
-        overall_volume = float(
-            total_vals[t] or 0
-        )
+        overall_volume = float(total_vals[t] or 0)
 
         current_market_sum = sum(
-            float(
-                market_totals[
-                    mkt
-                ][t]
-                or 0
-            )
-            for mkt in markets
+            float(market_totals[mkt][t] or 0) for mkt in markets
         )
 
-        if (
-            overall_volume == 0
-            and current_market_sum == 0
-        ):
+        if overall_volume == 0 and current_market_sum == 0:
             continue
 
         if current_market_sum <= 0:
-            raise ValueError(
-                "Cannot normalize market totals. "
-                f"Month={t}, "
-                f"Overall={overall_volume}, "
-                f"MarketTotal={current_market_sum}."
-            )
+            # Reported, not raised: one unpopulated month shouldn't take
+            # down the whole response. The month stays at zero and the
+            # rest of the series is still usable.
+            # print(
+            #     f"  WARNING build_market_product: no market volume at "
+            #     f"month {t} (Overall={overall_volume}) -- leaving zeros"
+            # )
+            continue
 
-        scale_factor = (
-            overall_volume
-            / current_market_sum
-        )
-
+        scale_factor = overall_volume / current_market_sum
         allocated = 0.0
 
-        for market_index, mkt in enumerate(
-            markets
-        ):
+        for market_index, mkt in enumerate(markets):
 
-            is_last = (
-                market_index
-                == len(markets) - 1
-            )
-
-            old_market_total = float(
-                market_totals[
-                    mkt
-                ][t]
-                or 0
-            )
+            is_last = market_index == len(markets) - 1
+            old_market_total = float(market_totals[mkt][t] or 0)
 
             if is_last:
-
-                new_market_total = round(
-                    overall_volume
-                    - allocated,
-                    10,
-                )
-
+                new_market_total = round(overall_volume - allocated, 10)
             else:
+                new_market_total = round(old_market_total * scale_factor, 10)
+                allocated += new_market_total
 
-                new_market_total = round(
-                    old_market_total
-                    * scale_factor,
-                    10,
-                )
-
-                allocated += (
-                    new_market_total
-                )
-
-            # -------------------------------------------------
-            # Scale existing Product values by same factor
-            # so Product mix inside market is preserved.
-            # -------------------------------------------------
-
+            # Scale product values by the same factor so the product mix
+            # inside the market is preserved.
             if old_market_total > 0:
-
-                child_scale = (
-                    new_market_total
-                    / old_market_total
-                )
+                child_scale = new_market_total / old_market_total
 
                 for prod in products:
-
-                    if (
-                        prod
-                        not in mp_vol[
-                            mkt
-                        ]
-                    ):
+                    if prod not in mp_vol[mkt]:
                         continue
-
-                    mp_vol[
-                        mkt
-                    ][
-                        prod
-                    ][
-                        t
-                    ] = round(
-                        float(
-                            mp_vol[
-                                mkt
-                            ][
-                                prod
-                            ][
-                                t
-                            ]
-                            or 0
-                        )
-                        * child_scale,
-                        10,
+                    mp_vol[mkt][prod][t] = round(
+                        float(mp_vol[mkt][prod][t] or 0) * child_scale, 10,
                     )
 
-            market_totals[
-                mkt
-            ][
-                t
-            ] = new_market_total
+            market_totals[mkt][t] = new_market_total
 
     # =========================================================
     # 3. Normalize Products inside each Market
-    #
-    # Guarantees:
-    #
-    # Biktarvy + Truvada + Descovy = Market
     # =========================================================
 
     normalized_mp_vol = {}
@@ -2342,193 +2163,80 @@ def build_market_product(
     for mkt in markets:
 
         product_labels = [
-            prod
-            for prod in products
-            if prod in mp_vol.get(
-                mkt,
-                {},
-            )
+            prod for prod in products if prod in mp_vol.get(mkt, {})
         ]
 
-        raw_product_volumes = [
-            mp_vol[
-                mkt
-            ][
-                prod
-            ]
-            for prod in product_labels
-        ]
+        
+
+        raw_product_volumes = [mp_vol[mkt][prod] for prod in product_labels]
 
         norm_shares = (
-            normalize_shares_to_100(
-                raw_product_volumes,
-                n,
-            )
+            normalize_shares_to_100(raw_product_volumes, n)
             if raw_product_volumes
             else []
         )
 
-        normalized_mp_vol[
-            mkt
-        ] = {}
+        # print("LABELS-3", scenario, mkt, "->", product_labels,
+        #               "norm_shares:", len(norm_shares))
 
-        market_product_shares[
-            mkt
-        ] = {}
+        normalized_mp_vol[mkt] = {}
+        market_product_shares[mkt] = {}
 
-        for index, prod in enumerate(
-            product_labels
-        ):
+        for index, prod in enumerate(product_labels):
+            market_product_shares[mkt][prod] = norm_shares[index]
+            normalized_mp_vol[mkt][prod] = [0.0] * n
 
-            market_product_shares[
-                mkt
-            ][
-                prod
-            ] = norm_shares[
-                index
-            ]
-
-            normalized_mp_vol[
-                mkt
-            ][
-                prod
-            ] = [0.0] * n
-
-        # -----------------------------------------------------
         # Rebuild child volumes from normalized shares
-        # -----------------------------------------------------
-
         for t in range(n):
 
-            market_volume = float(
-                market_totals[
-                    mkt
-                ][
-                    t
-                ]
-                or 0
-            )
-
+            market_volume = float(market_totals[mkt][t] or 0)
             allocated = 0.0
 
-            for product_index, prod in enumerate(
-                product_labels
-            ):
+            for product_index, prod in enumerate(product_labels):
 
-                is_last = (
-                    product_index
-                    == len(
-                        product_labels
-                    ) - 1
-                )
+                is_last = product_index == len(product_labels) - 1
 
                 if is_last:
-
-                    product_volume = round(
-                        market_volume
-                        - allocated,
-                        10,
-                    )
-
+                    product_volume = round(market_volume - allocated, 10)
                 else:
-
-                    product_share = float(
-                        norm_shares[
-                            product_index
-                        ][
-                            t
-                        ]
-                        or 0
-                    )
-
+                    product_share = float(norm_shares[product_index][t] or 0)
                     product_volume = round(
-                        market_volume
-                        * product_share
-                        / 100.0,
-                        10,
+                        market_volume * product_share / 100.0, 10,
                     )
+                    allocated += product_volume
 
-                    allocated += (
-                        product_volume
-                    )
-
-                normalized_mp_vol[
-                    mkt
-                ][
-                    prod
-                ][
-                    t
-                ] = product_volume
+                normalized_mp_vol[mkt][prod][t] = product_volume
 
     # Canonical map from this point.
     mp_vol = normalized_mp_vol
 
     # =========================================================
     # 4. Exact DISPLAY market totals
-    #
-    # Retail + Non-retail display = Overall display
     # =========================================================
 
-    overall_display = round_volume(
-        total_vals
-    )
+    overall_display = round_volume(total_vals)
 
-    market_display_totals = {
-        mkt: [0] * n
-        for mkt in markets
-    }
+    market_display_totals = {mkt: [0] * n for mkt in markets}
 
     for t in range(n):
 
-        target_overall = int(
-            overall_display[t]
-        )
-
+        target_overall = int(overall_display[t])
         allocated = 0
 
-        for market_index, mkt in enumerate(
-            markets
-        ):
+        for market_index, mkt in enumerate(markets):
 
-            is_last = (
-                market_index
-                == len(markets) - 1
-            )
+            is_last = market_index == len(markets) - 1
 
             if is_last:
-
-                display_market = (
-                    target_overall
-                    - allocated
-                )
-
+                display_market = target_overall - allocated
             else:
+                display_market = round(float(market_totals[mkt][t] or 0))
+                allocated += display_market
 
-                display_market = round(
-                    float(
-                        market_totals[
-                            mkt
-                        ][
-                            t
-                        ]
-                        or 0
-                    )
-                )
-
-                allocated += (
-                    display_market
-                )
-
-            market_display_totals[
-                mkt
-            ][
-                t
-            ] = display_market
+            market_display_totals[mkt][t] = display_market
 
     # =========================================================
     # 5. Exact DISPLAY Product children
-    #
-    # Products display = Market display
     # =========================================================
 
     display_mp_vol = {}
@@ -2536,77 +2244,27 @@ def build_market_product(
     for mkt in markets:
 
         product_labels = [
-            prod
-            for prod in products
-            if prod in mp_vol.get(
-                mkt,
-                {},
-            )
+            prod for prod in products if prod in mp_vol.get(mkt, {})
         ]
 
-        display_mp_vol[
-            mkt
-        ] = {
-            prod: [0] * n
-            for prod in product_labels
-        }
+        display_mp_vol[mkt] = {prod: [0] * n for prod in product_labels}
 
         for t in range(n):
 
-            target_market = (
-                market_display_totals[
-                    mkt
-                ][
-                    t
-                ]
-            )
-
+            target_market = market_display_totals[mkt][t]
             allocated = 0
 
-            for product_index, prod in enumerate(
-                product_labels
-            ):
+            for product_index, prod in enumerate(product_labels):
 
-                is_last = (
-                    product_index
-                    == len(
-                        product_labels
-                    ) - 1
-                )
+                is_last = product_index == len(product_labels) - 1
 
                 if is_last:
-
-                    display_product = (
-                        target_market
-                        - allocated
-                    )
-
+                    display_product = target_market - allocated
                 else:
+                    display_product = round(float(mp_vol[mkt][prod][t] or 0))
+                    allocated += display_product
 
-                    display_product = round(
-                        float(
-                            mp_vol[
-                                mkt
-                            ][
-                                prod
-                            ][
-                                t
-                            ]
-                            or 0
-                        )
-                    )
-
-                    allocated += (
-                        display_product
-                    )
-
-                display_mp_vol[
-                    mkt
-                ][
-                    prod
-                ][
-                    t
-                ] = display_product
+                display_mp_vol[mkt][prod][t] = display_product
 
     # =========================================================
     # 6. CHART: selected Market / Product
@@ -2621,131 +2279,65 @@ def build_market_product(
     if selected_market in mp_vol:
 
         mkt = selected_market
-
-        mkt_vol = (
-            market_totals[
-                mkt
-            ]
-        )
+        mkt_vol = market_totals[mkt]
 
         for prod in products:
 
-            if (
-                prod
-                not in mp_vol[
-                    mkt
-                ]
-            ):
+            if prod not in mp_vol[mkt]:
                 continue
 
-            if (
-                selected_product
-                and prod != selected_product
-            ):
+            if selected_product and prod != selected_product:
                 continue
 
-            raw_volume = (
-                mp_vol[
-                    mkt
-                ][
-                    prod
-                ]
+            raw_volume = mp_vol[mkt][prod]
+            display_volume = display_mp_vol[mkt][prod]
+
+            history_volume, forecast_volume = split_series(
+                display_volume, split_idx,
             )
 
-            display_volume = (
-                display_mp_vol[
-                    mkt
-                ][
-                    prod
-                ]
+            vol_chart_series.append({
+                "label": f"{mkt} - {prod}",
+                "market": mkt,
+                "product": prod,
+                "history": history_volume,
+                "forecast": forecast_volume,
+            })
+
+            mv_series_data.append({
+                "label": f"{mkt} - {prod}",
+                "market": mkt,
+                "product": prod,
+                "monthly_values": raw_volume,
+            })
+
+            product_share = market_product_shares[mkt].get(prod, [0.0] * n)
+
+            history_share, forecast_share = split_series(
+                product_share, split_idx,
             )
 
-            (
-                history_volume,
-                forecast_volume,
-            ) = split_series(
-                display_volume,
-                split_idx,
-            )
+            share_chart_series.append({
+                "label": f"{mkt} - {prod}",
+                "market": mkt,
+                "product": prod,
+                "history": history_share,
+                "forecast": forecast_share,
+            })
 
-            vol_chart_series.append(
-                {
-                    "label":
-                        f"{mkt} - {prod}",
-                    "market":
-                        mkt,
-                    "product":
-                        prod,
-                    "history":
-                        history_volume,
-                    "forecast":
-                        forecast_volume,
-                }
-            )
-
-            mv_series_data.append(
-                {
-                    "label":
-                        f"{mkt} - {prod}",
-                    "market":
-                        mkt,
-                    "product":
-                        prod,
-                    "monthly_values":
-                        raw_volume,
-                }
-            )
-
-            product_share = (
-                market_product_shares[
-                    mkt
-                ].get(
-                    prod,
-                    [0.0] * n,
-                )
-            )
-
-            (
-                history_share,
-                forecast_share,
-            ) = split_series(
-                product_share,
-                split_idx,
-            )
-
-            share_chart_series.append(
-                {
-                    "label":
-                        f"{mkt} - {prod}",
-                    "market":
-                        mkt,
-                    "product":
-                        prod,
-                    "history":
-                        history_share,
-                    "forecast":
-                        forecast_share,
-                }
-            )
-
-            ms_series_data.append(
-                {
-                    "label":
-                        f"{mkt} - {prod}",
-                    "market":
-                        mkt,
-                    "product":
-                        prod,
-                    "child_vols":
-                        raw_volume,
-                    "parent_vols":
-                        mkt_vol,
-                }
-            )
+            ms_series_data.append({
+                "label": f"{mkt} - {prod}",
+                "market": mkt,
+                "product": prod,
+                "child_vols": raw_volume,
+                "parent_vols": mkt_vol,
+            })
 
     # =========================================================
     # 7. TABLE: full hierarchy
     # =========================================================
+
+    
 
     vol_table_rows = []
     share_table_rows = []
@@ -2755,209 +2347,87 @@ def build_market_product(
 
     for mkt in markets:
 
-        mkt_vol = (
-            market_totals[
-                mkt
-            ]
-        )
+        # print("LABELS-7", scenario, mkt, "->", product_labels)
+
+        mkt_vol = market_totals[mkt]
 
         product_labels = [
-            prod
-            for prod in products
-            if prod in mp_vol.get(
-                mkt,
-                {},
-            )
+            prod for prod in products if prod in mp_vol.get(mkt, {})
         ]
 
-        # -----------------------------------------------------
-        # Monthly display
-        # -----------------------------------------------------
-
         vol_children = [
-            {
-                "label": prod,
-                "values": (
-                    display_mp_vol[
-                        mkt
-                    ][
-                        prod
-                    ]
-                ),
-            }
+            {"label": prod, "values": display_mp_vol[mkt][prod]}
             for prod in product_labels
         ]
 
         share_children = [
-            {
-                "label": prod,
-                "values": (
-                    market_product_shares[
-                        mkt
-                    ][
-                        prod
-                    ]
-                ),
-            }
+            {"label": prod, "values": market_product_shares[mkt][prod]}
             for prod in product_labels
         ]
 
-        vol_table_rows.append(
-            {
-                "label":
-                    mkt,
+        vol_table_rows.append({
+            "label": mkt,
+            "values": market_display_totals[mkt],
+            "children": vol_children,
+        })
 
-                "values":
-                    market_display_totals[
-                        mkt
-                    ],
+        share_table_rows.append({
+            "label": mkt,
+            "values": [100.0] * n,
+            "children": share_children,
+        })
 
-                "children":
-                    vol_children,
-            }
-        )
+        mv_table_rows.append({
+            "label": mkt,
+            "monthly_values": mkt_vol,
+            "children": [
+                {"label": prod, "monthly_values": mp_vol[mkt][prod]}
+                for prod in product_labels
+            ],
+        })
 
-        share_table_rows.append(
-            {
-                "label":
-                    mkt,
-
-                "values":
-                    [100.0] * n,
-
-                "children":
-                    share_children,
-            }
-        )
-
-        # -----------------------------------------------------
-        # Yearly/raw volume
-        # -----------------------------------------------------
-
-        mv_table_rows.append(
-            {
-                "label":
-                    mkt,
-
-                "monthly_values":
-                    mkt_vol,
-
-                "children": [
-                    {
-                        "label":
-                            prod,
-
-                        "monthly_values":
-                            mp_vol[
-                                mkt
-                            ][
-                                prod
-                            ],
-                    }
-                    for prod in product_labels
-                ],
-            }
-        )
-
-        # -----------------------------------------------------
-        # Yearly/raw share
-        # -----------------------------------------------------
-
-        ms_table_rows.append(
-            {
-                "label":
-                    mkt,
-
-                "fixed_values":
-                    [100.0]
-                    * len(
-                        all_years
-                    ),
-
-                "children": [
-                    {
-                        "label":
-                            prod,
-
-                        "child_vols":
-                            mp_vol[
-                                mkt
-                            ][
-                                prod
-                            ],
-
-                        "parent_vols":
-                            mkt_vol,
-                    }
-                    for prod in product_labels
-                ],
-            }
-        )
+        ms_table_rows.append({
+            "label": mkt,
+            "fixed_values": [100.0] * len(all_years),
+            "children": [
+                {
+                    "label": prod,
+                    "child_vols": mp_vol[mkt][prod],
+                    "parent_vols": mkt_vol,
+                }
+                for prod in product_labels
+            ],
+        })
 
     # =========================================================
     # 8. Final wrappers
     # =========================================================
 
     mv_chart = {
-        "months":
-            months,
-
-        "forecast_start_index":
-            split_idx,
-
-        "series":
-            vol_chart_series,
+        "months": months,
+        "forecast_start_index": split_idx,
+        "series": vol_chart_series,
     }
 
-    mv_table = {
-        "type":
-            "hierarchy",
-
-        "rows":
-            vol_table_rows,
-    }
+    mv_table = {"type": "hierarchy", "rows": vol_table_rows}
 
     ms_chart = {
-        "months":
-            months,
-
-        "forecast_start_index":
-            split_idx,
-
-        "series":
-            share_chart_series,
+        "months": months,
+        "forecast_start_index": split_idx,
+        "series": share_chart_series,
     }
 
-    ms_table = {
-        "type":
-            "hierarchy",
-
-        "rows":
-            share_table_rows,
-    }
+    ms_table = {"type": "hierarchy", "rows": share_table_rows}
 
     # =========================================================
     # 9. Selected
     # =========================================================
 
     selected_volume = (
-        mp_vol
-        .get(
-            selected_market,
-            {},
-        )
-        .get(
-            selected_product,
-            [0.0] * n,
-        )
+        mp_vol.get(selected_market, {}).get(selected_product, [0.0] * n)
     )
 
-    selected_parent_volume = (
-        market_totals.get(
-            selected_market,
-            total_vals,
-        )
-    )
+    selected_parent_volume = market_totals.get(selected_market, total_vals)
 
     # =========================================================
     # 10. Response
@@ -2965,47 +2435,24 @@ def build_market_product(
 
     return {
         "market_volume": {
-            "unit":
-                "count",
-
+            "unit": "count",
             **wrap_monthly_yearly_volume(
-                mv_chart,
-                mv_table,
-                months,
-                split_idx,
-                mv_series_data,
-                mv_table_rows,
-                "hierarchy",
+                mv_chart, mv_table, months, split_idx,
+                mv_series_data, mv_table_rows, "hierarchy",
             ),
         },
-
         "market_share": {
-            "unit":
-                "%",
-
+            "unit": "%",
             **wrap_monthly_yearly_share(
-                ms_chart,
-                ms_table,
-                months,
-                split_idx,
-                ms_series_data,
-                ms_table_rows,
-                "hierarchy",
+                ms_chart, ms_table, months, split_idx,
+                ms_series_data, ms_table_rows, "hierarchy",
             ),
         },
-
         "_selected": {
-            "months":
-                months,
-
-            "split_idx":
-                split_idx,
-
-            "volume":
-                selected_volume,
-
-            "parent_volume":
-                selected_parent_volume,
+            "months": months,
+            "split_idx": split_idx,
+            "volume": selected_volume,
+            "parent_volume": selected_parent_volume,
         },
     }
 
@@ -3036,30 +2483,19 @@ def build_product_market(
         Descovy
             Retail
             Non-retail
-        Truvada
-            Retail
-            Non-retail
 
     Rules
     -----
     1. Overall volume is authoritative.
-
-    2. Product totals are normalized so that:
-
-           sum(products) == Overall
-
-       for every month.
-
+    2. Product totals are normalized so sum(products) == Overall.
     3. Existing Product -> Market proportions are preserved.
-
-    4. Market children are normalized so that:
-
-           sum(markets within product) == product total
-
-    5. Display rounding is corrected so displayed children
-       also sum exactly to the displayed parent.
-
+    4. Market children are normalized so
+       sum(markets within product) == product total.
+    5. Display rounding is corrected so displayed children also sum
+       exactly to the displayed parent.
     6. Yearly calculations use raw normalized volumes.
+    7. Every product gets a child for every market that exists, at zero
+       where the product has no row there.
     """
 
     n = len(total_vals)
@@ -3075,7 +2511,6 @@ def build_product_market(
     for prod in products:
 
         pm_vol[prod] = {}
-
         prod_total = [0.0] * n
 
         for mkt in markets:
@@ -3086,59 +2521,41 @@ def build_product_market(
 
             if mkt == "Retail":
 
-                product_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    prod,
-                    "market_share",
-                    scenario,
-                )
-
-                if not product_d:
-                    continue
-
-                product_series = build_series(
-                    product_d,
-                    start,
-                    end,
-                )
-
                 market_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    "ALL",
-                    "market_share",
-                    scenario,
+                    cur, ta, mkt, None, "ALL", "market_share", scenario,
                 )
 
                 if not market_d:
+                    # The MARKET itself is absent -- skipping is right
+                    # here, unlike a missing product row below.
                     continue
 
-                market_series = build_series(
-                    market_d,
-                    start,
-                    end,
+                market_series = build_series(market_d, start, end)
+
+                product_d = fetch_forecast_scenario(
+                    cur, ta, mkt, None, prod, "market_share", scenario,
                 )
 
-                min_len = min(
-                    len(total_vals),
-                    len(market_series["values"]),
-                    len(product_series["values"]),
-                )
+                if not product_d:
+                    volume = [0.0] * n
+                else:
+                    product_series = build_series(product_d, start, end)
 
-                market_volume = build_volume_from_share(
-                    total_vals[:min_len],
-                    market_series["values"][:min_len],
-                )
+                    min_len = min(
+                        len(total_vals),
+                        len(market_series["values"]),
+                        len(product_series["values"]),
+                    )
 
-                volume = build_volume_from_share(
-                    market_volume,
-                    product_series["values"][:min_len],
-                )
+                    market_volume = build_volume_from_share(
+                        total_vals[:min_len],
+                        market_series["values"][:min_len],
+                    )
+
+                    volume = build_volume_from_share(
+                        market_volume,
+                        product_series["values"][:min_len],
+                    )
 
             # =================================================
             # Non-retail / source hierarchy
@@ -3149,27 +2566,16 @@ def build_product_market(
                 total_product_volume = [0.0] * n
 
                 market_d = fetch_forecast_scenario(
-                    cur,
-                    ta,
-                    mkt,
-                    None,
-                    "ALL",
-                    "market_share",
-                    scenario,
+                    cur, ta, mkt, None, "ALL", "market_share", scenario,
                 )
 
                 if not market_d:
                     continue
 
-                market_series = build_series(
-                    market_d,
-                    start,
-                    end,
-                )
+                market_series = build_series(market_d, start, end)
 
                 min_len_market = min(
-                    len(total_vals),
-                    len(market_series["values"]),
+                    len(total_vals), len(market_series["values"]),
                 )
 
                 market_volume = build_volume_from_share(
@@ -3177,55 +2583,27 @@ def build_product_market(
                     market_series["values"][:min_len_market],
                 )
 
-                sources = get_sources(
-                    cur,
-                    ta,
-                    mkt,
-                )
+                sources = get_sources(cur, ta, mkt)
 
                 for src in sources:
 
-                    source_d = (
-                        fetch_forecast_scenario_with_fallback(
-                            cur,
-                            ta,
-                            mkt,
-                            src,
-                            "ALL",
-                            "market_share",
-                            scenario,
-                        )
+                    source_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, "ALL", "market_share", scenario,
                     )
 
                     if not source_d:
                         continue
 
-                    source_series = build_series(
-                        source_d,
-                        start,
-                        end,
-                    )
+                    source_series = build_series(source_d, start, end)
 
-                    product_d = (
-                        fetch_forecast_scenario_with_fallback(
-                            cur,
-                            ta,
-                            mkt,
-                            src,
-                            prod,
-                            "market_share",
-                            scenario,
-                        )
+                    product_d = fetch_forecast_scenario_with_fallback(
+                        cur, ta, mkt, src, prod, "market_share", scenario,
                     )
 
                     if not product_d:
                         continue
 
-                    product_series = build_series(
-                        product_d,
-                        start,
-                        end,
-                    )
+                    product_series = build_series(product_d, start, end)
 
                     min_len = min(
                         len(market_volume),
@@ -3244,17 +2622,11 @@ def build_product_market(
                     )
 
                     for i in range(min_len):
-                        total_product_volume[i] += (
-                            product_volume[i]
-                        )
+                        total_product_volume[i] += product_volume[i]
 
                 volume = total_product_volume
 
-            # Ensure full month length
-            volume = (
-                volume
-                + [0.0] * (n - len(volume))
-            )[:n]
+            volume = (volume + [0.0] * (n - len(volume)))[:n]
 
             pm_vol[prod][mkt] = volume
 
@@ -3264,222 +2636,97 @@ def build_product_market(
         product_totals[prod] = prod_total
 
     # =========================================================
-    # 2. NORMALIZE PRODUCT TOTALS TO OVERALL
-    #
-    # This is the missing level.
-    #
-    # Guarantees:
-    #
-    #     Biktarvy
-    #   + Descovy
-    #   + Truvada
-    #   = Overall
-    #
-    # Existing Retail / Non-retail ratio for each Product
-    # is preserved.
+    # 2. Normalize PRODUCT totals to Overall
     # =========================================================
 
     for month_index in range(n):
 
-        overall_volume = float(
-            total_vals[month_index] or 0
-        )
+        overall_volume = float(total_vals[month_index] or 0)
 
         current_product_sum = sum(
-            float(
-                product_totals[
-                    prod
-                ][
-                    month_index
-                ]
-                or 0
-            )
+            float(product_totals[prod][month_index] or 0)
             for prod in products
         )
 
-        # ---------------------------------------------
-        # Everything zero
-        # ---------------------------------------------
-
-        if (
-            overall_volume == 0
-            and current_product_sum == 0
-        ):
+        if overall_volume == 0 and current_product_sum == 0:
             continue
 
         if current_product_sum <= 0:
-            raise ValueError(
-                "Cannot normalize Product totals. "
-                f"Month={month_index}, "
-                f"Overall={overall_volume}, "
-                f"ProductTotal={current_product_sum}."
-            )
+            # print(
+            #     f"  WARNING build_product_market: no product volume at "
+            #     f"month {month_index} (Overall={overall_volume}) -- "
+            #     "leaving zeros"
+            # )
+            continue
 
-        # ---------------------------------------------
-        # Scale Product parents to Overall
-        # ---------------------------------------------
-
-        product_scale = (
-            overall_volume
-            / current_product_sum
-        )
+        product_scale = overall_volume / current_product_sum
 
         new_product_totals = {}
-
         allocated_product_total = 0.0
 
-        for product_index, prod in enumerate(
-            products
-        ):
+        for product_index, prod in enumerate(products):
 
-            is_last_product = (
-                product_index
-                == len(products) - 1
-            )
-
-            old_product_total = float(
-                product_totals[
-                    prod
-                ][
-                    month_index
-                ]
-                or 0
-            )
+            is_last_product = product_index == len(products) - 1
+            old_product_total = float(product_totals[prod][month_index] or 0)
 
             if is_last_product:
-
                 new_product_total = round(
-                    overall_volume
-                    - allocated_product_total,
-                    10,
+                    overall_volume - allocated_product_total, 10,
                 )
-
             else:
-
                 new_product_total = round(
-                    old_product_total
-                    * product_scale,
-                    10,
+                    old_product_total * product_scale, 10,
                 )
+                allocated_product_total += new_product_total
 
-                allocated_product_total += (
-                    new_product_total
-                )
+            new_product_totals[prod] = new_product_total
 
-            new_product_totals[
-                prod
-            ] = new_product_total
-
-        # ---------------------------------------------
-        # Scale markets under each Product using the
-        # same Product-specific factor.
-        #
-        # This preserves:
-        #
-        # Retail : Non-retail
-        # ---------------------------------------------
-
+        # Scale markets under each product by that product's own factor,
+        # preserving its Retail : Non-retail ratio.
         for prod in products:
 
-            old_product_total = float(
-                product_totals[
-                    prod
-                ][
-                    month_index
-                ]
-                or 0
-            )
-
-            new_product_total = (
-                new_product_totals[
-                    prod
-                ]
-            )
+            old_product_total = float(product_totals[prod][month_index] or 0)
+            new_product_total = new_product_totals[prod]
 
             market_labels = [
-                mkt
-                for mkt in markets
-                if mkt in pm_vol.get(
-                    prod,
-                    {},
-                )
+                mkt for mkt in markets if mkt in pm_vol.get(prod, {})
             ]
 
             if not market_labels:
-                product_totals[
-                    prod
-                ][
-                    month_index
-                ] = new_product_total
-
+                product_totals[prod][month_index] = new_product_total
                 continue
 
             if old_product_total > 0:
-
-                product_market_scale = (
-                    new_product_total
-                    / old_product_total
-                )
-
+                product_market_scale = new_product_total / old_product_total
             else:
-
+                # No baseline split to preserve -- a product with no volume
+                # this month. Its markets stay at zero rather than being
+                # handed an arbitrary share.
                 product_market_scale = 0.0
 
             allocated_market_total = 0.0
 
-            for market_index, mkt in enumerate(
-                market_labels
-            ):
+            for market_index, mkt in enumerate(market_labels):
 
-                is_last_market = (
-                    market_index
-                    == len(market_labels) - 1
-                )
+                is_last_market = market_index == len(market_labels) - 1
 
                 old_market_volume = float(
-                    pm_vol[
-                        prod
-                    ][
-                        mkt
-                    ][
-                        month_index
-                    ]
-                    or 0
+                    pm_vol[prod][mkt][month_index] or 0
                 )
 
                 if is_last_market:
-
                     new_market_volume = round(
-                        new_product_total
-                        - allocated_market_total,
-                        10,
+                        new_product_total - allocated_market_total, 10,
                     )
-
                 else:
-
                     new_market_volume = round(
-                        old_market_volume
-                        * product_market_scale,
-                        10,
+                        old_market_volume * product_market_scale, 10,
                     )
+                    allocated_market_total += new_market_volume
 
-                    allocated_market_total += (
-                        new_market_volume
-                    )
+                pm_vol[prod][mkt][month_index] = new_market_volume
 
-                pm_vol[
-                    prod
-                ][
-                    mkt
-                ][
-                    month_index
-                ] = new_market_volume
-
-            product_totals[
-                prod
-            ][
-                month_index
-            ] = new_product_total
+            product_totals[prod][month_index] = new_product_total
 
     # =========================================================
     # 3. Normalize Market distribution inside each Product
@@ -3490,281 +2737,106 @@ def build_product_market(
 
     for prod in products:
 
-        labels = [
-            mkt
-            for mkt in markets
-            if mkt in pm_vol.get(
-                prod,
-                {},
-            )
-        ]
+        labels = [mkt for mkt in markets if mkt in pm_vol.get(prod, {})]
 
-        raw_market_volumes = [
-            pm_vol[
-                prod
-            ][
-                mkt
-            ]
-            for mkt in labels
-        ]
+        raw_market_volumes = [pm_vol[prod][mkt] for mkt in labels]
 
-        prod_total = (
-            product_totals[
-                prod
-            ]
-        )
+        prod_total = product_totals[prod]
 
         norm_shares = (
-            normalize_shares_to_100(
-                raw_market_volumes,
-                n,
-            )
+            normalize_shares_to_100(raw_market_volumes, n)
             if raw_market_volumes
             else []
         )
 
-        product_market_shares[
-            prod
-        ] = {
-            labels[i]: norm_shares[i]
-            for i in range(
-                len(labels)
-            )
+        product_market_shares[prod] = {
+            labels[i]: norm_shares[i] for i in range(len(labels))
         }
 
-        normalized_pm_vol[
-            prod
-        ] = {}
+        normalized_pm_vol[prod] = {}
 
-        normalized_market_values = [
-            [0.0] * n
-            for _ in labels
-        ]
+        normalized_market_values = [[0.0] * n for _ in labels]
 
         for t in range(n):
 
-            parent_volume = float(
-                prod_total[t] or 0
-            )
-
+            parent_volume = float(prod_total[t] or 0)
             allocated_raw = 0.0
 
-            for child_index in range(
-                len(labels)
-            ):
+            for child_index in range(len(labels)):
 
-                is_last = (
-                    child_index
-                    == len(labels) - 1
-                )
+                is_last = child_index == len(labels) - 1
 
                 if is_last:
-
-                    child_volume = round(
-                        parent_volume
-                        - allocated_raw,
-                        10,
-                    )
-
+                    child_volume = round(parent_volume - allocated_raw, 10)
                 else:
-
-                    share_value = float(
-                        norm_shares[
-                            child_index
-                        ][
-                            t
-                        ]
-                        or 0
-                    )
-
+                    share_value = float(norm_shares[child_index][t] or 0)
                     child_volume = round(
-                        parent_volume
-                        * share_value
-                        / 100.0,
-                        10,
+                        parent_volume * share_value / 100.0, 10,
                     )
+                    allocated_raw += child_volume
 
-                    allocated_raw += (
-                        child_volume
-                    )
+                normalized_market_values[child_index][t] = child_volume
 
-                normalized_market_values[
-                    child_index
-                ][
-                    t
-                ] = child_volume
+        for i, mkt in enumerate(labels):
+            normalized_pm_vol[prod][mkt] = normalized_market_values[i]
 
-        for i, mkt in enumerate(
-            labels
-        ):
-
-            normalized_pm_vol[
-                prod
-            ][
-                mkt
-            ] = (
-                normalized_market_values[
-                    i
-                ]
-            )
-
-    # Canonical Product -> Market volume map
     pm_vol = normalized_pm_vol
 
     # =========================================================
     # 4. Exact DISPLAY values
-    #
-    # Guarantees:
-    #
-    # Product parents displayed together == Overall display
-    #
-    # AND
-    #
-    # Retail + Non-retail display == Product display
     # =========================================================
 
-    product_display_totals = {
-        prod: [0] * n
-        for prod in products
-    }
+    product_display_totals = {prod: [0] * n for prod in products}
 
-    overall_display = round_volume(
-        total_vals
-    )
-
-    # ---------------------------------------------
-    # First reconcile displayed Product parents
-    # to displayed Overall
-    # ---------------------------------------------
+    overall_display = round_volume(total_vals)
 
     for t in range(n):
 
-        target_overall = int(
-            overall_display[t]
-        )
-
+        target_overall = int(overall_display[t])
         allocated_products = 0
 
-        for product_index, prod in enumerate(
-            products
-        ):
+        for product_index, prod in enumerate(products):
 
-            is_last_product = (
-                product_index
-                == len(products) - 1
-            )
+            is_last_product = product_index == len(products) - 1
 
             if is_last_product:
-
-                display_product_total = (
-                    target_overall
-                    - allocated_products
-                )
-
+                display_product_total = target_overall - allocated_products
             else:
-
                 display_product_total = round(
-                    float(
-                        product_totals[
-                            prod
-                        ][
-                            t
-                        ]
-                        or 0
-                    )
+                    float(product_totals[prod][t] or 0)
                 )
+                allocated_products += display_product_total
 
-                allocated_products += (
-                    display_product_total
-                )
-
-            product_display_totals[
-                prod
-            ][
-                t
-            ] = display_product_total
-
-    # ---------------------------------------------
-    # Then reconcile displayed Market children to
-    # displayed Product parent
-    # ---------------------------------------------
+            product_display_totals[prod][t] = display_product_total
 
     display_pm_vol = {}
 
     for prod in products:
 
-        labels = [
-            mkt
-            for mkt in markets
-            if mkt in pm_vol.get(
-                prod,
-                {},
-            )
-        ]
+        labels = [mkt for mkt in markets if mkt in pm_vol.get(prod, {})]
 
-        display_pm_vol[
-            prod
-        ] = {
-            mkt: [0] * n
-            for mkt in labels
-        }
+        display_pm_vol[prod] = {mkt: [0] * n for mkt in labels}
 
         for t in range(n):
 
-            target_product_total = (
-                product_display_totals[
-                    prod
-                ][
-                    t
-                ]
-            )
-
+            target_product_total = product_display_totals[prod][t]
             allocated_markets = 0
 
-            for market_index, mkt in enumerate(
-                labels
-            ):
+            for market_index, mkt in enumerate(labels):
 
-                is_last_market = (
-                    market_index
-                    == len(labels) - 1
-                )
+                is_last_market = market_index == len(labels) - 1
 
                 if is_last_market:
-
                     display_market_volume = (
-                        target_product_total
-                        - allocated_markets
+                        target_product_total - allocated_markets
                     )
-
                 else:
-
                     display_market_volume = round(
-                        float(
-                            pm_vol[
-                                prod
-                            ][
-                                mkt
-                            ][
-                                t
-                            ]
-                            or 0
-                        )
+                        float(pm_vol[prod][mkt][t] or 0)
                     )
+                    allocated_markets += display_market_volume
 
-                    allocated_markets += (
-                        display_market_volume
-                    )
-
-                display_pm_vol[
-                    prod
-                ][
-                    mkt
-                ][
-                    t
-                ] = (
-                    display_market_volume
-                )
+                display_pm_vol[prod][mkt][t] = display_market_volume
 
     # =========================================================
     # 5. CHART
@@ -3779,127 +2851,58 @@ def build_product_market(
     if selected_product in pm_vol:
 
         prod = selected_product
+        prod_total = product_totals[prod]
 
-        prod_total = (
-            product_totals[
-                prod
-            ]
-        )
-
-        labels = [
-            mkt
-            for mkt in markets
-            if mkt in pm_vol[
-                prod
-            ]
-        ]
+        labels = [mkt for mkt in markets if mkt in pm_vol[prod]]
 
         for mkt in labels:
 
-            if (
-                selected_market
-                and mkt != selected_market
-            ):
+            if selected_market and mkt != selected_market:
                 continue
 
-            raw_volume = (
-                pm_vol[
-                    prod
-                ][
-                    mkt
-                ]
+            raw_volume = pm_vol[prod][mkt]
+            display_volume = display_pm_vol[prod][mkt]
+
+            history_volume, forecast_volume = split_series(
+                display_volume, split_idx,
             )
 
-            display_volume = (
-                display_pm_vol[
-                    prod
-                ][
-                    mkt
-                ]
+            vol_chart_series.append({
+                "label": f"{prod} - {mkt}",
+                "product": prod,
+                "market": mkt,
+                "history": history_volume,
+                "forecast": forecast_volume,
+            })
+
+            mv_series_data.append({
+                "label": f"{prod} - {mkt}",
+                "product": prod,
+                "market": mkt,
+                "monthly_values": raw_volume,
+            })
+
+            market_share = product_market_shares[prod].get(mkt, [0.0] * n)
+
+            history_share, forecast_share = split_series(
+                market_share, split_idx,
             )
 
-            (
-                history_volume,
-                forecast_volume,
-            ) = split_series(
-                display_volume,
-                split_idx,
-            )
+            share_chart_series.append({
+                "label": f"{prod} - {mkt}",
+                "product": prod,
+                "market": mkt,
+                "history": history_share,
+                "forecast": forecast_share,
+            })
 
-            vol_chart_series.append(
-                {
-                    "label":
-                        f"{prod} - {mkt}",
-                    "product":
-                        prod,
-                    "market":
-                        mkt,
-                    "history":
-                        history_volume,
-                    "forecast":
-                        forecast_volume,
-                }
-            )
-
-            mv_series_data.append(
-                {
-                    "label":
-                        f"{prod} - {mkt}",
-                    "product":
-                        prod,
-                    "market":
-                        mkt,
-                    "monthly_values":
-                        raw_volume,
-                }
-            )
-
-            market_share = (
-                product_market_shares[
-                    prod
-                ].get(
-                    mkt,
-                    [0.0] * n,
-                )
-            )
-
-            (
-                history_share,
-                forecast_share,
-            ) = split_series(
-                market_share,
-                split_idx,
-            )
-
-            share_chart_series.append(
-                {
-                    "label":
-                        f"{prod} - {mkt}",
-                    "product":
-                        prod,
-                    "market":
-                        mkt,
-                    "history":
-                        history_share,
-                    "forecast":
-                        forecast_share,
-                }
-            )
-
-            ms_series_data.append(
-                {
-                    "label":
-                        f"{prod} - {mkt}",
-                    "product":
-                        prod,
-                    "market":
-                        mkt,
-                    "child_vols":
-                        raw_volume,
-                    "parent_vols":
-                        prod_total,
-                }
-            )
+            ms_series_data.append({
+                "label": f"{prod} - {mkt}",
+                "product": prod,
+                "market": mkt,
+                "child_vols": raw_volume,
+                "parent_vols": prod_total,
+            })
 
     # =========================================================
     # 6. TABLE
@@ -3913,189 +2916,85 @@ def build_product_market(
 
     for prod in products:
 
-        prod_total = (
-            product_totals[
-                prod
-            ]
-        )
+        prod_total = product_totals[prod]
 
-        labels = [
-            mkt
-            for mkt in markets
-            if mkt in pm_vol.get(
-                prod,
-                {},
-            )
-        ]
+        labels = [mkt for mkt in markets if mkt in pm_vol.get(prod, {})]
 
         vol_children = [
-            {
-                "label": mkt,
-                "values": (
-                    display_pm_vol[
-                        prod
-                    ][
-                        mkt
-                    ]
-                ),
-            }
+            {"label": mkt, "values": display_pm_vol[prod][mkt]}
             for mkt in labels
         ]
 
         share_children = [
-            {
-                "label": mkt,
-                "values": (
-                    product_market_shares[
-                        prod
-                    ][
-                        mkt
-                    ]
-                ),
-            }
+            {"label": mkt, "values": product_market_shares[prod][mkt]}
             for mkt in labels
         ]
 
-        vol_table_rows.append(
-            {
-                "label":
-                    prod,
+        vol_table_rows.append({
+            "label": prod,
+            # Reconciled display parent.
+            "values": product_display_totals[prod],
+            "children": vol_children,
+        })
 
-                # IMPORTANT:
-                # Use reconciled display parent.
-                "values":
-                    product_display_totals[
-                        prod
-                    ],
+        share_table_rows.append({
+            "label": prod,
+            "values": [100.0] * n,
+            "children": share_children,
+        })
 
-                "children":
-                    vol_children,
-            }
-        )
+        mv_table_rows.append({
+            "label": prod,
+            "monthly_values": prod_total,
+            "children": [
+                {"label": mkt, "monthly_values": pm_vol[prod][mkt]}
+                for mkt in labels
+            ],
+        })
 
-        share_table_rows.append(
-            {
-                "label":
-                    prod,
-                "values":
-                    [100.0] * n,
-                "children":
-                    share_children,
-            }
-        )
-
-        # ---------------------------------------------
-        # Yearly/raw volume
-        # ---------------------------------------------
-
-        mv_table_rows.append(
-            {
-                "label":
-                    prod,
-                "monthly_values":
-                    prod_total,
-                "children": [
-                    {
-                        "label":
-                            mkt,
-                        "monthly_values":
-                            pm_vol[
-                                prod
-                            ][
-                                mkt
-                            ],
-                    }
-                    for mkt in labels
-                ],
-            }
-        )
-
-        # ---------------------------------------------
-        # Yearly/raw share
-        # ---------------------------------------------
-
-        ms_table_rows.append(
-            {
-                "label":
-                    prod,
-                "fixed_values":
-                    [100.0]
-                    * len(all_years),
-                "children": [
-                    {
-                        "label":
-                            mkt,
-                        "child_vols":
-                            pm_vol[
-                                prod
-                            ][
-                                mkt
-                            ],
-                        "parent_vols":
-                            prod_total,
-                    }
-                    for mkt in labels
-                ],
-            }
-        )
+        ms_table_rows.append({
+            "label": prod,
+            "fixed_values": [100.0] * len(all_years),
+            "children": [
+                {
+                    "label": mkt,
+                    "child_vols": pm_vol[prod][mkt],
+                    "parent_vols": prod_total,
+                }
+                for mkt in labels
+            ],
+        })
 
     # =========================================================
     # 7. Wrappers
     # =========================================================
 
     mv_chart = {
-        "months":
-            months,
-        "forecast_start_index":
-            split_idx,
-        "series":
-            vol_chart_series,
+        "months": months,
+        "forecast_start_index": split_idx,
+        "series": vol_chart_series,
     }
 
-    mv_table = {
-        "type":
-            "hierarchy",
-        "rows":
-            vol_table_rows,
-    }
+    mv_table = {"type": "hierarchy", "rows": vol_table_rows}
 
     ms_chart = {
-        "months":
-            months,
-        "forecast_start_index":
-            split_idx,
-        "series":
-            share_chart_series,
+        "months": months,
+        "forecast_start_index": split_idx,
+        "series": share_chart_series,
     }
 
-    ms_table = {
-        "type":
-            "hierarchy",
-        "rows":
-            share_table_rows,
-    }
+    ms_table = {"type": "hierarchy", "rows": share_table_rows}
 
     # =========================================================
     # 8. Selected
     # =========================================================
 
     selected_volume = (
-        pm_vol
-        .get(
-            selected_product,
-            {},
-        )
-        .get(
-            selected_market,
-            [0.0] * n,
-        )
+        pm_vol.get(selected_product, {}).get(selected_market, [0.0] * n)
     )
 
-    selected_parent_volume = (
-        product_totals.get(
-            selected_product,
-            total_vals,
-        )
+    selected_parent_volume = product_totals.get(
+        selected_product, total_vals,
     )
 
     # =========================================================
@@ -4105,44 +3004,23 @@ def build_product_market(
     return {
         "market_volume": {
             "unit": "count",
-
             **wrap_monthly_yearly_volume(
-                mv_chart,
-                mv_table,
-                months,
-                split_idx,
-                mv_series_data,
-                mv_table_rows,
-                "hierarchy",
+                mv_chart, mv_table, months, split_idx,
+                mv_series_data, mv_table_rows, "hierarchy",
             ),
         },
-
         "market_share": {
             "unit": "%",
-
             **wrap_monthly_yearly_share(
-                ms_chart,
-                ms_table,
-                months,
-                split_idx,
-                ms_series_data,
-                ms_table_rows,
-                "hierarchy",
+                ms_chart, ms_table, months, split_idx,
+                ms_series_data, ms_table_rows, "hierarchy",
             ),
         },
-
         "_selected": {
-            "months":
-                months,
-
-            "split_idx":
-                split_idx,
-
-            "volume":
-                selected_volume,
-
-            "parent_volume":
-                selected_parent_volume,
+            "months": months,
+            "split_idx": split_idx,
+            "volume": selected_volume,
+            "parent_volume": selected_parent_volume,
         },
     }
 

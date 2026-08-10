@@ -698,7 +698,7 @@ BASELINE_SCENARIO = "Base"
 # what the stored rows already carry -- anything longer is derivation noise
 # leaking into the UI (31.419958% next to Base's 31.42%, which reads as two
 # different numbers when it's one).
-POST_PROCESSED_BREAKDOWNS = ("market_distribution", "product_distribution")
+POST_PROCESSED_BREAKDOWNS = ("market_distribution", "product_distribution" ,"market_product" ,"product_market")
 
 DISPLAY_DECIMALS = 2
 
@@ -790,6 +790,12 @@ def post_process_scenarios(response: dict) -> dict:
             view = _round_tree(view)
 
             if is_baseline and breakdown == "product_distribution":
+                view = _drop_empty_rows(view)
+
+            if is_baseline and breakdown == "market_product":
+                view = _drop_empty_rows(view)
+
+            if is_baseline and breakdown == "product_market":
                 view = _drop_empty_rows(view)
 
             market_analysis[breakdown] = view
@@ -1852,6 +1858,7 @@ def apply_scenario(payload: ApplySelectedScenarioRequest):
                 )
  
             response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+
             return response
  
     except HTTPException:

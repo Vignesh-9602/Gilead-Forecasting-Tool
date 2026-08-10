@@ -5270,6 +5270,25 @@ def build_product_market(market_analysis):
     return market_analysis
 
 def rebuild_product_market_volume(market_analysis):
+    """Rebuild Product -> Market volumes from each product's overall volume
+    and its market share split.
+
+    Matched by LABEL rather than by position. Two positional assumptions
+    used to live here and both break on a product that isn't in every
+    market:
+
+      - overall_rows[product_index + 1] assumed the product distribution
+        table lists the same products in the same order as the product
+        market table, offset by one for the Overall row.
+      - children[0] / children[1] assumed exactly two markets, in the order
+        Retail then Non-retail. A product with rows in only one market
+        (test prod, Non-retail only) has a single child, and [1] raises
+        IndexError.
+
+    Children are now filled from their own shares with the last one
+    absorbing the rounding residue, so they sum to the parent exactly
+    however many there are.
+    """
 
     # Overall product volumes
     overall_rows = (
@@ -5298,31 +5317,73 @@ def rebuild_product_market_volume(market_analysis):
         ["rows"]
     )
 
-    for product_index in range(len(pm_rows)):
+    overall_by_product = {
+        row.get("label"): row.get("values", [])
+        for row in overall_rows
+        if row.get("label") not in (None, "Overall")
+    }
 
-        overall = overall_rows[product_index + 1]["values"]
+    share_by_product = {
+        row.get("label"): row
+        for row in share_rows
+    }
 
-        retail_share = share_rows[product_index]["children"][0]["values"]
-        non_retail_share = share_rows[product_index]["children"][1]["values"]
+    for pm_row in pm_rows:
 
-        retail_values = []
-        non_retail_values = []
+        product = pm_row.get("label")
 
-        for month in range(len(overall)):
+        overall = overall_by_product.get(product)
+        share_row = share_by_product.get(product)
 
-            retail = round(
-                overall[month] * retail_share[month] / 100
+        if overall is None or share_row is None:
+            print(
+                f"  SKIP {product!r}: no matching "
+                f"{'overall volume' if overall is None else 'share'} row"
             )
+            continue
 
-            non_retail = overall[month] - retail
+        volume_children = pm_row.get("children") or []
+        share_children = share_row.get("children") or []
 
-            retail_values.append(retail)
-            non_retail_values.append(non_retail)
+        if not volume_children:
+            pm_row["values"] = list(overall)
+            continue
 
-        pm_rows[product_index]["values"] = overall.copy()
+        # Shares keyed by market so a mismatch in child ORDER between the
+        # two tables can't silently pair the wrong ones.
+        share_by_market = {
+            child.get("label"): child.get("values", [])
+            for child in share_children
+        }
 
-        pm_rows[product_index]["children"][0]["values"] = retail_values
-        pm_rows[product_index]["children"][1]["values"] = non_retail_values
+        months = len(overall)
+        rebuilt = {child.get("label"): [] for child in volume_children}
+
+        for month in range(months):
+
+            total = overall[month]
+            allocated = 0
+
+            for position, child in enumerate(volume_children):
+                market = child.get("label")
+                is_last = position == len(volume_children) - 1
+
+                if is_last:
+                    # Absorbs the residue, so children always sum to the
+                    # parent -- and a single-market product gets all of it.
+                    value = total - allocated
+                else:
+                    shares = share_by_market.get(market) or []
+                    share = shares[month] if month < len(shares) else 0
+                    value = round(total * share / 100)
+                    allocated += value
+
+                rebuilt[market].append(value)
+
+        pm_row["values"] = list(overall)
+
+        for child in volume_children:
+            child["values"] = rebuilt[child.get("label")]
 
 def rebuild_product_market_share(market_analysis):
 

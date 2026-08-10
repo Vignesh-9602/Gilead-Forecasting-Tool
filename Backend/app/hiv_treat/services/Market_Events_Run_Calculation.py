@@ -569,34 +569,39 @@ def _zeroed_forecast_data(data: dict) -> dict:
 
 
 def _fetch_seed_templates(cur, scenario_name: str, ta_name: str) -> List[tuple]:
-    """Every row belonging to the product with the widest coverage in this
-    scenario -- a new product is modelled on it exactly.
+    """The full set of row keys a product needs in this scenario, taken as
+    the UNION across every product that already has rows.
 
-    Rows here are not uniform: one market splits across several channels
-    (source_of_market), another across a different set, there is a
-    market='ALL' cross-market row per product, and more than one metric is
-    stored per cell. Pattern-matching a "canonical" row gets this wrong;
-    copying an established product's row keys verbatim cannot."""
+    Previously this mirrored a single reference product -- whichever had
+    the most rows. That inherits any gap the reference itself has: a
+    product seeded from a reference with no Retail rows ends up Non-retail
+    only, which then shows up as a product missing from one market in
+    every view built from it. The union can only be as complete as the
+    scenario's best-covered combination of products, which is the right
+    bar.
+
+    One representative forecast_data per key supplies the month grid; the
+    values are zeroed before insert, so which product it came from doesn't
+    matter.
+    """
     cur.execute(
         f"""
-        WITH reference AS (
-            SELECT product
-            FROM {TABLE}
-            WHERE ta_name = %s
-              AND scenario_name = %s
-              AND product IS NOT NULL
-              AND UPPER(TRIM(product)) <> 'ALL'
-            GROUP BY product
-            ORDER BY count(*) DESC, product
-            LIMIT 1
-        )
-        SELECT f.metric, f.market, f.source_of_market, f.forecast_data
-        FROM {TABLE} f
-        JOIN reference r ON f.product = r.product
-        WHERE f.ta_name = %s
-          AND f.scenario_name = %s
+        SELECT DISTINCT ON (metric, market, COALESCE(NULLIF(source_of_market, ''), 'ALL'))
+               metric,
+               market,
+               source_of_market,
+               forecast_data
+        FROM {TABLE}
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND product IS NOT NULL
+          AND UPPER(TRIM(product)) <> 'ALL'
+        ORDER BY metric,
+                 market,
+                 COALESCE(NULLIF(source_of_market, ''), 'ALL'),
+                 product
         """,
-        [ta_name, scenario_name, ta_name, scenario_name],
+        [ta_name, scenario_name],
     )
     return cur.fetchall()
 
