@@ -90,12 +90,12 @@ class SaveEventRequest(BaseModel):
 # SQL (psycopg2 style, %s placeholders)
 # ============================================================
 SELECT_EXISTING_IDS_SQL = """
-    SELECT id FROM raw_liver_liver.market_event_configuration
+    SELECT id FROM raw_liver.market_event_configuration
     WHERE ta_name = %s AND event_type = %s;
 """
 
 UPDATE_ROW_SQL = """
-    UPDATE raw_liver_liver.market_event_configuration
+    UPDATE raw_liver.market_event_configuration
        SET event_name = %s, start_date = %s, peak_percent = %s, months = %s,
            curve_type = %s, factor = %s, payment_type = %s, payment_types = %s,
            payers = %s, products = %s, source_percentages = %s, impacted_entities = %s
