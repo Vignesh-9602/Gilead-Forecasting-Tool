@@ -65,6 +65,9 @@ const emptyForm = {
 export default function MarketEventsPanel({
   variant = "compact",
   events = [],
+  // Adds/updates a row locally AND immediately persists the full event
+  // list to the backend (POST /api/liver-market-events/save) — there's no
+  // separate batch-save step, every "Save Event" click hits the API.
   onSave,
   onDelete,
   productOptions = [],
@@ -215,6 +218,11 @@ export default function MarketEventsPanel({
       backgroundColor: "#fff",
       fontSize: "13px",
     },
+    // Without this, the input's default (much taller) padding doesn't fit
+    // inside the 32px height above, so the field renders an internal
+    // scrollbar instead of just vertically centering the text — same fix
+    // already applied to the Impact dialog's number fields below.
+    "& input": { padding: "6px 12px" },
   };
   const compactSelectStyle = {
     "& .MuiOutlinedInput-root": {

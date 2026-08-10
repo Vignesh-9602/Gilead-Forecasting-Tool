@@ -39,6 +39,10 @@ const ForecastChart = React.memo(function ForecastChart({
   filterFromYM,
   filterToYM,
   viewMode = "monthly",
+  // Other selected Compare-Scenarios' series for the current tab (built by
+  // ModelInput via normalizeLiverResponse per scenario) — added alongside
+  // the applied scenario's own breakdown on non-Total-Market tabs.
+  otherScenarioSeries = [],
 }) {
   // ══════════════════════════════════════════════════════════════════════════
   // ALL HOOKS MUST BE CALLED UNCONDITIONALLY — no early returns before here.
@@ -113,19 +117,16 @@ const ForecastChart = React.memo(function ForecastChart({
     }));
   } else {
     // Non-Total-Market tabs (Product Distribution, Payment Type
-    // Distribution, Payment Type / Product) must always show the currently
-    // active scenario's own breakdown — one line per payment type / product
-    // / hierarchy leaf — never a per-scenario "Compare Scenarios" overlay.
-    // `series` here is already the correctly clipped/normalized data for
-    // this tab and scenario (see ModelInput's normalizeLiverResponse +
-    // mapLiverTabToView), so use it directly instead of re-fetching from
-    // rawScenariosData. Re-deriving from rawScenariosData per selected
-    // scenario was the source of two bugs: (1) it replaced the normal
-    // payment-type/product lines with scenario-tagged ones, and went
-    // completely blank whenever the Compare Scenarios selection excluded
-    // the scenario whose raw key happened to match; (2) it depended on this
-    // component's own separate, easily-stale TAB_KEY_MAP copy.
-    filteredSeries = (series || []).map((s) => ({ ...s, scenario: s.scenario || "" }));
+    // Distribution, Payment Type / Product) always show the applied
+    // scenario's own breakdown — one line per payment type / product /
+    // hierarchy leaf. When Compare Scenarios has other scenarios selected,
+    // their equivalent lines are ADDED alongside (never replacing) the
+    // applied scenario's breakdown, tagged with their scenario name so
+    // they're colored/labeled distinctly (see getSeriesColor below).
+    filteredSeries = [
+      ...(series || []).map((s) => ({ ...s, scenario: s.scenario || "" })),
+      ...(otherScenarioSeries || []),
+    ];
   }
 
   const isFilterFocusMode = !isTotalMarket && (!!currentBrand || !!currentPayer);
@@ -152,9 +153,13 @@ const ForecastChart = React.memo(function ForecastChart({
       }
       return getScenarioColor(index);
     }
-    // Payment type / product / other breakdown lines each get their own
-    // distinct color from the shared palette — never grouped/colored by
-    // scenario on these tabs.
+    // Other-scenario comparison lines get their scenario's color (matching
+    // Total Market Volume's convention) so they read as "a different
+    // scenario" at a glance; the applied scenario's own breakdown lines
+    // each get their own distinct palette color, never grouped by scenario.
+    if (item?.scenario && item.scenario !== appliedScenario && scenarioColorMap[item.scenario]) {
+      return scenarioColorMap[item.scenario];
+    }
     return CHART_PALETTE[index % CHART_PALETTE.length];
   };
 
