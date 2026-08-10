@@ -72,6 +72,7 @@ class LiverApplyFiltersRequest(BaseModel):
     ta: str = "HCV"
     payer: List[str] = []
     brand: List[str] = []
+    payment_type: List[str] = []
     metric: str = "payer_volume"       # "payer_volume" | "payer_share"
     from_date: str                      # "2020-04-01" — start of view window
     to_date: Optional[str] = None       # "2027-12-01" — end of view; falls back to config forecast end

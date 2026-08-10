@@ -1407,7 +1407,7 @@ def _sync_hier_mv_chart(tab_mv, fsi, chart_parent_filter=None):
 def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   train_end_year, train_end_month, forecast_periods, factors,
                                   granularity="monthly",
-                                  sel_payer=None, sel_product=None,
+                                  sel_payer=None, sel_product=None, sel_payment_type=None,
                                   force_tab1_ets=True,
                                   scenario_name="Base",
                                   auto_model="moving_average"):
@@ -1436,8 +1436,9 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     n                    = len(month_labels)
     fsi                  = forecast_start_index
 
-    tab2_label = sel_product  # None → factors apply to all series
+    tab2_label = sel_product      # None → factors apply to all series
     tab3_label = sel_payer
+    tab5_pt_label = sel_payment_type  # payment_type chart filter for Tab 5
 
     # ── Per-series config training windows ──────────────────────────────────
     # _wide_from_year/_month = earliest configured train_start across all (payer,brand)
@@ -1684,7 +1685,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     # Forecasting: proportional share distribution from _tmv_fc using a 6-period
     # trailing average.  Uses the closure variables month_range / month_labels / fsi
     # / _tmv_fc / tab25_factors that are already in scope.
-    def _build_tab5_3level(ptpp_rows, dim1_col, dim2_col, dim3_col, to_int=False, as_share=False):
+    def _build_tab5_3level(ptpp_rows, dim1_col, dim2_col, dim3_col, to_int=False, as_share=False,
+                           chart_d1_filter=None, chart_d2_filter=None):
         n     = len(month_range)
         n_fc  = n - fsi
         w     = min(6, fsi)
@@ -1803,7 +1805,13 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         chart_series: list = []
 
         for d1 in all_d1:
+            if chart_d1_filter and d1.lower() != chart_d1_filter.lower():
+                continue
             for d2 in sorted(dim2_by_d1[d1]):
+                # "NA" means this dimension has no sub-label (e.g. Cash has no payer);
+                # always include it regardless of chart_d2_filter since it can't match.
+                if chart_d2_filter and d2 != "NA" and d2.lower() != chart_d2_filter.lower():
+                    continue
                 if d2 == "NA":
                     lbl = d1
                     if as_share:
@@ -1868,17 +1876,30 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         # Tab 5: three 3-level views of payment_type × payer × product.
         # Each sub-view contains payer_volume and payer_share as metric keys.
         "payment_type_payer_product": {
+            # dim1=payment_type, dim2=payer, dim3=product
             "payment_type_payer_product": {
-                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 3, 4, to_int=True),
-                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 3, 4, as_share=True),
+                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 3, 4, to_int=True,
+                                                   chart_d1_filter=tab5_pt_label),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 3, 4, as_share=True,
+                                                   chart_d1_filter=tab5_pt_label),
             },
+            # dim1=payment_type, dim2=product, dim3=payer
             "payment_type_product_payer": {
-                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 4, 3, to_int=True),
-                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 4, 3, as_share=True),
+                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 4, 3, to_int=True,
+                                                   chart_d1_filter=tab5_pt_label,
+                                                   chart_d2_filter=tab2_label),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 4, 3, as_share=True,
+                                                   chart_d1_filter=tab5_pt_label,
+                                                   chart_d2_filter=tab2_label),
             },
+            # dim1=product, dim2=payment_type, dim3=payer
             "product_payment_type_payer": {
-                "payer_volume": _build_tab5_3level(ptpp_mv, 4, 2, 3, to_int=True),
-                "payer_share":  _build_tab5_3level(ptpp_mv, 4, 2, 3, as_share=True),
+                "payer_volume": _build_tab5_3level(ptpp_mv, 4, 2, 3, to_int=True,
+                                                   chart_d1_filter=tab2_label,
+                                                   chart_d2_filter=tab5_pt_label),
+                "payer_share":  _build_tab5_3level(ptpp_mv, 4, 2, 3, as_share=True,
+                                                   chart_d1_filter=tab2_label,
+                                                   chart_d2_filter=tab5_pt_label),
             },
         },
         "event_management": {},
@@ -2105,7 +2126,7 @@ def _aggregate_monthly_to_yearly(ma_monthly: dict) -> dict:
 def _build_market_analysis_both_granularities(
     cur, ta, from_year, from_month,
     train_end_year, train_end_month, forecast_periods_months, factors,
-    sel_payer=None, sel_product=None,
+    sel_payer=None, sel_product=None, sel_payment_type=None,
     force_tab1_ets=True, scenario_name="Base",
     auto_model="moving_average",
 ):
@@ -2118,7 +2139,7 @@ def _build_market_analysis_both_granularities(
         cur, ta, from_year, from_month,
         train_end_year, train_end_month, forecast_periods_months, factors,
         granularity="monthly",
-        sel_payer=sel_payer, sel_product=sel_product,
+        sel_payer=sel_payer, sel_product=sel_product, sel_payment_type=sel_payment_type,
         force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
         auto_model=auto_model,
     )
@@ -2423,6 +2444,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, factors,
                 sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                sel_payment_type=_first(payload.payment_type),
                 scenario_name=payload.scenario,
             )
             market_analysis = _recompute_all_market_shares_nested(market_analysis)
@@ -2508,6 +2530,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                     cur, payload.ta, wide_from_year, wide_from_month,
                     train_end_year, train_end_month, wide_forecast_periods, factors,
                     sel_payer=_first(payload.payer), sel_product=_first(payload.brand),
+                    sel_payment_type=_first(payload.payment_type),
                     scenario_name=payload.scenario,
                 )
                 persist_ma = _recompute_all_market_shares_nested(persist_ma)
