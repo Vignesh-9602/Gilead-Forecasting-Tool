@@ -1734,14 +1734,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         l1_fc: dict = {}
         for d1 in all_d1:
             s = _sh(_h(vol1, (d1,)), gt_h)
-            l1_fc[d1] = [s * t for t in _tmv_fc] if _tmv_fc else [0.0] * n_fc
+            l1_fc[(d1,)] = [s * t for t in _tmv_fc] if _tmv_fc else [0.0] * n_fc
 
         l2_fc: dict = {}
         for d1 in all_d1:
             h1 = _h(vol1, (d1,))
             for d2 in dim2_by_d1[d1]:
                 s = _sh(_h(vol2, (d1, d2)), h1)
-                l2_fc[(d1, d2)] = [s * v for v in l1_fc[d1]]
+                l2_fc[(d1, d2)] = [s * v for v in l1_fc[(d1,)]]
 
         l3_fc: dict = {}
         for (d1, d2), d3_set in dim3_by_d1d2.items():
@@ -1779,7 +1779,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                             "children": [],
                         })
                 else:
-                    lbl2     = f"{d1} - {d2}"
+                    lbl2     = d2
                     d3_set   = sorted(dim3_by_d1d2.get((d1, d2), set()))
                     children_l2.append({
                         "label":  lbl2,
@@ -1797,36 +1797,24 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             table_rows.append({"label": d1, "values": l1_vals, "children": children_l2})
 
         # ── build chart (leaf-level series only) ─────────────────────────────
-        # No parent-total series — the chart shows only the most granular level.
-        # _aggregate_monthly_to_yearly is told to skip parent recomputation for
-        # any hierarchy whose monthly chart has no parent-labelled series.
-        #
-        # Leaf label rules:
-        # • d3 exists (non-NA): "d1 - d3" if d2=="NA" else "d1 - d2 - d3"
-        # • d3 absent (all NA, Cash in sub-views 2/3): "d1 - d2" (level-2)
+        # Chart shows L2-level aggregates (dim1 - dim2).
+        # When d2=="NA" (e.g. Cash has no payer), fall back to L1 so Cash
+        # appears as a single series rather than being omitted.
         chart_series: list = []
 
         for d1 in all_d1:
             for d2 in sorted(dim2_by_d1[d1]):
-                d3_set = sorted(dim3_by_d1d2.get((d1, d2), set()))
-                if d3_set:
-                    for d3 in d3_set:
-                        lbl = f"{d1} - {d3}" if d2 == "NA" else f"{d1} - {d2} - {d3}"
-                        if as_share:
-                            h_vals = _h_pct(vol3, (d1, d2, d3))
-                            fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
-                            fc     = [round(fc_val, 4)] * n_fc
-                        else:
-                            h_vals = _h(vol3, (d1, d2, d3))
-                            fc     = list(l3_fc.get((d1, d2, d3), [0.0] * n_fc))
-                        chart_series.append({
-                            "label":    lbl,
-                            "history":  [round(v, 4) for v in h_vals],
-                            "forecast": [round(v, 4) for v in fc],
-                        })
+                if d2 == "NA":
+                    lbl = d1
+                    if as_share:
+                        h_vals = _h_pct(vol1, (d1,))
+                        fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
+                        fc     = [round(fc_val, 4)] * n_fc
+                    else:
+                        h_vals = _h(vol1, (d1,))
+                        fc     = list(l1_fc.get((d1,), [0.0] * n_fc))
                 else:
-                    # No valid d3 (Cash with no sub-payer): fall back to level-2
-                    lbl = d1 if d2 == "NA" else f"{d1} - {d2}"
+                    lbl = f"{d1} - {d2}"
                     if as_share:
                         h_vals = _h_pct(vol2, (d1, d2))
                         fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
@@ -1834,11 +1822,11 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                     else:
                         h_vals = _h(vol2, (d1, d2))
                         fc     = list(l2_fc.get((d1, d2), [0.0] * n_fc))
-                    chart_series.append({
-                        "label":    lbl,
-                        "history":  [round(v, 4) for v in h_vals],
-                        "forecast": [round(v, 4) for v in fc],
-                    })
+                chart_series.append({
+                    "label":    lbl,
+                    "history":  [round(v, 4) for v in h_vals],
+                    "forecast": [round(v, 4) for v in fc],
+                })
 
         return {
             "chart": {
