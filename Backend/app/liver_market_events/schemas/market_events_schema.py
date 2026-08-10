@@ -77,6 +77,7 @@ class ImpactCurveRow(BaseModel):
     # Entity selections (which fields are populated depends on the tab)
     payment_type: Optional[List[str]] = None          # payer_event: selected payment type
     products: Optional[List[str]] = None        # product_event: selected product / payer_event: context
+    payer: Optional[List[str]] = None    # payment_type_payer_product: selected payer(s)
     impacted_payment_type: Optional[List[str]] = None
     impacted_products: Optional[List[str]] = None
     # Curve parameters
