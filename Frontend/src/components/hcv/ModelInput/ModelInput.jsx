@@ -346,16 +346,32 @@ export default function PBCModelInput() {
       if (!maObj) return maObj;
       const out = { ...maObj };
 
-      // Unwrap self-nested single-ordering container:
-      // { payment_type_product: { payment_type_product: { payer_volume, payer_share } } }
-      // -> { payment_type_product: { payer_volume, payer_share } }
+      // The Payment Type / Product hierarchy tab can arrive nested one level
+      // deeper, holding BOTH orderings under fixed sub-keys instead of the
+      // flat payer_product / product_payer shape used elsewhere:
+      //   payment_type_product: {
+      //     payment_type_product: { payer_volume, payer_share },  // PaymentType -> Product
+      //     product_payment_type: { payer_volume, payer_share },  // Product -> PaymentType
+      //   }
+      // Unpack BOTH orderings into the flat keys this function (and
+      // TAB_KEY_MAP) expect. Previously this only unwrapped the
+      // PaymentType->Product ordering and reused it for BOTH Hierarchy Order
+      // dropdown options, silently discarding the real Product->PaymentType
+      // data (product_payment_type) whenever it was present.
       if (
         out.payment_type_product &&
-        out.payment_type_product.payment_type_product &&
         !out.payment_type_product.payer_volume &&
         !out.payment_type_product.payer_share
       ) {
-        out.payment_type_product = out.payment_type_product.payment_type_product;
+        const container = out.payment_type_product;
+        const ptToProduct = container.payment_type_product; // top level = payment type
+        const productToPt = container.product_payment_type; // top level = product
+        if (ptToProduct && !out.payer_product) out.payer_product = ptToProduct;
+        if (productToPt && !out.product_payer) out.product_payer = productToPt;
+        // Normalize payment_type_product itself down to a single-ordering
+        // metric object (payer_volume/payer_share) so any other code path
+        // that still reads it directly keeps working.
+        out.payment_type_product = ptToProduct || productToPt || container;
       }
 
       // Alias the payment-type breakdown tab so it works under either name.
@@ -366,14 +382,11 @@ export default function PBCModelInput() {
         out.payer_distribution = out.payment_type_distribution;
       }
 
-      // When only the single "payment_type_product" ordering is present,
-      // reuse it for both Hierarchy Order variants so the dropdown toggle in
-      // the Payment Type / Product tab always has data instead of going
-      // blank for whichever ordering the backend didn't compute.
-      if (out.payment_type_product) {
-        if (!out.payer_product) out.payer_product = out.payment_type_product;
-        if (!out.product_payer) out.product_payer = out.payment_type_product;
-      }
+      // Only if, after unpacking above, one ordering genuinely has no data
+      // of its own (older/partial responses) — reuse the other ordering
+      // rather than leaving the dropdown option blank.
+      if (out.payer_product && !out.product_payer) out.product_payer = out.payer_product;
+      if (out.product_payer && !out.payer_product) out.payer_product = out.product_payer;
 
       return out;
     };
@@ -475,21 +488,24 @@ export default function PBCModelInput() {
     };
 
     // Helper to parse a table object into our internal format
+    // Recursively parses rows AND their children to arbitrary depth — some
+    // tabs (e.g. Payment type-Payer-Product) nest a real 3rd hierarchy
+    // level (e.g. Commercial -> Commercial - CVS -> ASGA/GILD/Other), and a
+    // shallow one-level-deep children map would silently drop that bottom
+    // level entirely.
+    const parseRow = (r, asPercent) => ({
+      hierarchy: r.hierarchy || r.label || "",
+      label: r.label || r.hierarchy || "",
+      total: Array.isArray(r.total) ? parseValues(r.total, asPercent) : undefined,
+      values: parseValues(r.values, asPercent),
+      children: (r.children || []).map((c) => parseRow(c, asPercent)),
+    });
     const parseTableObj = (rawTable, fallbackMonths, asPercent) => {
       if (!rawTable) return { type: "flat", headers: fallbackMonths, rows: [] };
       return {
         type: rawTable.type,
         headers: rawTable.headers || fallbackMonths,
-        rows: (rawTable.rows || []).map((r) => ({
-          hierarchy: r.hierarchy || r.label || "",
-          label: r.label || r.hierarchy || "",
-          total: Array.isArray(r.total) ? parseValues(r.total, asPercent) : undefined,
-          values: parseValues(r.values, asPercent),
-          children: (r.children || []).map((c) => ({
-            label: c.label,
-            values: parseValues(c.values, asPercent),
-          })),
-        })),
+        rows: (rawTable.rows || []).map((r) => parseRow(r, asPercent)),
       };
     };
 
@@ -611,11 +627,18 @@ export default function PBCModelInput() {
 
         // Flattens table rows (and their children, for hierarchy tabs) into
         // the same "Parent - Child" label convention the chart's own series
-        // already use (e.g. "Cash - ASGA").
+        // already use (e.g. "Cash - ASGA"). Rows literally labeled "Total"
+        // are a rollup/summary row (used across several flat tabs, e.g.
+        // Product Distribution, Payment Type Distribution) — not a real
+        // breakdown category — so they're excluded here. Otherwise a tab
+        // whose monthly chart never included a "Total" line would gain one
+        // only in Yearly view, which is both redundant (it just re-sums the
+        // other lines) and inconsistent between Monthly/Yearly.
         const flattenTableRows = (rows) => {
           const out = [];
           (rows || []).forEach((r) => {
             const label = r.label || r.hierarchy || "";
+            if (label.trim().toLowerCase() === "total") return;
             if (r.children?.length) {
               r.children.forEach((c) => {
                 out.push({ label: `${label} - ${c.label}`, values: c.values || [] });
@@ -3608,6 +3631,8 @@ export default function PBCModelInput() {
               isSavingEditChanges={isSavingEditChanges}
               editedHierarchies={editedHierarchies}
               appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+              setNewScenarioName={setNewScenarioName}
+              setSaveScenarioDialogOpen={setSaveScenarioDialogOpen}
             />
           ) : (
             <>

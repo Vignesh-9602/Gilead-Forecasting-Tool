@@ -14,6 +14,8 @@ import {
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DownloadIcon from "@mui/icons-material/Download";
+import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
+import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import Tooltip from "@mui/material/Tooltip";
 import Plot from "react-plotly.js";
 import dayjs from "dayjs";
@@ -94,8 +96,17 @@ export default function PaymentPayerProductTable({
   isSavingEditChanges,
   editedHierarchies = {},
   appliedScenarioReady,
+  // Save Scenario — same dialog every other tab uses (state/dialog itself
+  // lives in ModelInput.jsx and renders regardless of active tab).
+  setNewScenarioName,
+  setSaveScenarioDialogOpen,
 }) {
   const [hierarchyOrder, setHierarchyOrder] = useState(HIERARCHY_ORDERS[0].value);
+  // Collapsible rows — same convention as ModelInputTable's expandedBrands:
+  // keyed map of { [rowKey]: true } for expanded rows, collapsed by default.
+  const [expandedRows, setExpandedRows] = useState({});
+  const toggleRowExpand = (key) =>
+    setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
 
   const paymentTypes = payerOptions.length ? payerOptions : DEFAULT_PAYERS;
   const subPayers = paymentTypes;
@@ -189,18 +200,27 @@ export default function PaymentPayerProductTable({
   // `children`) into the same flat row list this component renders,
   // carrying each row's own values array (already the correctly-scaled
   // volume/share numbers computed by the backend for that hierarchy level).
+  // Collapsible: a row's children are only included in the output when the
+  // row itself is expanded (same behavior as ModelInputTable's
+  // expandedBrands), so collapsing a parent hides its whole subtree.
   const flattenRealRows = (rowsIn, level = 0, ancestorLabels = []) => {
     const out = [];
     (rowsIn || []).forEach((r) => {
       const label = r.label || r.hierarchy || "";
       const path = [...ancestorLabels, label];
+      const key = path.join(" > ");
+      const hasChildren = !!(r.children && r.children.length);
+      const isExpanded = !!expandedRows[key];
       out.push({
         level,
         label,
+        key,
+        hasChildren,
+        isExpanded,
         values: Array.isArray(r.total) ? r.total : r.values || [],
         highlighted: dimMatchesPath(path),
       });
-      if (r.children?.length) {
+      if (hasChildren && isExpanded) {
         out.push(...flattenRealRows(r.children, level + 1, path));
       }
     });
@@ -224,6 +244,38 @@ export default function PaymentPayerProductTable({
   const activeOrder = HIERARCHY_ORDERS.find((o) => o.value === hierarchyOrder) || HIERARCHY_ORDERS[0];
   const [dim1, dim2, dim3] = activeOrder.dims;
   const dimValues = { pt: paymentTypes, payer: subPayers, product: products };
+
+  // Expand All / Collapse All — same toolbar affordance ModelInputTable uses
+  // for its own expandable tabs. Collects every row key that has children
+  // (from whichever data source — real or mock — is currently active) and
+  // marks them all expanded/collapsed at once.
+  const collectParentKeys = (rowsIn, ancestorLabels = []) => {
+    const keys = [];
+    (rowsIn || []).forEach((r) => {
+      const label = r.label || r.hierarchy || "";
+      const path = [...ancestorLabels, label];
+      if (r.children?.length) {
+        keys.push(path.join(" > "));
+        keys.push(...collectParentKeys(r.children, path));
+      }
+    });
+    return keys;
+  };
+  const handleExpandAllRows = () => {
+    let parentKeys;
+    if (useRealData) {
+      parentKeys = collectParentKeys(realTableSrc.rows);
+    } else {
+      // Mock data: every level-0 and level-1 combination has children.
+      parentKeys = [];
+      dimValues[dim1].forEach((v1) => {
+        parentKeys.push(v1);
+        dimValues[dim2].forEach((v2) => parentKeys.push(`${v1} > ${v2}`));
+      });
+    }
+    setExpandedRows(Object.fromEntries(parentKeys.map((k) => [k, true])));
+  };
+  const handleCollapseAllRows = () => setExpandedRows({});
 
   // Same highlighting convention as ModelInputTable's Payer/Product tab:
   // a row is highlighted only if every dimension already fixed on it (pt /
@@ -261,25 +313,39 @@ export default function PaymentPayerProductTable({
 
   // Row styling matches ModelInputTable's existing hasChildren/leaf convention
   // (background #f8fafc + #1e293b bold for parent rows, white + #334155 for
-  // leaves) — only the left padding increases per hierarchy level. A matched
-  // row switches to the app's shared "applied" amber highlight.
+  // leaf children). Only the top level (level 0) is bold — every level below
+  // it is plain "normal" weight (400), never medium/semibold, so children
+  // never read as bold regardless of depth; color still steps down per level
+  // so the hierarchy remains visually readable. Left padding increases by a
+  // full 48px per level — set via explicit pl (not the "p" shorthand) so
+  // there's no ambiguity about which wins — much larger than a single
+  // level's step in ModelInputTable, since this tab goes one level deeper. A matched row
+  // switches to the app's shared "applied" amber highlight regardless of level.
   const rowStyle = (level, highlighted) => ({
-    backgroundColor: highlighted ? "#fffbeb" : level < 2 ? "#f8fafc" : "white",
-    fontWeight: level === 0 ? 700 : level === 1 ? 600 : 500,
-    color: highlighted ? "#f59e0b" : level < 2 ? "#1e293b" : "#334155",
+    backgroundColor: highlighted ? "#fffbeb" : level === 0 ? "#f8fafc" : "white",
+    fontWeight: level === 0 ? 700 : 400,
+    color: highlighted ? "#f59e0b" : level === 0 ? "#1e293b" : level === 1 ? "#334155" : "#64748b",
   });
-  const indentPx = (level) => (level === 0 ? "16px" : level === 1 ? "32px" : "56px");
+  const indentPx = (level) => (level === 0 ? "16px" : level === 1 ? "64px" : "112px");
 
   const rows = useRealData ? flattenRealRows(realTableSrc.rows) : [];
   if (!useRealData) {
     dimValues[dim1].forEach((v1) => {
-      rows.push({ level: 0, label: v1, fixed: { [dim1]: v1 }, parentFixed: {} });
+      const key1 = v1;
+      const expanded1 = !!expandedRows[key1];
+      rows.push({ level: 0, label: v1, key: key1, hasChildren: true, isExpanded: expanded1, fixed: { [dim1]: v1 }, parentFixed: {} });
+      if (!expanded1) return;
       dimValues[dim2].forEach((v2) => {
-        rows.push({ level: 1, label: v2, fixed: { [dim1]: v1, [dim2]: v2 }, parentFixed: { [dim1]: v1 } });
+        const key2 = `${key1} > ${v2}`;
+        const expanded2 = !!expandedRows[key2];
+        rows.push({ level: 1, label: v2, key: key2, hasChildren: true, isExpanded: expanded2, fixed: { [dim1]: v1, [dim2]: v2 }, parentFixed: { [dim1]: v1 } });
+        if (!expanded2) return;
         dimValues[dim3].forEach((v3) => {
           rows.push({
             level: 2,
             label: v3,
+            key: `${key2} > ${v3}`,
+            hasChildren: false,
             fixed: { [dim1]: v1, [dim2]: v2, [dim3]: v3 },
             parentFixed: { [dim1]: v1, [dim2]: v2 },
           });
@@ -425,7 +491,35 @@ export default function PaymentPayerProductTable({
             gap: 1,
           }}
         >
-          <Typography sx={{ fontSize: "16px", fontWeight: 700, color: "#1e293b" }}>{activeTabLabel}</Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+            <Typography sx={{ fontSize: "16px", fontWeight: 700, color: "#1e293b" }}>{activeTabLabel}</Typography>
+
+            {setSaveScenarioDialogOpen && (
+              <Button
+                variant="contained"
+                onClick={() => {
+                  setNewScenarioName?.("");
+                  setSaveScenarioDialogOpen(true);
+                }}
+                sx={primaryBtnSx}
+              >
+                Save Scenario
+              </Button>
+            )}
+
+            {/* Expand All / Collapse All — same affordance ModelInputTable
+                uses for its own expandable tabs. */}
+            <Tooltip title="Expand All">
+              <IconButton size="small" onClick={handleExpandAllRows}>
+                <UnfoldMoreIcon />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Collapse All">
+              <IconButton size="small" onClick={handleCollapseAllRows}>
+                <UnfoldLessIcon />
+              </IconButton>
+            </Tooltip>
+          </Box>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
             {/* Hierarchy Order dropdown — was previously missing from this
                 tab; styling matches the 3-level dropdown used elsewhere. */}
@@ -443,7 +537,7 @@ export default function PaymentPayerProductTable({
               >
                 {HIERARCHY_ORDERS.map((opt) => (
                   <MenuItem key={opt.value} value={opt.value} sx={{ fontSize: "12px" }}>
-                    Hierarchy: {opt.label}
+                    {opt.label}
                   </MenuItem>
                 ))}
               </Select>
@@ -597,16 +691,45 @@ export default function PaymentPayerProductTable({
               const highlighted = useRealData ? !!row.highlighted : isRowHighlighted(row);
               const style = rowStyle(row.level, highlighted);
               return (
-                <Box component="tr" key={i} sx={{ borderBottom: "1px solid #e2e8f0" }}>
+                <Box
+                  component="tr"
+                  key={row.key ?? i}
+                  onClick={() => {
+                    if (row.hasChildren) toggleRowExpand(row.key);
+                  }}
+                  sx={{
+                    borderBottom: "1px solid #e2e8f0",
+                    cursor: row.hasChildren ? "pointer" : "default",
+                    "&:hover": row.hasChildren ? { backgroundColor: highlighted ? "#fff3c4" : "#f1f5f9" } : undefined,
+                  }}
+                >
                   <Box
                     component="td"
                     sx={{
                       position: "sticky", left: 0, zIndex: 1, backgroundColor: style.backgroundColor,
                       fontWeight: style.fontWeight, fontSize: "14px", color: style.color, textAlign: "left",
-                      p: "10px 16px", pl: indentPx(row.level), minWidth: 220, borderRight: "2px solid #e2e8f0",
+                      pt: "10px", pb: "10px", pr: "16px", pl: indentPx(row.level), minWidth: 220, borderRight: "2px solid #e2e8f0",
                     }}
                   >
-                    {row.label}
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                      {row.hasChildren && (
+                        <Box
+                          component="span"
+                          sx={{
+                            fontSize: "9px",
+                            fontWeight: 700,
+                            width: "14px",
+                            flexShrink: 0,
+                            color: highlighted ? "#f59e0b" : "#64748b",
+                          }}
+                        >
+                          {row.isExpanded ? "▼" : "▶"}
+                        </Box>
+                      )}
+                      <Box component="span" sx={{ fontWeight: style.fontWeight, color: style.color }}>
+                        {row.label}
+                      </Box>
+                    </Box>
                   </Box>
                   {columns.map((col) => {
                     // Real data: the backend already computed the correctly

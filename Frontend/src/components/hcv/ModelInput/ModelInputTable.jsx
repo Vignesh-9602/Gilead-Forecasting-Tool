@@ -181,6 +181,27 @@ const ModelInputTable = React.memo(function ModelInputTable({
     const activeMetricKey = toApiMetricKey(metric);
     const fallbackMonths = chartData?.months || [];
 
+    // Same nested-shape quirk normalizeLiverResponse() reconciles for the
+    // *active* scenario also applies to *other* (raw, un-reconciled)
+    // scenarios shown via Compare Scenarios: a scenario's market_analysis
+    // may hold the Payment Type / Product hierarchy nested under
+    // payment_type_product.{payment_type_product|product_payment_type}
+    // instead of flat payer_product / product_payer keys. Without this
+    // fallback, that scenario's compare-overlay rows silently disappear.
+    const resolveBackendTabObj = (scenarioMA) => {
+      const direct = scenarioMA?.[backendTabKey];
+      if (direct) return direct;
+      if (backendTabKey === "payer_product" || backendTabKey === "product_payer") {
+        const container = scenarioMA?.payment_type_product;
+        if (container?.payment_type_product || container?.product_payment_type) {
+          return backendTabKey === "payer_product"
+            ? container.payment_type_product
+            : container.product_payment_type;
+        }
+      }
+      return undefined;
+    };
+
     const toDisplayData = (values, labelsForThisScenario) => {
       const obj = {};
       labelsForThisScenario.forEach((label, i) => {
@@ -204,8 +225,9 @@ const ModelInputTable = React.memo(function ModelInputTable({
         return;
       }
 
-      const tabObj =
-        liverRawData?.scenarios?.[scenarioName]?.market_analysis?.[backendTabKey];
+      const tabObj = resolveBackendTabObj(
+        liverRawData?.scenarios?.[scenarioName]?.market_analysis,
+      );
       if (!tabObj) return;
       const metricObj =
         tabObj[activeMetricKey] ||
