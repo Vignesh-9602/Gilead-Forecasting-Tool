@@ -52,13 +52,29 @@ def flat_forecast(history_values: list, window: int = 3) -> float:
 
 def build_values_for_series(data: dict, month_tuples: list, forecast_start_index: int,
                              product: str = None, payer: str = None,
-                             forecast_fn=None) -> tuple:
+                             forecast_fn=None, treat_zero_as_missing: bool = True) -> tuple:
     """
     Build (history, forecast, all_values) for a single chart/table series.
 
     - History: actual values from data for months before forecast_start_index
     - Forecast: if forecast_fn is provided, call it as forecast_fn(history, n_fcast).
-                Otherwise fall back to flat continuation (avg of last 3 history values).
+                Otherwise fall back to flat continuation (avg of last 3 history values)
+                for any forecast cell that is <= 0 -- UNLESS treat_zero_as_missing is
+                False, in which case raw values are used exactly as stored.
+
+    treat_zero_as_missing=True (the default) is correct when `data` may
+    genuinely be sparse (e.g. built straight from transaction_data, where a
+    missing row and a real zero can't be told apart, so treating a zero as
+    "not forecast yet" is the safer assumption). Callers whose `data` has
+    already had every (product, payer) cell explicitly pre-populated for
+    every month (e.g. run_calculation_service.py's zero-seeding + event
+    application, where a real event can legitimately drive an entity's
+    volume to EXACTLY zero, such as a fully-drained impacted product) must
+    pass False -- otherwise a deliberate zero gets silently overwritten with
+    a flat-forecast fallback derived from history, corrupting both the
+    displayed value and any share computed from it (observed as per-entity
+    shares summing to over 100%, since the substituted value never went
+    through the event's own zero-sum redistribution/renormalization).
 
     Returns (history_list, forecast_list, full_list)
     """
@@ -67,9 +83,11 @@ def build_values_for_series(data: dict, month_tuples: list, forecast_start_index
     n_fcast  = len(month_tuples) - forecast_start_index
     if forecast_fn is not None:
         forecast = forecast_fn(history, n_fcast)
-    else:
+    elif treat_zero_as_missing:
         flat_val = flat_forecast(history)
         forecast = [v if v > 0 else flat_val for v in all_raw[forecast_start_index:]]
+    else:
+        forecast = all_raw[forecast_start_index:]
     return history, forecast, history + forecast
 
 

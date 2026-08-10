@@ -196,3 +196,17 @@ class DeleteEventRequest(BaseModel):
     ]
 
     event_name: str = Field(..., min_length=1)
+
+#new product
+class AddProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+
+class UpdateProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    new_product_name: str
+
+class DeleteProductRequest(BaseModel):
+    ta_name: str
+    product_name: str

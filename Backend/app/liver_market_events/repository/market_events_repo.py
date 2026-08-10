@@ -419,12 +419,14 @@ def get_configs_for_selection(cur, ta_name: str, payers: list, products: list) -
 # Transaction data queries
 # ---------------------------------------------------------------------------
 
-def get_volume_by_product_payer(cur, ta: str, from_year: int, from_month: int,
-                                to_year: int, to_month: int,
-                                payers: list = None, products: list = None) -> list:
+def get_volume_by_product_payment_type(cur, ta: str, from_year: int, from_month: int,
+                                        to_year: int, to_month: int,
+                                        payment_types: list = None, products: list = None) -> list:
     """
-    Return (year, month, product, payer, volume) tuples from transaction_data.
-    Filtered by TA and date range; optionally narrowed by payers and products.
+    Return (year, month, product, payment_type, volume) tuples from
+    transaction_data, summed ACROSS the payer (CVS/Non CVS/"NA") sub-split --
+    payer_event/product_event operate on payment_type only, never the
+    CVS/Non-CVS dimension directly (see payment_type_payer_product for that).
     """
     conditions = [
         "ta = %s",
@@ -432,23 +434,89 @@ def get_volume_by_product_payer(cur, ta: str, from_year: int, from_month: int,
     ]
     params = [ta, from_year, from_month, to_year, to_month]
 
-    if payers:
-        conditions.append("payer = ANY(%s::text[])")
-        params.append(payers)
+    if payment_types:
+        conditions.append("payment_type = ANY(%s::text[])")
+        params.append(payment_types)
 
     if products:
         conditions.append("product = ANY(%s::text[])")
         params.append(products)
 
     query = f"""
-        SELECT year, month, product, payer, SUM(volume) AS volume
+        SELECT year, month, product, payment_type, SUM(volume) AS volume
         FROM raw_liver.transaction_data
         WHERE {" AND ".join(conditions)}
-        GROUP BY year, month, product, payer
-        ORDER BY year, month, product, payer
+        GROUP BY year, month, product, payment_type
+        ORDER BY year, month, product, payment_type
     """
     cur.execute(query, params)
     return cur.fetchall()
+# ---------------------------------------------------------------------------
+# Payment Type × Payer × Product (3-level, CVS/Non-CVS cut)
+# pct = product % within the (payment_type, payer) sub-group
+# ---------------------------------------------------------------------------
+def _to_list(val) -> list:
+    """Normalise str or list → list for use with ANY(%s::text[])."""
+    return val if isinstance(val, list) else [val]
+
+def get_payment_type_payer_product(cur, ta: str, from_year: int, from_month: int,
+                                    to_year: int, to_month: int,
+                                    payment_type=None, metric: str = "payer_volume") -> list:
+    """Returns [(year, month, payment_type, payer, product, value), ...]"""
+    base_query = """
+        SELECT year, month, payment_type, payer, product, volume, pct_within_pt_payer
+        FROM (
+            SELECT year, month, payment_type, payer, product,
+                   SUM(volume) AS volume,
+                   ROUND(
+                       SUM(volume) * 100.0 /
+                       NULLIF(SUM(SUM(volume)) OVER (PARTITION BY year, month, payment_type, payer), 0),
+                   2) AS pct_within_pt_payer
+            FROM raw_liver.transaction_data
+            WHERE ta = %s
+              AND (year * 100 + month) BETWEEN (%s * 100 + %s) AND (%s * 100 + %s)
+            GROUP BY year, month, payment_type, payer, product
+        ) agg
+        {pt_filter}
+        ORDER BY payment_type, payer, product, year, month
+    """
+    if payment_type:
+        cur.execute(
+            base_query.format(pt_filter="WHERE payment_type = ANY(%s::text[])"),
+            (ta, from_year, from_month, to_year, to_month, _to_list(payment_type))
+        )
+    else:
+        cur.execute(base_query.format(pt_filter=""), (ta, from_year, from_month, to_year, to_month))
+    rows = cur.fetchall()
+    col_idx = 6 if metric == "payer_share" else 5
+    return [(r[0], r[1], r[2], r[3], r[4], float(r[col_idx])) for r in rows]
+
+
+def get_payment_type_payer_product_yearly(cur, ta: str, from_year: int, to_year: int,
+                                           payment_type=None, metric: str = "payer_volume") -> list:
+    """Returns [(year, 0, payment_type, payer, product, value), ...]"""
+    base_query = """
+        SELECT year, payment_type, payer, product, volume, pct_within_pt_payer
+        FROM (
+            SELECT year, payment_type, payer, product,
+                   SUM(volume) AS volume,
+                   ROUND(SUM(volume) * 100.0 /
+                         NULLIF(SUM(SUM(volume)) OVER (PARTITION BY year, payment_type, payer), 0), 2
+                   ) AS pct_within_pt_payer
+            FROM raw_liver.transaction_data
+            WHERE ta = %s AND year BETWEEN %s AND %s
+            GROUP BY year, payment_type, payer, product
+        ) agg
+        {pt_filter}
+        ORDER BY payment_type, payer, product, year
+    """
+    if payment_type:
+        cur.execute(base_query.format(pt_filter="WHERE payment_type = ANY(%s::text[])"),
+                    (ta, from_year, to_year, _to_list(payment_type)))
+    else:
+        cur.execute(base_query.format(pt_filter=""), (ta, from_year, to_year))
+    col_idx = 5 if metric == "payer_share" else 4
+    return [(r[0], 0, r[1], r[2], r[3], float(r[col_idx])) for r in cur.fetchall()]
 
 
 def get_distinct_months(cur, ta: str) -> list:

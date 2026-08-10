@@ -2004,3 +2004,286 @@ def delete_event_endpoint(
             status_code=500,
             detail=f"Failed to delete event: {str(exc)}",
         )
+
+#new product
+
+@router.get("/products")
+def get_products(db=Depends(get_connection)):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                product_id,
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            FROM raw_hiv_treat.product_master_hiv_treat
+            ORDER BY product_name
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        return {
+            "products": [
+                {
+                    "product_id": row["product_id"],
+                    "product_name": row["product_id"],
+                    "date_added": row["date_added"].strftime("%Y-%m-%d")
+                    if row.get("date_added")
+                    else None,
+                    "added_by": row["added_by"],
+                    "modified_by": row["modified_by"],
+                }
+                for row in rows
+            ]
+        }
+
+    finally:
+        cursor.close()
+
+
+@router.post("/products")
+def add_product(
+    payload: AddProductRequest,
+    db=Depends(get_connection)
+):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        user_id = "system"  # Replace with actual logged-in user
+
+        # Check if product already exists
+        cursor.execute(
+            """
+            SELECT 1
+            FROM raw_hiv_treat.product_master_hiv_treat
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (payload.ta_name, payload.product_name)
+        )
+
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail="Product already exists."
+            )
+
+        # Insert product
+        cursor.execute(
+            """
+            INSERT INTO raw_hiv_treat.product_master_hiv_treat
+            (
+                ta_name,
+                product_id,
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            )
+            VALUES (%s, %s, %s, CURRENT_DATE, %s, %s)
+            RETURNING
+                product_id,
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            """,
+            (
+                payload.ta_name,
+                payload.product_name,
+                payload.product_name,
+                user_id,
+                user_id,
+            )
+        )
+
+        product = cursor.fetchone()
+        db.commit()
+
+        return {
+            "message": "Product added successfully",
+            "product": {
+                "product_id": product["product_id"],
+                "product_name": product["product_id"],
+                "date_added": product["date_added"].strftime("%Y-%m-%d"),
+                "added_by": product["added_by"],
+                "modified_by": product["modified_by"]
+            }
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
+
+
+@router.put("/products")
+def update_product(
+    payload: UpdateProductRequest,
+    db=Depends(get_connection)
+):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        user_id = "system"  # Replace with actual logged-in user
+
+        # Check if existing product exists
+        cursor.execute(
+            """
+            SELECT
+                product_id,
+                date_added,
+                added_by
+            FROM raw_hiv_treat.product_master_hiv_treat
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        existing_product = cursor.fetchone()
+
+        if not existing_product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found."
+            )
+
+        # Check if new product name already exists
+        cursor.execute(
+            """
+            SELECT 1
+            FROM raw_hiv_treat.product_master_hiv_treat
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.new_product_name
+            )
+        )
+
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail="Product already exists."
+            )
+
+        # Update product
+        cursor.execute(
+            """
+            UPDATE raw_hiv_treat.product_master_hiv_treat
+            SET
+                product_name = %s,
+                product_id = %s,
+                modified_by = %s
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_name)) = UPPER(TRIM(%s))
+            RETURNING
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            """,
+            (
+                payload.new_product_name,
+                payload.new_product_name,  # product_id same as product_name
+                user_id,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        updated_product = cursor.fetchone()
+
+        db.commit()
+
+        return {
+            "message": "Product updated successfully",
+            "product": {
+                "product_id": updated_product["product_name"],  # product_id same as product_name
+                "product_name": updated_product["product_name"],
+                "date_added": (
+                    updated_product["date_added"].strftime("%Y-%m-%d")
+                    if updated_product["date_added"]
+                    else None
+                ),
+                "added_by": updated_product["added_by"],
+                "modified_by": updated_product["modified_by"]
+            }
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
+
+
+@router.delete("/products")
+def delete_product(
+    payload: DeleteProductRequest,
+    db=Depends(get_connection)
+):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Check if product exists
+        cursor.execute(
+            """
+            SELECT product_id
+            FROM raw_hiv_treat.product_master_hiv_treat
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        product = cursor.fetchone()
+
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found."
+            )
+
+        # Delete product
+        cursor.execute(
+            """
+            DELETE FROM raw_hiv_treat.product_master_hiv_treat
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        db.commit()
+
+        return {
+            "message": "Product deleted successfully",
+            "deleted_product": payload.product_name
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
