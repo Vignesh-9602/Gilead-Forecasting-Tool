@@ -278,6 +278,18 @@ export default function PaymentPayerProductTable({
   // those doesn't collide with the applied scenario's own row keys.
   const flattenRealRows = (rowsIn, level = 0, ancestorLabels = [], keyPrefix = "") => {
     const out = [];
+    // Some hierarchy orderings have a sibling that skips a level entirely
+    // (e.g. "Cash" has no Payer breakdown, so under a given Product it sits
+    // alongside "Commercial"/"Medicaid"/"Medicare" with zero children while
+    // they each have CVS/Non CVS children). Basing bold weight purely on
+    // that row's OWN hasChildren made Cash render as a plain leaf (400)
+    // while its true siblings at the same level got the bolder "has more
+    // depth below" weight (600) — visually inconsistent even though they're
+    // meant to read as the same level. siblingsHaveChildren looks at
+    // whether ANY row in this same sibling group has children, so the
+    // whole group gets the same weight regardless of which individual
+    // sibling happens to be a leaf.
+    const siblingsHaveChildren = (rowsIn || []).some((r) => r.children && r.children.length);
     (rowsIn || []).forEach((r) => {
       const label = r.label || r.hierarchy || "";
       const path = [...ancestorLabels, label];
@@ -289,6 +301,7 @@ export default function PaymentPayerProductTable({
         label,
         key,
         hasChildren,
+        siblingsHaveChildren,
         isExpanded,
         values: Array.isArray(r.total) ? r.total : r.values || [],
         highlighted: dimMatchesPath(path),
@@ -404,23 +417,63 @@ export default function PaymentPayerProductTable({
 
   // Same highlight rule as isRowHighlighted, but for real backend rows where
   // we only have a label path (e.g. ["Commercial", "CVS", "ASGA"]) rather
-  // than a { pt, payer, product } fixed map — matches if every filter
-  // that's actually applied (payment type / payer / product) appears
-  // somewhere on the path. A filter that isn't set is treated as already
-  // satisfied, so e.g. filtering by payer alone still matches every
-  // payment type/product combo under that payer.
+  // than a { pt, payer, product } fixed map.
+  //
+  // Matches ModelInputTable's actual convention (not just "same colors"):
+  // a row highlights only once every dimension it has ALREADY REACHED
+  // matches that dimension's applied filter, cascading down — a filter for
+  // a dimension this row hasn't reached yet (e.g. a Product filter checked
+  // against a Payment-Type-only parent row) doesn't block it, exactly like
+  // ModelInputTable's parent row only checking its own single dimension
+  // and leaving the child to check the next one once isAppliedParent is
+  // true.
+  //
+  // Classifies each label in the path by VALUE (is it a known Payment
+  // Type / CVS-Non CVS / Product name?) rather than by its POSITION in the
+  // path. Position alone isn't reliable here: "Cash" has no Payer
+  // breakdown, so in the Payment type-Payer-Product ordering, "Cash"'s
+  // children are Products sitting at the path position that would
+  // normally hold a Payer value for every other Payment Type. Classifying
+  // by value naturally handles that regardless of which Hierarchy Order is
+  // selected or which branch collapsed a level.
+  const isPtValue = (v) =>
+    paymentTypes.some((p) => String(p).toLowerCase() === String(v || "").toLowerCase());
+  const isPayerFilterValue = (v) => {
+    const s = String(v || "").toLowerCase();
+    return s === "cvs" || s === "non cvs";
+  };
+  const isProductValue = (v) =>
+    products.some((p) => String(p).toLowerCase() === String(v || "").toLowerCase());
+
   const pathMatchesAppliedFilters = (path) => {
-    // Exact match only — path is always an array of individual, already-
-    // separate labels (e.g. ["Commercial", "CVS"]), never a single
-    // compound "Parent - Child" string, so there's no need for substring
-    // matching here. That matters specifically because "Non CVS" contains
-    // "CVS" as a substring — a .includes() check would incorrectly treat
-    // a "CVS" filter as matching "Non CVS" rows too.
     const lower = path.map((p) => String(p || "").toLowerCase());
-    const payerOk = !currentPayer || lower.some((p) => p === currentPayer);
-    const subPayerOk = !currentSubPayer || lower.some((p) => p === currentSubPayer);
-    const brandOk = !currentBrand || lower.some((p) => p === currentBrand);
-    return payerOk && subPayerOk && brandOk;
+    const reachedPt = lower.find(isPtValue);
+    const reachedPayer = lower.find(isPayerFilterValue);
+    const reachedProduct = lower.find(isProductValue);
+
+    // Payment Type: only checked once this row's own pt value is known —
+    // for every ordering, the very first label in any path is always a
+    // Payment Type value, so this is effectively always "reached".
+    if (currentPayer && reachedPt !== undefined && reachedPt !== currentPayer) return false;
+
+    // Payer (CVS / Non CVS): checked once reached. "Cash" skips the Payer
+    // level entirely, so a branch whose Payment Type is Cash can never
+    // satisfy an applied Payer filter — that branch should NOT highlight,
+    // not be treated as "not yet reached, so pass".
+    if (currentSubPayer) {
+      if (reachedPayer !== undefined) {
+        if (reachedPayer !== currentSubPayer) return false;
+      } else if (reachedPt === "cash") {
+        return false;
+      }
+    }
+
+    // Product: checked once reached; a row that hasn't drilled down to a
+    // specific product yet (e.g. a Payment Type or Payer-level row) isn't
+    // penalized for a Product filter it hasn't gotten to yet.
+    if (currentBrand && reachedProduct !== undefined && reachedProduct !== currentBrand) return false;
+
+    return true;
   };
   const dimMatchesPath = (path) => {
     if (!isFilterFocusMode) return false;
@@ -474,10 +527,16 @@ export default function PaymentPayerProductTable({
     //   - 3-level branch: top (700) -> intermediate parent (600, since
     //     "CVS"/"Non CVS" are themselves parents of something) -> leaf
     //     (400). Three steps.
-    // Driven by hasChildren rather than a fixed level number, so it
-    // naturally adapts per branch: a row that itself has children is
-    // always bold-ish; a leaf is always plain, whether it's one level
-    // down (2-level branch) or two levels down (3-level branch).
+    // `hasChildren` here is really "siblingsHaveChildren" (passed in by the
+    // caller) rather than this exact row's own hasChildren — some rows
+    // (e.g. "Cash" under a Product, in the Product-Payment type-Payer
+    // ordering) have zero children of their own while their siblings under
+    // the SAME parent (Commercial/Medicaid/Medicare) do have children.
+    // Weighting purely on the individual row's own hasChildren made that
+    // one sibling render as a plain leaf (400) while its peers at the same
+    // visual level got 600 — inconsistent bolding across what should read
+    // as one uniform row of siblings. Using "does ANY sibling in this group
+    // have children" keeps the whole sibling group at the same weight.
     let fontWeight;
     if (level === 0) {
       // Scenario group header (e.g. "Base", "test2") — the outermost
@@ -608,20 +667,18 @@ export default function PaymentPayerProductTable({
   }
 
 
-  // ── Chart: one line per top-level dimension value ──────────────────────
+  // ── Chart: one line per direct-child combination ────────────────────────
   // Real data: the backend's chart.series only contains fully-flattened leaf
   // combinations (e.g. "Cash - ASGA", "Commercial - CVS - ASGA") — there's no
   // separate top-level-only series to filter for. Use the table instead:
   // each row already carries the correctly pre-aggregated total for that
-  // path across every column. Flattens level 0 (top) AND level 1 (its
-  // direct children) into separate lines — level 0 alone isn't enough: two
-  // of the three Hierarchy Order options share the same top-level dimension
-  // ("Payment type-Payer-Product" and "Payment type-Product-Payer" both
-  // have Payment Type at level 0), so their top-level totals are
-  // mathematically identical and the chart wouldn't visibly change when
-  // switching between them — only the level-1 breakdown actually differs
-  // between those two. Level 2+ stays table-only to avoid overcrowding the
-  // chart with too many lines.
+  // path across every column. Plots the "Parent - Child" combination line
+  // for each of level 0's direct children (e.g. "Cash - ASGA", "Commercial -
+  // CVS") — never the bare parent-only line, since that's just the sum of
+  // those children and would duplicate the same shape as an extra,
+  // unlabeled line. A row with no children at all is plotted on its own,
+  // using just its own label. Level 2+ stays table-only to avoid
+  // overcrowding the chart with too many lines.
   // Switches between monthly/yearly chart+table together with the
   // Monthly/Yearly toggle (realTableSrc above already does this for the
   // table; the chart previously stayed hardcoded to monthly regardless of
@@ -640,18 +697,29 @@ export default function PaymentPayerProductTable({
       // the table header's same totalMarketViewMode check just below.
       const realLabels = totalMarketViewMode === "yearly" ? chartMonths : chartMonths.map(formatDateLabel);
 
-      // One line per (parent) row, and one per (parent's) direct child —
-      // never deeper than that.
+      // One line per (parent's) direct child ("Parent - Child" combination),
+      // never the bare parent-only line by itself. A parent row with
+      // children (e.g. "Cash" -> "ASGA"/"GILD"/"Other") is really just the
+      // sum of those children — plotting it as its own separate line
+      // duplicated that same shape/trend as an extra, label-less "Cash"
+      // line sitting alongside "Cash - ASGA" etc., which read as if there
+      // were two unrelated "Cash" values. Only rows with NO children at all
+      // (true leaves at this table's top level) get plotted on their own,
+      // using their own label with no " - " suffix.
       const buildLineDefsFromTable = (tableObj) => {
         const out = [];
         (tableObj?.rows || []).forEach((r) => {
           const parentLabel = r.label || r.hierarchy || "";
-          out.push({
-            label: parentLabel,
-            path: [parentLabel],
-            values: Array.isArray(r.total) ? r.total : r.values || [],
-          });
-          (r.children || []).forEach((c) => {
+          const children = r.children || [];
+          if (!children.length) {
+            out.push({
+              label: parentLabel,
+              path: [parentLabel],
+              values: Array.isArray(r.total) ? r.total : r.values || [],
+            });
+            return;
+          }
+          children.forEach((c) => {
             const childLabel = c.label || c.hierarchy || "";
             out.push({
               label: `${parentLabel} - ${childLabel}`,
@@ -771,6 +839,42 @@ export default function PaymentPayerProductTable({
     });
   })();
 
+  // See the `revision` prop on PlotComponent below — forces react-plotly.js
+  // to fully re-diff against the latest chartTraces whenever something that
+  // can change which lines exist or what they contain actually changes
+  // (Hierarchy Order, Monthly/Yearly, which scenarios are being compared,
+  // the applied scenario, the metric, or any of the three filters).
+  // Deliberately NOT bumped on every render — react-plotly already handles
+  // most `data` prop changes on its own, and constantly forcing a redraw
+  // (once per render) risks the opposite problem: Plotly re-processing a
+  // trace list mid-transition, right as a new scenario's traces are being
+  // added, and settling on an incomplete one — which looks exactly like
+  // "only one scenario shows at a time" right after toggling Compare
+  // Scenarios. Keying revision off the actual inputs avoids that.
+  const chartRevision = useMemo(
+    () =>
+      JSON.stringify({
+        order: hierarchyOrder,
+        mode: totalMarketViewMode,
+        scenarios: (selectedCompareScenarios || []).slice().sort(),
+        applied: appliedScenario,
+        metric,
+        payer: appliedPayerFilter,
+        product: appliedProductFilter,
+        subPayer: appliedSubPayerFilter,
+      }),
+    [
+      hierarchyOrder,
+      totalMarketViewMode,
+      selectedCompareScenarios,
+      appliedScenario,
+      metric,
+      appliedPayerFilter,
+      appliedProductFilter,
+      appliedSubPayerFilter,
+    ],
+  );
+
   // ── Toolbar button styles (matches ModelInputTable) ──────────────────
   const primaryBtnSx = {
     height: "35px",
@@ -812,6 +916,17 @@ export default function PaymentPayerProductTable({
         <AccordionDetails sx={{ pt: 0, pb: 1, px: 1 }}>
           <Box sx={{ width: "100%", height: 380 }}>
             <PlotComponent
+              // react-plotly.js can keep a stale internal trace list across
+              // renders when the trace COUNT/shape changes (e.g. going from
+              // no data / mock fallback to real backend traces, or the
+              // number of Compare Scenarios lines changing) — it doesn't
+              // always fully repaint every line's geometry even though the
+              // `data` prop did change, which showed up as a legend entry
+              // appearing with no visible line underneath it. `revision`
+              // (react-plotly's documented escape hatch for this) forces a
+              // full redraw whenever anything that can change which lines
+              // exist or what they contain changes.
+              revision={chartRevision}
               data={chartTraces}
               layout={{
                 autosize: true,
@@ -902,7 +1017,7 @@ export default function PaymentPayerProductTable({
               >
                 {HIERARCHY_ORDERS.map((opt) => (
                   <MenuItem key={opt.value} value={opt.value} sx={{ fontSize: "12px" }}>
-                    {opt.label}
+                    Hierarchy: {opt.label}
                   </MenuItem>
                 ))}
               </Select>
@@ -1029,7 +1144,9 @@ export default function PaymentPayerProductTable({
             <Button
               variant="outlined"
               onClick={handleEnterTableEdit}
-              disabled={tableEditing || !appliedScenarioReady}
+              // Editing is only meaningful in Market Share view — disabled
+              // in Market Volume so users can't edit raw volume cells here.
+              disabled={tableEditing || !appliedScenarioReady || metric === "market_volume"}
               sx={secondaryBtnSx}
             >
               Edit Changes
@@ -1111,7 +1228,7 @@ export default function PaymentPayerProductTable({
           <Box component="tbody">
             {rows.map((row, i) => {
               const highlighted = useRealData ? !!row.highlighted : isRowHighlighted(row);
-              const style = rowStyle(row.level, highlighted, row.hasChildren);
+              const style = rowStyle(row.level, highlighted, row.siblingsHaveChildren ?? row.hasChildren);
               return (
                 <Box
                   component="tr"

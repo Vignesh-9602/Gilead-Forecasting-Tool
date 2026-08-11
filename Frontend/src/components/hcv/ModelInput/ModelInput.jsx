@@ -1538,8 +1538,9 @@ export default function PBCModelInput() {
 
   useLayoutEffect(() => {
     if (!filtersLoaded) return;
-    // Events Management / the mock 3-level tab have no chart/metric/table of their own.
-    if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
+    // Events Management has no chart/metric/table of its own — skip
+    // entirely (it doesn't even use the shared `metric` state).
+    if (activeTab === "manage_events") return;
 
     let targetMetric = "market_volume";
     if (activeTab === "total_market") {
@@ -1548,6 +1549,10 @@ export default function PBCModelInput() {
       targetMetric = "market_share";
     } else if (activeTab === "payer_prod" || activeTab === "prod_payer") {
       targetMetric = "market_volume";
+    } else if (activeTab === "payment_payer_prod") {
+      // Payment Type / Product tab (PaymentPayerProductTable) should show
+      // Market Share by default, not Market Volume.
+      targetMetric = "market_share";
     }
 
     // Set per-tab model default only when the model is at the other tab's
@@ -1570,8 +1575,21 @@ export default function PBCModelInput() {
     }
 
     if (isHCV && liverRawData) {
+      // normalizeLiverResponse is what actually rebuilds hierarchyData
+      // (tabs.payment_type_payer_product.orders) for the new target
+      // metric — this must run for the payment_payer_prod tab too, not
+      // just the flat/2D tabs. Skipping it here previously left
+      // PaymentPayerProductTable rendering the OLD (Market Volume) numbers
+      // while `isPercent` (driven by the `metric` prop set above) had
+      // already flipped to true, so it showed raw volume figures with a
+      // "%" suffix appended instead of real share values.
       const nextLiverTabsRaw = normalizeLiverResponse(liverRawData, targetMetric);
       setLiverTabsRaw(nextLiverTabsRaw);
+
+      // Payment Type / Product renders straight from hierarchyData (just
+      // rebuilt above) rather than the shared chartData/tableData state —
+      // it doesn't use mapLiverTabToView at all, so stop here for it.
+      if (activeTab === "payment_payer_prod") return;
 
       const { chart, table } = mapLiverTabToView(
         nextLiverTabsRaw,
@@ -1581,7 +1599,7 @@ export default function PBCModelInput() {
       );
       setChartData(chart);
       setTableData(table);
-    } else if (metric !== targetMetric) {
+    } else if (metric !== targetMetric && activeTab !== "payment_payer_prod") {
       handleApplyFilterWithMetric(targetMetric);
     }
   }, [activeTab, filtersLoaded, isHCV, liverRawData, totalMarketViewMode]);
@@ -1720,6 +1738,25 @@ export default function PBCModelInput() {
     });
     return out;
   }, [activeTab, liverRawData, selectedCompareScenarios, currentlyAppliedScenario, metric]);
+
+  // The APPLIED scenario's own hierarchy orders, computed the exact same
+  // way (a synchronous memo straight off liverRawData) as
+  // otherScenarioHierarchyData above — deliberately NOT sourced from
+  // liverTabsRaw state. liverTabsRaw is only rebuilt by a separate effect
+  // keyed off [activeTab, filtersLoaded, isHCV, liverRawData,
+  // totalMarketViewMode], so it can momentarily lag behind (or, on some
+  // render paths, simply not be what this tab currently needs) relative to
+  // otherScenarioHierarchyData, which always recomputes synchronously
+  // during render. That mismatch showed up as the applied scenario's own
+  // lines being missing from the Payment type-Payer-Product chart/table
+  // while a compared scenario's lines rendered fine — sourcing both from
+  // the same memo pattern removes the possibility of them ever diverging.
+  const appliedScenarioHierarchyData = useMemo(() => {
+    if (activeTab !== "payment_payer_prod") return {};
+    if (!liverRawData) return {};
+    const tabs = normalizeLiverResponse(liverRawData, metric);
+    return tabs?.tabs?.payment_type_payer_product?.orders || {};
+  }, [activeTab, liverRawData, metric]);
 
   useEffect(() => {
     if (filterOptions?.scenario_names?.length) {
@@ -4282,7 +4319,7 @@ export default function PBCModelInput() {
               // Real backend data for the 3 pre-computed hierarchy orderings
               // (falls back to the mock generator inside the component when
               // a given ordering isn't present in the response).
-              hierarchyData={liverTabsRaw?.tabs?.payment_type_payer_product?.orders}
+              hierarchyData={appliedScenarioHierarchyData}
               otherScenarioHierarchyData={otherScenarioHierarchyData}
               appliedScenario={currentlyAppliedScenario}
               selectedCompareScenarios={selectedCompareScenarios}
