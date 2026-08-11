@@ -38,6 +38,8 @@ import {
   saveLiverMarketEventsConfig,
   deleteLiverMarketEvent,
   getLiverMarketEventsFilters,
+  getLiverMarketEventsList,
+  runLiverMarketEventsCalculation,
 } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
@@ -194,6 +196,7 @@ export default function PBCModelInput() {
   const [savingTable, setSavingTable] = useState(false);
   const [isSavingEditChanges, setIsSavingEditChanges] = useState(false);
   const [savingMarketEvents, setSavingMarketEvents] = useState(false);
+  const [runningMarketEventsCalculation, setRunningMarketEventsCalculation] = useState(false);
   // true only after Refresh succeeds — gates the Save button
   const [isRefreshed, setIsRefreshed] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -1500,8 +1503,38 @@ export default function PBCModelInput() {
     if (fetchedTaRef.current === therapyArea) return;
     fetchedTaRef.current = therapyArea;
     fetchMetricFilters();
+  }, [therapyArea]);
+
+  // Separate from the fetchMetricFilters effect above on purpose: that one
+  // requires a real therapyArea (it branches on isHCV internally), but the
+  // market-events list endpoint already defaults to "HCV" server-side, so
+  // this shouldn't be blocked by the same guard. If therapyArea never
+  // resolves to a truthy value at all, the effect above silently never
+  // calls fetchMetricFilters either — worth confirming in the console
+  // whether that's ALSO missing on refresh, which would point to
+  // `favState?.selectedTherapyArea` not being populated yet rather than
+  // anything specific to market events.
+  const fetchedMarketEventsTaRef = useRef(null);
+  useEffect(() => {
+    const resolvedTa = therapyArea || "HCV";
+    if (fetchedMarketEventsTaRef.current === resolvedTa) return;
+    fetchedMarketEventsTaRef.current = resolvedTa;
     fetchSavedMarketEvents();
   }, [therapyArea]);
+
+  // Re-fetch every time the Events Management tab is opened, so it always
+  // reflects the latest saved state (e.g. events created/deleted from the
+  // Total Market Volume panel's compact list, or in another browser tab)
+  // rather than only whatever was loaded once on initial mount.
+  const prevActiveTabRef = useRef(activeTab);
+  useEffect(() => {
+    const enteredManageEvents =
+      activeTab === "manage_events" && prevActiveTabRef.current !== "manage_events";
+    prevActiveTabRef.current = activeTab;
+    if (enteredManageEvents) {
+      fetchSavedMarketEvents();
+    }
+  }, [activeTab]);
 
   useLayoutEffect(() => {
     if (!filtersLoaded) return;
@@ -2851,13 +2884,25 @@ export default function PBCModelInput() {
   const mapApiRowToLocalEvent = (row, fallbackEventType) => {
     const apiEventType = row.event_type || fallbackEventType || "product_event";
     return {
-      id: row.event_id,
+      // Local list key only — the backend identifies/deletes events by
+      // event_name (string), not event_id, so fall back to the name (or a
+      // generated key) when event_id isn't present on the row.
+      id: row.event_id ?? row.event_name ?? `evt_${Math.random().toString(36).slice(2)}`,
       eventType: EVENT_TYPE_FROM_API[apiEventType] || "Product",
       name: row.event_name || "",
       paymentTypes: row.payment_types || [],
       products: row.products || [],
       payers: row.payers || [],
-      impactedItems: row.impacted_products || [],
+      // The "impacted" list's field name varies by event category —
+      // product events impact payers/products, payer events impact
+      // payment types, etc. — so check every variant seen in the API
+      // response rather than a single hardcoded key.
+      impactedItems:
+        row.impacted_products ||
+        row.impacted_payment_types ||
+        row.impacted_payers ||
+        row.impacted_items ||
+        [],
       sourcePercentages: row.source_percentages || {},
       startDate: row.start_date || "",
       peakPercent: Number(row.peak_percent) || 0,
@@ -2870,28 +2915,53 @@ export default function PBCModelInput() {
     };
   };
 
-  // GET /api/liver-market-events/filters — loads any previously-saved
-  // Impact Curve Configuration rows so they survive a page refresh. Before
-  // this, nothing ever read events back from the server (only local state
-  // + the save/delete calls existed), which is why a refresh always showed
-  // an empty Events Management table even after a successful save.
-  // NOTE: the response shape here is inferred (checks the most likely
-  // places the rows could live), not confirmed against a real sample the
-  // way the apply-filters response was earlier — if events still don't
-  // reappear, log the actual response from this call and I'll correct the
-  // field paths below to match.
+  // GET /api/liver-market-events/market-events/{ta_name} — loads every
+  // previously-saved Impact Curve Configuration row for the Events
+  // Management tab (and the Total Market Volume panel's event list) so
+  // they survive a page refresh. Response shape (confirmed):
+  // {
+  //   events_management: {
+  //     product_event: { impact_curve_configuration: { rows: [...] } },
+  //     payer_event: { impact_curve_configuration: { rows: [...] } },
+  //     payment_type_payer_product_event: { impact_curve_configuration: { rows: [...] } },
+  //   }
+  // }
+  // Each row does NOT carry its own event_type — it's implied by which of
+  // the three category keys it lives under — so that key is stamped onto
+  // each row before mapping.
   const fetchSavedMarketEvents = async () => {
     try {
-      const res = await getLiverMarketEventsFilters(therapyArea || "HCV");
+      const res = await getLiverMarketEventsList(therapyArea || "HCV");
       const data = res?.data || {};
-      const rawRows =
-        data?.impact_curve_configuration?.rows ||
-        data?.events ||
-        data?.rows ||
-        [];
-      if (Array.isArray(rawRows) && rawRows.length) {
-        setMarketEvents(rawRows.map((r) => mapApiRowToLocalEvent(r, data?.selected_tab)));
+      const eventsManagement = data?.events_management;
+
+      let rawRows = [];
+      if (eventsManagement) {
+        rawRows = [
+          "product_event",
+          "payer_event",
+          "payment_type_payer_product_event",
+        ].flatMap((eventType) => {
+          const rows =
+            eventsManagement?.[eventType]?.impact_curve_configuration?.rows || [];
+          return rows.map((r) => ({ ...r, event_type: r.event_type || eventType }));
+        });
+      } else {
+        // Fallback for older/alternate response shapes.
+        rawRows =
+          data?.impact_curve_configuration?.rows ||
+          data?.events ||
+          data?.rows ||
+          data?.market_events ||
+          (Array.isArray(data) ? data : []);
       }
+
+      // Always sync to whatever the server returned — including an empty
+      // list, so a tab reopen after every event was deleted correctly
+      // clears the local table instead of leaving stale rows behind.
+      setMarketEvents(
+        Array.isArray(rawRows) ? rawRows.map((r) => mapApiRowToLocalEvent(r, r.event_type)) : [],
+      );
     } catch (error) {
       console.error("Failed to fetch saved market events:", error);
     }
@@ -2931,8 +3001,9 @@ export default function PBCModelInput() {
     PaymentType_Payer_Product: "payment_type_payer_product_event",
   };
 
-  // DELETE /api/liver-market-events/{event_id} — removes a single Impact
-  // Curve Configuration row from the backend, then drops it locally.
+  // DELETE /api/liver-market-events/{event_name} — removes a single Impact
+  // Curve Configuration row from the backend (identified by its event NAME,
+  // not a numeric event_id), then drops it locally.
   // NOTE: previously this skipped the network call entirely for events
   // that hadn't been through a successful Save yet (tracked via
   // evt.persisted), on the theory that a client-only event_id would just
@@ -2946,7 +3017,7 @@ export default function PBCModelInput() {
 
     try {
       setLoading(true);
-      await deleteLiverMarketEvent(eventId, {
+      await deleteLiverMarketEvent(evt.name, {
         ta_name: therapyArea || "HCV",
         event_type: EVENT_TYPE_TO_API[evt.eventType] || "product_event",
       });
@@ -3065,10 +3136,32 @@ export default function PBCModelInput() {
     }
   };
 
+  // POST /api/liver-market-events/run-calculation — triggers a recalculation
+  // of the Impact Curve Configuration for the currently applied filters.
+  // Wired to the "Run Calculation" button next to the Market Events
+  // dropdown on the Total Market Volume panel.
+  // NOTE: payload shape here is a best-effort guess (ta_name only) —
+  // mirror handleSaveMarketEventsToServer's payload above if the backend
+  // actually needs selected_filter/impact_curve_configuration too.
+  const handleRunMarketEventsCalculation = async () => {
+    try {
+      setRunningMarketEventsCalculation(true);
+      setLoading(true);
+      await runLiverMarketEventsCalculation({ ta_name: therapyArea || "HCV" });
+      showSnackbar("Market events calculation started successfully", "success");
+    } catch (error) {
+      console.error("Failed to run market events calculation:", error);
+      const msg = error?.response?.data || error?.message || "Unknown error";
+      showSnackbar(typeof msg === "string" ? msg : "Failed to run calculation", "error");
+    } finally {
+      setRunningMarketEventsCalculation(false);
+      setLoading(false);
+    }
+  };
+
   // Keeps the app-wide product master in sync when a new product is added
   // from the Add Event modal's "+ Add new product" option.
-  const handleAddMarketEventProduct = async (productName) => {
-    await addLiverMarketEventsProduct({ product_name: productName });
+  const handleAddMarketEventProduct = async (productName) => {    await addLiverMarketEventsProduct({ product_name: productName });
     setProductOptions((prev) => (prev.includes(productName) ? prev : [...prev, productName]));
   };
 
@@ -3544,7 +3637,19 @@ export default function PBCModelInput() {
             <Button
               variant="contained"
               onClick={handleApplyFilter}
-              disabled={!resolveFromDate() || !toDate}
+              // "Cash" has no Payer (PAYER FILTER / CVS-Non CVS) breakdown,
+              // so that dropdown is disabled and doesn't need a selection
+              // in that case — but for any other Payment Type, both the
+              // Payment Type and Payer Filter dropdowns must have a real
+              // selection before Apply Filter is allowed. Previously only
+              // the date range was checked here, so Apply Filter could be
+              // clicked with Payer Filter left on "Select".
+              disabled={
+                !resolveFromDate() ||
+                !toDate ||
+                !payerFilter ||
+                (payerFilter !== "Cash" && !subPayerFilter)
+              }
               sx={{
                 textTransform: "none",
                 borderRadius: "6px",
@@ -4130,8 +4235,12 @@ export default function PBCModelInput() {
 
         {/* ── TAB CONTENT ── */}
         <Box sx={{ p: 3 }}>
-          {/* Market Events — compact panel matching the wireframe, shown only on Total Market Volume */}
-          {activeTab === "total_market" && (
+          {/* Market Events — compact panel matching the wireframe. Shown on
+              every tab except Events Management (which has its own full
+              table variant right below), so it stays visible for Product
+              Distribution / Payment Type Distribution / Payment Type-Product
+              too, not just Total Market Volume. */}
+          {activeTab !== "manage_events" && (
             <MarketEventsPanel
               variant="compact"
               events={marketEvents}
@@ -4140,6 +4249,8 @@ export default function PBCModelInput() {
               productOptions={productOptions}
               payerOptions={payerOptions}
               availableDates={availableDates}
+              onRunCalculation={handleRunMarketEventsCalculation}
+              runningCalculation={runningMarketEventsCalculation}
             />
           )}
 
@@ -4175,6 +4286,8 @@ export default function PBCModelInput() {
               otherScenarioHierarchyData={otherScenarioHierarchyData}
               appliedScenario={currentlyAppliedScenario}
               selectedCompareScenarios={selectedCompareScenarios}
+              compareScenarioOptions={compareScenarioOptions}
+              handleCompareScenarioChange={handleCompareScenarioChange}
               handleDownloadTable={handleDownloadTable}
               handleConfirmSave={handleConfirmSave}
               handleEnterTableEdit={handleEnterTableEdit}

@@ -41,6 +41,10 @@ const formatDateLabel = (s) => {
 // Same curve options exposed by the real Impact Curve Configuration (Market Events).
 const CURVE_TYPES = ["Linear", "Exponential", "Logarithmic", "S-Curve"];
 
+// PaymentType_Payer_Product event's "Payer" field is its own fixed list —
+// CSV / Non-CSV — not the payer-name list used by other event types.
+const CSV_PAYER_OPTIONS = ["CSV", "Non-CSV"];
+
 const SELECT_ALL = "__SELECT_ALL__";
 
 // Mirrors Market Events' Impact Curve Configuration row fields exactly —
@@ -73,6 +77,10 @@ export default function MarketEventsPanel({
   productOptions = [],
   payerOptions = [],
   availableDates = [],
+  // "Run Calculation" button (compact variant only, next to the Market
+  // Events dropdown) — triggers POST /api/liver-market-events/run-calculation.
+  onRunCalculation,
+  runningCalculation = false,
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -246,13 +254,14 @@ export default function MarketEventsPanel({
   };
   const labelStyle = { mb: 0.5, fontSize: "11px", fontWeight: 700, color: "#64748b" };
 
-  const renderMultiSelect = (field, label, options) => (
+  const renderMultiSelect = (field, label, options, disabled = false) => (
     <Box sx={{ minWidth: 0 }}>
       <Typography sx={labelStyle}>{label.toUpperCase()}</Typography>
-      <FormControl size="small" fullWidth sx={compactSelectStyle}>
+      <FormControl size="small" fullWidth sx={compactSelectStyle} disabled={disabled}>
         <Select
           multiple
           displayEmpty
+          disabled={disabled}
           value={form[field]}
           onChange={toggleMultiSelect(field, options)}
           input={<OutlinedInput />}
@@ -277,6 +286,37 @@ export default function MarketEventsPanel({
     </Box>
   );
 
+  // Single-choice version of the field above, for Product event's Products
+  // dropdown (only that one, per request — Payer and PaymentType_Payer_Product
+  // events still allow multiple products). Keeps form[field] as a
+  // single-element array under the hood so the rest of the component
+  // (impact-dialog exclusion, save payload, table display) doesn't need to
+  // special-case this field's shape — it just always contains 0 or 1 items.
+  const renderSingleSelect = (field, label, options, disabled = false) => (
+    <Box sx={{ minWidth: 0 }}>
+      <Typography sx={labelStyle}>{label.toUpperCase()}</Typography>
+      <FormControl size="small" fullWidth sx={compactSelectStyle} disabled={disabled}>
+        <Select
+          displayEmpty
+          disabled={disabled}
+          value={form[field][0] || ""}
+          onChange={(e) => {
+            const val = e.target.value;
+            setForm((f) => ({ ...f, [field]: val ? [val] : [] }));
+          }}
+          input={<OutlinedInput />}
+          renderValue={(selected) => selected || "Select"}
+        >
+          {options.map((opt) => (
+            <MenuItem key={opt} value={opt}>
+              {opt}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    </Box>
+  );
+
   // ── Impact Dialog handlers (mirrors MarketEvent.jsx) ────────────────
   // For Payer event → impacted = payers not selected as source payers.
   // For Product event → impacted = products not selected as source products.
@@ -285,6 +325,18 @@ export default function MarketEventsPanel({
   const isPPPEvent = eventType === "PaymentType_Payer_Product";
   const impactOptions = isPayerEvent ? payerOptions : productOptions;
   const selectedSourceItems = isPayerEvent ? form.payers : form.products;
+
+  // PaymentType_Payer_Product: when "Cash" is one of the selected Payment
+  // Types, the Payer (CSV / Non-CSV) field doesn't apply and is disabled.
+  // Clear any previously-selected payer value at the same time so a
+  // disabled field doesn't silently keep a stale selection.
+  const isCashPaymentTypeSelected = isPPPEvent && form.paymentTypes.includes("Cash");
+  useEffect(() => {
+    if (isCashPaymentTypeSelected && form.payers.length) {
+      setForm((f) => ({ ...f, payers: [] }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCashPaymentTypeSelected]);
 
   const handleOpenImpactDialog = () => {
     const initial = {};
@@ -479,7 +531,7 @@ export default function MarketEventsPanel({
             {isPPPEvent ? (
               <>
                 {renderMultiSelect("paymentTypes", "Payment Type", payerOptions)}
-                {renderMultiSelect("payers", "Payer", payerOptions)}
+                {renderMultiSelect("payers", "Payer", CSV_PAYER_OPTIONS, isCashPaymentTypeSelected)}
                 {renderMultiSelect("products", "Products", productOptions)}
               </>
             ) : isPayerEvent ? (
@@ -490,7 +542,7 @@ export default function MarketEventsPanel({
             ) : (
               <>
                 {renderMultiSelect("payers", "Payers", payerOptions)}
-                {renderMultiSelect("products", "Products", productOptions)}
+                {renderSingleSelect("products", "Products", productOptions)}
               </>
             )}
 
@@ -705,37 +757,58 @@ export default function MarketEventsPanel({
     <Box sx={{ mb: 3, p: 2, border: "1px solid #e2e8f0", borderRadius: "8px", backgroundColor: "white" }}>
       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5 }}>
         <Typography sx={{ fontWeight: 700, fontSize: "14px" }}>Market Events</Typography>
-        <FormControl size="small" sx={{ width: 240, minWidth: 240 }}>
-          <Select
-            multiple
-            displayEmpty
-            value={selectedEventIds}
-            onChange={(e) => setSelectedEventIds(e.target.value)}
-            input={<OutlinedInput />}
-            sx={{
-              fontSize: "12px",
-              "& .MuiSelect-select": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-            }}
-            MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
-            renderValue={(selected) => {
-              if (!events.length) return "No events created";
-              if (!selected.length) return "Select Events";
-              if (selected.length === events.length) return "All Events";
-              return `${selected.length} Selected`;
-            }}
-          >
-            {events.length === 0 ? (
-              <MenuItem disabled>No events created yet</MenuItem>
-            ) : (
-              events.map((evt) => (
-                <MenuItem key={evt.id} value={evt.id}>
-                  <Checkbox size="small" checked={selectedEventIds.includes(evt.id)} />
-                  <ListItemText primary={`${evt.name} (${evt.eventType})`} />
-                </MenuItem>
-              ))
-            )}
-          </Select>
-        </FormControl>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+          {onRunCalculation && (
+            <Button
+              variant="contained"
+              size="small"
+              onClick={onRunCalculation}
+              disabled={runningCalculation}
+              sx={{
+                textTransform: "none",
+                fontSize: "12px",
+                fontWeight: 700,
+                borderRadius: "6px",
+                backgroundColor: "#2563EB",
+                boxShadow: "none",
+                "&:hover": { backgroundColor: "#1D4ED8", boxShadow: "none" },
+              }}
+            >
+              {runningCalculation ? "Running..." : "Run Calculation"}
+            </Button>
+          )}
+          <FormControl size="small" sx={{ width: 240, minWidth: 240 }}>
+            <Select
+              multiple
+              displayEmpty
+              value={selectedEventIds}
+              onChange={(e) => setSelectedEventIds(e.target.value)}
+              input={<OutlinedInput />}
+              sx={{
+                fontSize: "12px",
+                "& .MuiSelect-select": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+              }}
+              MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
+              renderValue={(selected) => {
+                if (!events.length) return "No events created";
+                if (!selected.length) return "Select Events";
+                if (selected.length === events.length) return "All Events";
+                return `${selected.length} Selected`;
+              }}
+            >
+              {events.length === 0 ? (
+                <MenuItem disabled>No events created yet</MenuItem>
+              ) : (
+                events.map((evt) => (
+                  <MenuItem key={evt.id} value={evt.id}>
+                    <Checkbox size="small" checked={selectedEventIds.includes(evt.id)} />
+                    <ListItemText primary={`${evt.name} (${evt.eventType})`} />
+                  </MenuItem>
+                ))
+              )}
+            </Select>
+          </FormControl>
+        </Box>
       </Box>
       {selectedEvents.length === 0 ? (
         <Typography sx={{ fontSize: "11px", color: "#64748b" }}>
