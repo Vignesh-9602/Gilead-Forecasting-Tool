@@ -11,6 +11,9 @@ import {
   Accordion,
   AccordionSummary,
   AccordionDetails,
+  Checkbox,
+  ListItemText,
+  OutlinedInput,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -114,6 +117,12 @@ export default function PaymentPayerProductTable({
   otherScenarioHierarchyData = {},
   appliedScenario,
   selectedCompareScenarios = [],
+  // Compare Scenarios dropdown — same control ModelInputTable renders in
+  // its own toolbar, wired to the same shared handler/state in ModelInput
+  // (selectedCompareScenarios is app-wide, not per-tab, so picking
+  // scenarios here or on another tab affects both).
+  compareScenarioOptions = [],
+  handleCompareScenarioChange,
   // Toolbar action handlers (passed from ModelInput)
   handleDownloadTable,
   handleConfirmSave,
@@ -204,9 +213,10 @@ export default function PaymentPayerProductTable({
 
   // Sums leafVolume over every dimension not present in `fixed`.
   const sumVolume = (fixed, monthIdx) => {
-    const pts = fixed.pt ? [fixed.pt] : paymentTypes;
-    const payers = fixed.payer ? [fixed.payer] : subPayers;
-    const prods = fixed.product ? [fixed.product] : products;
+    const f = fixed || {};
+    const pts = f.pt ? [f.pt] : paymentTypes;
+    const payers = f.payer ? [f.payer] : subPayers;
+    const prods = f.product ? [f.product] : products;
     let total = 0;
     pts.forEach((pt) => payers.forEach((payer) => prods.forEach((product) => {
       total += leafVolume(pt, payer, product, monthIdx);
@@ -309,26 +319,41 @@ export default function PaymentPayerProductTable({
   const dimValues = { pt: paymentTypes, payer: subPayers, product: products };
 
   // Expand All / Collapse All — same toolbar affordance ModelInputTable uses
-  // for its own expandable tabs.
+  // for its own expandable tabs. Shared helper collects every expandable
+  // key across all scenario groups currently being shown (the scenario
+  // group key itself, plus every parent key within that scenario's tree,
+  // namespaced the same way buildScenarioGroupRows/flattenRealRows are).
+  const collectAllScenarioKeys = () => {
+    if (!useRealData) return [];
+    const keys = [];
+    scenarioNamesToShow.forEach((name) => {
+      const isApplied = name === appliedScenario;
+      let scenarioTableForThis;
+      if (isApplied) {
+        scenarioTableForThis = realTableSrc;
+      } else {
+        const order = otherScenarioHierarchyData[name]?.[backendOrderKey];
+        scenarioTableForThis = totalMarketViewMode === "yearly" ? order?.yearlyTable : order?.table;
+      }
+      if (!scenarioTableForThis?.rows?.length) return;
+      const keyPrefix = isApplied ? "" : `${name}::`;
+      keys.push(`${keyPrefix}__scenario__`);
+      collectParentKeys(scenarioTableForThis.rows).forEach((k) => keys.push(keyPrefix + k));
+    });
+    return keys;
+  };
+
   const handleExpandAllRows = () => {
     let parentKeys;
     if (useRealData) {
-      parentKeys = collectParentKeys(realTableSrc.rows);
-      (selectedCompareScenarios || [])
-        .filter((name) => name && name !== appliedScenario)
-        .forEach((name) => {
-          const scenarioOrder = otherScenarioHierarchyData[name]?.[backendOrderKey];
-          const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder?.yearlyTable : scenarioOrder?.table;
-          if (scenarioTableSrc?.rows?.length) {
-            collectParentKeys(scenarioTableSrc.rows).forEach((k) => parentKeys.push(`${name}::${k}`));
-          }
-        });
+      parentKeys = collectAllScenarioKeys();
     } else {
-      // Mock data: every level-0 and level-1 combination has children.
-      parentKeys = [];
+      // Mock data: every level-0 and level-1 combination has children,
+      // nested under the synthetic scenario group header.
+      parentKeys = ["__scenario__"];
       dimValues[dim1].forEach((v1) => {
-        parentKeys.push(v1);
-        dimValues[dim2].forEach((v2) => parentKeys.push(`${v1} > ${v2}`));
+        parentKeys.push(`__scenario__ > ${v1}`);
+        dimValues[dim2].forEach((v2) => parentKeys.push(`__scenario__ > ${v1} > ${v2}`));
       });
     }
     setExpandedRows(Object.fromEntries(parentKeys.map((k) => [k, true])));
@@ -336,27 +361,15 @@ export default function PaymentPayerProductTable({
   const handleCollapseAllRows = () => setExpandedRows({});
 
   // Starts fully expanded on first load, and again whenever the Hierarchy
-  // Order dropdown or Monthly/Yearly toggle changes the underlying data —
-  // matching ModelInputTable's Payer/Product tabs, which also default to
-  // expanded rather than collapsed. The user can still collapse individual
-  // rows, or hit "Collapse All", afterward; this only sets the starting
-  // point each time the data changes. Also expands each OTHER Compare
-  // Scenarios scenario's rows (scenario-prefixed keys) the same way, so
-  // they don't default to collapsed just because they're not the applied
-  // scenario.
+  // Order dropdown, Monthly/Yearly toggle, or Compare Scenarios selection
+  // changes the underlying data — matching ModelInputTable's Payer/Product
+  // tabs, which also default to expanded rather than collapsed. The user
+  // can still collapse individual rows/scenario groups, or hit "Collapse
+  // All", afterward; this only sets the starting point each time the data
+  // changes.
   useEffect(() => {
     if (!useRealData) return;
-    const keys = collectParentKeys(realTableSrc.rows);
-    (selectedCompareScenarios || [])
-      .filter((name) => name && name !== appliedScenario)
-      .forEach((name) => {
-        const scenarioOrder = otherScenarioHierarchyData[name]?.[backendOrderKey];
-        const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder?.yearlyTable : scenarioOrder?.table;
-        if (scenarioTableSrc?.rows?.length) {
-          collectParentKeys(scenarioTableSrc.rows).forEach((k) => keys.push(`${name}::${k}`));
-        }
-      });
-    setExpandedRows(Object.fromEntries(keys.map((k) => [k, true])));
+    setExpandedRows(Object.fromEntries(collectAllScenarioKeys().map((k) => [k, true])));
   }, [backendOrderKey, totalMarketViewMode, useRealData, realTableSrc, selectedCompareScenarios, appliedScenario, otherScenarioHierarchyData]);
 
   // Same highlighting convention as ModelInputTable's Payer/Product tab:
@@ -381,10 +394,11 @@ export default function PaymentPayerProductTable({
   };
   const isRowHighlighted = (row) => {
     if (!isFilterFocusMode) return false;
+    const fixed = row.fixed || {};
     return (
-      dimMatches(dim1, row.fixed[dim1]) &&
-      dimMatches(dim2, row.fixed[dim2]) &&
-      dimMatches(dim3, row.fixed[dim3])
+      dimMatches(dim1, fixed[dim1]) &&
+      dimMatches(dim2, fixed[dim2]) &&
+      dimMatches(dim3, fixed[dim3])
     );
   };
 
@@ -466,6 +480,15 @@ export default function PaymentPayerProductTable({
     // down (2-level branch) or two levels down (3-level branch).
     let fontWeight;
     if (level === 0) {
+      // Scenario group header (e.g. "Base", "test2") — the outermost
+      // wrapper, matching ModelInputTable's Product/Payment Type
+      // Distribution convention of putting the scenario name itself at
+      // the top, with the tab's own hierarchy nested underneath.
+      fontWeight = 700;
+    } else if (level === 1) {
+      // Top of this tab's own hierarchy (e.g. "Cash"/"Commercial") — same
+      // prominence it always had, just one level deeper now that the
+      // scenario wrapper sits above it.
       fontWeight = 700;
     } else if (hasChildren) {
       fontWeight = 600;
@@ -473,66 +496,117 @@ export default function PaymentPayerProductTable({
       fontWeight = 400;
     }
     return {
-      backgroundColor: highlighted ? "#fffbeb" : level === 0 ? "#f8fafc" : "white",
+      backgroundColor: highlighted ? "#fffbeb" : level <= 1 ? "#f8fafc" : "white",
       fontWeight,
-      color: highlighted ? "#f59e0b" : level === 0 ? "#1e293b" : level === 1 ? "#334155" : "#64748b",
+      color: highlighted ? "#f59e0b" : level <= 1 ? "#1e293b" : level === 2 ? "#334155" : "#64748b",
     };
   };
-  const indentPx = (level) => (level === 0 ? "16px" : level === 1 ? "64px" : "112px");
+  const indentPx = (level) =>
+    level === 0 ? "16px" : level === 1 ? "48px" : level === 2 ? "96px" : "144px";
 
-  const rows = useRealData ? flattenRealRows(realTableSrc.rows) : [];
-  if (!useRealData) {
-    dimValues[dim1].forEach((v1) => {
-      const key1 = v1;
-      const expanded1 = !!expandedRows[key1];
-      rows.push({ level: 0, label: v1, key: key1, hasChildren: true, isExpanded: expanded1, fixed: { [dim1]: v1 }, parentFixed: {} });
-      if (!expanded1) return;
-      dimValues[dim2].forEach((v2) => {
-        const key2 = `${key1} > ${v2}`;
-        const expanded2 = !!expandedRows[key2];
-        rows.push({ level: 1, label: v2, key: key2, hasChildren: true, isExpanded: expanded2, fixed: { [dim1]: v1, [dim2]: v2 }, parentFixed: { [dim1]: v1 } });
-        if (!expanded2) return;
-        dimValues[dim3].forEach((v3) => {
-          rows.push({
-            level: 2,
-            label: v3,
-            key: `${key2} > ${v3}`,
-            hasChildren: false,
-            fixed: { [dim1]: v1, [dim2]: v2, [dim3]: v3 },
-            parentFixed: { [dim1]: v1, [dim2]: v2 },
+  // Scenario group rows: matches ModelInputTable's Product/Payment Type
+  // Distribution tables, where the SCENARIO itself (e.g. "Base", "test2")
+  // is the top-level parent and the tab's own hierarchy is nested under
+  // it — not a flat "(scenario)"-suffixed sibling row, which is what this
+  // used to do. One group per scenario currently being shown (the applied
+  // scenario plus any Compare Scenarios selections); each group's own row
+  // is the sum of its top-level children, same aggregate convention
+  // ModelInputTable uses for its scenario-group header row.
+  const scenarioNamesToShow = (
+    selectedCompareScenarios?.length ? selectedCompareScenarios : appliedScenario ? [appliedScenario] : []
+  ).filter(Boolean);
+
+  const buildScenarioGroupRows = (scenarioName) => {
+    const isApplied = scenarioName === appliedScenario;
+    let scenarioTableForThis;
+    if (isApplied) {
+      scenarioTableForThis = realTableSrc;
+    } else {
+      const order = otherScenarioHierarchyData[scenarioName]?.[backendOrderKey];
+      scenarioTableForThis = totalMarketViewMode === "yearly" ? order?.yearlyTable : order?.table;
+    }
+    if (!scenarioTableForThis?.rows?.length) return [];
+
+    const keyPrefix = isApplied ? "" : `${scenarioName}::`;
+    const groupKey = `${keyPrefix}__scenario__`;
+    const isGroupExpanded = !!expandedRows[groupKey];
+
+    // Always compute the flattened content (needed for the group's own
+    // aggregate row), but only include it in the rendered list when the
+    // scenario group itself is expanded. Every row gets tagged with its
+    // scenario (flattenRealRows itself doesn't know about scenarios) so
+    // downstream logic — e.g. restricting cell editing to the applied
+    // scenario's own rows — can tell them apart.
+    const flatContent = flattenRealRows(scenarioTableForThis.rows, 1, [], keyPrefix).map((r) => ({
+      ...r,
+      scenario: scenarioName,
+    }));
+    const topChildren = flatContent.filter((r) => r.level === 1);
+    const valuesLength = topChildren.reduce((max, c) => Math.max(max, c.values.length), 0);
+    const groupValues = Array.from({ length: valuesLength }, (_, i) =>
+      topChildren.reduce((sum, c) => sum + (Number(c.values?.[i]) || 0), 0),
+    );
+
+    const groupRow = {
+      level: 0,
+      label: scenarioName,
+      key: groupKey,
+      hasChildren: true,
+      isExpanded: isGroupExpanded,
+      values: groupValues,
+      highlighted: false,
+      scenario: scenarioName,
+      isScenarioGroup: true,
+    };
+
+    return [groupRow, ...(isGroupExpanded ? flatContent : [])];
+  };
+
+  let rows = [];
+  if (useRealData) {
+    rows = scenarioNamesToShow.flatMap(buildScenarioGroupRows);
+  } else {
+    // Mock fallback: wrap the existing synthetic 3-level tree under a
+    // single scenario header too, so the visual convention still matches
+    // even without real backend data.
+    const scenarioLabel = appliedScenario || "Base";
+    const groupKey = "__scenario__";
+    const isGroupExpanded = !!expandedRows[groupKey];
+    rows.push({
+      level: 0,
+      label: scenarioLabel,
+      key: groupKey,
+      hasChildren: true,
+      isExpanded: isGroupExpanded,
+      scenario: scenarioLabel,
+      isScenarioGroup: true,
+    });
+    if (isGroupExpanded) {
+      dimValues[dim1].forEach((v1) => {
+        const key1 = `${groupKey} > ${v1}`;
+        const expanded1 = !!expandedRows[key1];
+        rows.push({ level: 1, label: v1, key: key1, hasChildren: true, isExpanded: expanded1, fixed: { [dim1]: v1 }, parentFixed: {} });
+        if (!expanded1) return;
+        dimValues[dim2].forEach((v2) => {
+          const key2 = `${key1} > ${v2}`;
+          const expanded2 = !!expandedRows[key2];
+          rows.push({ level: 2, label: v2, key: key2, hasChildren: true, isExpanded: expanded2, fixed: { [dim1]: v1, [dim2]: v2 }, parentFixed: { [dim1]: v1 } });
+          if (!expanded2) return;
+          dimValues[dim3].forEach((v3) => {
+            rows.push({
+              level: 3,
+              label: v3,
+              key: `${key2} > ${v3}`,
+              hasChildren: false,
+              fixed: { [dim1]: v1, [dim2]: v2, [dim3]: v3 },
+              parentFixed: { [dim1]: v1, [dim2]: v2 },
+            });
           });
         });
       });
-    });
+    }
   }
 
-  // Compare Scenarios for the TABLE: append each OTHER selected scenario's
-  // own tree as additional top-level groups, right after the applied
-  // scenario's rows — this tab previously had no scenario-comparison
-  // support at all in its table (unlike the standard tabs' tables), so
-  // switching on another scenario never showed anything here either.
-  // Top-level rows get a "(Scenario)" suffix so they're distinguishable
-  // from the applied scenario's own rows; each scenario's rows use a
-  // scenario-prefixed key namespace so their expand/collapse state can't
-  // collide with the applied scenario's.
-  if (useRealData) {
-    const otherScenarioNames = (selectedCompareScenarios || []).filter(
-      (name) => name && name !== appliedScenario,
-    );
-    otherScenarioNames.forEach((name) => {
-      const scenarioOrders = otherScenarioHierarchyData[name];
-      const scenarioOrder = scenarioOrders && scenarioOrders[backendOrderKey];
-      if (!scenarioOrder) return;
-      const scenarioTableSrc = totalMarketViewMode === "yearly" ? scenarioOrder.yearlyTable : scenarioOrder.table;
-      if (!scenarioTableSrc?.rows?.length) return;
-      const scenarioRows = flattenRealRows(scenarioTableSrc.rows, 0, [], `${name}::`);
-      scenarioRows.forEach((r) => {
-        if (r.level === 0) r.label = `${r.label} (${name})`;
-        r.scenario = name;
-      });
-      rows.push(...scenarioRows);
-    });
-  }
 
   // ── Chart: one line per top-level dimension value ──────────────────────
   // Real data: the backend's chart.series only contains fully-flattened leaf
@@ -834,6 +908,49 @@ export default function PaymentPayerProductTable({
               </Select>
             </FormControl>
 
+            {/* Compare Scenarios — identical control to ModelInputTable's
+                own toolbar (same options list, same handler, same shared
+                selectedCompareScenarios state), so picking scenarios here
+                behaves exactly the way it does on every other tab. */}
+            {compareScenarioOptions.length > 1 && handleCompareScenarioChange && (
+              <FormControl sx={{ minWidth: 220, maxWidth: 220 }}>
+                <Select
+                  multiple
+                  displayEmpty
+                  value={selectedCompareScenarios}
+                  onChange={handleCompareScenarioChange}
+                  input={<OutlinedInput />}
+                  sx={{
+                    height: "34px",
+                    fontSize: "13px",
+                    borderRadius: "8px",
+                    backgroundColor: "#fcfcfd",
+                    "& .MuiSelect-select": {
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                  }}
+                  MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
+                  renderValue={(selected) => {
+                    if (!selected.length) return "Compare Scenarios";
+                    if (selected.length === compareScenarioOptions.length) return "All Scenarios";
+                    return selected.join(", ");
+                  }}
+                >
+                  {compareScenarioOptions.map((option) => {
+                    const isActive = option === appliedScenario;
+                    return (
+                      <MenuItem key={option} value={option} disabled={isActive}>
+                        <Checkbox size="small" checked={selectedCompareScenarios.includes(option)} disabled={isActive} />
+                        <ListItemText primary={isActive ? `${option} (Active)` : option} />
+                      </MenuItem>
+                    );
+                  })}
+                </Select>
+              </FormControl>
+            )}
+
             {filterOptions?.metric_filters?.length > 0 && (
             <FormControl size="small" sx={{ minWidth: 160 }}>
               <Select
@@ -975,7 +1092,7 @@ export default function PaymentPayerProductTable({
                   fontWeight: 700, fontSize: "14px", textAlign: "left", p: "12px 16px", minWidth: 220, borderRight: "2px solid #e2e8f0", borderBottom: "2px solid #e2e8f0",
                 }}
               >
-                {DIM_LABELS[dim1]} / {DIM_LABELS[dim2]} / {DIM_LABELS[dim3]}
+                Scenario / {DIM_LABELS[dim1]} / {DIM_LABELS[dim2]} / {DIM_LABELS[dim3]}
               </Box>
               {columns.map((col) => (
                 <Box
@@ -1043,17 +1160,34 @@ export default function PaymentPayerProductTable({
                     const displayVal = useRealData
                       ? Number(row.values?.[col.indices[0]] ?? 0)
                       : (() => {
-                          const ownVal = columnValue(row.fixed, col);
-                          const parentVal = row.level === 0 ? columnValue({}, col) : parentColumnValue(row.parentFixed, col);
+                          // The scenario-group header row (level 0) has no
+                          // .fixed at all — it's a pure grouping label, not
+                          // a real dimension combination — so both it and
+                          // level 1 (the actual top of this tab's own
+                          // hierarchy) fall back to the grand total ({})
+                          // for their own value/parent reference, same as
+                          // this always worked before the scenario wrapper
+                          // was added (just shifted from level 0 to <= 1).
+                          const fixed = row.fixed || {};
+                          const ownVal = columnValue(fixed, col);
+                          const parentVal = row.level <= 1 ? columnValue({}, col) : parentColumnValue(row.parentFixed || {}, col);
                           return isPercent ? (parentVal ? (ownVal / parentVal) * 100 : 0) : ownVal;
                         })();
 
                     // Same eligibility rule ModelInputTable uses (isEditEligible):
                     // edit mode on, monthly view only, leaf rows only. Real
                     // data only — the mock fallback has no backend row to
-                    // patch values into on save.
+                    // patch values into on save. Also restricted to the
+                    // applied scenario's own rows — handleSaveHierarchyTableChanges
+                    // only ever patches the applied scenario's raw data, so
+                    // editing a comparison scenario's cells would silently
+                    // go nowhere.
                     const isEditableCell =
-                      tableEditing && totalMarketViewMode === "monthly" && useRealData && !row.hasChildren;
+                      tableEditing &&
+                      totalMarketViewMode === "monthly" &&
+                      useRealData &&
+                      !row.hasChildren &&
+                      (!row.scenario || row.scenario === appliedScenario);
                     const cellKey = `${row.key}::${col.key}`;
                     const editedVal = editedCells[cellKey];
                     const shownVal = editedVal !== undefined ? editedVal : displayVal;

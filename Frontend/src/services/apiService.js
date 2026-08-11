@@ -354,12 +354,24 @@ export const saveLiverMarketEventsConfig = (payload) => {
 };
 
 // DELETE — remove a single market event (Impact Curve Configuration row).
-// event_id is a path param; ta_name/event_type are query params.
+// event_name (string) is the path param — NOT event_id; ta_name/event_type
+// are query params.
 // event_type is one of: "product_event" | "payer_event" | "payment_type_payer_product_event".
-export const deleteLiverMarketEvent = (eventId, { ta_name, event_type }) => {
-  return httpClient.delete(`/api/liver-market-events/${eventId}`, {
-    params: { ta_name, event_type },
-  });
+export const deleteLiverMarketEvent = (eventName, { ta_name, event_type }) => {
+  return httpClient.delete(
+    `/api/liver-market-events/${encodeURIComponent(eventName)}`,
+    {
+      params: { ta_name, event_type },
+    },
+  );
+};
+
+// GET — list all saved market events (Impact Curve Configuration rows) for
+// a therapy area, used to populate the Events Management tab's table.
+export const getLiverMarketEventsList = (taName) => {
+  return httpClient.get(
+    `/api/liver-market-events/market-events/${encodeURIComponent(taName)}`,
+  );
 };
 
 // GET — Output screen filters for a therapy area (e.g. ta=HCV)
