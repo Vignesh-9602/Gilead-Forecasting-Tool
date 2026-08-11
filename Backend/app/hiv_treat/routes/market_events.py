@@ -2352,6 +2352,184 @@ def update_product(
         cursor.close()
 
 
+# @router.delete("/products")
+# def delete_product(
+#     payload: DeleteProductRequest,
+#     db=Depends(get_connection)
+# ):
+#     cursor = db.cursor(cursor_factory=RealDictCursor)
+
+#     try:
+#         # Check if product exists
+#         cursor.execute(
+#             """
+#             SELECT product_id
+#             FROM raw_hiv_treat.product_master_hiv_treat
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#             """,
+#             (
+#                 payload.ta_name,
+#                 payload.product_name
+#             )
+#         )
+
+#         product = cursor.fetchone()
+
+#         if not product:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Product not found."
+#             )
+
+#         # Delete product
+#         cursor.execute(
+#             """
+#             DELETE FROM raw_hiv_treat.product_master_hiv_treat
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#             """,
+#             (
+#                 payload.ta_name,
+#                 payload.product_name
+#             )
+#         )
+
+#         db.commit()
+
+#         return {
+#             "message": "Product deleted successfully",
+#             "deleted_product": payload.product_name
+#         }
+
+#     except Exception:
+#         db.rollback()
+#         raise
+
+#     finally:
+#         cursor.close()
+
+
+PRODUCT_MASTER_TABLE = "raw_hiv_treat.product_master_hiv_treat"
+FORECAST_TABLE = "raw_hiv_treat.forecast_outputs"
+
+SHARE_DECIMALS = 2
+
+
+class DeleteProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    # Limit the removal to one scenario; omit to remove the product
+    # everywhere, which is what "delete the product" normally means.
+    scenario_name: Optional[str] = None
+
+
+def _parse_forecast_data(raw) -> dict:
+    if isinstance(raw, str):
+        return json.loads(raw) if raw.strip() else {}
+    return raw or {}
+
+
+def normalize_shares_after_delete(cursor, ta_name: str,
+                                  scenarios: Optional[List[str]] = None) -> int:
+    """Rescale each group of sibling product shares back to 100.
+
+    Deleting a product that held share leaves its siblings summing to less
+    than 100. Every view reading these rows then shows a market that
+    doesn't add up, and any view that normalizes children to their parent
+    inflates whoever is left by an arbitrary amount instead.
+
+    A "group" is one (scenario, metric, market, source_of_market): the set
+    of products measured against the same whole. That covers per-market
+    product shares, per-source shares, AND the market='ALL' portfolio
+    shares, since all three are groups whose members sum to 100.
+
+    market_share_pm is deliberately untouched -- it splits ONE product
+    across markets, so removing a different product doesn't disturb it.
+
+    Returns the number of rows rewritten.
+    """
+    query = f"""
+        SELECT id, scenario_name, metric, market, product,
+               COALESCE(NULLIF(source_of_market, ''), 'ALL') AS som,
+               forecast_data
+        FROM {FORECAST_TABLE}
+        WHERE ta_name = %s
+          AND metric = 'market_share'
+          AND product IS NOT NULL
+          AND UPPER(TRIM(product)) <> 'ALL'
+    """
+    params: List = [ta_name]
+
+    if scenarios:
+        query += " AND scenario_name = ANY(%s)"
+        params.append(list(scenarios))
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    groups = {}
+    for row in rows:
+        key = (row["scenario_name"], row["metric"], row["market"], row["som"])
+        groups.setdefault(key, []).append(row)
+
+    rewritten = 0
+
+    for key, members in groups.items():
+
+        parsed = [
+            (row, _parse_forecast_data(row["forecast_data"]))
+            for row in members
+        ]
+
+        for field in ("train_values", "forecast_values"):
+
+            length = max(
+                (len(data.get(field) or []) for _, data in parsed),
+                default=0,
+            )
+
+            for index in range(length):
+
+                total = 0.0
+                for _, data in parsed:
+                    values = data.get(field) or []
+                    if index < len(values):
+                        total += float(values[index] or 0)
+
+                # Every sibling is zero at this index -- nothing to scale,
+                # and no basis for inventing a split.
+                if total <= 0:
+                    continue
+
+                # Already sums to 100 (within storage rounding).
+                if abs(total - 100.0) <= 0.01:
+                    continue
+
+                factor = 100.0 / total
+                for _, data in parsed:
+                    values = data.get(field) or []
+                    if index < len(values):
+                        values[index] = round(
+                            float(values[index] or 0) * factor,
+                            SHARE_DECIMALS,
+                        )
+
+        for row, data in parsed:
+            cursor.execute(
+                f"""
+                UPDATE {FORECAST_TABLE}
+                SET forecast_data = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                [json.dumps(data), row["id"]],
+            )
+            rewritten += cursor.rowcount
+
+    return rewritten
+
+
 @router.delete("/products")
 def delete_product(
     payload: DeleteProductRequest,
@@ -2362,16 +2540,13 @@ def delete_product(
     try:
         # Check if product exists
         cursor.execute(
-            """
+            f"""
             SELECT product_id
-            FROM raw_hiv_treat.product_master_hiv_treat
+            FROM {PRODUCT_MASTER_TABLE}
             WHERE ta_name = %s
               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
             """,
-            (
-                payload.ta_name,
-                payload.product_name
-            )
+            (payload.ta_name, payload.product_name),
         )
 
         product = cursor.fetchone()
@@ -2379,27 +2554,77 @@ def delete_product(
         if not product:
             raise HTTPException(
                 status_code=404,
-                detail="Product not found."
+                detail="Product not found.",
             )
 
-        # Delete product
+        # The name as stored, not as typed -- forecast_outputs.product holds
+        # the same value as product_master.product_id, and the lookup above
+        # was case-insensitive.
+        stored_name = product["product_id"]
+
+        # --------------------------------------------------
+        # Forecast rows
+        # --------------------------------------------------
+        # Deleted first and in the SAME transaction as the master row.
+        # All metrics, markets, sources and scenarios go -- including Base,
+        # or the product reappears the moment anyone runs a calculation,
+        # since seeding models new products on whatever rows already exist.
+        forecast_params = [payload.ta_name, stored_name]
+        scenario_clause = ""
+        if payload.scenario_name:
+            scenario_clause = "AND scenario_name = %s"
+            forecast_params.append(payload.scenario_name)
+
         cursor.execute(
-            """
-            DELETE FROM raw_hiv_treat.product_master_hiv_treat
+            f"""
+            DELETE FROM {FORECAST_TABLE}
             WHERE ta_name = %s
-              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+              {scenario_clause}
             """,
-            (
-                payload.ta_name,
-                payload.product_name
-            )
+            forecast_params,
         )
+        forecast_rows_deleted = cursor.rowcount
+
+        # --------------------------------------------------
+        # Renormalize the survivors
+        # --------------------------------------------------
+        # The deleted product's share has to go somewhere: without this,
+        # every group it belonged to now sums to less than 100.
+        shares_renormalized = 0
+        if forecast_rows_deleted:
+            shares_renormalized = normalize_shares_after_delete(
+                cursor,
+                payload.ta_name,
+                [payload.scenario_name] if payload.scenario_name else None,
+            )
+
+        # --------------------------------------------------
+        # Master row
+        # --------------------------------------------------
+        # Kept when the caller scoped the delete to one scenario -- the
+        # product still exists, it just no longer participates there.
+        master_rows_deleted = 0
+        if not payload.scenario_name:
+            cursor.execute(
+                f"""
+                DELETE FROM {PRODUCT_MASTER_TABLE}
+                WHERE ta_name = %s
+                  AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+                """,
+                (payload.ta_name, payload.product_name),
+            )
+            master_rows_deleted = cursor.rowcount
 
         db.commit()
 
         return {
             "message": "Product deleted successfully",
-            "deleted_product": payload.product_name
+            "deleted_product": stored_name,
+            "scenario_name": payload.scenario_name,
+            "forecast_rows_deleted": forecast_rows_deleted,
+            "master_rows_deleted": master_rows_deleted,
+            "share_rows_renormalized": shares_renormalized,
         }
 
     except Exception:
@@ -2408,111 +2633,3 @@ def delete_product(
 
     finally:
         cursor.close()
-
-
-# FORECAST_TABLE = "raw_hiv_treat.forecast_outputs"
-# @router.delete("/products")
-# def delete_product(
-#     payload: DeleteProductRequest,
-#     db=Depends(get_connection)
-# ):
-#     cursor = db.cursor(cursor_factory=RealDictCursor)
- 
-#     try:
-#         # Check if product exists
-#         cursor.execute(
-#             f"""
-#             SELECT product_id
-#             FROM {PRODUCT_MASTER_TABLE}
-#             WHERE ta_name = %s
-#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
-#             """,
-#             (
-#                 payload.ta_name,
-#                 payload.product_name
-#             )
-#         )
- 
-#         product = cursor.fetchone()
- 
-#         if not product:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="Product not found."
-#             )
- 
-#         # The name as stored, not as typed -- forecast_outputs.product holds
-#         # the same value as product_master.product_id, and the lookup above
-#         # was case-insensitive.
-#         stored_name = product["product_id"]
- 
-#         # --------------------------------------------------
-#         # Forecast rows
-#         # --------------------------------------------------
-#         # Deleted first and in the SAME transaction as the master row:
-#         # leaving these behind would keep the product in every dropdown
-#         # (fetch_available_entities reads DISTINCT product from this table)
-#         # and in every chart, with no master row to manage it by.
-#         #
-#         # All metrics, markets, sources and scenarios go -- including Base.
-#         # Base is never WRITTEN to by the calculation, but a deleted product
-#         # has to leave the baseline too or it reappears the moment anyone
-#         # runs a calculation, since seeding models new products on whatever
-#         # rows already exist.
-#         forecast_params = [payload.ta_name, stored_name]
-#         scenario_clause = ""
-#         if payload.scenario_name:
-#             scenario_clause = "AND scenario_name = %s"
-#             forecast_params.append(payload.scenario_name)
- 
-#         cursor.execute(
-#             f"""
-#             DELETE FROM {FORECAST_TABLE}
-#             WHERE ta_name = %s
-#               AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
-#               {scenario_clause}
-#             """,
-#             forecast_params,
-#         )
-#         forecast_rows_deleted = cursor.rowcount
- 
-#         # --------------------------------------------------
-#         # Master row
-#         # --------------------------------------------------
-#         # Kept when the caller scoped the delete to one scenario -- the
-#         # product still exists, it just no longer participates there.
-#         master_rows_deleted = 0
-#         if not payload.scenario_name:
-#             cursor.execute(
-#                 f"""
-#                 DELETE FROM {PRODUCT_MASTER_TABLE}
-#                 WHERE ta_name = %s
-#                   AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
-#                 """,
-#                 (
-#                     payload.ta_name,
-#                     payload.product_name
-#                 )
-#             )
-#             master_rows_deleted = cursor.rowcount
- 
-#         db.commit()
- 
-#         return {
-#             "message": "Product deleted successfully",
-#             "deleted_product": stored_name,
-#             "scenario_name": payload.scenario_name,
-#             "forecast_rows_deleted": forecast_rows_deleted,
-#             "master_rows_deleted": master_rows_deleted,
-#             # Removing a product that held share leaves the remaining
-#             # products in each market summing to less than 100 until a
-#             # calculation renormalizes them (build_write_set does this).
-#             "shares_need_recalculation": forecast_rows_deleted > 0,
-#         }
- 
-#     except Exception:
-#         db.rollback()
-#         raise
- 
-#     finally:
-#         cursor.close()

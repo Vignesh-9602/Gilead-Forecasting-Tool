@@ -1936,6 +1936,29 @@ def build_product_distribution(
 #    reported and skipped; raising takes down the whole response for one
 #    unpopulated month.
 
+def _reconcile_display_children(labels, values_by_label, target, t):
+    """Round each child to a whole number and give the residue to the
+    LARGEST child rather than the last one.
+
+    'Last absorbs the remainder' guarantees children sum to their parent,
+    but it puts the entire rounding residue of every sibling onto whichever
+    row happens to sort last. On a ~30,000 row a few units are invisible;
+    on a product with no volume they read as data -- which is how a newly
+    added product ends up displaying -8, 9, 9 instead of zeros.
+
+    The largest child is the one where the residue genuinely disappears
+    into the rounding it came from.
+    """
+    values = [round(float(values_by_label[label][t] or 0)) for label in labels]
+
+    residue = int(target) - sum(values)
+
+    if residue and values:
+        absorber = max(range(len(values)), key=lambda i: values[i])
+        values[absorber] += residue
+
+    return values
+
 
 def build_market_product(
     cur,
@@ -1974,10 +1997,11 @@ def build_market_product(
        sum(products in market) == market total.
     4. Existing product proportions inside each market are preserved.
     5. Display rounding is corrected so displayed children also sum
-       exactly to the displayed market parent.
+       exactly to the displayed market parent -- with the residue going to
+       the largest child, never to a zero-volume one.
     6. Yearly calculations use raw normalized volumes.
     7. Every product appears under every market -- at zero where it has
-       no data. See the note at the top of this module.
+       no data.
     """
 
     n = len(total_vals)
@@ -2098,8 +2122,6 @@ def build_market_product(
 
             mp_vol[mkt][prod] = volume
 
-            # print("MP_VOL", scenario, mkt, "->", sorted(mp_vol[mkt].keys()))
-
     # =========================================================
     # 2. Normalize MARKET totals to Overall
     # =========================================================
@@ -2117,12 +2139,7 @@ def build_market_product(
 
         if current_market_sum <= 0:
             # Reported, not raised: one unpopulated month shouldn't take
-            # down the whole response. The month stays at zero and the
-            # rest of the series is still usable.
-            # print(
-            #     f"  WARNING build_market_product: no market volume at "
-            #     f"month {t} (Overall={overall_volume}) -- leaving zeros"
-            # )
+            # down the whole response.
             continue
 
         scale_factor = overall_volume / current_market_sum
@@ -2156,6 +2173,10 @@ def build_market_product(
     # =========================================================
     # 3. Normalize Products inside each Market
     # =========================================================
+    # Raw (unrounded) values here. The last product absorbs the residue at
+    # full float precision, which is a ~1e-10 adjustment -- unlike the
+    # DISPLAY pass below, where the residue is whole units and has to be
+    # placed deliberately.
 
     normalized_mp_vol = {}
     market_product_shares = {}
@@ -2166,8 +2187,6 @@ def build_market_product(
             prod for prod in products if prod in mp_vol.get(mkt, {})
         ]
 
-        
-
         raw_product_volumes = [mp_vol[mkt][prod] for prod in product_labels]
 
         norm_shares = (
@@ -2176,9 +2195,6 @@ def build_market_product(
             else []
         )
 
-        # print("LABELS-3", scenario, mkt, "->", product_labels,
-        #               "norm_shares:", len(norm_shares))
-
         normalized_mp_vol[mkt] = {}
         market_product_shares[mkt] = {}
 
@@ -2186,26 +2202,40 @@ def build_market_product(
             market_product_shares[mkt][prod] = norm_shares[index]
             normalized_mp_vol[mkt][prod] = [0.0] * n
 
-        # Rebuild child volumes from normalized shares
         for t in range(n):
 
             market_volume = float(market_totals[mkt][t] or 0)
             allocated = 0.0
 
+            # The residue goes to the largest product, not the last, for
+            # the same reason as the display pass -- a zero-volume product
+            # must stay at zero.
+            largest_index = None
+            if product_labels:
+                largest_index = max(
+                    range(len(product_labels)),
+                    key=lambda i: float(
+                        mp_vol[mkt][product_labels[i]][t] or 0
+                    ),
+                )
+
             for product_index, prod in enumerate(product_labels):
 
-                is_last = product_index == len(product_labels) - 1
+                if product_index == largest_index:
+                    continue
 
-                if is_last:
-                    product_volume = round(market_volume - allocated, 10)
-                else:
-                    product_share = float(norm_shares[product_index][t] or 0)
-                    product_volume = round(
-                        market_volume * product_share / 100.0, 10,
-                    )
-                    allocated += product_volume
+                product_share = float(norm_shares[product_index][t] or 0)
+                product_volume = round(
+                    market_volume * product_share / 100.0, 10,
+                )
+                allocated += product_volume
 
                 normalized_mp_vol[mkt][prod][t] = product_volume
+
+            if largest_index is not None:
+                normalized_mp_vol[mkt][product_labels[largest_index]][t] = (
+                    round(market_volume - allocated, 10)
+                )
 
     # Canonical map from this point.
     mp_vol = normalized_mp_vol
@@ -2219,21 +2249,11 @@ def build_market_product(
     market_display_totals = {mkt: [0] * n for mkt in markets}
 
     for t in range(n):
-
-        target_overall = int(overall_display[t])
-        allocated = 0
-
-        for market_index, mkt in enumerate(markets):
-
-            is_last = market_index == len(markets) - 1
-
-            if is_last:
-                display_market = target_overall - allocated
-            else:
-                display_market = round(float(market_totals[mkt][t] or 0))
-                allocated += display_market
-
-            market_display_totals[mkt][t] = display_market
+        values = _reconcile_display_children(
+            markets, market_totals, int(overall_display[t]), t,
+        )
+        for i, mkt in enumerate(markets):
+            market_display_totals[mkt][t] = values[i]
 
     # =========================================================
     # 5. Exact DISPLAY Product children
@@ -2250,21 +2270,11 @@ def build_market_product(
         display_mp_vol[mkt] = {prod: [0] * n for prod in product_labels}
 
         for t in range(n):
-
-            target_market = market_display_totals[mkt][t]
-            allocated = 0
-
-            for product_index, prod in enumerate(product_labels):
-
-                is_last = product_index == len(product_labels) - 1
-
-                if is_last:
-                    display_product = target_market - allocated
-                else:
-                    display_product = round(float(mp_vol[mkt][prod][t] or 0))
-                    allocated += display_product
-
-                display_mp_vol[mkt][prod][t] = display_product
+            values = _reconcile_display_children(
+                product_labels, mp_vol[mkt], market_display_totals[mkt][t], t,
+            )
+            for i, prod in enumerate(product_labels):
+                display_mp_vol[mkt][prod][t] = values[i]
 
     # =========================================================
     # 6. CHART: selected Market / Product
@@ -2337,8 +2347,6 @@ def build_market_product(
     # 7. TABLE: full hierarchy
     # =========================================================
 
-    
-
     vol_table_rows = []
     share_table_rows = []
 
@@ -2346,8 +2354,6 @@ def build_market_product(
     ms_table_rows = []
 
     for mkt in markets:
-
-        # print("LABELS-7", scenario, mkt, "->", product_labels)
 
         mkt_vol = market_totals[mkt]
 

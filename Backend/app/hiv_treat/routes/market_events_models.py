@@ -212,14 +212,14 @@ class UpdateProductRequest(BaseModel):
     product_name: str
     new_product_name: str
 
-class DeleteProductRequest(BaseModel):
-    ta_name: str
-    product_name: str
-
-
 # class DeleteProductRequest(BaseModel):
 #     ta_name: str
 #     product_name: str
-#     # Limit the removal to one scenario; omit to remove the product
-#     # everywhere, which is what "delete the product" normally means.
-#     scenario_name: Optional[str] = None
+
+
+class DeleteProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    # Limit the removal to one scenario; omit to remove the product
+    # everywhere, which is what "delete the product" normally means.
+    scenario_name: Optional[str] = None
