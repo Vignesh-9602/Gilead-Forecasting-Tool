@@ -1961,9 +1961,11 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             # IPF: iteratively scale l3_fc to satisfy both:
             #   payment_type margins  → l1_target_fc  (Tab 3 values)
             #   product margins       → product_target_fc (Tab 2 values)
-            # Runs only when product_target_fc is provided; l1_target_fc is always
-            # present for canonical calls so it acts as the second marginal.
-            if product_target_fc is not None and l3_fc:
+            # Skipped when a specific payer/product is selected for recalculation:
+            # the model-on-selection path has already placed the user's forecast into
+            # l3_fc; running IPF would scale those values back toward MA targets and
+            # cancel the recalculation's effect.
+            if product_target_fc is not None and l3_fc and sel_d2 is None and sel_d3 is None:
                 _by_pt: dict   = defaultdict(list)
                 _by_prod: dict = defaultdict(list)
                 for _k in l3_fc:
@@ -2238,6 +2240,10 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     # from this l3_fc via canonical_l3_fc, keeping all three views consistent.
     # l1_target_fc anchors each payment_type's total to its Tab 3 value.
     _tab5_canonical_l3: dict = {}
+    # When Tab 5 is the recalculation target, don't constrain its product
+    # margins to Tab 2's MA values — Tab 5 should freely determine product
+    # distribution, and Tab 2 will be backfilled from Tab 5 below.
+    _t5_product_target = _tab5_product_target if recalc_tab_level < 5 else None
     _tab5_vol_ptpp = _build_tab5_3level(
         ptpp_mv, 2, 3, 4, to_int=True,
         chart_d1_filter=tab5_pt_label,
@@ -2245,7 +2251,7 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         _tab5_f=_t5_f,
         _canonical_l3_out=_tab5_canonical_l3,
         l1_target_fc=_tab5_l1_target,
-        product_target_fc=_tab5_product_target,
+        product_target_fc=_t5_product_target,
     )
     _tab5_shr_ptpp = _build_tab5_3level(
         ptpp_mv, 2, 3, 4, as_share=True,
@@ -2255,6 +2261,61 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         canonical_l3_fc=_tab5_canonical_l3,
         canonical_idx=(0, 1, 2),
     )
+
+    # ── Backfill Tab 2 product forecasts from Tab 5 ─────────────────────────
+    # After a Tab 5 recalculation, product totals (summed across all payment
+    # types and payers in Tab 5) become the authoritative Tab 2 forecast so
+    # that product_distribution always reflects the most-granular computation.
+    if recalc_tab_level >= 5 and _tab5_canonical_l3:
+        n_fc = len(month_range) - fsi
+        _t2_from_t5: dict = {}
+        for (pt, payer, prod), fc_vals in _tab5_canonical_l3.items():
+            if not prod or prod.upper() == "NA":
+                continue
+            if prod in _t2_from_t5:
+                _t2_from_t5[prod] = [_t2_from_t5[prod][i] + fc_vals[i] for i in range(len(fc_vals))]
+            else:
+                _t2_from_t5[prod] = list(fc_vals)
+
+        if _t2_from_t5:
+            # Patch chart series forecast values
+            _chart_series = _pd2_vol_formatted.get("chart", {}).get("series", [])
+            for s in _chart_series:
+                lbl = s.get("label", "")
+                if lbl.lower() == "total":
+                    continue
+                if lbl in _t2_from_t5:
+                    s["forecast"] = [int(round(v)) for v in _t2_from_t5[lbl]]
+
+            # Recompute Total chart series from patched non-total series
+            _non_tot_s = [s for s in _chart_series if s.get("label", "").lower() != "total"]
+            _tot_s = next((s for s in _chart_series if s.get("label", "").lower() == "total"), None)
+            if _tot_s and _non_tot_s:
+                _tot_s["forecast"] = [
+                    int(round(sum(s["forecast"][i] if i < len(s.get("forecast", [])) else 0
+                                  for s in _non_tot_s)))
+                    for i in range(n_fc)
+                ]
+
+            # Patch table rows (values = history[:fsi] + forecast[fsi:])
+            _table_rows = _pd2_vol_formatted.get("table", {}).get("rows", [])
+            for r in _table_rows:
+                lbl = r.get("label", "")
+                if lbl.lower() == "total":
+                    continue
+                if lbl in _t2_from_t5:
+                    hist = list(r.get("values", []))[:fsi]
+                    r["values"] = hist + [int(round(v)) for v in _t2_from_t5[lbl]]
+
+            # Recompute Total table row
+            _non_tot_r = [r for r in _table_rows if r.get("label", "").lower() != "total"]
+            _tot_r = next((r for r in _table_rows if r.get("label", "").lower() == "total"), None)
+            if _tot_r and _non_tot_r:
+                _tot_r["values"] = [
+                    int(round(sum(r["values"][i] if i < len(r.get("values", [])) else 0
+                                  for r in _non_tot_r)))
+                    for i in range(len(month_labels))
+                ]
 
     market_analysis = {
         "total_market_volume": {
@@ -2987,23 +3048,24 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             base_full_ma, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, base_factors,
+                sel_payer=_first(payload.payer),
+                sel_product=_first(payload.brand),
+                sel_payment_type=_first(payload.payment_type),
                 scenario_name="Base",
             )
+            base_full_ma = _recompute_all_market_shares_nested(base_full_ma)
 
         def _inactive_stub(sc_name):
-            # Always prefer DB-persisted data — it is stable regardless of the
-            # current date filter. Clip to the user's from_date so the shared chart
-            # axis (derived from the active scenario) and the inactive stubs all start
-            # at the same month.  Without clipping, a DB-stored wide snapshot (Apr-20)
-            # causes the X-axis to drift left whenever an inactive scenario's months
-            # array is longer than the active scenario's clipped months.
+            # Base is always freshly computed so it stays in sync with the current
+            # config (train_end_date, forecast_periods, from_date). Using the DB
+            # snapshot risks showing Base with a stale forecast_start_index when
+            # config or dates changed since Base was last active.
+            if sc_name == "Base":
+                return {"market_analysis": base_full_ma}
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 return {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month)}
-            # Fallback for Base when it has never been persisted yet
-            if sc_name == "Base":
-                return {"market_analysis": base_full_ma}  # freshly computed from from_year/from_month
             return {"market_analysis": {}}
 
         scenarios = {
@@ -3245,8 +3307,12 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             base_full_ma_rc, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, _base_f,
+                sel_payer=market,
+                sel_product=product,
+                sel_payment_type=payment_type,
                 scenario_name="Base",
             )
+            base_full_ma_rc = _recompute_all_market_shares_nested(base_full_ma_rc)
 
         def _inactive_stub_rc(sc_name):
             if sc_name == "Base":
@@ -3693,9 +3759,13 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         _base_ma, _ = _build_market_analysis_both_granularities(
             cur, ta, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, base_factors,
+            sel_payer=flt.payer or None,
+            sel_product=flt.product or None,
             sel_payment_type=flt.payment_type or None,
             scenario_name="Base",
         )
+        _base_ma = _recompute_all_market_shares_nested(_base_ma)
+
         def _inactive_stub(sc_name):
             if sc_name == "Base":
                 return {"market_analysis": _base_ma}
@@ -3765,9 +3835,13 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     _base_ma, _ = _build_market_analysis_both_granularities(
         cur, ta, from_year, from_month,
         train_end_year, train_end_month, forecast_periods, base_factors,
+        sel_payer=flt.payer or None,
+        sel_product=flt.product or None,
         sel_payment_type=flt.payment_type or None,
         scenario_name="Base",
     )
+    _base_ma = _recompute_all_market_shares_nested(_base_ma)
+
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
