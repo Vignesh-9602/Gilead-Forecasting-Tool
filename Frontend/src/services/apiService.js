@@ -300,6 +300,16 @@ export const getLiverMarketEventsFilters = (ta = "HCV") => {
   });
 };
 
+// GET — loads every previously-saved Impact Curve Configuration row for the
+// Events Management tab, grouped by event type (product_event / payer_event
+// / payment_type_payer_product_event). This was previously imported and
+// called from ModelInput.jsx but never actually defined here, so every call
+// silently threw (caught by the surrounding try/catch) and the Events
+// Management page never listed anything on open.
+export const getLiverMarketEventsList = (taName = "HCV") => {
+  return httpClient.get(`/api/liver-market-events/market-events/${encodeURIComponent(taName)}`);
+};
+
 // GET — list products (base + newly added) for the "Manage New Products"
 // modal on the Impact Curve Configuration screen.
 export const getLiverMarketEventsProducts = (params = {}) => {
@@ -354,24 +364,12 @@ export const saveLiverMarketEventsConfig = (payload) => {
 };
 
 // DELETE — remove a single market event (Impact Curve Configuration row).
-// event_name (string) is the path param — NOT event_id; ta_name/event_type
-// are query params.
+// event_id is a path param; ta_name/event_type are query params.
 // event_type is one of: "product_event" | "payer_event" | "payment_type_payer_product_event".
-export const deleteLiverMarketEvent = (eventName, { ta_name, event_type }) => {
-  return httpClient.delete(
-    `/api/liver-market-events/${encodeURIComponent(eventName)}`,
-    {
-      params: { ta_name, event_type },
-    },
-  );
-};
-
-// GET — list all saved market events (Impact Curve Configuration rows) for
-// a therapy area, used to populate the Events Management tab's table.
-export const getLiverMarketEventsList = (taName) => {
-  return httpClient.get(
-    `/api/liver-market-events/market-events/${encodeURIComponent(taName)}`,
-  );
+export const deleteLiverMarketEvent = (eventId, { ta_name, event_type }) => {
+  return httpClient.delete(`/api/liver-market-events/${eventId}`, {
+    params: { ta_name, event_type },
+  });
 };
 
 // GET — Output screen filters for a therapy area (e.g. ta=HCV)
