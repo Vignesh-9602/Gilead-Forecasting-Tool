@@ -5270,6 +5270,25 @@ def build_product_market(market_analysis):
     return market_analysis
 
 def rebuild_product_market_volume(market_analysis):
+    """Rebuild Product -> Market volumes from each product's overall volume
+    and its market share split.
+
+    Matched by LABEL rather than by position. Two positional assumptions
+    used to live here and both break on a product that isn't in every
+    market:
+
+      - overall_rows[product_index + 1] assumed the product distribution
+        table lists the same products in the same order as the product
+        market table, offset by one for the Overall row.
+      - children[0] / children[1] assumed exactly two markets, in the order
+        Retail then Non-retail. A product with rows in only one market
+        (test prod, Non-retail only) has a single child, and [1] raises
+        IndexError.
+
+    Children are now filled from their own shares with the last one
+    absorbing the rounding residue, so they sum to the parent exactly
+    however many there are.
+    """
 
     # Overall product volumes
     overall_rows = (
@@ -5298,31 +5317,73 @@ def rebuild_product_market_volume(market_analysis):
         ["rows"]
     )
 
-    for product_index in range(len(pm_rows)):
+    overall_by_product = {
+        row.get("label"): row.get("values", [])
+        for row in overall_rows
+        if row.get("label") not in (None, "Overall")
+    }
 
-        overall = overall_rows[product_index + 1]["values"]
+    share_by_product = {
+        row.get("label"): row
+        for row in share_rows
+    }
 
-        retail_share = share_rows[product_index]["children"][0]["values"]
-        non_retail_share = share_rows[product_index]["children"][1]["values"]
+    for pm_row in pm_rows:
 
-        retail_values = []
-        non_retail_values = []
+        product = pm_row.get("label")
 
-        for month in range(len(overall)):
+        overall = overall_by_product.get(product)
+        share_row = share_by_product.get(product)
 
-            retail = round(
-                overall[month] * retail_share[month] / 100
+        if overall is None or share_row is None:
+            print(
+                f"  SKIP {product!r}: no matching "
+                f"{'overall volume' if overall is None else 'share'} row"
             )
+            continue
 
-            non_retail = overall[month] - retail
+        volume_children = pm_row.get("children") or []
+        share_children = share_row.get("children") or []
 
-            retail_values.append(retail)
-            non_retail_values.append(non_retail)
+        if not volume_children:
+            pm_row["values"] = list(overall)
+            continue
 
-        pm_rows[product_index]["values"] = overall.copy()
+        # Shares keyed by market so a mismatch in child ORDER between the
+        # two tables can't silently pair the wrong ones.
+        share_by_market = {
+            child.get("label"): child.get("values", [])
+            for child in share_children
+        }
 
-        pm_rows[product_index]["children"][0]["values"] = retail_values
-        pm_rows[product_index]["children"][1]["values"] = non_retail_values
+        months = len(overall)
+        rebuilt = {child.get("label"): [] for child in volume_children}
+
+        for month in range(months):
+
+            total = overall[month]
+            allocated = 0
+
+            for position, child in enumerate(volume_children):
+                market = child.get("label")
+                is_last = position == len(volume_children) - 1
+
+                if is_last:
+                    # Absorbs the residue, so children always sum to the
+                    # parent -- and a single-market product gets all of it.
+                    value = total - allocated
+                else:
+                    shares = share_by_market.get(market) or []
+                    share = shares[month] if month < len(shares) else 0
+                    value = round(total * share / 100)
+                    allocated += value
+
+                rebuilt[market].append(value)
+
+        pm_row["values"] = list(overall)
+
+        for child in volume_children:
+            child["values"] = rebuilt[child.get("label")]
 
 def rebuild_product_market_share(market_analysis):
 
@@ -7266,7 +7327,21 @@ def rebuild_product_market_tab_from_market_share_edit(
         if edited_index is None:
             continue
 
-        other_index = 1 - edited_index
+        # `other_index = 1 - edited_index` only works for exactly two
+        # children. Anything else silently addresses the wrong row (or
+        # index -1, the last one), so handle the general case: every child
+        # that wasn't edited absorbs the remainder in proportion to what it
+        # already holds.
+        other_indices = [
+            i for i in range(len(volume_children)) if i != edited_index
+        ]
+
+        if not other_indices:
+            print(
+                f"  SKIP {parent.get('label')!r}: only one market, "
+                "nothing to rebalance against"
+            )
+            continue
 
         # ---------------------------------------
         # Month loop
@@ -7274,40 +7349,80 @@ def rebuild_product_market_tab_from_market_share_edit(
 
         for m in range(months):
 
+            total = parent_total[m]
+
+            # A product with no volume this month has no market split to
+            # compute -- test prod before its launch month is the case
+            # that surfaced this. Both the edited child and the others are
+            # zero, and the shares are undefined rather than 0/0. Zero
+            # them and move on instead of dividing by the parent.
+            if not total:
+                volume_children[edited_index]["values"][m] = 0
+                share_children[edited_index]["values"][m] = 0.0
+                for i in other_indices:
+                    volume_children[i]["values"][m] = 0
+                    share_children[i]["values"][m] = 0.0
+                continue
+
             # Edited share -> volume
 
             edited_volume = round(
-                parent_total[m]
+                total
                 * share_children[edited_index]["values"][m]
                 / 100
             )
 
+            # An edit above 100% would drive the others negative; clamp so
+            # the remainder is always distributable.
+            edited_volume = max(0, min(edited_volume, total))
+
             volume_children[edited_index]["values"][m] = edited_volume
 
-            # Remaining volume
+            # Remaining volume, split across the other markets in
+            # proportion to what they currently hold. With two markets
+            # this is exactly the previous behaviour.
 
-            volume_children[other_index]["values"][m] = (
-                parent_total[m]
-                - edited_volume
-            )
+            remainder = total - edited_volume
 
-            # Remaining share
+            current = [
+                volume_children[i]["values"][m] for i in other_indices
+            ]
+            current_total = sum(current)
 
-            share_children[other_index]["values"][m] = round(
-                volume_children[other_index]["values"][m]
-                / parent_total[m]
-                * 100,
-                2,
-            )
+            allocated = 0
+            for position, i in enumerate(other_indices):
+                is_last = position == len(other_indices) - 1
 
-            # Edited share (normalize)
+                if is_last:
+                    # Absorb the rounding residue so the children sum to
+                    # the parent exactly.
+                    value = remainder - allocated
+                elif current_total > 0:
+                    value = round(remainder * current[position] / current_total)
+                    allocated += value
+                else:
+                    # Nothing to go on -- split evenly.
+                    value = round(remainder / len(other_indices))
+                    allocated += value
+
+                volume_children[i]["values"][m] = value
+
+            # Shares, recomputed from the volumes so the two always agree
 
             share_children[edited_index]["values"][m] = round(
                 volume_children[edited_index]["values"][m]
-                / parent_total[m]
+                / total
                 * 100,
                 2,
             )
+
+            for i in other_indices:
+                share_children[i]["values"][m] = round(
+                    volume_children[i]["values"][m]
+                    / total
+                    * 100,
+                    2,
+                )
 
     # --------------------------------------------------
     # Push changes back to Market Product
