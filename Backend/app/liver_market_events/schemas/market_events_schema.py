@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +99,14 @@ class ImpactCurveConfiguration(BaseModel):
     rows: List[ImpactCurveRow] = []
 
 
+class EventSelection(BaseModel):
+    event_name: str
+    event_type: Literal["payer_event", "product_event", "payment_type_payer_product_event"]
+
 class RunCalculationRequest(BaseModel):
-    """Request body for POST /api/liver-market-events/run-calculation."""
-    ta_name: str = "HCV"
+    ta_name: str
     selected_filter: SelectedFilter
-    selected_tab: str       # "payer_event" | "product_event" | "overall_event"
-    impact_curve_configuration: ImpactCurveConfiguration
+    events: List[EventSelection] = []
 
 
 # ---------------------------------------------------------------------------

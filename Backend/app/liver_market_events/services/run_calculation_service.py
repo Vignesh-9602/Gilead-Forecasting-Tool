@@ -32,8 +32,6 @@ from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
     get_volume_by_product_payment_type,
-    save_impact_rows,
-    load_impact_rows,
 )
 from app.liver_market_events.services.market_events_service import (
     CURVE_TYPES,
@@ -53,6 +51,11 @@ from app.liver_market_events.services.market_events_service import (
     _load_scenario_raw_series,
     _merge_config_with_saved_data,
     _persist_market_events_result,
+)
+# TODO: confirm actual module path for Events Management (the file
+# defining market_event_configuration / get_events_for_calculation).
+from app.liver_market_events.services.Events_Management import (
+    get_events_for_calculation,
 )
 
 
@@ -1013,11 +1016,17 @@ def run_market_events_calculation(payload) -> dict:
     POST /api/liver-market-events/run-calculation
 
     1. Fetches BASE transaction data for the selected filter.
-    2. Applies event curves (from impact_curve_configuration.rows) to the
-       active tab's data only.
-    3. Rebuilds metrics_views for all three tabs (active tab uses post-event
-       data; the other two tabs reflect BASE data unchanged).
-    4. Returns the same shape as /apply-filters so the frontend can re-render
+    2. Fetches the events named in payload.event_ids (from Events Management's
+       persisted market_event_configuration table) and groups them by type.
+    3. Applies each group SEQUENTIALLY in a fixed order -- payer_event, then
+       product_event, then payment_type_payer_product -- each building on the
+       previous group's already-modified data, exactly matching how a single
+       group's own multiple rows already stack. A type with no selected
+       events is simply skipped; order never depends on event start_date.
+    4. Rebuilds metrics_views for every tab from the final post-event state,
+       so every tab reflects the combined effect regardless of which types
+       were actually selected this run.
+    5. Returns the same shape as /apply-filters so the frontend can re-render
        consistently.
     """
     conn = get_connection()
@@ -1025,7 +1034,6 @@ def run_market_events_calculation(payload) -> dict:
     try:
         ta = payload.ta_name
         sf = payload.selected_filter
-        tab = payload.selected_tab
 
         # if sf.scenario_name.strip().upper() == "BASE":
         #     raise ValueError(
@@ -1152,14 +1160,15 @@ def run_market_events_calculation(payload) -> dict:
             for v in base_total_raw[forecast_start_index:]
         ]
 
-        # ── Apply events to a deep copy of base data (active tab only) ─────
-        event_rows = [
-            {**row.model_dump(), "event_id": row.event_id or idx + 1}
-            for idx, row in enumerate(payload.impact_curve_configuration.rows)
-        ]
+        # ── Fetch the selected events and group by type ────────────────────
+        grouped = get_events_for_calculation(ta, payload.events)
+        payer_rows_in   = grouped.get("payer_event", [])
+        product_rows_in = grouped.get("product_event", [])
+        ptpp_rows_in    = grouped.get("payment_type_payer_product", [])
+        any_events = bool(payer_rows_in or product_rows_in or ptpp_rows_in)
 
         mod_payer_leaf = None
-        if event_rows:
+        if any_events:
             mod_data = copy.deepcopy(base_data)
             _fill_forecast_data(mod_data, month_tuples, forecast_start_index)
             # Start from recomputed totals (pre-fill may raise per-series totals above base)
@@ -1167,50 +1176,58 @@ def run_market_events_calculation(payload) -> dict:
             # Keep history months aligned with base
             mod_total[:forecast_start_index] = list(base_total_all[:forecast_start_index])
 
-            if tab == "payment_type_payer_product":
-                # Build the mutable 3-level leaf from mod_data as it stands
-                # right now (base data + forecast fill; payer_event/product_
-                # event only mutate `data` when THEY are the active tab, per
-                # the current one-tab-per-request architecture) so this
-                # tab's own events land on top of that.
+            # Fixed order: payer_event -> product_event -> payment_type_payer_
+            # product, each pass building on the previous pass's already-
+            # modified mod_data. A group with no selected events for it is
+            # skipped entirely -- mod_data simply isn't touched for that type.
+            if payer_rows_in:
+                mod_total = _apply_events_to_data(
+                    mod_data, month_tuples, forecast_start_index,
+                    mod_total, payer_rows_in, "payer_event",
+                    show_products, show_payers,
+                )
+            if product_rows_in:
+                mod_total = _apply_events_to_data(
+                    mod_data, month_tuples, forecast_start_index,
+                    mod_total, product_rows_in, "product_event",
+                    show_products, show_payers,
+                )
+            if ptpp_rows_in:
+                # Built AFTER payer_event/product_event above, so the CVS/
+                # Non-CVS leaf reflects whatever those two already changed.
                 mod_payer_leaf = _build_payer_leaf(
                     mod_data, month_tuples, forecast_start_index,
                     leaf_hist_monthly, pt_payer_map, leaf_totals,
                     show_products, forecast_fn=None, treat_zero_as_missing=False,
                 )
-
-            mod_total = _apply_events_to_data(
-                mod_data, month_tuples, forecast_start_index,
-                mod_total, event_rows, tab,
-                show_products, show_payers,
-                payer_leaf=mod_payer_leaf, pt_payer_map=pt_payer_map,
-            )
+                mod_total = _apply_events_to_data(
+                    mod_data, month_tuples, forecast_start_index,
+                    mod_total, ptpp_rows_in, "payment_type_payer_product",
+                    show_products, show_payers,
+                    payer_leaf=mod_payer_leaf, pt_payer_map=pt_payer_map,
+                )
         else:
             mod_data = base_data
             mod_total = base_total_all
 
         # ── Build metrics_views for every tab ─────────────────────────────
-        # All tabs use mod_data/mod_total so switching tabs shows the same
-        # post-event state (e.g. overall_event volume increase is visible
-        # in payer and product tabs without re-running). Takes the month
-        # grid as parameters (rather than closing over fixed outer values) so
-        # it can be built once for the full computed range (persistence) and
-        # again for a narrower, display-only slice (the HTTP response) below.
+        # All tabs use mod_data/mod_total so every tab reflects the combined
+        # effect of whatever event types were actually selected this run,
+        # regardless of which tab the frontend happens to be displaying.
         _ALL_TABS = ("payer_event", "product_event", "overall_event",
             #  "payment_type_product",
                "payment_type_payer_product")
 
         def _metrics(t: str, mt: list, ch: list, fsi: int, tot: list) -> dict:
-            touched_pairs = (
-                _compute_touched_entities(event_rows, t) if (t == tab and event_rows) else None
-            )
             if t == "payer_event":
+                touched_pairs = _compute_touched_entities(payer_rows_in, t) if payer_rows_in else None
                 return _build_payer_event_metrics(
                     mod_data, mt, ch, fsi, tot, show_products, show_payers,
                     filter_products=sf.products, filter_payers=sf.payment_type,
                     touched_pairs=touched_pairs, treat_zero_as_missing=False,
                 )
             if t == "product_event":
+                touched_pairs = _compute_touched_entities(product_rows_in, t) if product_rows_in else None
                 return _build_product_event_metrics(
                     mod_data, mt, ch, fsi, tot, show_products, show_payers,
                     filter_products=sf.products, filter_payers=sf.payment_type,
@@ -1228,7 +1245,7 @@ def run_market_events_calculation(payload) -> dict:
                     leaf_hist_monthly, pt_payer_map, leaf_totals,
                     filter_products=sf.products, filter_payment_types=sf.payment_type,
                     treat_zero_as_missing=False,
-                    payer_leaf_override=(mod_payer_leaf if t == tab else None),
+                    payer_leaf_override=mod_payer_leaf,
                 )
             return _build_overall_event_metrics(mt, ch, fsi, tot)
 
@@ -1262,22 +1279,15 @@ def run_market_events_calculation(payload) -> dict:
             for t in _ALL_TABS
         }
 
-        # Persist this run's event rows for the active tab (whole-array
-        # replace -- the frontend always resends the complete current list,
-        # never a single row to add/delete, see save_impact_rows), so they
-        # survive a tab switch, a page reload, or the next apply-filters/
-        # refresh call instead of vanishing the moment this response is sent.
-        # Persisted even when empty (0 rows): that correctly captures "the
-        # user deleted their last event and reran," not "leave whatever was
-        # there before."
-        # save_impact_rows(cur, ta, sf.scenario_name, tab, event_rows)
-        # conn.commit()
-
-        # The other two tabs weren't touched by this run -- load their own
-        # independently-persisted rows instead of blanking them to [].
-        payer_rows   = event_rows if tab == "payer_event"   else load_impact_rows(cur, ta, sf.scenario_name, "payer_event")
-        product_rows = event_rows if tab == "product_event" else load_impact_rows(cur, ta, sf.scenario_name, "product_event")
-        overall_rows = event_rows if tab == "overall_event" else load_impact_rows(cur, ta, sf.scenario_name, "overall_event")
+        # Events now live entirely in market_event_configuration (Events
+        # Management's own CRUD, keyed by event_id) -- there's no more
+        # separate per-scenario/per-tab row storage to read or write here.
+        # Each tab's rows for this response are simply whichever of the
+        # selected event_ids matched that type; a type with none selected
+        # this run correctly shows zero rows, not stale leftovers.
+        payer_rows   = payer_rows_in
+        product_rows = product_rows_in
+        overall_rows = []   # overall_event is display-only; no events can target it
 
         # ── Assemble impact_curve_configuration per tab ────────────────────
         payer_event_cfg = {
@@ -1318,7 +1328,6 @@ def run_market_events_calculation(payload) -> dict:
             "available_scenarios": scenarios,
             "available_months":    available_months,
             "selected_filter":     sf.model_dump(),
-            "selected_tab":        tab,
             "metric_filters":      METRIC_FILTERS,
             "market_analysis":     market_analysis,
             "impact_curve_configuration": {
