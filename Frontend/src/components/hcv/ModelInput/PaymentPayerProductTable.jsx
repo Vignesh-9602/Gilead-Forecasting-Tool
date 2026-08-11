@@ -1017,7 +1017,7 @@ export default function PaymentPayerProductTable({
               >
                 {HIERARCHY_ORDERS.map((opt) => (
                   <MenuItem key={opt.value} value={opt.value} sx={{ fontSize: "12px" }}>
-                    Hierarchy: {opt.label}
+                    {opt.label}
                   </MenuItem>
                 ))}
               </Select>
