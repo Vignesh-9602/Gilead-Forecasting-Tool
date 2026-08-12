@@ -745,7 +745,7 @@ export default function MarketEventsPanel({
             <Button
               variant="contained"
               size="small"
-              onClick={onRunCalculation}
+              onClick={() => onRunCalculation(selectedEventIds)}
               disabled={runningCalculation}
               sx={{
                 textTransform: "none",

@@ -96,6 +96,7 @@ export default function PaymentPayerProductTable({
   handleEnterTableEdit,
   handleSaveTableChanges,
   onSaveHierarchyChanges,
+  handleCancelTableEdit,
   tableEditing,
   isRefreshed,
   savingTable,
@@ -108,13 +109,11 @@ export default function PaymentPayerProductTable({
   setExpandedRows,
   hierarchyOrder = HIERARCHY_ORDERS[0].value,
   setHierarchyOrder,
-  // SCROLL PERSISTENCE PROPS
   tableScrollPosition,
   onTableScroll,
 }) {
   const tableContainerRef = useRef(null);
 
-  // Restore scroll position when table mounts or data updates
   useLayoutEffect(() => {
     if (tableContainerRef.current && tableScrollPosition) {
       tableContainerRef.current.scrollTop = tableScrollPosition.scrollTop || 0;
@@ -170,7 +169,7 @@ export default function PaymentPayerProductTable({
         
         const rowValues = columns.map((col) => {
           const displayVal = useRealData
-            ? Number(row.values?.[col.indices[0]] ?? 0)
+            ? Number(row.values?.[col?.indices?.[0]] ?? 0)
             : (() => {
                 const fixed = row.fixed || {};
                 const ownVal = columnValue(fixed, col);
@@ -246,7 +245,8 @@ export default function PaymentPayerProductTable({
   const isPercent = metric === "market_share";
 
   const backendOrderKey = ORDER_TO_BACKEND_KEY[hierarchyOrder];
-  const realOrder = hierarchyData && hierarchyData[backendOrderKey];
+  
+  const realOrder = hierarchyData && (hierarchyData[backendOrderKey] || hierarchyData[Object.keys(hierarchyData)[0]]);
   const realTableSrc = realOrder
     ? (totalMarketViewMode === "yearly" ? realOrder.yearlyTable : realOrder.table)
     : null;
@@ -293,12 +293,14 @@ export default function PaymentPayerProductTable({
   };
 
   const columnValue = (fixed, col) => {
-    const perMonth = col.indices.map((idx) => sumVolume(fixed, idx));
+    const indices = col?.indices || [0];
+    const perMonth = indices.map((idx) => sumVolume(fixed, idx));
     if (!isPercent) return perMonth.reduce((a, b) => a + b, 0);
     return perMonth.reduce((a, b) => a + b, 0) / perMonth.length;
   };
   const parentColumnValue = (parentFixed, col) => {
-    const perMonth = col.indices.map((idx) => sumVolume(parentFixed, idx));
+    const indices = col?.indices || [0];
+    const perMonth = indices.map((idx) => sumVolume(parentFixed, idx));
     return perMonth.reduce((a, b) => a + b, 0) / (isPercent ? perMonth.length : 1);
   };
 
@@ -317,7 +319,7 @@ export default function PaymentPayerProductTable({
       if (isApplied) {
         scenarioTableForThis = realTableSrc;
       } else {
-        const order = otherScenarioHierarchyData[name]?.[backendOrderKey];
+        const order = otherScenarioHierarchyData[name]?.[backendOrderKey] || otherScenarioHierarchyData[name]?.[Object.keys(otherScenarioHierarchyData[name] || {})[0]];
         scenarioTableForThis = totalMarketViewMode === "yearly" ? order?.yearlyTable : order?.table;
       }
       if (!scenarioTableForThis?.rows?.length) return;
@@ -458,7 +460,7 @@ export default function PaymentPayerProductTable({
     if (isApplied) {
       scenarioTableForThis = realTableSrc;
     } else {
-      const order = otherScenarioHierarchyData[scenarioName]?.[backendOrderKey];
+      const order = otherScenarioHierarchyData[scenarioName]?.[backendOrderKey] || otherScenarioHierarchyData[scenarioName]?.[Object.keys(otherScenarioHierarchyData[scenarioName] || {})[0]];
       scenarioTableForThis = totalMarketViewMode === "yearly" ? order?.yearlyTable : order?.table;
     }
     if (!scenarioTableForThis?.rows?.length) return [];
@@ -540,6 +542,7 @@ export default function PaymentPayerProductTable({
   const activeTableForChart = totalMarketViewMode === "yearly" ? realOrder?.yearlyTable : realOrder?.table;
   const chartMonths = activeChartForOrder?.months;
   const chartFsi = activeChartForOrder?.forecast_start_index ?? 0;
+  
   const chartTraces = (() => {
     if (activeTableForChart?.rows?.length && chartMonths?.length) {
       const realLabels = totalMarketViewMode === "yearly" ? chartMonths : chartMonths.map(formatDateLabel);
@@ -580,7 +583,7 @@ export default function PaymentPayerProductTable({
       const otherScenarioLineDefs = [];
       otherScenarioNames.forEach((name) => {
         const scenarioOrders = otherScenarioHierarchyData[name];
-        const scenarioOrder = scenarioOrders && scenarioOrders[backendOrderKey];
+        const scenarioOrder = scenarioOrders && (scenarioOrders[backendOrderKey] || scenarioOrders[Object.keys(scenarioOrders)[0]]);
         if (!scenarioOrder) return;
         const scenarioTable = totalMarketViewMode === "yearly" ? scenarioOrder.yearlyTable : scenarioOrder.table;
         buildLineDefsFromTable(scenarioTable).forEach((ld) => {
@@ -595,6 +598,7 @@ export default function PaymentPayerProductTable({
 
       return visibleLineDefs.flatMap(({ label, path, values, scenario }, lineIndex) => {
         const highlighted = dimMatchesPath(path);
+        
         const color = highlighted
           ? "#f59e0b"
           : scenario && scenarioColorMap[scenario]
@@ -899,7 +903,7 @@ export default function PaymentPayerProductTable({
               <Button
                 variant="outlined"
                 onClick={handleEnterTableEdit}
-                disabled={tableEditing || !appliedScenarioReady || metric === "market_volume"}
+                disabled={tableEditing || !appliedScenarioReady}
                 sx={secondaryBtnSx}
               >
                 Edit Changes
@@ -1065,8 +1069,9 @@ export default function PaymentPayerProductTable({
                       </Box>
                     </Box>
                     {columns.map((col) => {
+                      const colIndex = col?.indices?.[0] ?? 0;
                       const displayVal = useRealData
-                        ? Number(row.values?.[col.indices[0]] ?? 0)
+                        ? Number(row.values?.[colIndex] ?? 0)
                         : (() => {
                             const fixed = row.fixed || {};
                             const ownVal = columnValue(fixed, col);
@@ -1085,7 +1090,7 @@ export default function PaymentPayerProductTable({
                       const shownVal = editedVal !== undefined ? editedVal : displayVal;
 
                       const isF = activeChartForOrder && chartFsi != null
-                        ? col.indices.some((idx) => idx >= chartFsi)
+                        ? (col?.indices || []).some((idx) => idx >= chartFsi)
                         : true;
 
                       const cellBg = isEditableCell

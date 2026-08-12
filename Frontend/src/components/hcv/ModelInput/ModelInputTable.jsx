@@ -41,10 +41,12 @@ const parseDateString = (s) => {
   const relaxed = dayjs(s);
   return relaxed.isValid() ? relaxed : dayjs(NaN);
 };
+
 const formatDateLabel = (s) => {
   const p = parseDateString(s);
   return p.isValid() ? p.format("MMM-YY") : s || "";
 };
+
 const toYearMonth = (s) => {
   const p = parseDateString(s);
   return p.isValid() ? p.format("YYYY-MM") : s || "";
@@ -112,7 +114,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
   handleCellChange,
   onDeleteScenario,
   onDeleteScenarioClick,
-  // SCROLL PERSISTENCE PROPS
   tableScrollPosition,
   onTableScroll,
 }) {

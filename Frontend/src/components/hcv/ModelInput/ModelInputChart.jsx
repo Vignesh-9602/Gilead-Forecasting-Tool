@@ -120,16 +120,11 @@ const ForecastChart = React.memo(function ForecastChart({
     });
   }
 
-  // DISTINCT SCENARIO COLOR ASSIGNMENT
   const getSeriesColor = (item, index) => {
     const scenarioName = item?.scenario || item?.label || "";
-    
-    // When comparing multiple scenarios, map distinct scenario colors
     if (scenarioName && scenarioColorMap[scenarioName]) {
       return scenarioColorMap[scenarioName];
     }
-    
-    // Otherwise fallback to palette by index for distinct breakdown curves
     return CHART_PALETTE[index % CHART_PALETTE.length];
   };
 

@@ -89,7 +89,6 @@ export default function PBCModelInput() {
   const fetchedTaRef = useRef(null);
   const fetchedMarketEventsTaRef = useRef(null);
   const prevActiveTabRef = useRef("");
-  // Ref map to hold scroll positions per tab
   const tableScrollPositionsRef = useRef({});
 
   // ── STATE ──
@@ -329,7 +328,7 @@ export default function PBCModelInput() {
       }
 
       if (out.payer_product && !out.product_payer) out.product_payer = out.payer_product;
-      if (out.product_payer && !out.payer_product) out.payer_product = out.payer_product;
+      if (out.product_payer && !out.payer_product) out.product_payer = out.payer_product;
 
       return out;
     };
@@ -506,11 +505,13 @@ export default function PBCModelInput() {
         ...Object.keys(chartOrdersObj),
         ...Object.keys(tableOrdersObj),
       ]);
-      if (!orderKeys.size) return null;
+
+      const defaultOrderKeys = ["payment_type_payer_product", "payment_type_product_payer", "product_payment_type_payer"];
+      const effectiveOrderKeys = orderKeys.size ? orderKeys : new Set(defaultOrderKeys);
 
       const orders = {};
-      orderKeys.forEach((orderKey) => {
-        const chartOrderObj = chartOrdersObj[orderKey] || {};
+      effectiveOrderKeys.forEach((orderKey) => {
+        const chartOrderObj = chartOrdersObj[orderKey] || chartOrdersObj;
         const tableOrderObj = tableOrdersObj[orderKey] || chartOrderObj;
 
         const chartMetric = selectMetricForTab("payment_type_payer_product", chartOrderObj);
@@ -2200,6 +2201,7 @@ export default function PBCModelInput() {
     }
   };
 
+  // SAFE RECONCILIATION FIX: Preserves nested `orders` mapping to prevent blank page crashes
   const handleSaveHierarchyTableChanges = async ({ editedCells, backendOrderKey, columns, rows }) => {
     const editedKeys = Object.keys(editedCells || {});
     if (!editedKeys.length) {
@@ -2334,9 +2336,27 @@ export default function PBCModelInput() {
       const response = await refreshLiverTable(payload);
       const respData = response?.data || {};
       if (respData && Object.keys(respData).length) {
-        const normalized = normalizeLiverResponse(respData, metric);
-        setLiverTabsRaw(normalized);
         setLiverRawData(respData);
+        const normalized = normalizeLiverResponse(respData, metric);
+        
+        // Preserve nested hierarchy orders mapping to prevent empty state rendering
+        setLiverTabsRaw((prev) => {
+          const updatedTabs = { ...(normalized?.tabs || {}) };
+          if (prev?.tabs?.payment_type_payer_product?.orders) {
+            updatedTabs.payment_type_payer_product = {
+              ...(updatedTabs.payment_type_payer_product || {}),
+              orders: {
+                ...prev.tabs.payment_type_payer_product.orders,
+                ...(updatedTabs.payment_type_payer_product?.orders || {}),
+              },
+            };
+          }
+          return {
+            ...(normalized || {}),
+            tabs: updatedTabs,
+          };
+        });
+
         initializeCompareScenarios(respData);
       }
 
@@ -2529,6 +2549,7 @@ export default function PBCModelInput() {
     if (val === null || val === undefined) return [];
     return [val];
   };
+
   const mapApiRowToLocalEvent = (row, fallbackEventType) => {
     const apiEventType = row.event_type || fallbackEventType || "product_event";
     const feEventType = EVENT_TYPE_FROM_API[apiEventType] || "Product";
@@ -2695,16 +2716,76 @@ export default function PBCModelInput() {
     }
   };
 
-  const handleRunMarketEventsCalculation = async () => {
+  const handleRunMarketEventsCalculation = async (selectedEventIdsFromPanel) => {
     try {
       setRunningMarketEventsCalculation(true);
       setLoading(true);
-      await runLiverMarketEventsCalculation({ ta_name: therapyArea || "HCV" });
-      showSnackbar("Market events calculation started successfully", "success");
+
+      const formattedStartDate = resolveFromDate()
+        ? dayjs(resolveFromDate(), DATE_INPUT_FORMATS).format("YYYY-MM-01")
+        : "2020-04-01";
+
+      const formattedEndDate = toDate
+        ? dayjs(toDate, DATE_INPUT_FORMATS).format("YYYY-MM-01")
+        : "2027-09-01";
+
+      const currentScenario = currentlyAppliedScenario || scenarioSelector || "BASE";
+      const normalizedScenario = currentScenario.toLowerCase() === "base"
+        ? "BASE"
+        : currentScenario;
+
+      const activeSelectedIds = Array.isArray(selectedEventIdsFromPanel) && selectedEventIdsFromPanel.length > 0
+        ? selectedEventIdsFromPanel
+        : marketEvents.map((e) => e.id);
+
+      const filteredEvents = marketEvents
+        .filter((evt) => activeSelectedIds.includes(evt.id))
+        .map((evt) => ({
+          event_name: evt.name,
+          event_type: EVENT_TYPE_TO_API[evt.eventType] || "product_event",
+        }));
+
+      const payload = {
+        ta_name: therapyArea || "HCV",
+        selected_filter: {
+          scenario_name: normalizedScenario,
+          payment_type: payerFilter
+            ? [payerFilter]
+            : payerOptions?.length
+              ? [payerOptions[0]]
+              : ["Commercial"],
+          products: productFilter
+            ? [productFilter]
+            : productOptions?.length
+              ? [productOptions[0]]
+              : ["ASGA"],
+          start_date: formattedStartDate,
+          end_date: formattedEndDate,
+        },
+        events: filteredEvents,
+      };
+
+      const response = await runLiverMarketEventsCalculation(payload);
+      const respData = response?.data || {};
+
+      if (respData && Object.keys(respData).length) {
+        setLiverRawData(respData);
+        const normalized = normalizeLiverResponse(respData, metric);
+        setLiverTabsRaw(normalized);
+
+        const { chart, table } = mapLiverTabToView(normalized, activeTab, totalMarketViewMode, metric);
+        setChartData(chart);
+        setTableData(table);
+
+        if (respData.available_months?.length) setAvailableDates(respData.available_months);
+        initializeCompareScenarios(respData);
+      }
+
+      showSnackbar("Market events calculation completed successfully!", "success");
     } catch (error) {
       console.error("Failed to run market events calculation:", error);
-      const msg = error?.response?.data || error?.message || "Unknown error";
-      showSnackbar(typeof msg === "string" ? msg : "Failed to run calculation", "error");
+      const msg = error?.response?.data?.detail || error?.response?.data || error?.message || "Unknown error";
+      showSnackbar(typeof msg === "string" ? msg : JSON.stringify(msg), "error");
     } finally {
       setRunningMarketEventsCalculation(false);
       setLoading(false);
