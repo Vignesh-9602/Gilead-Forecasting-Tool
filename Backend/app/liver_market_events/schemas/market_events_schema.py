@@ -101,7 +101,7 @@ class ImpactCurveConfiguration(BaseModel):
 
 class EventSelection(BaseModel):
     event_name: str
-    event_type: Literal["payer_event", "product_event", "payment_type_payer_product_event"]
+    event_type: Literal["payment_type_event", "product_event", "payment_type_payer_product_event"]
 
 class RunCalculationRequest(BaseModel):
     ta_name: str
