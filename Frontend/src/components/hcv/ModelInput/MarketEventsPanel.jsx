@@ -207,12 +207,10 @@ export default function MarketEventsPanel({
   const paymentTypeDisplay = (evt) =>
     sourcesLabel(evt.eventType === "PaymentType_Payer_Product" ? evt.paymentTypes : evt.payers);
 
-  // FIX: Robust payer display calculation for PaymentType_Payer_Product events
   const payerDisplay = (evt) => {
     if (evt.eventType === "PaymentType_Payer_Product") {
       if (evt.payers && evt.payers.length) return sourcesLabel(evt.payers);
       if (evt.paymentTypes && evt.paymentTypes.length) {
-        // Fallback for API structure where Payer (CVS/Non CVS) resides in payers array
         return sourcesLabel(evt.payers);
       }
     }
@@ -747,7 +745,7 @@ export default function MarketEventsPanel({
             <Button
               variant="contained"
               size="small"
-              onClick={onRunCalculation}
+              onClick={() => onRunCalculation(selectedEventIds)}
               disabled={runningCalculation}
               sx={{
                 textTransform: "none",
