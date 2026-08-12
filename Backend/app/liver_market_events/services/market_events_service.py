@@ -8,6 +8,7 @@ from app.liver_market_events.schemas.market_events_schema import (
     CreateProductRequest,
     UpdateProductRequest,
 )
+from app.liver_market_events.services.Events_Management import (rename_product_in_market_events,delete_product_from_market_events)
 from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
@@ -1558,6 +1559,40 @@ def build_market_analysis_response(event_tabs: dict) -> dict:
         },
         "payment_type_payer_product": event_tabs.get("payment_type_payer_product", {}).get("metrics_views", {}),
     }
+def _clean_table_for_response(obj, scenario_name: str = "Total") -> None:
+    """
+    Strips the redundant headers/forecast_start_index/editable keys that
+    build_flat_table/build_hierarchy_table (shared with Liver's own
+    pipeline) always bake into every table dict, and renames the top
+    "Overall"/"Overall Payer" row label to match apply_liver_filters's
+    convention: the literal scenario name for total_market_volume's own
+    row ("Overall Payer" -> e.g. "Base"), "Total" everywhere else.
+
+    The label rename happens ONLY here, at the response layer. Every
+    internal comparison against the literal string "Overall" (redistribution/
+    edit logic, snapshot extraction, etc.) is deliberately left untouched --
+    those ~30 call sites all still rely on "Overall" as their sentinel
+    identifier, and renaming it there would be a much larger, higher-risk
+    change for no functional benefit, since this function runs last and
+    only reshapes what's actually returned to the client.
+
+    Mutates obj in place; walks the whole response tree once.
+    """
+    if isinstance(obj, dict):
+        if "rows" in obj and ("headers" in obj or "editable" in obj or "forecast_start_index" in obj):
+            obj.pop("headers", None)
+            obj.pop("forecast_start_index", None)
+            obj.pop("editable", None)
+            obj.setdefault("type", "flat")
+        if obj.get("label") == "Overall Payer":
+            obj["label"] = scenario_name
+        elif obj.get("label") == "Overall":
+            obj["label"] = "Total"
+        for v in obj.values():
+            _clean_table_for_response(v, scenario_name)
+    elif isinstance(obj, list):
+        for item in obj:
+            _clean_table_for_response(item, scenario_name)
 # ---------------------------------------------------------------------------
 # POST /refresh — redistribution helpers + apply edits
 # ---------------------------------------------------------------------------
@@ -3245,7 +3280,7 @@ def update_market_events_product(product_name: str, payload: UpdateProductReques
 
         events_touched = 0
         try:
-            events_touched = rename_product_in_impact_rows(cur, "HCV", product_name, new_name)
+            events_touched = rename_product_in_market_events("HCV", product_name, new_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()
@@ -3282,7 +3317,7 @@ def delete_market_events_product(product_name: str) -> dict:
 
         cascade = {"deleted_rows": 0, "updated_rows": 0}
         try:
-            cascade = delete_product_from_impact_rows(cur, "HCV", product_name)
+            cascade = delete_product_from_market_events("HCV", product_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()
