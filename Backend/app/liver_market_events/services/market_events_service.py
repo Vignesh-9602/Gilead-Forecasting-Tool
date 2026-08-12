@@ -1559,6 +1559,40 @@ def build_market_analysis_response(event_tabs: dict) -> dict:
         },
         "payment_type_payer_product": event_tabs.get("payment_type_payer_product", {}).get("metrics_views", {}),
     }
+def _clean_table_for_response(obj, scenario_name: str = "Total") -> None:
+    """
+    Strips the redundant headers/forecast_start_index/editable keys that
+    build_flat_table/build_hierarchy_table (shared with Liver's own
+    pipeline) always bake into every table dict, and renames the top
+    "Overall"/"Overall Payer" row label to match apply_liver_filters's
+    convention: the literal scenario name for total_market_volume's own
+    row ("Overall Payer" -> e.g. "Base"), "Total" everywhere else.
+
+    The label rename happens ONLY here, at the response layer. Every
+    internal comparison against the literal string "Overall" (redistribution/
+    edit logic, snapshot extraction, etc.) is deliberately left untouched --
+    those ~30 call sites all still rely on "Overall" as their sentinel
+    identifier, and renaming it there would be a much larger, higher-risk
+    change for no functional benefit, since this function runs last and
+    only reshapes what's actually returned to the client.
+
+    Mutates obj in place; walks the whole response tree once.
+    """
+    if isinstance(obj, dict):
+        if "rows" in obj and ("headers" in obj or "editable" in obj or "forecast_start_index" in obj):
+            obj.pop("headers", None)
+            obj.pop("forecast_start_index", None)
+            obj.pop("editable", None)
+            obj.setdefault("type", "flat")
+        if obj.get("label") == "Overall Payer":
+            obj["label"] = scenario_name
+        elif obj.get("label") == "Overall":
+            obj["label"] = "Total"
+        for v in obj.values():
+            _clean_table_for_response(v, scenario_name)
+    elif isinstance(obj, list):
+        for item in obj:
+            _clean_table_for_response(item, scenario_name)
 # ---------------------------------------------------------------------------
 # POST /refresh — redistribution helpers + apply edits
 # ---------------------------------------------------------------------------
