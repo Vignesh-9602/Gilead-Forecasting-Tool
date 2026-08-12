@@ -306,7 +306,17 @@ def get_events_for_calculation(ta_name: str, events: list) -> dict[str, list[dic
                     f"event_type={db_event_type}: {sorted(missing)}"
                 )
 
-            tab = "payment_type_payer_product" if db_event_type == "payment_type_payer_product_event" else db_event_type
+            if db_event_type == "payment_type_payer_product_event":
+                tab = "payment_type_payer_product"
+            elif db_event_type == "payment_type_event":
+                # External name (this session's rename) -- run_calculation_
+                # service.py's internal code still uses "payer_event"
+                # throughout (tab branching, _ALL_TABS, _build_event_input,
+                # etc.), which was deliberately left unchanged. Translate
+                # here, at the boundary, so nothing internal needs touching.
+                tab = "payer_event"
+            else:
+                tab = db_event_type
             for r in db_rows:
                 row = {
                     "event_name":         r[1],
@@ -318,7 +328,7 @@ def get_events_for_calculation(ta_name: str, events: list) -> dict[str, list[dic
                     "products":           r[9] or [],
                     "source_percentages": r[10] or {},
                 }
-                if tab == "payment_type_event":
+                if tab == "payer_event":
                     row["payment_type"] = r[7] or []
                     row["impacted_payment_types"] = r[11] or []
                 elif tab == "product_event":
