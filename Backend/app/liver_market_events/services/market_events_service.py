@@ -8,6 +8,7 @@ from app.liver_market_events.schemas.market_events_schema import (
     CreateProductRequest,
     UpdateProductRequest,
 )
+from app.liver_market_events.services.Events_Management import (rename_product_in_market_events,delete_product_from_market_events)
 from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
@@ -3245,7 +3246,7 @@ def update_market_events_product(product_name: str, payload: UpdateProductReques
 
         events_touched = 0
         try:
-            events_touched = rename_product_in_impact_rows(cur, "HCV", product_name, new_name)
+            events_touched = rename_product_in_market_events("HCV", product_name, new_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()
@@ -3282,7 +3283,7 @@ def delete_market_events_product(product_name: str) -> dict:
 
         cascade = {"deleted_rows": 0, "updated_rows": 0}
         try:
-            cascade = delete_product_from_impact_rows(cur, "HCV", product_name)
+            cascade = delete_product_from_market_events("HCV", product_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()
