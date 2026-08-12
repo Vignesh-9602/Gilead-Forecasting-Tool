@@ -95,8 +95,8 @@ export default function PaymentPayerProductTable({
   handleConfirmSave,
   handleEnterTableEdit,
   handleSaveTableChanges,
-  onSaveHierarchyChanges,
   handleCancelTableEdit,
+  onSaveHierarchyChanges,
   tableEditing,
   isRefreshed,
   savingTable,
@@ -136,7 +136,11 @@ export default function PaymentPayerProductTable({
   const [editedCells, setEditedCells] = useState({});
   const wasEditingRef = useRef(false);
   useEffect(() => {
-    if (tableEditing && !wasEditingRef.current) {
+    if (tableEditing !== wasEditingRef.current) {
+      // Clear on both entering AND exiting edit mode. Entering: start fresh.
+      // Exiting (after Refresh or Cancel): stale string values left in
+      // editedCells would otherwise get rendered as shownVal in the now
+      // read-only cells and crash formatValue, which expects a number.
       setEditedCells({});
     }
     wasEditingRef.current = tableEditing;
@@ -169,7 +173,7 @@ export default function PaymentPayerProductTable({
         
         const rowValues = columns.map((col) => {
           const displayVal = useRealData
-            ? Number(row.values?.[col?.indices?.[0]] ?? 0)
+            ? Number(row.values?.[col.indices[0]] ?? 0)
             : (() => {
                 const fixed = row.fixed || {};
                 const ownVal = columnValue(fixed, col);
@@ -246,6 +250,7 @@ export default function PaymentPayerProductTable({
 
   const backendOrderKey = ORDER_TO_BACKEND_KEY[hierarchyOrder];
   
+  // SAFE NAVIGATION: Safeguard realOrder against undefined orders object
   const realOrder = hierarchyData && (hierarchyData[backendOrderKey] || hierarchyData[Object.keys(hierarchyData)[0]]);
   const realTableSrc = realOrder
     ? (totalMarketViewMode === "yearly" ? realOrder.yearlyTable : realOrder.table)
@@ -293,18 +298,20 @@ export default function PaymentPayerProductTable({
   };
 
   const columnValue = (fixed, col) => {
-    const indices = col?.indices || [0];
-    const perMonth = indices.map((idx) => sumVolume(fixed, idx));
+    const perMonth = col.indices.map((idx) => sumVolume(fixed, idx));
     if (!isPercent) return perMonth.reduce((a, b) => a + b, 0);
     return perMonth.reduce((a, b) => a + b, 0) / perMonth.length;
   };
   const parentColumnValue = (parentFixed, col) => {
-    const indices = col?.indices || [0];
-    const perMonth = indices.map((idx) => sumVolume(parentFixed, idx));
+    const perMonth = col.indices.map((idx) => sumVolume(parentFixed, idx));
     return perMonth.reduce((a, b) => a + b, 0) / (isPercent ? perMonth.length : 1);
   };
 
-  const formatValue = (val) => (isPercent ? `${val.toFixed(1)}%` : Math.round(val).toLocaleString());
+  const formatValue = (val) => {
+    const n = Number(val);
+    const safe = Number.isFinite(n) ? n : 0;
+    return isPercent ? `${safe.toFixed(1)}%` : Math.round(safe).toLocaleString();
+  };
 
   const activeOrder = HIERARCHY_ORDERS.find((o) => o.value === hierarchyOrder) || HIERARCHY_ORDERS[0];
   const [dim1, dim2, dim3] = activeOrder.dims;
@@ -903,7 +910,7 @@ export default function PaymentPayerProductTable({
               <Button
                 variant="outlined"
                 onClick={handleEnterTableEdit}
-                disabled={tableEditing || !appliedScenarioReady}
+                disabled={tableEditing || !appliedScenarioReady || metric === "market_volume"}
                 sx={secondaryBtnSx}
               >
                 Edit Changes
@@ -1069,9 +1076,8 @@ export default function PaymentPayerProductTable({
                       </Box>
                     </Box>
                     {columns.map((col) => {
-                      const colIndex = col?.indices?.[0] ?? 0;
                       const displayVal = useRealData
-                        ? Number(row.values?.[colIndex] ?? 0)
+                        ? Number(row.values?.[col.indices[0]] ?? 0)
                         : (() => {
                             const fixed = row.fixed || {};
                             const ownVal = columnValue(fixed, col);
@@ -1083,14 +1089,14 @@ export default function PaymentPayerProductTable({
                         tableEditing &&
                         totalMarketViewMode === "monthly" &&
                         useRealData &&
-                        !row.hasChildren &&
+                        (!row.hasChildren || isPayerFilterValue(row.label)) &&
                         (!row.scenario || row.scenario === appliedScenario);
                       const cellKey = `${row.key}::${col.key}`;
                       const editedVal = editedCells[cellKey];
                       const shownVal = editedVal !== undefined ? editedVal : displayVal;
 
                       const isF = activeChartForOrder && chartFsi != null
-                        ? (col?.indices || []).some((idx) => idx >= chartFsi)
+                        ? col.indices.some((idx) => idx >= chartFsi)
                         : true;
 
                       const cellBg = isEditableCell

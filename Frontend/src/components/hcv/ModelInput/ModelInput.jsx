@@ -283,7 +283,15 @@ export default function PBCModelInput() {
     const active =
       data.active_scenario ||
       (data.scenarios && Object.keys(data.scenarios || {})[0]);
-    const sc = data.scenarios && data.scenarios[active];
+    // Apply Filter responses nest market_analysis under scenarios[active].
+    // Run Calculation / Refresh responses put market_analysis directly on
+    // the root object with no `scenarios` wrapper at all — fall back to
+    // treating `data` itself as the scenario object in that case, otherwise
+    // ma/chartMa stay undefined and this function bails out with empty tabs
+    // even though the response is full of data.
+    const sc = data.scenarios
+      ? data.scenarios[active]
+      : (data.market_analysis ? data : undefined);
     let ma = sc && sc.market_analysis;
 
     const hasChart = (scenarioData) => {
@@ -1315,7 +1323,25 @@ export default function PBCModelInput() {
 
     if (isHCV && liverRawData) {
       const nextLiverTabsRaw = normalizeLiverResponse(liverRawData, targetMetric);
-      setLiverTabsRaw(nextLiverTabsRaw);
+
+      // Don't blindly overwrite: if this normalization run came up short on
+      // the hierarchy orders (e.g. a stale/edge-case response shape), keep
+      // whatever orders were already in state instead of wiping them out.
+      setLiverTabsRaw((prev) => {
+        if (prev?.tabs?.payment_type_payer_product?.orders && !nextLiverTabsRaw?.tabs?.payment_type_payer_product?.orders) {
+          return {
+            ...nextLiverTabsRaw,
+            tabs: {
+              ...(nextLiverTabsRaw?.tabs || {}),
+              payment_type_payer_product: {
+                ...(nextLiverTabsRaw?.tabs?.payment_type_payer_product || {}),
+                orders: prev.tabs.payment_type_payer_product.orders,
+              },
+            },
+          };
+        }
+        return nextLiverTabsRaw;
+      });
 
       if (activeTab === "payment_payer_prod") return;
 
@@ -2221,7 +2247,16 @@ export default function PBCModelInput() {
         (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
         "Base";
 
-      let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis || {};
+      // liverRawData may come from either Apply Filter (market_analysis nested
+      // under scenarios[name]) or Run Calculation (market_analysis at the
+      // root, no `scenarios` wrapper). Reading only the nested shape silently
+      // produced an empty market_analysis whenever liverRawData had the
+      // Run Calculation shape, which sent a gutted payload to refreshLiverTable
+      // and made "Refresh" fail. Fall back to the root object in that case.
+      let fullMarketAnalysis = liverRawData?.scenarios
+        ? liverRawData.scenarios[sourceScenario]?.market_analysis
+        : liverRawData?.market_analysis;
+
       if (!fullMarketAnalysis && liverRawData?.scenarios) {
         const matchedKey = Object.keys(liverRawData.scenarios).find(
           (k) => k.toLowerCase() === sourceScenario.toLowerCase()
@@ -2259,6 +2294,22 @@ export default function PBCModelInput() {
         patchedValuesByRowKey[rowKey] = base;
       });
 
+      // Track every ancestor path of an edited row, so their aggregate
+      // totals can be recalculated as well, not just the exact edited row.
+      const touchedAncestorPaths = new Set();
+      Object.keys(patchedValuesByRowKey).forEach((path) => {
+        const parts = path.split(" > ");
+        for (let i = 1; i < parts.length; i++) {
+          touchedAncestorPaths.add(parts.slice(0, i).join(" > "));
+        }
+      });
+      const sumArrays = (arrs) => {
+        const length = arrs.reduce((max, a) => Math.max(max, (a || []).length), 0);
+        return Array.from({ length }, (_, i) =>
+          arrs.reduce((sum, a) => sum + (Number(a?.[i]) || 0), 0)
+        );
+      };
+
       const patchTree = (nodes, ancestorPath) =>
         (nodes || []).map((n) => {
           const label = n.label || n.hierarchy || "";
@@ -2266,13 +2317,55 @@ export default function PBCModelInput() {
           const next = { ...n };
           if (n.children?.length) next.children = patchTree(n.children, path);
           if (patchedValuesByRowKey[path]) {
+            // This exact row was edited — use the typed value directly.
             const newVals = patchedValuesByRowKey[path];
             if (Array.isArray(next.total)) next.total = newVals;
             else next.values = newVals;
+          } else if (touchedAncestorPaths.has(path) && next.children?.length) {
+            // Not edited directly, but a descendant was — roll the
+            // aggregate up from the (already patched) children instead of
+            // sending the stale pre-edit total for this row.
+            const childArrays = next.children.map(
+              (c) => (Array.isArray(c.total) ? c.total : c.values) || []
+            );
+            const rolledUp = sumArrays(childArrays);
+            if (Array.isArray(next.total)) next.total = rolledUp;
+            else next.values = rolledUp;
           }
           return next;
         });
       const patchedRows = patchTree(origRows, "");
+
+      // The chart's own series (history/forecast) is a separate, coarser
+      // (max 2-level) representation of the same tree. It was never being
+      // patched, so it kept pointing at pre-edit numbers even though
+      // table.rows was patched — if the backend uses chart series as the
+      // source of truth for recompute, the edit would be invisible to it.
+      // Derive matching series values from the same patched/rolled-up tree.
+      const rawChart = orderObj?.[activeMetric]?.monthly?.chart;
+      const chartFsiForPatch = rawChart?.forecast_start_index ?? 0;
+      const patchedSeriesByLabel = {};
+      patchedRows.forEach((r) => {
+        const rLabel = r.label || r.hierarchy || "";
+        if (r.children?.length) {
+          r.children.forEach((c) => {
+            const cLabel = c.label || c.hierarchy || "";
+            patchedSeriesByLabel[`${rLabel} - ${cLabel}`] =
+              (Array.isArray(c.total) ? c.total : c.values) || [];
+          });
+        } else {
+          patchedSeriesByLabel[rLabel] = (Array.isArray(r.total) ? r.total : r.values) || [];
+        }
+      });
+      const patchedChartSeries = (rawChart?.series || []).map((s) => {
+        const patched = patchedSeriesByLabel[s.label];
+        if (!patched) return s;
+        return {
+          ...s,
+          history: patched.slice(0, chartFsiForPatch),
+          forecast: patched.slice(chartFsiForPatch),
+        };
+      });
 
       const mergedMarketAnalysis = {
         ...fullMarketAnalysis,
@@ -2285,6 +2378,7 @@ export default function PBCModelInput() {
               monthly: {
                 ...(orderObj?.[activeMetric]?.monthly || {}),
                 table: { type: "hierarchical", rows: patchedRows },
+                chart: rawChart ? { ...rawChart, series: patchedChartSeries } : rawChart,
               },
             },
           },
@@ -2358,6 +2452,16 @@ export default function PBCModelInput() {
         });
 
         initializeCompareScenarios(respData);
+
+        // Keep FE scenario state in sync with what the backend actually
+        // returned — different endpoints have used different casing for the
+        // same scenario (e.g. Run Calculation's "BASE" vs this endpoint's
+        // "Base"). Without this, currentlyAppliedScenario goes stale after
+        // Refresh and later lookups keyed by scenario name silently miss.
+        if (respData.active_scenario) {
+          setCurrentlyAppliedScenario(respData.active_scenario);
+          setTentativeRadioSelectedScenario(respData.active_scenario);
+        }
       }
 
       setIsRefreshed(false);
@@ -2492,8 +2596,14 @@ export default function PBCModelInput() {
       response?.available_scenarios ||
       (response?.scenarios ? Object.keys(response.scenarios) : []);
 
+    // Different endpoints have returned different casing for the same
+    // scenario (e.g. Run Calculation's "BASE" vs Refresh's "Base"). A plain
+    // `.includes` check treats those as two different scenarios and adds a
+    // bogus duplicate that silently fails to load if ever selected. Compare
+    // case-insensitively instead.
     const toAdd = appliedScenario || currentlyAppliedScenario || "";
-    const merged = toAdd && !scenarios.includes(toAdd)
+    const alreadyPresent = toAdd && scenarios.some((s) => s.toLowerCase() === toAdd.toLowerCase());
+    const merged = toAdd && !alreadyPresent
       ? [...scenarios, toAdd]
       : scenarios;
 
