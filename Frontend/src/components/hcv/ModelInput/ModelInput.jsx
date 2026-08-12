@@ -162,6 +162,11 @@ export default function PBCModelInput() {
   const [userHasCustomizedCompare, setUserHasCustomizedCompare] = useState(false);
   const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] = useState("");
   const [currentlyAppliedScenario, setCurrentlyAppliedScenario] = useState("");
+  // Different endpoints have returned the same scenario with different
+  // casing (e.g. Run Calculation's "BASE" vs elsewhere's "Base"). Compare
+  // scenario names case-insensitively everywhere, not just ===.
+  const sameScenario = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 
   const [expandedBrands, setExpandedBrands] = useState({});
   const [threeLevelExpandedRows, setThreeLevelExpandedRows] = useState({});
@@ -2634,9 +2639,9 @@ export default function PBCModelInput() {
   };
 
   const EVENT_TYPE_TO_API = {
-    Product: "payer_event",
-    Payer: "payment_type_payer_product_event",
-    PaymentType_Payer_Product: "product_event",
+    Product: "product_event",
+    Payer: "payment_type_event",
+    PaymentType_Payer_Product: "payment_type_payer_product_event",
   };
   const EVENT_TYPE_FROM_API = Object.fromEntries(
     Object.entries(EVENT_TYPE_TO_API).map(([feType, beType]) => [beType, feType]),
@@ -2697,7 +2702,7 @@ export default function PBCModelInput() {
       if (eventsManagement) {
         rawRows = [
           "product_event",
-          "payer_event",
+          "payment_type_event",
           "payment_type_payer_product_event",
         ].flatMap((eventType) => {
           const rows = eventsManagement?.[eventType]?.impact_curve_configuration?.rows || [];
@@ -3984,7 +3989,7 @@ export default function PBCModelInput() {
               savingTable={savingTable}
               isSavingEditChanges={isSavingEditChanges}
               editedHierarchies={editedHierarchies}
-              appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+              appliedScenarioReady={!!currentlyAppliedScenario && sameScenario(currentlyAppliedScenario, tentativeRadioSelectedScenario)}
               setNewScenarioName={setNewScenarioName}
               setSaveScenarioDialogOpen={setSaveScenarioDialogOpen}
               expandedRows={threeLevelExpandedRows}
@@ -4049,7 +4054,7 @@ export default function PBCModelInput() {
             compareScenarioOptions={compareScenarioOptions}
             currentlyAppliedScenario={currentlyAppliedScenario}
             tentativeRadioSelectedScenario={tentativeRadioSelectedScenario}
-            appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+            appliedScenarioReady={!!currentlyAppliedScenario && sameScenario(currentlyAppliedScenario, tentativeRadioSelectedScenario)}
             userHasCustomizedCompare={userHasCustomizedCompare}
             savedScenarioRows={savedScenarioRows}
             appliedProductFilter={appliedProductFilter}
