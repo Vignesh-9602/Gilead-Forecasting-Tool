@@ -4,6 +4,7 @@ import { GlobalContext } from "../context/Provider";
 import MainLayout from "../layouts/MainLayout";
 import HCVLayout from "../layouts/HCVLayout";
 import HIVLayout from "../layouts/HIVLayout";
+import HIVPrepLayout from "../layouts/HIVPrepLayout";
 
 export default function TherapyAreaRouter() {
     const { favState } = useContext(GlobalContext);
@@ -17,6 +18,9 @@ export default function TherapyAreaRouter() {
 
         case "HIV Treatment":
             return <HIVLayout />;
+
+        case "HIV PrEP":
+            return <HIVPrepLayout />;
 
         default:
             return <Navigate to="/landingpage" />;
