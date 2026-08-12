@@ -44,7 +44,8 @@ from app.liver_market_events.services.market_events_service import (
     # _build_payment_type_product_metrics,        # NEW
     _build_payment_type_payer_product_metrics,  # NEW
     _fetch_pt_payer_history,                      # NEW
-    build_market_analysis_response,              # NEW
+    build_market_analysis_response,    
+    _clean_table_for_response,          # NEW
     _clamp_min_start_to_transaction_floor,
     _get_date_range_from_configs,
     _get_scenarios_with_base,
@@ -52,8 +53,7 @@ from app.liver_market_events.services.market_events_service import (
     _merge_config_with_saved_data,
     _persist_market_events_result,
 )
-# TODO: confirm actual module path for Events Management (the file
-# defining market_event_configuration / get_events_for_calculation).
+
 from app.liver_market_events.services.Events_Management import (
     get_events_for_calculation,
 )
@@ -1006,10 +1006,200 @@ def _compute_touched_entities(event_rows: list, tab: str):
         return pairs
     return None
 
+def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
+    """
+    Clip a market_analysis dict (nested monthly/yearly format) so that all
+    monthly chart months and table headers only cover (from_year, from_month)
+    onwards.  This prevents DB-stored wide data (e.g. Apr-20 start) from
+    appearing in responses when the user's filter starts later (e.g. Mar-22),
+    which would otherwise make the comparison table use Apr-20 column headers.
 
+    Yearly data is left unchanged.  Returns the original dict unchanged when
+    all months already start at or after from_date.
+    """
+    from_ym = from_year * 100 + from_month
+
+    def _find_clip_idx(months: list) -> int:
+        for i, m in enumerate(months):
+            try:
+                parts = str(m).split("-")
+                y, mo = int(parts[0]), int(parts[1])
+                if y * 100 + mo >= from_ym:
+                    return i
+            except Exception:
+                pass
+        return 0
+
+    def _clip_chart(chart: dict) -> dict:
+        months = chart.get("months", [])
+        if not months:
+            return chart
+        clip_idx = _find_clip_idx(months)
+        if clip_idx == 0:
+            return chart
+        new_months = months[clip_idx:]
+        old_fsi = chart.get("forecast_start_index", 0)
+        new_fsi = max(0, old_fsi - clip_idx)
+        new_series = []
+        for s in chart.get("series", []):
+            if "history" in s or "forecast" in s:
+                history  = list(s.get("history", []))
+                forecast = list(s.get("forecast", []))
+                hist_key, fore_key = "history", "forecast"
+            else:
+                history  = list(s.get("train_values", []))
+                forecast = list(s.get("forecast_values", []))
+                hist_key, fore_key = "train_values", "forecast_values"
+            if clip_idx <= old_fsi:
+                new_h, new_f = history[clip_idx:], forecast
+            else:
+                new_h, new_f = [], forecast[clip_idx - old_fsi:]
+            base = {k: v for k, v in s.items()
+                    if k not in ("history", "forecast", "train_values", "forecast_values")}
+            base[hist_key] = new_h
+            base[fore_key] = new_f
+            new_series.append(base)
+        return {**chart, "months": new_months, "forecast_start_index": new_fsi, "series": new_series}
+
+    def _clip_table(table: dict, clip_idx: int) -> dict:
+        if not table or clip_idx == 0:
+            return table
+        # Only write "headers" if the source table already had the key.
+        # Many stored tables omit "headers" (the frontend falls back to the
+        # chart months).  Writing an empty list would override that fallback
+        # in JavaScript ([] is truthy) and produce a zero-column table.
+        src_headers = table.get("headers")  # None if key absent
+        new_rows = []
+        for row in table.get("rows", []):
+            new_row = dict(row)
+            if "values" in row:
+                new_row["values"] = list(row["values"])[clip_idx:]
+            if "total" in row:
+                new_row["total"] = list(row["total"])[clip_idx:]
+            new_children = []
+            for child in row.get("children", []):
+                nc = dict(child)
+                if "values" in child:
+                    nc["values"] = list(child["values"])[clip_idx:]
+                new_children.append(nc)
+            if new_children:
+                new_row["children"] = new_children
+            new_rows.append(new_row)
+        result = {**table, "rows": new_rows}
+        if src_headers is not None:
+            result["headers"] = src_headers[clip_idx:]
+        return result
+
+    def _first_row_len(table: dict) -> int:
+        """Return the value-array length of the first row in table (any shape)."""
+        rows = table.get("rows", [])
+        if not rows:
+            return 0
+        r = rows[0]
+        for key in ("values", "total"):
+            v = r.get(key)
+            if v is not None:
+                return len(v)
+        children = r.get("children") or []
+        if children:
+            return len(children[0].get("values") or [])
+        return 0
+
+    def _table_clip_idx(chart: dict, table: dict, clip_idx: int) -> int:
+        """
+        _clip_chart uses clip_idx derived from the chart's original months array.
+        But _prepend_wide_months widens only the CHART (e.g. to Apr-20) while the
+        TABLE rows stay at the original filter window (e.g. Mar-22).  Applying
+        clip_idx blindly to the table over-clips it — e.g. clipping 23 from a
+        70-value table yields 47 instead of the correct 70.
+
+        Correct the clip index by accounting for the gap between chart months and
+        table row values: if the table already starts later than the chart, shift
+        the clip index left by that offset so the table is not over-clipped.
+        """
+        orig_chart_len = len(chart.get("months", []))
+        if not orig_chart_len or clip_idx == 0:
+            return clip_idx
+        tbl_len = _first_row_len(table)
+        if 0 < tbl_len < orig_chart_len:
+            # Table starts (orig_chart_len - tbl_len) months into the chart.
+            return max(0, clip_idx - (orig_chart_len - tbl_len))
+        return clip_idx
+
+    result = {}
+    for tab_key, tab in ma.items():
+        result[tab_key] = {}
+        for metric_key, metric in tab.items():
+            monthly = metric.get("monthly", {})
+            if monthly:
+                chart = monthly.get("chart", {})
+                table = monthly.get("table", {})
+                clip_idx = _find_clip_idx(chart.get("months", [])) if chart.get("months") else 0
+                clipped_tbl = _clip_table(table, _table_clip_idx(chart, table, clip_idx))
+                result[tab_key][metric_key] = {
+                    "monthly": {
+                        "chart": _clip_chart(chart),
+                        "table": clipped_tbl,
+                    },
+                    "yearly": metric.get("yearly", {}),
+                }
+            elif "chart" in metric:
+                # Flat (legacy) format
+                chart = metric.get("chart", {})
+                table = metric.get("table", {})
+                clip_idx = _find_clip_idx(chart.get("months", [])) if chart.get("months") else 0
+                clipped_tbl = _clip_table(table, _table_clip_idx(chart, table, clip_idx))
+                result[tab_key][metric_key] = {
+                    "chart": _clip_chart(chart),
+                    "table": clipped_tbl,
+                }
+            elif not any(k in metric for k in ("monthly", "yearly", "chart", "table")):
+                # Sub-view: metric = {inner_metric: {monthly: ..., yearly: ...}}
+                result[tab_key][metric_key] = {}
+                for inner_key, inner_data in metric.items():
+                    inner_monthly = inner_data.get("monthly", {}) if isinstance(inner_data, dict) else {}
+                    if inner_monthly:
+                        ic    = inner_monthly.get("chart", {})
+                        it    = inner_monthly.get("table", {})
+                        ci    = _find_clip_idx(ic.get("months", [])) if ic.get("months") else 0
+                        ct    = _clip_table(it, _table_clip_idx(ic, it, ci))
+                        result[tab_key][metric_key][inner_key] = {
+                            "monthly": {"chart": _clip_chart(ic), "table": ct},
+                            "yearly":  inner_data.get("yearly", {}),
+                        }
+                    else:
+                        result[tab_key][metric_key][inner_key] = inner_data
+            else:
+                result[tab_key][metric_key] = metric
+    return result
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+def _load_scenario_stub(cur, scenario_name: str, from_year: int, from_month: int) -> dict:
+    """
+    Mirrors apply_liver_filters's _inactive_stub: for a scenario that isn't
+    the one currently being calculated, return its last-saved factors +
+    market_analysis, clipped to the same display window as the active
+    scenario via the SAME _clip_ma_to_from_date apply_liver_filters uses --
+    reusing it here (not reimplementing) avoids two independent clipping
+    implementations drifting out of sync.
+    """
+    cur.execute(
+        "SELECT factors, chart_data FROM raw_liver.liver_scenarios WHERE UPPER(scenario_name) = UPPER(%s)",
+        (scenario_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"market_analysis": {}}
+    factors_raw = row[0] if isinstance(row[0], dict) else {}
+    chart_data = row[1] if row[1] else {}
+    ma = chart_data.get("market_analysis", {}) if isinstance(chart_data, dict) else {}
+    if ma:
+        ma = _clip_ma_to_from_date(ma, from_year, from_month)
+    stub = {"market_analysis": ma}
+    if factors_raw:
+        stub["factors"] = factors_raw
+    return stub
 
 def run_market_events_calculation(payload) -> dict:
     """
@@ -1322,19 +1512,33 @@ def run_market_events_calculation(payload) -> dict:
                                                                                     # from overall_event/payer_event keys only
 
         market_analysis = build_market_analysis_response(event_tabs)
+        _clean_table_for_response(market_analysis, sf.scenario_name)
+
+        cur.execute(
+            "SELECT factors FROM raw_liver.liver_scenarios WHERE UPPER(scenario_name) = UPPER(%s)",
+            (sf.scenario_name,),
+        )
+        _frow = cur.fetchone()
+        active_factors = _frow[0] if _frow and isinstance(_frow[0], dict) else {}
+
+        _start_y, _start_m = int(sf.start_date[:4]), int(sf.start_date[5:7])
+
+        scenarios_out = {
+            sc: (
+                {"factors": active_factors, "market_analysis": market_analysis}
+                if sc == sf.scenario_name
+                else _load_scenario_stub(cur, sc, _start_y, _start_m)
+            )
+            for sc in scenarios
+        }
 
         return {
             "ta_name":             ta,
-            "available_scenarios": scenarios,
-            "available_months":    available_months,
             "selected_filter":     sf.model_dump(),
-            "metric_filters":      METRIC_FILTERS,
-            "market_analysis":     market_analysis,
-            "impact_curve_configuration": {
-                "payer_event":   payer_event_cfg,
-                "product_event": product_event_cfg,
-                "overall_event": overall_event_cfg,
-            },
+            "available_months":    available_months,
+            "available_scenarios": scenarios,
+            "active_scenario":     sf.scenario_name,
+            "scenarios":           scenarios_out,
         }
     finally:
         cur.close()
