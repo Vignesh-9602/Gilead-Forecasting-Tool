@@ -3246,6 +3246,9 @@ export default function HIVMarketEvent() {
                     onClose={() => setOpenManageProducts(false)}
                     products={products}
                     setProducts={setProducts}
+                    therapyArea={therapyArea}
+                    scenarioName={scenarioName}
+                    onProductSaved={() => handleApplyFilter()}
                 />
             </Paper>
 

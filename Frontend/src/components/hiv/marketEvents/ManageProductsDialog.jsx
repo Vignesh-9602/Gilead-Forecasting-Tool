@@ -22,13 +22,18 @@ import {
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 
-import { useSnackbarStore } from "../../../stores";
+import { useSnackbarStore, useLoadingStore } from "../../../stores";
+import { addHIVProduct, getHIVProducts, updateHIVProduct, deleteHIVProduct } from "../../../services/apiService";
+
 
 export default function ManageProductsDialog({
     open,
     onClose,
     products,
     setProducts,
+    therapyArea,
+    onProductSaved,
+    scenarioName,
 }) {
 
     const { showSnackbar } = useSnackbarStore();
@@ -37,22 +42,40 @@ export default function ManageProductsDialog({
 
     const [newProduct, setNewProduct] = useState("");
 
+    const [savingProduct, setSavingProduct] = useState(false);
+
     const [editingId, setEditingId] = useState(null);
 
     const [editingValue, setEditingValue] = useState("");
+    const [savingEdit, setSavingEdit] = useState(false);
 
     const [deleteProduct, setDeleteProduct] = useState(null);
+    const [deletingProduct, setDeletingProduct] = useState(false);
+    const [loadingProducts, setLoadingProducts] = useState(false);
+    const { setLoading } = useLoadingStore();
+
+    // useEffect(() => {
+
+    //     if (!open) {
+    //         setShowAddRow(false);
+    //         setNewProduct("");
+    //         setEditingId(null);
+    //         setEditingValue("");
+    //         setDeleteProduct(null);
+    //     }
+
+    // }, [open]);
 
     useEffect(() => {
-
-        if (!open) {
+        if (open) {
+            fetchProducts();
+        } else {
             setShowAddRow(false);
             setNewProduct("");
             setEditingId(null);
             setEditingValue("");
             setDeleteProduct(null);
         }
-
     }, [open]);
 
     const handleAddProduct = () => {
@@ -65,7 +88,43 @@ export default function ManageProductsDialog({
         setNewProduct("");
     };
 
-    const handleSaveProduct = () => {
+    const fetchProducts = async () => {
+        try {
+            setLoading(true);
+
+            const { data: response } = await getHIVProducts();
+
+            const productList = Array.isArray(response?.products)
+                ? response.products
+                : [];
+
+            const mappedProducts = productList.map((product) => ({
+                id: product.product_id,
+                product_id: product.product_id,
+                product_name: product.product_name,
+                date_added: product.date_added,
+                added_by: product.added_by,
+                modified_by: product.modified_by,
+                is_new: false,
+            }));
+
+            setProducts(mappedProducts);
+        } catch (error) {
+            console.error("Failed to fetch products", error);
+
+            const errorMessage =
+                error?.response?.data?.message ||
+                "Failed to fetch products";
+
+            showSnackbar(errorMessage, "error");
+
+            setProducts([]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleSaveProduct = async () => {
 
         const name = newProduct.trim();
 
@@ -85,27 +144,67 @@ export default function ManageProductsDialog({
             return;
         }
 
-        const today = new Date().toISOString().split("T")[0];
-
-        const newRow = {
-            id: Date.now(),
+        const payload = {
+            ta_name: therapyArea,
             product_name: name,
-            date_added: today,
-            added_by: "Admin User",
-            modified_by: "Admin User",
-            is_new: true
         };
 
-        setProducts(prev => [...prev, newRow]);
+        try {
 
-        setShowAddRow(false);
+            setSavingProduct(true);
 
-        setNewProduct("");
+            const { data: response } = await addHIVProduct(payload);
 
-        showSnackbar(
-            "Product added successfully",
-            "success"
-        );
+            const product = response?.product;
+
+            if (!product) {
+                throw new Error("Product details are missing from the API response");
+            }
+
+            const newRow = {
+                id: product.product_id,
+                product_id: product.product_id,
+                product_name: product.product_name,
+                product_code: product.product_code,
+                active_flag: product.active_flag,
+                company: product.company,
+                date_added: product.date_added,
+                added_by: product.added_by,
+                modified_by: product.modified_by,
+                is_new: true,
+            };
+
+            // setProducts(prev => [...prev, newRow]);
+
+            setShowAddRow(false);
+            setNewProduct("");
+
+            await fetchProducts();
+
+            showSnackbar(
+                "Product added successfully",
+                "success"
+            );
+
+            // Refresh the screen with the new product
+            if (onProductSaved) {
+                await onProductSaved();
+            }
+
+        } catch (error) {
+
+            console.error("Failed to add product", error);
+
+            showSnackbar(
+                "Failed to add product",
+                "error"
+            );
+
+        } finally {
+
+            setSavingProduct(false);
+
+        }
     };
 
     const handleEdit = row => {
@@ -124,75 +223,140 @@ export default function ManageProductsDialog({
 
     };
 
-    const handleSaveEdit = () => {
-
+    const handleSaveEdit = async () => {
         const value = editingValue.trim();
 
         if (!value) {
-
-            showSnackbar(
-                "Product name is required",
-                "warning"
-            );
-
+            showSnackbar("Product name is required", "warning");
             return;
+        }
 
+        const currentProduct = products.find(
+            (item) => item.id === editingId
+        );
+
+        if (!currentProduct) {
+            showSnackbar("Unable to find the selected product", "error");
+            return;
+        }
+
+        const originalProductName = currentProduct.product_name;
+
+        if (
+            originalProductName.toLowerCase() ===
+            value.toLowerCase()
+        ) {
+            showSnackbar("No changes were made", "info");
+            handleCancelEdit();
+            return;
         }
 
         const duplicate = products.some(
-            item =>
+            (item) =>
                 item.id !== editingId &&
-                item.product_name.toLowerCase() ===
+                item.product_name?.toLowerCase() ===
                 value.toLowerCase()
         );
 
         if (duplicate) {
-
-            showSnackbar(
-                "Product already exists",
-                "warning"
-            );
-
+            showSnackbar("Product already exists", "warning");
             return;
-
         }
 
-        setProducts(prev =>
-            prev.map(item =>
-                item.id === editingId
-                    ? {
-                        ...item,
-                        product_name: value,
-                        modified_by: "Admin User"
-                    }
-                    : item
-            )
-        );
+        const payload = {
+            ta_name: therapyArea,
+            product_name: originalProductName,
+            new_product_name: value,
+        };
 
-        setEditingId(null);
+        try {
+            setSavingEdit(true);
 
-        setEditingValue("");
+            const { data: response } = await updateHIVProduct(payload);
 
-        showSnackbar(
-            "Product updated successfully",
-            "success"
-        );
+            if (!response?.product) {
+                throw new Error(
+                    "Updated product details are missing from the API response"
+                );
+            }
+
+            setEditingId(null);
+            setEditingValue("");
+
+            await fetchProducts();
+
+            showSnackbar(
+                response?.message || "Product updated successfully",
+                "success"
+            );
+
+            if (onProductSaved) {
+                await onProductSaved();
+            }
+        } catch (error) {
+            console.error("Failed to update product", error);
+
+            const errorMessage =
+                error?.response?.data?.message ||
+                error?.message ||
+                "Failed to update product";
+
+            showSnackbar(errorMessage, "error");
+        } finally {
+            setSavingEdit(false);
+        }
     };
 
-    const handleDelete = () => {
+    const handleDelete = async () => {
+        if (!deleteProduct) {
+            return;
+        }
 
-        setProducts(prev =>
-            prev.filter(
-                item => item.id !== deleteProduct.id
-            )
-        );
+        if (!therapyArea) {
+            showSnackbar("Therapy area is required", "warning");
+            return;
+        }
 
-        setDeleteProduct(null);
+        if (!scenarioName) {
+            showSnackbar("Scenario name is required", "warning");
+            return;
+        }
 
-        showSnackbar(
-            "Product deleted successfully",
-            "success"
-        );
+        const payload = {
+            ta_name: therapyArea,
+            product_name: deleteProduct.product_name,
+            scenario_name: scenarioName,
+        };
+
+        try {
+            setLoading(true);
+
+            const { data: response } = await deleteHIVProduct(payload);
+
+            setDeleteProduct(null);
+
+            await fetchProducts();
+
+            showSnackbar(
+                response?.message || "Product deleted successfully",
+                "success"
+            );
+
+            if (onProductSaved) {
+                await onProductSaved();
+            }
+        } catch (error) {
+            console.error("Failed to delete product", error);
+
+            const errorMessage =
+                error?.response?.data?.message ||
+                error?.message ||
+                "Failed to delete product";
+
+            showSnackbar(errorMessage, "error");
+        } finally {
+            setLoading(false);
+        }
     };
 
     const headerStyle = {
@@ -301,6 +465,7 @@ export default function ManageProductsDialog({
                                 <Button
                                     variant="contained"
                                     onClick={handleSaveProduct}
+                                    disabled={savingProduct}
                                     sx={{
                                         ...buttonStyle,
                                         background: "#4F46E5",
@@ -390,6 +555,7 @@ export default function ManageProductsDialog({
                                                     fullWidth
                                                     size="small"
                                                     value={editingValue}
+                                                    disabled={savingEdit}
                                                     onChange={(e) =>
                                                         setEditingValue(
                                                             e.target.value
@@ -441,11 +607,11 @@ export default function ManageProductsDialog({
                                         </TableCell>
 
                                         <TableCell>
-                                            {row.added_by}
+                                            {row.added_by || "-"}
                                         </TableCell>
 
                                         <TableCell>
-                                            {row.modified_by}
+                                            {row.modified_by || "-"}
                                         </TableCell>
 
                                         <TableCell align="center">
@@ -461,9 +627,8 @@ export default function ManageProductsDialog({
                                                     <Button
                                                         size="small"
                                                         variant="contained"
-                                                        onClick={
-                                                            handleSaveEdit
-                                                        }
+                                                        onClick={handleSaveEdit}
+                                                        disabled={savingEdit}
                                                         sx={{
                                                             ...buttonStyle,
                                                             background:
@@ -476,9 +641,8 @@ export default function ManageProductsDialog({
                                                     <Button
                                                         size="small"
                                                         variant="outlined"
-                                                        onClick={
-                                                            handleCancelEdit
-                                                        }
+                                                        onClick={handleCancelEdit}
+                                                        disabled={savingEdit}
                                                         sx={buttonStyle}
                                                     >
                                                         Cancel
@@ -502,12 +666,14 @@ export default function ManageProductsDialog({
                                                         }
                                                     >
                                                         <EditIcon
+                                                            disabled={savingEdit}
                                                             fontSize="small"
                                                         // color="warning"
                                                         />
                                                     </IconButton>
 
                                                     <IconButton
+                                                        disabled={savingEdit}
                                                         onClick={() =>
                                                             setDeleteProduct(
                                                                 row
@@ -557,13 +723,23 @@ export default function ManageProductsDialog({
                     </Button>
                 </DialogActions>
 
-            </Dialog>
+            </Dialog >
 
             {/* Delete Confirmation */}
 
-            <Dialog
+            < Dialog
                 open={Boolean(deleteProduct)}
-                onClose={() => setDeleteProduct(null)}
+                // onClose={() => setDeleteProduct(null)
+                // }
+                onClose={() => {
+
+                    if (!deletingProduct) {
+
+                        setDeleteProduct(null);
+
+                    }
+
+                }}
                 maxWidth="xs"
                 fullWidth
             >
@@ -620,7 +796,7 @@ export default function ManageProductsDialog({
 
                 </DialogActions>
 
-            </Dialog>
+            </Dialog >
 
         </>
 

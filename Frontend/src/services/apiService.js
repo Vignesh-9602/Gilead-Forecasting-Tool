@@ -510,6 +510,26 @@ export const deleteHIVScenario = (payload) =>
     }
   );
 
+export const addHIVProduct = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/products",
+    payload
+  );
+
+export const getHIVProducts = () => {
+  return httpClient.get("/api/hiv_treat/products");
+};
+
+export const updateHIVProduct = (payload) => {
+  return httpClient.put("/api/hiv_treat/products", payload);
+};
+
+export const deleteHIVProduct = (payload) => {
+  return httpClient.delete("/api/hiv_treat/products", {
+    data: payload,
+  });
+};
+
 
 // HIV Prep API's
 
