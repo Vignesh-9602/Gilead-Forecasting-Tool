@@ -139,6 +139,16 @@ const ModelInputTable = React.memo(function ModelInputTable({
   const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
   const isThreeLevelTab = activeTab === "payment_payer_prod";
 
+  // Different endpoints (Run Calculation vs Apply Filter/Refresh) have
+  // returned the same scenario with different casing (e.g. "BASE" vs
+  // "Base"). Every exact === comparison against a scenario name is a
+  // latent bug: it silently drops highlighting/protection for that
+  // scenario the moment casing doesn't match. Compare case-insensitively
+  // everywhere a scenario name is checked.
+  const sameScenario = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+  const isBaseScenario = (name) => sameScenario(name, "Base");
+
   const isForecastMonth = (col) => {
     if (!chartData?.months?.length || chartData?.forecast_start_index == null)
       return false;
@@ -213,7 +223,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
 
     const out = [];
     scenarioNames.forEach((scenarioName) => {
-      if (scenarioName === currentlyAppliedScenario) {
+      if (sameScenario(scenarioName, currentlyAppliedScenario)) {
         tableData.forEach((row) => {
           out.push({
             ...row,
@@ -326,7 +336,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
             is_applied: entry.rows.some((r) => r.is_applied),
           },
           children,
-          isScenarioOverlay: scenarioName !== currentlyAppliedScenario,
+          isScenarioOverlay: !sameScenario(scenarioName, currentlyAppliedScenario),
           isScenarioGroup: true,
         };
       });
@@ -385,7 +395,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
         mainRow,
         children: entry.children,
         isScenarioOverlay:
-          activeTab === "total_market" ? false : entry.scenario !== currentlyAppliedScenario,
+          activeTab === "total_market" ? false : !sameScenario(entry.scenario, currentlyAppliedScenario),
       };
     });
   }, [isThreeLevelTab, activeTab, isScenarioParentTab, taggedTableRows, chartData, currentlyAppliedScenario, isPercentTab]);
@@ -770,7 +780,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         }}
                       >
                         {compareScenarioOptions.map((option) => {
-                          const isActive = option === currentlyAppliedScenario;
+                          const isActive = sameScenario(option, currentlyAppliedScenario);
                           return (
                             <MenuItem key={option} value={option} disabled={isActive}>
                               <Checkbox
@@ -947,7 +957,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                     </Box>
 
                     {selectedCompareScenarios.map((scen) => {
-                      const isApplied = currentlyAppliedScenario === scen;
+                      const isApplied = sameScenario(currentlyAppliedScenario, scen);
                       return (
                         <Box
                           component="tr"
@@ -982,7 +992,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                 name="activeScenarioRadio"
                                 value={scen}
                                 checked={
-                                  tentativeRadioSelectedScenario === scen
+                                  sameScenario(tentativeRadioSelectedScenario, scen)
                                 }
                                 onChange={() =>
                                   handleActiveScenarioRadioChange(scen)
@@ -1051,8 +1061,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         if (!userHasCustomizedCompare) return true;
                         if (!selectedCompareScenarios.length) return true;
                         return (
-                          group.brandName === currentlyAppliedScenario ||
-                          selectedCompareScenarios.includes(group.brandName)
+                          sameScenario(group.brandName, currentlyAppliedScenario) ||
+                          selectedCompareScenarios.some((s) => sameScenario(s, group.brandName))
                         );
                       })
                       .map((group) => {
@@ -1061,7 +1071,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         const showChildren = isExpanded;
 
                         const isSelected =
-                          tentativeRadioSelectedScenario === group.brandName;
+                          sameScenario(tentativeRadioSelectedScenario, group.brandName);
 
                         const currentBrand = (
                           appliedProductFilter ||
@@ -1096,7 +1106,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
 
                         const isAppliedScenarioGroup =
                           activeTab === "total_market"
-                            ? (group.brandName || "") === (currentlyAppliedScenario || "")
+                            ? sameScenario(group.brandName, currentlyAppliedScenario)
                             : !group.isScenarioOverlay;
                         const isEditEligible = (() => {
                           if (!tableEditing) return false;
@@ -1233,7 +1243,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                     </Typography>
                                   </Box>
 
-                                  {activeTab === "total_market" && group.brandName !== "Base" && (
+                                  {activeTab === "total_market" && !isBaseScenario(group.brandName) && (
                                     <Tooltip title="Delete Scenario">
                                       <IconButton
                                         size="small"
@@ -1433,12 +1443,12 @@ const ModelInputTable = React.memo(function ModelInputTable({
                       .filter(
                         (name) =>
                           !groupedTableHierarchy.some(
-                            (g) => g.brandName === name,
+                            (g) => sameScenario(g.brandName, name),
                           ),
                       )
                       .map((name) => {
                         const isSelected =
-                          tentativeRadioSelectedScenario === name;
+                          sameScenario(tentativeRadioSelectedScenario, name);
                         return (
                           <Box
                             component="tr"
@@ -1497,7 +1507,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                     {name}
                                   </Typography>
                                 </Box>
-                                {name !== "Base" && (
+                                {!isBaseScenario(name) && (
                                   <Tooltip title="Delete Scenario">
                                     <IconButton
                                       size="small"
