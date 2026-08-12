@@ -300,6 +300,16 @@ export const getLiverMarketEventsFilters = (ta = "HCV") => {
   });
 };
 
+// GET — loads every previously-saved Impact Curve Configuration row for the
+// Events Management tab, grouped by event type (product_event / payer_event
+// / payment_type_payer_product_event). This was previously imported and
+// called from ModelInput.jsx but never actually defined here, so every call
+// silently threw (caught by the surrounding try/catch) and the Events
+// Management page never listed anything on open.
+export const getLiverMarketEventsList = (taName = "HCV") => {
+  return httpClient.get(`/api/liver-market-events/market-events/${encodeURIComponent(taName)}`);
+};
+
 // GET — list products (base + newly added) for the "Manage New Products"
 // modal on the Impact Curve Configuration screen.
 export const getLiverMarketEventsProducts = (params = {}) => {

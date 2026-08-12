@@ -1862,6 +1862,15 @@ def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
             factors
         )
 
+        # retail = next(
+        #     (r for r in scenarios_block[scenario]["market_analysis"]
+        #      ["market_product"]["market_volume"]["monthly"]["table"]["rows"]
+        #      if r["label"] == "Retail"),
+        #     None,
+        # )
+        # print("BLOCK", scenario, "retail children ->",
+        #       [c["label"] for c in (retail or {}).get("children", [])])
+
     return {
         "ta_name": ta,
         "selected_filter": {

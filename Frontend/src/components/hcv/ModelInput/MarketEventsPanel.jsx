@@ -38,14 +38,13 @@ const formatDateLabel = (s) => {
   return parsed.isValid() ? parsed.format("MMM-YY") : s;
 };
 
-// Same curve options exposed by the real Impact Curve Configuration (Market Events).
 const CURVE_TYPES = ["Linear", "Exponential", "Logarithmic", "S-Curve"];
-
+const CVS_PAYER_OPTIONS = ["CVS", "Non CVS"];
 const SELECT_ALL = "__SELECT_ALL__";
 
-// Mirrors Market Events' Impact Curve Configuration row fields exactly —
-// event_name, products, markets (payers), impacted_items, start_date,
-// peak_percent, months, curve_type, factor.
+const eventTypeLabel = (et) =>
+  et === "PaymentType_Payer_Product" ? "PT_Payer_Prod" : et === "Payer" ? "Payment Type" : et;
+
 const emptyForm = {
   name: "",
   paymentTypes: [],
@@ -60,19 +59,16 @@ const emptyForm = {
   factor: "",
 };
 
-// Reusable panel shared by the Total Market Volume tab (compact list) and the
-// Events Management tab (full table) so both stay backed by the same events state.
 export default function MarketEventsPanel({
   variant = "compact",
   events = [],
-  // Adds/updates a row locally AND immediately persists the full event
-  // list to the backend (POST /api/liver-market-events/save) — there's no
-  // separate batch-save step, every "Save Event" click hits the API.
   onSave,
   onDelete,
   productOptions = [],
   payerOptions = [],
   availableDates = [],
+  onRunCalculation,
+  runningCalculation = false,
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -81,12 +77,9 @@ export default function MarketEventsPanel({
   const [form, setForm] = useState(emptyForm);
   const [saveError, setSaveError] = useState("");
 
-  // ── Impact Dialog state (mirrors MarketEvent.jsx) ───────────────────
   const [openImpactDialog, setOpenImpactDialog] = useState(false);
   const [impactValues, setImpactValues] = useState({});
 
-  // Which events (created via the Events Management tab) are shown in the
-  // compact panel — auto-includes new events, drops ones that get deleted.
   const [selectedEventIds, setSelectedEventIds] = useState(() => events.map((e) => e.id));
   const knownEventIdsRef = useRef(new Set(events.map((e) => e.id)));
   useEffect(() => {
@@ -100,7 +93,6 @@ export default function MarketEventsPanel({
     }
   }, [events]);
 
-  // Only future months make sense as a launch date for a new event.
   const futureDates = useMemo(() => {
     const idx = availableDates.indexOf(dayjs().format("MMM-YY"));
     return idx === -1 ? availableDates : availableDates.slice(idx);
@@ -159,10 +151,19 @@ export default function MarketEventsPanel({
       return;
     }
 
-    // Derive impacted items from source percentages (same as MarketEvent.jsx)
-    const impactedItems = Object.keys(form.sourcePercentages).filter(
-      (key) => !form.products.includes(key) && !form.payers.includes(key),
+    const isPayerEvent = eventType === "Payer";
+    const impactOptionsList = isPayerEvent ? payerOptions : productOptions;
+    const selectedSourceItems = isPayerEvent ? form.payers : form.products;
+
+    let impactedItems = Object.keys(form.sourcePercentages).filter(
+      (key) => !form.products.includes(key) && !form.payers.includes(key)
     );
+
+    if (!impactedItems.length && selectedSourceItems.length) {
+      impactedItems = impactOptionsList.filter(
+        (opt) => !selectedSourceItems.includes(opt)
+      );
+    }
 
     onSave?.({
       id: editingId ?? Date.now(),
@@ -195,7 +196,7 @@ export default function MarketEventsPanel({
       </Button>
       <Menu anchorEl={addMenuAnchor} open={!!addMenuAnchor} onClose={() => setAddMenuAnchor(null)}>
         <MenuItem onClick={() => openAddForm("Product")}>Product event</MenuItem>
-        <MenuItem onClick={() => openAddForm("Payer")}>Payer event</MenuItem>
+        <MenuItem onClick={() => openAddForm("Payer")}>Payment type event</MenuItem>
         <MenuItem onClick={() => openAddForm("PaymentType_Payer_Product")}>Payment type_Payer_Product event</MenuItem>
       </Menu>
     </>
@@ -203,14 +204,40 @@ export default function MarketEventsPanel({
 
   const sourcesLabel = (items) => (items && items.length ? items.join(", ") : "N/A");
 
+  const paymentTypeDisplay = (evt) =>
+    sourcesLabel(evt.eventType === "PaymentType_Payer_Product" ? evt.paymentTypes : evt.payers);
+
+  // FIX: Robust payer display calculation for PaymentType_Payer_Product events
+  const payerDisplay = (evt) => {
+    if (evt.eventType === "PaymentType_Payer_Product") {
+      if (evt.payers && evt.payers.length) return sourcesLabel(evt.payers);
+      if (evt.paymentTypes && evt.paymentTypes.length) {
+        // Fallback for API structure where Payer (CVS/Non CVS) resides in payers array
+        return sourcesLabel(evt.payers);
+      }
+    }
+    return "N/A";
+  };
+
+  const impactedDisplay = (evt) => {
+    if (evt.impactedItems && evt.impactedItems.length) {
+      return sourcesLabel(evt.impactedItems);
+    }
+    const isPayer = evt.eventType === "Payer";
+    const masterList = isPayer ? payerOptions : productOptions;
+    const selectedList = isPayer ? evt.payers : evt.products;
+    if (selectedList && selectedList.length) {
+      const derived = masterList.filter((item) => !selectedList.includes(item));
+      if (derived.length) return sourcesLabel(derived);
+    }
+    return "N/A";
+  };
+
   const renderMultiSelectSummary = (selected, placeholder) => {
     if (!selected.length) return placeholder;
     return selected.join(", ");
   };
 
-  // Shared multi-select w/ "Select All" — matches Market Events' Impact
-  // Curve Configuration Products/Payers/Impacted selects.
-  // ── Compact input styles — sized to fit all fields on one row ────────
   const compactInputStyle = {
     "& .MuiOutlinedInput-root": {
       height: "32px",
@@ -218,10 +245,6 @@ export default function MarketEventsPanel({
       backgroundColor: "#fff",
       fontSize: "13px",
     },
-    // Without this, the input's default (much taller) padding doesn't fit
-    // inside the 32px height above, so the field renders an internal
-    // scrollbar instead of just vertically centering the text — same fix
-    // already applied to the Impact dialog's number fields below.
     "& input": { padding: "6px 12px" },
   };
   const compactSelectStyle = {
@@ -246,13 +269,14 @@ export default function MarketEventsPanel({
   };
   const labelStyle = { mb: 0.5, fontSize: "11px", fontWeight: 700, color: "#64748b" };
 
-  const renderMultiSelect = (field, label, options) => (
+  const renderMultiSelect = (field, label, options, disabled = false) => (
     <Box sx={{ minWidth: 0 }}>
       <Typography sx={labelStyle}>{label.toUpperCase()}</Typography>
-      <FormControl size="small" fullWidth sx={compactSelectStyle}>
+      <FormControl size="small" fullWidth sx={compactSelectStyle} disabled={disabled}>
         <Select
           multiple
           displayEmpty
+          disabled={disabled}
           value={form[field]}
           onChange={toggleMultiSelect(field, options)}
           input={<OutlinedInput />}
@@ -277,14 +301,43 @@ export default function MarketEventsPanel({
     </Box>
   );
 
-  // ── Impact Dialog handlers (mirrors MarketEvent.jsx) ────────────────
-  // For Payer event → impacted = payers not selected as source payers.
-  // For Product event → impacted = products not selected as source products.
-  // For PaymentType_Payer_Product → impacted = products not selected as source products.
+  const renderSingleSelect = (field, label, options, disabled = false) => (
+    <Box sx={{ minWidth: 0 }}>
+      <Typography sx={labelStyle}>{label.toUpperCase()}</Typography>
+      <FormControl size="small" fullWidth sx={compactSelectStyle} disabled={disabled}>
+        <Select
+          displayEmpty
+          disabled={disabled}
+          value={form[field][0] || ""}
+          onChange={(e) => {
+            const val = e.target.value;
+            setForm((f) => ({ ...f, [field]: val ? [val] : [] }));
+          }}
+          input={<OutlinedInput />}
+          renderValue={(selected) => selected || "Select"}
+        >
+          {options.map((opt) => (
+            <MenuItem key={opt} value={opt}>
+              {opt}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    </Box>
+  );
+
   const isPayerEvent = eventType === "Payer";
   const isPPPEvent = eventType === "PaymentType_Payer_Product";
   const impactOptions = isPayerEvent ? payerOptions : productOptions;
   const selectedSourceItems = isPayerEvent ? form.payers : form.products;
+
+  const isCashPaymentTypeSelected =
+    isPPPEvent && form.paymentTypes.length === 1 && form.paymentTypes[0] === "Cash";
+  useEffect(() => {
+    if (isCashPaymentTypeSelected && form.payers.length) {
+      setForm((f) => ({ ...f, payers: [] }));
+    }
+  }, [isCashPaymentTypeSelected]);
 
   const handleOpenImpactDialog = () => {
     const initial = {};
@@ -315,7 +368,6 @@ export default function MarketEventsPanel({
     setOpenImpactDialog(false);
   };
 
-  // Derived values for the impact dialog
   const impactedOptionValues = impactOptions.filter(
     (opt) => !selectedSourceItems.includes(opt),
   );
@@ -348,7 +400,7 @@ export default function MarketEventsPanel({
           pr: 1,
         }}
       >
-        {isPayerEvent ? "Impacted Payers (%)" : "Impacted Products (%)"}
+        {isPayerEvent ? "Impacted Payment Types (%)" : "Source of Business (%)"}
         <IconButton size="small" onClick={handleCloseImpactDialog}>
           <CloseIcon fontSize="small" />
         </IconButton>
@@ -358,10 +410,7 @@ export default function MarketEventsPanel({
           {impactOptions.map((opt) => {
             const disabled = selectedSourceItems.includes(opt);
             return (
-              <Box
-                key={opt}
-                sx={{ display: "flex", alignItems: "center", gap: 7 }}
-              >
+              <Box key={opt} sx={{ display: "flex", alignItems: "center", gap: 7 }}>
                 <Typography
                   sx={{
                     width: "120px",
@@ -435,17 +484,15 @@ export default function MarketEventsPanel({
           backgroundColor: "#fff",
         }}
       >
-        {/* ── Header row ── */}
         <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5 }}>
           <Typography sx={{ fontWeight: 700, fontSize: "14px", color: "#0f172a" }}>
-            {editingId ? `Edit ${eventType} Event` : `Add ${eventType} Event`}
+            {editingId ? `Edit ${eventTypeLabel(eventType)} Event` : `Add ${eventTypeLabel(eventType)} Event`}
           </Typography>
           <IconButton size="small" onClick={closeForm}>
             <CloseIcon fontSize="small" />
           </IconButton>
         </Box>
 
-        {/* ── All fields on one row — CSS grid, horizontal scroll if needed ── */}
         <Box sx={{ overflowX: "auto" }}>
           <Box
             sx={{
@@ -458,14 +505,13 @@ export default function MarketEventsPanel({
               minWidth: isPPPEvent ? 1400 : 1200,
             }}
           >
-            {/* Event Name */}
             <Box>
               <Typography sx={labelStyle}>EVENT NAME</Typography>
               <TextField
                 placeholder={
                   isPPPEvent
                     ? "PT_Payer_Product Event"
-                    : `${eventType} Event`
+                    : `${eventTypeLabel(eventType)} Event`
                 }
                 size="small"
                 fullWidth
@@ -475,29 +521,27 @@ export default function MarketEventsPanel({
               />
             </Box>
 
-            {/* Source selects — order depends on event type */}
             {isPPPEvent ? (
               <>
                 {renderMultiSelect("paymentTypes", "Payment Type", payerOptions)}
-                {renderMultiSelect("payers", "Payer", payerOptions)}
-                {renderMultiSelect("products", "Products", productOptions)}
+                {renderSingleSelect("payers", "Payer", CVS_PAYER_OPTIONS, isCashPaymentTypeSelected)}
+                {renderSingleSelect("products", "Products", productOptions)}
               </>
             ) : isPayerEvent ? (
               <>
                 {renderMultiSelect("products", "Products", productOptions)}
-                {renderMultiSelect("payers", "Payers", payerOptions)}
+                {renderSingleSelect("payers", "Payment Type", payerOptions)}
               </>
             ) : (
               <>
-                {renderMultiSelect("payers", "Payers", payerOptions)}
-                {renderMultiSelect("products", "Products", productOptions)}
+                {renderMultiSelect("payers", "Payment Type", payerOptions)}
+                {renderSingleSelect("products", "Products", productOptions)}
               </>
             )}
 
-            {/* Impacted — "Edit Source" button */}
             <Box>
               <Typography sx={labelStyle}>
-                {isPayerEvent ? "IMPACTED PAYERS" : "IMPACTED PRODUCTS"}
+                {isPayerEvent ? "IMPACTED PAYMENT TYPES" : "SOURCE OF BUSINESS"}
               </Typography>
               <Button
                 variant="outlined"
@@ -516,7 +560,6 @@ export default function MarketEventsPanel({
               </Button>
             </Box>
 
-            {/* Start Date */}
             <Box>
               <Typography sx={labelStyle}>START DATE</Typography>
               <FormControl size="small" fullWidth sx={compactSelectStyle}>
@@ -534,7 +577,6 @@ export default function MarketEventsPanel({
               </FormControl>
             </Box>
 
-            {/* Peak % */}
             <Box>
               <Typography sx={labelStyle}>PEAK %</Typography>
               <TextField
@@ -548,7 +590,6 @@ export default function MarketEventsPanel({
               />
             </Box>
 
-            {/* Months */}
             <Box>
               <Typography sx={labelStyle}>MONTHS</Typography>
               <TextField
@@ -562,7 +603,6 @@ export default function MarketEventsPanel({
               />
             </Box>
 
-            {/* Curve */}
             <Box>
               <Typography sx={labelStyle}>CURVE</Typography>
               <FormControl size="small" fullWidth sx={compactSelectStyle}>
@@ -579,7 +619,6 @@ export default function MarketEventsPanel({
               </FormControl>
             </Box>
 
-            {/* Factor */}
             <Box>
               <Typography sx={labelStyle}>FACTOR</Typography>
               <TextField
@@ -602,7 +641,6 @@ export default function MarketEventsPanel({
           </Box>
         </Box>
 
-        {/* ── Error + Action buttons ── */}
         {saveError && (
           <Typography sx={{ fontSize: "12px", color: "#ef4444", mt: 1.5 }}>{saveError}</Typography>
         )}
@@ -641,9 +679,9 @@ export default function MarketEventsPanel({
               <TableRow sx={{ backgroundColor: "#f8fafc" }}>
                 <TableCell>Type</TableCell>
                 <TableCell>Event Name</TableCell>
-                <TableCell>Payment Types</TableCell>
+                <TableCell>Payment Type</TableCell>
                 <TableCell>Products</TableCell>
-                <TableCell>Payers</TableCell>
+                <TableCell>Payer</TableCell>
                 <TableCell>Impacted</TableCell>
                 <TableCell>Start Date</TableCell>
                 <TableCell>Peak %</TableCell>
@@ -665,16 +703,16 @@ export default function MarketEventsPanel({
                   <TableRow key={evt.id}>
                     <TableCell>
                       <Chip
-                        label={evt.eventType === "PaymentType_Payer_Product" ? "PT_Payer_Prod" : evt.eventType}
+                        label={eventTypeLabel(evt.eventType)}
                         size="small"
                         sx={{ fontWeight: 700, fontSize: "10px" }}
                       />
                     </TableCell>
                     <TableCell sx={{ fontWeight: 600 }}>{evt.name}</TableCell>
-                    <TableCell>{sourcesLabel(evt.paymentTypes)}</TableCell>
+                    <TableCell>{paymentTypeDisplay(evt)}</TableCell>
                     <TableCell>{sourcesLabel(evt.products)}</TableCell>
-                    <TableCell>{sourcesLabel(evt.payers)}</TableCell>
-                    <TableCell>{sourcesLabel(evt.impactedItems)}</TableCell>
+                    <TableCell>{payerDisplay(evt)}</TableCell>
+                    <TableCell>{impactedDisplay(evt)}</TableCell>
                     <TableCell>{formatDateLabel(evt.startDate)}</TableCell>
                     <TableCell>{evt.peakPercent}%</TableCell>
                     <TableCell>{evt.months} M</TableCell>
@@ -684,7 +722,7 @@ export default function MarketEventsPanel({
                       <IconButton size="small" onClick={() => openEditForm(evt)}>
                         <EditIcon fontSize="small" />
                       </IconButton>
-                      <IconButton size="small" onClick={() => onDelete?.(evt.id)}>
+                      <IconButton size="small" onClick={() => onDelete?.(evt)}>
                         <DeleteOutlineIcon fontSize="small" sx={{ color: "#ef4444" }} />
                       </IconButton>
                     </TableCell>
@@ -699,43 +737,63 @@ export default function MarketEventsPanel({
     );
   }
 
-  // variant === "compact" — Total Market Volume tab panel
   const selectedEvents = events.filter((evt) => selectedEventIds.includes(evt.id));
   return (
     <Box sx={{ mb: 3, p: 2, border: "1px solid #e2e8f0", borderRadius: "8px", backgroundColor: "white" }}>
       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5 }}>
         <Typography sx={{ fontWeight: 700, fontSize: "14px" }}>Market Events</Typography>
-        <FormControl size="small" sx={{ width: 240, minWidth: 240 }}>
-          <Select
-            multiple
-            displayEmpty
-            value={selectedEventIds}
-            onChange={(e) => setSelectedEventIds(e.target.value)}
-            input={<OutlinedInput />}
-            sx={{
-              fontSize: "12px",
-              "& .MuiSelect-select": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-            }}
-            MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
-            renderValue={(selected) => {
-              if (!events.length) return "No events created";
-              if (!selected.length) return "Select Events";
-              if (selected.length === events.length) return "All Events";
-              return `${selected.length} Selected`;
-            }}
-          >
-            {events.length === 0 ? (
-              <MenuItem disabled>No events created yet</MenuItem>
-            ) : (
-              events.map((evt) => (
-                <MenuItem key={evt.id} value={evt.id}>
-                  <Checkbox size="small" checked={selectedEventIds.includes(evt.id)} />
-                  <ListItemText primary={`${evt.name} (${evt.eventType})`} />
-                </MenuItem>
-              ))
-            )}
-          </Select>
-        </FormControl>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+          {onRunCalculation && (
+            <Button
+              variant="contained"
+              size="small"
+              onClick={onRunCalculation}
+              disabled={runningCalculation}
+              sx={{
+                textTransform: "none",
+                fontSize: "12px",
+                fontWeight: 700,
+                borderRadius: "6px",
+                backgroundColor: "#2563EB",
+                boxShadow: "none",
+                "&:hover": { backgroundColor: "#1D4ED8", boxShadow: "none" },
+              }}
+            >
+              {runningCalculation ? "Running..." : "Run Calculation"}
+            </Button>
+          )}
+          <FormControl size="small" sx={{ width: 240, minWidth: 240 }}>
+            <Select
+              multiple
+              displayEmpty
+              value={selectedEventIds}
+              onChange={(e) => setSelectedEventIds(e.target.value)}
+              input={<OutlinedInput />}
+              sx={{
+                fontSize: "12px",
+                "& .MuiSelect-select": { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+              }}
+              MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
+              renderValue={(selected) => {
+                if (!events.length) return "No events created";
+                if (!selected.length) return "Select Events";
+                if (selected.length === events.length) return "All Events";
+                return `${selected.length} Selected`;
+              }}
+            >
+              {events.length === 0 ? (
+                <MenuItem disabled>No events created yet</MenuItem>
+              ) : (
+                events.map((evt) => (
+                  <MenuItem key={evt.id} value={evt.id}>
+                    <Checkbox size="small" checked={selectedEventIds.includes(evt.id)} />
+                    <ListItemText primary={`${evt.name} (${eventTypeLabel(evt.eventType)})`} />
+                  </MenuItem>
+                ))
+              )}
+            </Select>
+          </FormControl>
+        </Box>
       </Box>
       {selectedEvents.length === 0 ? (
         <Typography sx={{ fontSize: "11px", color: "#64748b" }}>
@@ -761,14 +819,14 @@ export default function MarketEventsPanel({
             >
               <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                 <Chip
-                  label={evt.eventType === "PaymentType_Payer_Product" ? "PT_Payer_Prod" : evt.eventType}
+                  label={eventTypeLabel(evt.eventType)}
                   size="small"
                   sx={{ fontWeight: 700, fontSize: "10px" }}
                 />
                 <Typography sx={{ fontSize: "12px", fontWeight: 700 }}>{evt.name}</Typography>
                 <Typography sx={{ fontSize: "11px", color: "#64748b" }}>
-                  {evt.eventType === "PaymentType_Payer_Product" && `PT: ${sourcesLabel(evt.paymentTypes)} | `}
-                  Products: {sourcesLabel(evt.products)} | Payers: {sourcesLabel(evt.payers)} | Starts:{" "}
+                  Payment Type: {paymentTypeDisplay(evt)} | Products: {sourcesLabel(evt.products)}
+                  {evt.eventType === "PaymentType_Payer_Product" && ` | Payer: ${payerDisplay(evt)}`} | Starts:{" "}
                   {formatDateLabel(evt.startDate)} | Peak: {evt.peakPercent}% over {evt.months}M ({evt.curveType})
                 </Typography>
               </Box>

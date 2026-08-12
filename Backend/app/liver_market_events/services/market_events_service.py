@@ -1403,7 +1403,7 @@ def _build_payment_type_payer_product_metrics(
                             sh = _pct_of(leaf_vol[(prod, pt, payer)], payer_total)  # product % of payer total
                             l3_share.append({"label": prod, "values": sh})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{pt} - {payer} - {prod}"
+                                lbl = f"{payer} - {prod}"
                                 vol = leaf_vol[(prod, pt, payer)]
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                                 share_series.append({"label": lbl, "history": sh[:fsi], "forecast": sh[fsi:]})
@@ -1431,7 +1431,7 @@ def _build_payment_type_payer_product_metrics(
                                 prod_total[i] += v
                             l3_vol.append({"label": payer, "values": _vi(vol)})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{pt} - {prod} - {payer}"
+                                lbl = f"{prod} - {payer}"
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l3_share = []
                         for payer, l3v in zip(pt_payer_map[pt], l3_vol):
@@ -1459,7 +1459,7 @@ def _build_payment_type_payer_product_metrics(
                                 pt_total_here[i] += v
                             l3_vol.append({"label": payer, "values": _vi(vol)})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{prod} - {pt} - {payer}"
+                                lbl = f"{pt} - {payer}"
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l3_share = []
                         for payer in pt_payer_map[pt]:
@@ -1536,8 +1536,8 @@ def _pick_level(metric_view: dict, level_key: str) -> dict:
 def build_market_analysis_response(event_tabs: dict) -> dict:
     """
     Re-projects event_tabs (payer_event/product_event/overall_event +
-    payment_type_product + payment_type_payer_product) into the 5-tab
-    market_analysis shape. Pure re-projection -- never mutates event_tabs.
+    payment_type_payer_product) into the 4-tab market_analysis shape.
+    Pure re-projection -- never mutates event_tabs.
     """
     overall_mv = event_tabs.get("overall_event", {}).get("metrics_views", {})
     payer_mv   = event_tabs.get("payer_event",   {}).get("metrics_views", {})
@@ -1556,7 +1556,6 @@ def build_market_analysis_response(event_tabs: dict) -> dict:
             "payer_volume": _pick_level(product_mv.get("product_volume", {}), "product_level"),
             "payer_share":  _pick_level(product_mv.get("product_share",  {}), "product_level"),
         },
-        "payment_type_product":       event_tabs.get("payment_type_product", {}).get("metrics_views", {}),
         "payment_type_payer_product": event_tabs.get("payment_type_payer_product", {}).get("metrics_views", {}),
     }
 # ---------------------------------------------------------------------------

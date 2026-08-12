@@ -58,6 +58,10 @@ class EventRow(BaseModel):
     product_event and payer_event never use it (ignored/stored empty if sent).
     payer_event now distributes across payment types (Commercial, Medicaid, ...),
     not payers (CVS, Non-CVS) — hence impacted_payment_types, not impacted_payers.
+
+    'payment_types' is the ONLY payment-type field, used by all three event
+    types: single-select-as-list for payer_event/product_event's own context,
+    multi-select for payment_type_payer_product_event's context.
     """
     event_id: Optional[int] = None
     event_name: str
@@ -66,7 +70,6 @@ class EventRow(BaseModel):
     months: Optional[int] = None
     curve_type: Optional[str] = None
     factor: Optional[float] = None
-    payment_type: Optional[str] = None                 # only for payment_type_payer_product_event
     payment_types: list[str] = []
     payers: list[str] = []                              # only used for payment_type_payer_product_event
     products: list[str] = []
@@ -97,7 +100,7 @@ SELECT_EXISTING_IDS_SQL = """
 UPDATE_ROW_SQL = """
     UPDATE raw_liver.market_event_configuration
        SET event_name = %s, start_date = %s, peak_percent = %s, months = %s,
-           curve_type = %s, factor = %s, payment_type = %s, payment_types = %s,
+           curve_type = %s, factor = %s, payment_types = %s,
            payers = %s, products = %s, source_percentages = %s, impacted_entities = %s
      WHERE id = %s;
 """
@@ -105,9 +108,9 @@ UPDATE_ROW_SQL = """
 INSERT_ROW_SQL = """
     INSERT INTO raw_liver.market_event_configuration (
         ta_name, event_type, event_name, start_date, peak_percent, months,
-        curve_type, factor, payment_type, payment_types, payers, products,
+        curve_type, factor, payment_types, payers, products,
         source_percentages, impacted_entities, created_by
-    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'admin')
+    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'admin')
     RETURNING id;
 """
 
@@ -121,7 +124,7 @@ DELETE_SINGLE_SQL = """
 
 SELECT_ROWS_SQL = """
     SELECT id, event_name, start_date, peak_percent, months, curve_type, factor,
-           payment_type, payment_types, payers, products, source_percentages, impacted_entities
+           payment_types, payers, products, source_percentages, impacted_entities
     FROM raw_liver.market_event_configuration
     WHERE ta_name = %s AND event_type = %s
     ORDER BY id;
@@ -142,19 +145,18 @@ def _rows_to_response(db_rows: list, event_type: str) -> list[dict]:
             "months":              r[4],
             "curve_type":          r[5],
             "factor":              float(r[6]) if r[6] is not None else None,
-            "payment_types":       r[8] or [],
-            "products":            r[10] or [],
-            "source_percentages":  r[11] or {},
+            "payment_types":       r[7] or [],
+            "products":            r[9] or [],
+            "source_percentages":  r[10] or {},
         }
 
         if event_type == "payment_type_payer_product_event":
-            row["payment_type"] = r[7]
-            row["payers"] = r[9] or []
-            row["impacted_products"] = r[12] or []
+            row["payers"] = r[8] or []
+            row["impacted_products"] = r[11] or []
         elif event_type == "product_event":
-            row["impacted_products"] = r[12] or []
+            row["impacted_products"] = r[11] or []
         else:  # payer_event — now distributes by payment_type, not payer
-            row["impacted_payment_types"] = r[12] or []
+            row["impacted_payment_types"] = r[11] or []
 
         result.append(row)
     return result
@@ -193,14 +195,14 @@ def save_market_events(payload: SaveEventRequest) -> dict:
             if row.event_id is not None and row.event_id in existing_ids:
                 cur.execute(UPDATE_ROW_SQL, (
                     row.event_name, row.start_date, row.peak_percent, row.months,
-                    row.curve_type, row.factor, row.payment_type, Json(row.payment_types),
+                    row.curve_type, row.factor, Json(row.payment_types),
                     Json(payers), Json(row.products), Json(row.source_percentages),
                     Json(impacted), row.event_id,
                 ))
             else:
                 cur.execute(INSERT_ROW_SQL, (
                     ta_name, event_type, row.event_name, row.start_date, row.peak_percent,
-                    row.months, row.curve_type, row.factor, row.payment_type,
+                    row.months, row.curve_type, row.factor,
                     Json(row.payment_types), Json(payers), Json(row.products),
                     Json(row.source_percentages), Json(impacted),
                 ))
@@ -256,6 +258,77 @@ def delete_market_event(event_name: str, ta_name: str, event_type: EventType) ->
     except Exception:
         conn.rollback()
         raise
+    finally:
+        cur.close()
+        conn.close()
+
+# ============================================================
+# Fetch events by (event_name, event_type) for Run Calculation
+# ============================================================
+SELECT_ROWS_BY_NAMES_SQL = """
+    SELECT id, event_name, start_date, peak_percent, months, curve_type, factor,
+           payment_types, payers, products, source_percentages,
+           impacted_entities
+    FROM raw_liver.market_event_configuration
+    WHERE ta_name = %s AND event_type = %s AND event_name = ANY(%s)
+    ORDER BY id;
+"""
+
+
+def get_events_for_calculation(ta_name: str, events: list) -> dict[str, list[dict]]:
+    """
+    events: list of EventSelection (event_name + event_type), as sent in
+    RunCalculationRequest. Fetches and groups by internal tab name -- one
+    query per requested event_type, so a mistyped event_name errors clearly
+    instead of silently matching nothing or the wrong row.
+    """
+    if not events:
+        return {}
+
+    by_type: dict[str, list[str]] = {}
+    for e in events:
+        by_type.setdefault(e.event_type, []).append(e.event_name)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        grouped: dict[str, list[dict]] = {}
+        for db_event_type, names in by_type.items():
+            cur.execute(SELECT_ROWS_BY_NAMES_SQL, (ta_name, db_event_type, names))
+            db_rows = cur.fetchall()
+
+            found_names = {r[1] for r in db_rows}
+            missing = set(names) - found_names
+            if missing:
+                raise ValueError(
+                    f"Event(s) not found for ta_name={ta_name}, "
+                    f"event_type={db_event_type}: {sorted(missing)}"
+                )
+
+            tab = "payment_type_payer_product" if db_event_type == "payment_type_payer_product_event" else db_event_type
+            for r in db_rows:
+                row = {
+                    "event_name":         r[1],
+                    "start_date":         r[2].isoformat() if r[2] else None,
+                    "peak_percent":       float(r[3]) if r[3] is not None else None,
+                    "months":             r[4],
+                    "curve_type":         r[5],
+                    "factor":             float(r[6]) if r[6] is not None else None,
+                    "products":           r[9] or [],
+                    "source_percentages": r[10] or {},
+                }
+                if tab == "payer_event":
+                    row["payment_type"] = r[7] or []
+                    row["impacted_payment_types"] = r[11] or []
+                elif tab == "product_event":
+                    row["payment_type"] = r[7] or []
+                    row["impacted_products"] = r[11] or []
+                else:  # payment_type_payer_product
+                    row["payment_type"] = r[7] or []
+                    row["payer"] = r[8] or []
+                    row["impacted_products"] = r[11] or []
+                grouped.setdefault(tab, []).append(row)
+        return grouped
     finally:
         cur.close()
         conn.close()

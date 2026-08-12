@@ -50,9 +50,18 @@ class LiverConfigResponse(BaseModel):
 class LiverSelectedFilter(BaseModel):
     payer: Optional[str] = None
     product: Optional[str] = None
+    payment_type: Optional[str] = None
     start_date: str
     end_date: str
     scenario: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def remap_market_to_payment_type(cls, data):
+        if isinstance(data, dict) and data.get("payment_type") is None and data.get("market"):
+            data = dict(data)
+            data["payment_type"] = data["market"]
+        return data
 
 
 class LiverFiltersResponse(BaseModel):
@@ -299,6 +308,7 @@ class LiverRefreshRequest(BaseModel):
     selected_filter: LiverSelectedFilter
     scenario_name: str = "Base"
     selected_tab: str                        # e.g. "total_market_volume", "payer_distribution"
+    selected_subview: Optional[str] = None   # active sub-view within Tab 4/5 (e.g. "payment_type_product")
     selected_metric: str = "payer_volume"   # "payer_volume" | "payer_share"
     edited_hierarchy: Optional[str] = None   # row label that was edited (for redistribution)
     factors: Optional[Dict[str, Any]] = None # pass-through; returned as-is for active scenario
@@ -314,6 +324,7 @@ class ScenarioFilter(BaseModel):
     end_date: str
     payer: Optional[str] = None
     product: Optional[str] = None
+    payment_type: Optional[str] = None
 
 
 class SaveScenarioRequest(BaseModel):
