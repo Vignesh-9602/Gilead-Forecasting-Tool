@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useLayoutEffect, useRef } from "react";
 import {
   Box,
   Paper,
@@ -19,7 +19,6 @@ import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import dayjs from "dayjs";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
@@ -35,7 +34,6 @@ const DATE_INPUT_FORMATS = [
   "YYYY-MM-DDTHH:mm:ssZ",
 ];
 
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
 const parseDateString = (s) => {
   if (!s) return dayjs(NaN);
   const strict = dayjs(s, DATE_INPUT_FORMATS, true);
@@ -65,7 +63,6 @@ const tagHierarchyWithScenario = (hierarchy, scenarioName) => {
   return `${hierarchy} (${scenarioName})`;
 };
 
-// ─── MarketMetricsTable ───────────────────────────────────────────────────────
 const ModelInputTable = React.memo(function ModelInputTable({
   activeTab,
   activeTabLabel,
@@ -115,7 +112,28 @@ const ModelInputTable = React.memo(function ModelInputTable({
   handleCellChange,
   onDeleteScenario,
   onDeleteScenarioClick,
+  // SCROLL PERSISTENCE PROPS
+  tableScrollPosition,
+  onTableScroll,
 }) {
+  const tableContainerRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (tableContainerRef.current && tableScrollPosition) {
+      tableContainerRef.current.scrollTop = tableScrollPosition.scrollTop || 0;
+      tableContainerRef.current.scrollLeft = tableScrollPosition.scrollLeft || 0;
+    }
+  }, [tableScrollPosition]);
+
+  const handleContainerScroll = (e) => {
+    if (onTableScroll) {
+      onTableScroll({
+        scrollTop: e.target.scrollTop,
+        scrollLeft: e.target.scrollLeft,
+      });
+    }
+  };
+
   const isPercentTab = metric === "market_share";
   const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
   const isThreeLevelTab = activeTab === "payment_payer_prod";
@@ -776,6 +794,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
       })()}
 
       <Box
+        ref={tableContainerRef}
+        onScroll={handleContainerScroll}
         sx={{
           backgroundColor: "white",
           maxHeight: 500,
@@ -1333,7 +1353,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                         backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
                                         borderRight: "2px solid #e2e8f0",
                                         p: "10px 16px",
-                                        pl: "48px", // Indentation applied to child data
+                                        pl: "48px",
                                         boxSizing: "border-box",
                                         minWidth: 220,
                                         maxWidth: 220,

@@ -84,6 +84,15 @@ export default function PBCModelInput() {
   const therapyArea = favState?.selectedTherapyArea;
   const isHCV = therapyArea && therapyArea.toLowerCase() === "hcv";
 
+  // ── REFS ──
+  const userSelectedMetricRef = useRef(false);
+  const fetchedTaRef = useRef(null);
+  const fetchedMarketEventsTaRef = useRef(null);
+  const prevActiveTabRef = useRef("");
+  // Ref map to hold scroll positions per tab
+  const tableScrollPositionsRef = useRef({});
+
+  // ── STATE ──
   const [activeTab, setActiveTab] = useState("total_market");
   const [scenarioSelector, setScenarioSelector] = useState("");
   const [fromDate, setFromDate] = useState("");
@@ -91,7 +100,18 @@ export default function PBCModelInput() {
   const [payerFilter, setPayerFilter] = useState("");
   const [subPayerFilter, setSubPayerFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
-  const [metric, setMetric] = useState("market_volume");
+
+  const [tabMetrics, setTabMetrics] = useState({
+    total_market: "market_volume",
+    prod_dist: "market_share",
+    payer_dist: "market_share",
+    payment_payer_prod: "market_share",
+    payer_prod: "market_volume",
+    prod_payer: "market_volume",
+  });
+
+  const metric = tabMetrics[activeTab] || "market_volume";
+
   const [availableDates, setAvailableDates] = useState([]);
   const [chartData, setChartData] = useState(null);
   const [tableData, setTableData] = useState([]);
@@ -146,6 +166,7 @@ export default function PBCModelInput() {
 
   const [expandedBrands, setExpandedBrands] = useState({});
   const [threeLevelExpandedRows, setThreeLevelExpandedRows] = useState({});
+  const [hierarchyOrder, setHierarchyOrder] = useState("pt-payer-product");
 
   const [tableEditing, setTableEditing] = useState(false);
   const [tableSnapshot, setTableSnapshot] = useState([]);
@@ -157,9 +178,6 @@ export default function PBCModelInput() {
   const [isRefreshed, setIsRefreshed] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [scenarioToDelete, setScenarioToDelete] = useState("");
-
-  // Tracks if user has explicitly modified the metric so tab switches preserve user selection
-  const userSelectedMetricRef = useRef(false);
 
   const metricUnit = useMemo(() => {
     if (activeTab === "total_market") return "";
@@ -177,6 +195,10 @@ export default function PBCModelInput() {
   const showMetricFilter = activeTab !== "total_market";
   const trajectoryMonthOptions =
     chartData?.months?.slice(chartData?.forecast_start_index) || [];
+
+  const handleTableScroll = (pos) => {
+    tableScrollPositionsRef.current[activeTab] = pos;
+  };
 
   const inputStyle = {
     bgcolor: "#fcfcfd",
@@ -1238,7 +1260,6 @@ export default function PBCModelInput() {
     };
   };
 
-  const fetchedTaRef = useRef(null);
   useEffect(() => {
     if (!therapyArea) return;
     if (fetchedTaRef.current === therapyArea) return;
@@ -1246,7 +1267,6 @@ export default function PBCModelInput() {
     fetchMetricFilters();
   }, [therapyArea]);
 
-  const fetchedMarketEventsTaRef = useRef(null);
   useEffect(() => {
     const resolvedTa = therapyArea || "HCV";
     if (fetchedMarketEventsTaRef.current === resolvedTa) return;
@@ -1254,7 +1274,6 @@ export default function PBCModelInput() {
     fetchSavedMarketEvents();
   }, [therapyArea]);
 
-  const prevActiveTabRef = useRef(activeTab);
   useEffect(() => {
     const enteredManageEvents =
       activeTab === "manage_events" && prevActiveTabRef.current !== "manage_events";
@@ -1264,8 +1283,6 @@ export default function PBCModelInput() {
     }
   }, [activeTab]);
 
-  // TASK 2: Metric Persistence Across Tabs.
-  // Preserves user-selected metric (`market_share` / `market_volume`) during navigation.
   useLayoutEffect(() => {
     if (!filtersLoaded) return;
     if (activeTab === "manage_events") return;
@@ -1342,7 +1359,6 @@ export default function PBCModelInput() {
     }
   }, [modelSelection, allFactors]);
 
-  // TASK 1: Preserving row expansion state across tabs
   useEffect(() => {
     if (!liverTabsRaw) return;
     if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
@@ -2338,17 +2354,19 @@ export default function PBCModelInput() {
     }
   };
 
-  // TASK 2: Metric Persistence Across Tabs.
-  // Updates `userSelectedMetricRef` to indicate manual selection by the user.
   const handleMetricChange = async (nm) => {
     userSelectedMetricRef.current = true;
+    setTabMetrics((prev) => ({
+      ...prev,
+      [activeTab]: nm,
+    }));
+
     if (tableEditing) {
       setTableData(tableSnapshot);
       setEditedHierarchies({});
       setTableEditing(false);
       setEditable(false);
     }
-    setMetric(nm);
     if (nm !== "market_share") setBrand("");
     if (isHCV && liverRawData) {
       setLiverTabsRaw(normalizeLiverResponse(liverRawData, nm));
@@ -2357,100 +2375,97 @@ export default function PBCModelInput() {
     }
   };
 
- const handleDownloadTable = () => {
-  try {
-    const isYearly = totalMarketViewMode === "yearly";
+  const handleDownloadTable = () => {
+    try {
+      const isYearly = totalMarketViewMode === "yearly";
 
-    // ── 1. HIERARCHY TAB (3-level: Payment type-Payer-Product) ──
-    if (activeTab === "payment_payer_prod") {
-      const activeOrderKey = TAB_KEY_MAP[activeTab];
-      const realOrder = liverTabsRaw?.tabs?.[activeOrderKey]?.orders?.[ORDER_TO_BACKEND_KEY?.["pt-payer-product"] || "payment_type_payer_product"];
-      const realTable = isYearly ? realOrder?.yearlyTable : realOrder?.table;
+      if (activeTab === "payment_payer_prod") {
+        const activeOrderKey = TAB_KEY_MAP[activeTab];
+        const realOrder = liverTabsRaw?.tabs?.[activeOrderKey]?.orders?.[ORDER_TO_BACKEND_KEY?.["pt-payer-product"] || "payment_type_payer_product"];
+        const realTable = isYearly ? realOrder?.yearlyTable : realOrder?.table;
 
-      const headers = realTable?.headers?.length
-        ? realTable.headers
-        : availableDates || [];
-      const formattedHeaders = isYearly
-        ? headers
-        : headers.map((h) => formatDateLabel(h));
+        const headers = realTable?.headers?.length
+          ? realTable.headers
+          : availableDates || [];
+        const formattedHeaders = isYearly
+          ? headers
+          : headers.map((h) => formatDateLabel(h));
 
-      const headerRow = ["Hierarchy Path", ...formattedHeaders];
-      const csvRows = [headerRow];
+        const headerRow = ["Hierarchy Path", ...formattedHeaders];
+        const csvRows = [headerRow];
 
-      // Recursive helper to flatten all hierarchy levels into CSV rows
-      const extractHierarchyRows = (nodes, ancestorLabels = []) => {
-        (nodes || []).forEach((node) => {
-          const currentPath = [...ancestorLabels, node.label || node.hierarchy || ""].join(" > ");
-          const vals = Array.isArray(node.total) ? node.total : node.values || [];
+        const extractHierarchyRows = (nodes, ancestorLabels = []) => {
+          (nodes || []).forEach((node) => {
+            const currentPath = [...ancestorLabels, node.label || node.hierarchy || ""].join(" > ");
+            const vals = Array.isArray(node.total) ? node.total : node.values || [];
 
-          const rowValues = headers.map((_, idx) => {
-            const v = vals[idx];
-            if (v == null) return "";
-            return metric === "market_share"
-              ? `${Number(v).toFixed(1)}%`
-              : Math.round(Number(v)).toString();
+            const rowValues = headers.map((_, idx) => {
+              const v = vals[idx];
+              if (v == null) return "";
+              return metric === "market_share"
+                ? `${Number(v).toFixed(1)}%`
+                : Math.round(Number(v)).toString();
+            });
+
+            csvRows.push([currentPath, ...rowValues]);
+
+            if (node.children?.length) {
+              extractHierarchyRows(node.children, [...ancestorLabels, node.label || node.hierarchy || ""]);
+            }
           });
+        };
 
-          csvRows.push([currentPath, ...rowValues]);
+        if (realTable?.rows?.length) {
+          extractHierarchyRows(realTable.rows);
+        }
 
-          if (node.children?.length) {
-            extractHierarchyRows(node.children, [...ancestorLabels, node.label || node.hierarchy || ""]);
-          }
-        });
-      };
+        const csvContent = csvRows
+          .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
+          .join("\n");
 
-      if (realTable?.rows?.length) {
-        extractHierarchyRows(realTable.rows);
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${activeTabLabel.replace(/\s+/g, "_")}_Full_Hierarchy.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return;
       }
 
-      const csvContent = csvRows
+      const months = chartData?.months || [];
+      const formattedHeaders = months.map((m) => (isYearly ? m : formatDateLabel(m)));
+      const headerRow = ["Product / Scenario", ...formattedHeaders];
+
+      const rows = tableData.map((r) => [
+        r.hierarchy,
+        ...months.map((m) => {
+          const v = r.monthly_data?.[m];
+          if (v == null) return "";
+          return metricUnit === "%" ? `${Number(v).toFixed(1)}%` : Math.round(Number(v));
+        }),
+      ]);
+
+      const csv = [headerRow, ...rows]
         .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
         .join("\n");
 
-      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${activeTabLabel.replace(/\s+/g, "_")}_Full_Hierarchy.csv`;
+      a.download = `${activeTabLabel.replace(/\s+/g, "_")}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      return;
+    } catch (e) {
+      console.error("Failed to download CSV:", e);
+      showSnackbar("Failed to download table", "error");
     }
-
-    // ── 2. STANDARD TABS (total_market, prod_dist, payer_dist, etc.) ──
-    const months = chartData?.months || [];
-    const formattedHeaders = months.map((m) => (isYearly ? m : formatDateLabel(m)));
-    const headerRow = ["Product / Scenario", ...formattedHeaders];
-
-    const rows = tableData.map((r) => [
-      r.hierarchy,
-      ...months.map((m) => {
-        const v = r.monthly_data?.[m];
-        if (v == null) return "";
-        return metricUnit === "%" ? `${Number(v).toFixed(1)}%` : Math.round(Number(v));
-      }),
-    ]);
-
-    const csv = [headerRow, ...rows]
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activeTabLabel.replace(/\s+/g, "_")}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  } catch (e) {
-    console.error("Failed to download CSV:", e);
-    showSnackbar("Failed to download table", "error");
-  }
-};
+  };
 
   const initializeCompareScenarios = (response, appliedScenario) => {
     const scenarios =
@@ -2541,7 +2556,6 @@ export default function PBCModelInput() {
     };
   };
 
-  // 1. GET API Integrator (/api/liver-market-events/market-events/{ta_name})
   const fetchSavedMarketEvents = async () => {
     try {
       const res = await getLiverMarketEventsList(therapyArea || "HCV");
@@ -2550,7 +2564,6 @@ export default function PBCModelInput() {
 
       let rawRows = [];
       if (eventsManagement) {
-        // Collect rows across all three categories
         rawRows = [
           "product_event",
           "payer_event",
@@ -2569,7 +2582,6 @@ export default function PBCModelInput() {
     }
   };
 
-  // Helper: Builds a single row object for the save payload
   const buildMarketEventRow = (evt) => {
     const isPPPEvt = evt.eventType === "PaymentType_Payer_Product";
     const isPayerEvt = evt.eventType === "Payer";
@@ -2608,7 +2620,6 @@ export default function PBCModelInput() {
     "S-Curve": "scurve",
   };
 
- // 3. DELETE API Integrator (/api/liver-market-events/{event_name})
   const handleDeleteMarketEvent = async (evt) => {
     if (!evt || !evt.name) return;
 
@@ -2638,27 +2649,6 @@ export default function PBCModelInput() {
     }
   };
 
-  // const buildMarketEventRow = (evt) => {
-  //   const isPPPEvt = evt.eventType === "PaymentType_Payer_Product";
-  //   const isPayerEvt = evt.eventType === "Payer";
-  //   return {
-  //     event_id: evt.id,
-  //     event_name: evt.name,
-  //     start_date: evt.startDate,
-  //     peak_percent: Number(evt.peakPercent) || 0,
-  //     months: Number(evt.months) || 0,
-  //     curve_type: CURVE_TYPE_TO_API[evt.curveType] || String(evt.curveType || "").toLowerCase(),
-  //     factor: evt.curveType === "Linear" ? 0 : Number(evt.factor) || 0,
-  //     payment_types: (isPPPEvt ? evt.paymentTypes : evt.payers) || [],
-  //     payers: isPPPEvt ? (evt.payers || []) : [],
-  //     products: evt.products || [],
-  //     source_percentages: evt.sourcePercentages || {},
-  //     impacted_products: isPayerEvt ? [] : (evt.impactedItems || []),
-  //     impacted_payment_types: isPayerEvt ? (evt.impactedItems || []) : [],
-  //   };
-  // };
-
-// 2. SAVE API Integrator (/api/liver-market-events/save)
   const handleSaveMarketEventsToServer = async (eventsOverride) => {
     const eventsToSave = eventsOverride || marketEvents;
     if (!eventsToSave.length) {
@@ -2677,7 +2667,6 @@ export default function PBCModelInput() {
         end_date: toDate || liverRawData?.selected_filter?.end_date || "",
       };
 
-      // Group events by eventType to execute separate save payloads per API category
       const groupsByType = eventsToSave.reduce((acc, evt) => {
         (acc[evt.eventType] ||= []).push(evt);
         return acc;
@@ -2705,6 +2694,7 @@ export default function PBCModelInput() {
       setLoading(false);
     }
   };
+
   const handleRunMarketEventsCalculation = async () => {
     try {
       setRunningMarketEventsCalculation(true);
@@ -3808,6 +3798,10 @@ export default function PBCModelInput() {
               setSaveScenarioDialogOpen={setSaveScenarioDialogOpen}
               expandedRows={threeLevelExpandedRows}
               setExpandedRows={setThreeLevelExpandedRows}
+              hierarchyOrder={hierarchyOrder}
+              setHierarchyOrder={setHierarchyOrder}
+              tableScrollPosition={tableScrollPositionsRef.current[activeTab]}
+              onTableScroll={handleTableScroll}
             />
           ) : (
             <>
@@ -3898,6 +3892,8 @@ export default function PBCModelInput() {
             handleCellChange={handleCellChange}
             onDeleteScenario={handleDeleteScenario}
             onDeleteScenarioClick={handleDeleteScenarioClick}
+            tableScrollPosition={tableScrollPositionsRef.current[activeTab]}
+            onTableScroll={handleTableScroll}
           />
             </>
           )}

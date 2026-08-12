@@ -15,7 +15,7 @@ const DATE_INPUT_FORMATS = [
 const getScenarioColor = (index) =>
   `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
 
-const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4"];
+const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4", "#3b82f6", "#ef4444"];
 
 const ForecastChart = React.memo(function ForecastChart({
   chartData,
@@ -102,8 +102,6 @@ const ForecastChart = React.memo(function ForecastChart({
     ];
   }
 
-  // TASK 3: Filter chart series by selected filters ONLY if multiple scenarios are selected.
-  // When a single scenario is active in Product or Payment Type Distribution, display all breakdown items.
   const isMultipleScenariosSelected = selectedCompareScenarios.length > 1;
   const isFilterFocusMode = !isTotalMarket && isMultipleScenariosSelected && (!!currentBrand || !!currentPayer);
 
@@ -122,17 +120,16 @@ const ForecastChart = React.memo(function ForecastChart({
     });
   }
 
+  // DISTINCT SCENARIO COLOR ASSIGNMENT
   const getSeriesColor = (item, index) => {
-    if (activeTab === "total_market") {
-      const scenarioName = item?.scenario || item?.label || "";
-      if (scenarioName && scenarioColorMap[scenarioName]) {
-        return scenarioColorMap[scenarioName];
-      }
-      return getScenarioColor(index);
+    const scenarioName = item?.scenario || item?.label || "";
+    
+    // When comparing multiple scenarios, map distinct scenario colors
+    if (scenarioName && scenarioColorMap[scenarioName]) {
+      return scenarioColorMap[scenarioName];
     }
-    if (item?.scenario && item.scenario !== appliedScenario && scenarioColorMap[item.scenario]) {
-      return scenarioColorMap[item.scenario];
-    }
+    
+    // Otherwise fallback to palette by index for distinct breakdown curves
     return CHART_PALETTE[index % CHART_PALETTE.length];
   };
 
@@ -158,8 +155,8 @@ const ForecastChart = React.memo(function ForecastChart({
       }
     }
 
-    const width = isSelectedTrace ? 3.5 : 1.5;
-    const color = isSelectedTrace ? "#f59e0b" : getSeriesColor(s, idx);
+    const width = isSelectedTrace ? 3 : 1.5;
+    const color = getSeriesColor(s, idx);
 
     const name =
       s.scenario && s.scenario !== s.label

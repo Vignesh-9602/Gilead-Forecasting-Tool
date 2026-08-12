@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useRef } from "react";
+import React, { useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import {
   Box,
   Paper,
@@ -55,7 +55,7 @@ const seededRandom = (seedStr) => {
   return x - Math.floor(x);
 };
 
-const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4"];
+const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4", "#3b82f6", "#ef4444"];
 
 const getScenarioColor = (index) => `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
 
@@ -106,8 +106,30 @@ export default function PaymentPayerProductTable({
   setSaveScenarioDialogOpen,
   expandedRows = {},
   setExpandedRows,
+  hierarchyOrder = HIERARCHY_ORDERS[0].value,
+  setHierarchyOrder,
+  // SCROLL PERSISTENCE PROPS
+  tableScrollPosition,
+  onTableScroll,
 }) {
-  const [hierarchyOrder, setHierarchyOrder] = useState(HIERARCHY_ORDERS[0].value);
+  const tableContainerRef = useRef(null);
+
+  // Restore scroll position when table mounts or data updates
+  useLayoutEffect(() => {
+    if (tableContainerRef.current && tableScrollPosition) {
+      tableContainerRef.current.scrollTop = tableScrollPosition.scrollTop || 0;
+      tableContainerRef.current.scrollLeft = tableScrollPosition.scrollLeft || 0;
+    }
+  }, [tableScrollPosition]);
+
+  const handleContainerScroll = (e) => {
+    if (onTableScroll) {
+      onTableScroll({
+        scrollTop: e.target.scrollTop,
+        scrollLeft: e.target.scrollLeft,
+      });
+    }
+  };
 
   const toggleRowExpand = (key) =>
     setExpandedRows((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -133,58 +155,52 @@ export default function PaymentPayerProductTable({
   const paymentTypesKey = paymentTypes.join("|");
   const productsKey = products.join("|");
 
-  // Inside PaymentPayerProductTable.jsx
-
-const handleLocalDownloadTable = () => {
-  try {
-    const isYearly = totalMarketViewMode === "yearly";
-    
-    // 1. Format Headers
-    const formattedHeaders = columns.map((col) =>
-      isYearly ? col.label : formatDateLabel(col.label)
-    );
-    const headerRow = ["Hierarchy Path", ...formattedHeaders];
-    const csvRows = [headerRow];
-
-    // 2. Map Flattened Rows (includes all parent & leaf items)
-    (rows || []).forEach((row) => {
-      // Use clean label or key for full path clarity
-      const labelPath = row.key ? row.key.replace(/__scenario__ > /g, "").replace(/::/g, " - ") : row.label;
+  const handleLocalDownloadTable = () => {
+    try {
+      const isYearly = totalMarketViewMode === "yearly";
       
-      const rowValues = columns.map((col) => {
-        const displayVal = useRealData
-          ? Number(row.values?.[col.indices[0]] ?? 0)
-          : (() => {
-              const fixed = row.fixed || {};
-              const ownVal = columnValue(fixed, col);
-              const parentVal = row.level <= 1 ? columnValue({}, col) : parentColumnValue(row.parentFixed || {}, col);
-              return isPercent ? (parentVal ? (ownVal / parentVal) * 100 : 0) : ownVal;
-            })();
+      const formattedHeaders = columns.map((col) =>
+        isYearly ? col.label : formatDateLabel(col.label)
+      );
+      const headerRow = ["Hierarchy Path", ...formattedHeaders];
+      const csvRows = [headerRow];
 
-        return formatValue(displayVal);
+      (rows || []).forEach((row) => {
+        const labelPath = row.key ? row.key.replace(/__scenario__ > /g, "").replace(/::/g, " - ") : row.label;
+        
+        const rowValues = columns.map((col) => {
+          const displayVal = useRealData
+            ? Number(row.values?.[col.indices[0]] ?? 0)
+            : (() => {
+                const fixed = row.fixed || {};
+                const ownVal = columnValue(fixed, col);
+                const parentVal = row.level <= 1 ? columnValue({}, col) : parentColumnValue(row.parentFixed || {}, col);
+                return isPercent ? (parentVal ? (ownVal / parentVal) * 100 : 0) : ownVal;
+              })();
+
+          return formatValue(displayVal);
+        });
+
+        csvRows.push([labelPath, ...rowValues]);
       });
 
-      csvRows.push([labelPath, ...rowValues]);
-    });
+      const csvContent = csvRows
+        .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
 
-    // 3. Generate CSV Blob
-    const csvContent = csvRows
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activeTabLabel.replace(/\s+/g, "_")}_Full_Hierarchy.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  } catch (err) {
-    console.error("Failed to download CSV from PaymentPayerProductTable:", err);
-  }
-};
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${activeTabLabel.replace(/\s+/g, "_")}_Full_Hierarchy.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to download CSV from PaymentPayerProductTable:", err);
+    }
+  };
 
   const { ptWeights, payerWeights, productShareMap } = useMemo(() => {
     const rawPt = Object.fromEntries(paymentTypes.map((pt) => [pt, 1 + seededRandom(`pt|${pt}`) * 3]));
@@ -417,12 +433,6 @@ const handleLocalDownloadTable = () => {
     };
   };
 
-  // INDENTATION FIX:
-  // Standardizing left-padding per hierarchy level.
-  // level 0: 16px (Scenario header)
-  // level 1: 48px (1st Hierarchy Dimension, e.g., Product)
-  // level 2: 80px (2nd Hierarchy Dimension, e.g., Payment Types including Commercial & Cash)
-  // level 3: 112px (3rd Hierarchy Dimension, e.g., Payers under Commercial)
   const indentPx = (level) => {
     switch (level) {
       case 0:
@@ -583,13 +593,13 @@ const handleLocalDownloadTable = () => {
         ? allLineDefs.filter(({ path }) => chartPathMatchesAppliedFilters(path))
         : allLineDefs;
 
-      return visibleLineDefs.flatMap(({ label, path, values, scenario }, idx) => {
+      return visibleLineDefs.flatMap(({ label, path, values, scenario }, lineIndex) => {
         const highlighted = dimMatchesPath(path);
         const color = highlighted
           ? "#f59e0b"
           : scenario && scenarioColorMap[scenario]
             ? scenarioColorMap[scenario]
-            : CHART_PALETTE[idx % CHART_PALETTE.length];
+            : CHART_PALETTE[lineIndex % CHART_PALETTE.length];
         const width = highlighted ? 3.5 : 1.5;
         const traceName = scenario ? `${label} (${scenario})` : label;
 
@@ -687,6 +697,17 @@ const handleLocalDownloadTable = () => {
     borderColor: "#e2e8f0",
     color: "#64748b",
     "&:hover": { borderColor: "#cbd5e1", backgroundColor: "#f8fafc" },
+  };
+
+  const tableInputStyle = {
+    bgcolor: "#fcfcfd",
+    borderRadius: "8px",
+    minWidth: "200px",
+    "& .MuiOutlinedInput-root": {
+      borderRadius: "8px",
+      height: "35px",
+      backgroundColor: "#fcfcfd",
+    },
   };
 
   return (
@@ -799,45 +820,6 @@ const handleLocalDownloadTable = () => {
               </Select>
             </FormControl>
 
-            {compareScenarioOptions.length > 1 && handleCompareScenarioChange && (
-              <FormControl sx={{ minWidth: 220, maxWidth: 220 }}>
-                <Select
-                  multiple
-                  displayEmpty
-                  value={selectedCompareScenarios}
-                  onChange={handleCompareScenarioChange}
-                  input={<OutlinedInput />}
-                  sx={{
-                    height: "34px",
-                    fontSize: "13px",
-                    borderRadius: "8px",
-                    backgroundColor: "#fcfcfd",
-                    "& .MuiSelect-select": {
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    },
-                  }}
-                  MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
-                  renderValue={(selected) => {
-                    if (!selected.length) return "Compare Scenarios";
-                    if (selected.length === compareScenarioOptions.length) return "All Scenarios";
-                    return selected.join(", ");
-                  }}
-                >
-                  {compareScenarioOptions.map((option) => {
-                    const isActive = option === appliedScenario;
-                    return (
-                      <MenuItem key={option} value={option} disabled={isActive}>
-                        <Checkbox size="small" checked={selectedCompareScenarios.includes(option)} disabled={isActive} />
-                        <ListItemText primary={isActive ? `${option} (Active)` : option} />
-                      </MenuItem>
-                    );
-                  })}
-                </Select>
-              </FormControl>
-            )}
-
             {filterOptions?.metric_filters?.length > 0 && (
               <FormControl size="small" sx={{ minWidth: 160 }}>
                 <Select
@@ -856,7 +838,7 @@ const handleLocalDownloadTable = () => {
 
             <Box sx={{ display: "flex", bgcolor: "#E2E8F0", borderRadius: "10px", p: "2px" }}>
               {["monthly", "yearly"].map((mode) => (
-                <Box
+                <Button
                   key={mode}
                   onClick={() => {
                     if (mode === totalMarketViewMode) return;
@@ -864,41 +846,42 @@ const handleLocalDownloadTable = () => {
                     if (mode === "yearly" && tableEditing) handleCancelTableEdit?.();
                   }}
                   sx={{
-                    minWidth: 70,
-                    textAlign: "center",
-                    cursor: "pointer",
-                    py: 0.5,
+                    minWidth: 80,
+                    height: 30,
                     px: 1.5,
+                    py: 0.25,
+                    textTransform: "none",
                     borderRadius: "8px",
-                    fontSize: "12px",
-                    fontWeight: 600,
                     bgcolor: totalMarketViewMode === mode ? "#fff" : "transparent",
                     color: totalMarketViewMode === mode ? "#4F46E5" : "#64748B",
+                    boxShadow: totalMarketViewMode === mode ? 1 : "none",
+                    "&:hover": {
+                      bgcolor: totalMarketViewMode === mode ? "#fff" : "transparent",
+                    },
                   }}
                 >
                   {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                </Box>
+                </Button>
               ))}
             </Box>
 
             {handleLocalDownloadTable && (
-             
-                  <Tooltip title="Download table as CSV">
-                    <IconButton
-                      size="small"
-                      onClick={handleLocalDownloadTable}
-                      sx={{
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "8px",
-                        width: 32,
-                        height: 32,
-                        color: "#64748b",
-                        "&:hover": { backgroundColor: "#f8fafc" },
-                      }}
-                    >
-                      <DownloadIcon sx={{ fontSize: 18 }} />
-                    </IconButton>
-                  </Tooltip>
+              <Tooltip title="Download table as CSV">
+                <IconButton
+                  size="small"
+                  onClick={handleLocalDownloadTable}
+                  sx={{
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "8px",
+                    width: 32,
+                    height: 32,
+                    color: "#64748b",
+                    "&:hover": { backgroundColor: "#f8fafc" },
+                  }}
+                >
+                  <DownloadIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
             )}
 
             {handleConfirmSave && (
@@ -958,11 +941,50 @@ const handleLocalDownloadTable = () => {
                 Cancel
               </Button>
             )}
+
+            {compareScenarioOptions.length > 1 && handleCompareScenarioChange && (
+              <FormControl sx={{ ...tableInputStyle, width: 220, minWidth: 220, maxWidth: 220 }}>
+                <Select
+                  multiple
+                  displayEmpty
+                  value={selectedCompareScenarios}
+                  onChange={handleCompareScenarioChange}
+                  input={<OutlinedInput />}
+                  sx={{
+                    fontSize: "13px",
+                    height: "34px",
+                    "& .MuiSelect-select": {
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                  }}
+                  MenuProps={{ PaperProps: { sx: { maxHeight: 260 } } }}
+                  renderValue={(selected) => {
+                    if (!selected.length) return "Compare Scenarios";
+                    if (selected.length === compareScenarioOptions.length) return "All Scenarios";
+                    return selected.join(", ");
+                  }}
+                >
+                  {compareScenarioOptions.map((option) => {
+                    const isActive = option === appliedScenario;
+                    return (
+                      <MenuItem key={option} value={option} disabled={isActive}>
+                        <Checkbox size="small" checked={selectedCompareScenarios.includes(option)} disabled={isActive} />
+                        <ListItemText primary={isActive ? `${option} (Active)` : option} />
+                      </MenuItem>
+                    );
+                  })}
+                </Select>
+              </FormControl>
+            )}
           </Box>
         </Box>
 
         {/* ── TABLE ── */}
         <Box
+          ref={tableContainerRef}
+          onScroll={handleContainerScroll}
           sx={{
             backgroundColor: "white",
             maxHeight: 500,
