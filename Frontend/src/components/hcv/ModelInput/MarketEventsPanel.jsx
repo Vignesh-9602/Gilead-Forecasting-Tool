@@ -80,17 +80,17 @@ export default function MarketEventsPanel({
   const [openImpactDialog, setOpenImpactDialog] = useState(false);
   const [impactValues, setImpactValues] = useState({});
 
-  const [selectedEventIds, setSelectedEventIds] = useState(() => events.map((e) => e.id));
+  // Start with nothing selected — events should only appear once the user
+  // explicitly picks them from the dropdown, not automatically on load.
+  const [selectedEventIds, setSelectedEventIds] = useState(() => []);
   const knownEventIdsRef = useRef(new Set(events.map((e) => e.id)));
   useEffect(() => {
     const currentIds = new Set(events.map((e) => e.id));
-    const newIds = events.map((e) => e.id).filter((id) => !knownEventIdsRef.current.has(id));
     knownEventIdsRef.current = currentIds;
-    if (newIds.length) {
-      setSelectedEventIds((prev) => [...prev, ...newIds]);
-    } else {
-      setSelectedEventIds((prev) => prev.filter((id) => currentIds.has(id)));
-    }
+    // Only drop selections for events that no longer exist (e.g. deleted).
+    // Newly-created events are intentionally left unselected so they don't
+    // suddenly appear in the chart/list without the user choosing them.
+    setSelectedEventIds((prev) => prev.filter((id) => currentIds.has(id)));
   }, [events]);
 
   const futureDates = useMemo(() => {

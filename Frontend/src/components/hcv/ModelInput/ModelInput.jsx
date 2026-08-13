@@ -2011,6 +2011,7 @@ export default function PBCModelInput() {
           scenario_name: scenarioNameFromDialog,
           selected_filter: {
             market: appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+            payer: appliedSubPayerFilter || subPayerFilter || "",
             product: appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
             start_date: resolveFromDate(),
             end_date: toDate || "",
@@ -2049,12 +2050,12 @@ export default function PBCModelInput() {
           if (normalized?.tabs && Object.keys(normalized.tabs).length) {
             setLiverTabsRaw(normalized);
             setLiverRawData(respData);
-            initializeCompareScenarios(respData, scenarioNameFromDialog);
+            // Keep whatever scenario was already applied/selected instead of
+            // switching to the newly saved one — saving a scenario should not
+            // auto-select or auto-apply it.
+            initializeCompareScenarios(respData);
           }
         }
-
-        setTentativeRadioSelectedScenario(scenarioNameFromDialog);
-        setCurrentlyAppliedScenario(scenarioNameFromDialog);
 
         setSavedScenarioRows((prev) => {
           const scenarioInResponse =
@@ -2093,7 +2094,8 @@ export default function PBCModelInput() {
         metric_filters: resData?.metric_filters || [],
         scenario_names: resData?.scenario_names || [],
       });
-      setScenarioSelector(scenarioNameFromDialog);
+      // Do not auto-select the newly saved scenario — leave the current
+      // scenarioSelector as-is so the user has to pick it explicitly.
     } catch (err) {
       console.error("[SaveScenario] error:", err?.response?.data || err);
       showSnackbar("Failed to save scenario", "error");
@@ -2145,7 +2147,8 @@ export default function PBCModelInput() {
       selected_filter: {
         start_date: backendSf.start_date || resolveFromDate(),
         end_date: backendSf.end_date || toDate || "",
-        payer: backendSf.payer || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        payment_type: backendSf.payment_type || appliedPayerFilter || payerFilter || getFirstOption(payerOptions) || "",
+        payer: backendSf.payer || appliedSubPayerFilter || subPayerFilter || "",
         product: backendSf.product || appliedProductFilter || productFilter || getFirstOption(productOptions) || "",
       },
       scenario_name: activeScenario,
@@ -2946,7 +2949,8 @@ export default function PBCModelInput() {
         selected_filter: {
           start_date: resolveFromDate() || liverRawData?.selected_filter?.start_date || "",
           end_date: toDate || liverRawData?.selected_filter?.end_date || "",
-          payer: appliedPayerFilter || payerFilter || liverRawData?.selected_filter?.payer || getFirstOption(payerOptions) || "",
+          payment_type: appliedPayerFilter || payerFilter || liverRawData?.selected_filter?.payment_type || getFirstOption(payerOptions) || "",
+          payer: appliedSubPayerFilter || subPayerFilter || liverRawData?.selected_filter?.payer || "",
           product: appliedProductFilter || productFilter || liverRawData?.selected_filter?.product || getFirstOption(productOptions) || "",
         },
         scenario_name: scenarioName,
@@ -2994,7 +2998,8 @@ export default function PBCModelInput() {
         selected_filter: {
           start_date: resolveFromDate() || backendSf.start_date,
           end_date: toDate || backendSf.end_date || "",
-          payer: appliedPayerFilter || payerFilter || backendSf.payer || getFirstOption(payerOptions) || "",
+          payment_type: appliedPayerFilter || payerFilter || backendSf.payment_type || getFirstOption(payerOptions) || "",
+          payer: appliedSubPayerFilter || subPayerFilter || backendSf.payer || "",
           product: appliedProductFilter || productFilter || backendSf.product || getFirstOption(productOptions) || "",
         },
         scenario_name: chosenScenario,
