@@ -424,11 +424,15 @@ export default function PaymentPayerProductTable({
     return payerOk && subPayerOk && brandOk;
   };
 
-  const rowStyle = (level, highlighted, hasChildren) => {
+  const rowStyle = (level, highlighted, hasChildren, isCvsLevel) => {
     let fontWeight;
     if (level === 0) {
       fontWeight = 700;
     } else if (level === 1) {
+      fontWeight = 700;
+    } else if (tableEditing && isCvsLevel) {
+      // In edit mode, make the CVS / Non CVS row stand out as bold,
+      // regardless of which level of the tree it happens to sit at.
       fontWeight = 700;
     } else if (hasChildren) {
       fontWeight = 600;
@@ -814,7 +818,14 @@ export default function PaymentPayerProductTable({
             <FormControl size="small" sx={{ minWidth: 220 }}>
               <Select
                 value={hierarchyOrder}
-                onChange={(e) => setHierarchyOrder(e.target.value)}
+                onChange={(e) => {
+                  // Editing is only allowed on the default "Payment type-Payer-Product"
+                  // hierarchy, so exit edit mode when switching away from it.
+                  if (tableEditing && e.target.value !== HIERARCHY_ORDERS[0].value) {
+                    handleCancelTableEdit?.();
+                  }
+                  setHierarchyOrder(e.target.value);
+                }}
                 sx={{
                   height: "34px",
                   fontSize: "12px",
@@ -906,7 +917,7 @@ export default function PaymentPayerProductTable({
               </Button>
             )}
 
-            {handleEnterTableEdit && (
+            {handleEnterTableEdit && hierarchyOrder === HIERARCHY_ORDERS[0].value && (
               <Button
                 variant="outlined"
                 onClick={handleEnterTableEdit}
@@ -1031,7 +1042,7 @@ export default function PaymentPayerProductTable({
             <Box component="tbody">
               {rows.map((row, i) => {
                 const highlighted = useRealData ? !!row.highlighted : isRowHighlighted(row);
-                const style = rowStyle(row.level, highlighted, row.siblingsHaveChildren ?? row.hasChildren);
+                const style = rowStyle(row.level, highlighted, row.siblingsHaveChildren ?? row.hasChildren, isPayerFilterValue(row.label));
                 return (
                   <Box
                     component="tr"

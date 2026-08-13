@@ -1782,7 +1782,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                            sel_d2=None, sel_d3=None, _tab5_f=None,
                            canonical_l3_fc=None, canonical_idx=(0, 1, 2),
                            _canonical_l3_out=None,
-                           l1_target_fc=None, product_target_fc=None):
+                           l1_target_fc=None, product_target_fc=None,
+                           show_leaf=False):
         """
         canonical_l3_fc : when provided, skip model computation and derive l3/l2/l1 forecasts
                           from these pre-computed (pt, payer, product) leaf volumes.
@@ -1790,6 +1791,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                           (0,1,2) = identity, (0,2,1) = swap d2/d3, (1,2,0) = rotate.
         _canonical_l3_out : mutable dict populated with this call's l3_fc for the canonical
                             orientation so derived orientations can read it.
+        show_leaf       : caller sets True when the filter has a selection for whichever
+                          real-world dimension this orientation's d3 represents (e.g. product
+                          for the canonical payment_type→payer→product view). When True, any
+                          (d1, d2) group that's fully selected down to d2 (chart_d1_filter set,
+                          and chart_d2_filter set or d2=="NA" since that group has no d2 to
+                          pick) renders its d3 leaf siblings as chart series instead of the
+                          single d1/d2 aggregate series -- e.g. filtering to Commercial-CVS-ASGA
+                          shows Commercial-CVS-ASGA, Commercial-CVS-GILD, Commercial-CVS-Other.
         """
         n     = len(month_range)
         n_fc  = n - fsi
@@ -2247,6 +2256,41 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                 # always include it regardless of chart_d2_filter since it can't match.
                 if chart_d2_filter and d2 != "NA" and d2.lower() != chart_d2_filter.lower():
                     continue
+
+                # Leaf mode: the filter is fully drilled down to this (d1, d2) group's
+                # deepest dimension (chart_d1_filter always required; chart_d2_filter
+                # required too unless this group has no d2 to select, e.g. Cash). Show
+                # every d3 sibling under the group instead of the single d1/d2 aggregate.
+                _leaf_here = show_leaf and bool(chart_d1_filter) and (d2 == "NA" or bool(chart_d2_filter))
+                if _leaf_here:
+                    den_h  = d1_h if d2 == "NA" else _h(vol2, (d1, d2))
+                    den_fc = d1_fc if d2 == "NA" else l2_fc.get((d1, d2), [0.0] * n_fc)
+                    lbl_prefix = d1 if d2 == "NA" else f"{d1} - {d2}"
+                    for d3 in sorted(dim3_by_d1d2.get((d1, d2), set())):
+                        lbl = f"{lbl_prefix} - {d3}"
+                        if as_share:
+                            h_vals = _h_pct(vol3, (d1, d2, d3), den_h=den_h)
+                            if use_direct_ma:
+                                # Rolling MA-6 of share (% of parent level for this leaf)
+                                _seed = _share_last6.get((d1, d2, d3), h_vals[-_w6:])
+                                fc    = [round(v, 4) for v in _rolling_ma(_seed, _w6, n_fc)]
+                            else:
+                                # Derive from model volume forecast: L3 / parent
+                                l3_fc_v = l3_fc.get((d1, d2, d3), [0.0] * n_fc)
+                                fc      = [
+                                    round(l3_fc_v[i] / den_fc[i] * 100, 4) if den_fc[i] else 0.0
+                                    for i in range(n_fc)
+                                ]
+                        else:
+                            h_vals = _h(vol3, (d1, d2, d3))
+                            fc     = list(l3_fc.get((d1, d2, d3), [0.0] * n_fc))
+                        chart_series.append({
+                            "label":    lbl,
+                            "history":  [round(v, 4) for v in h_vals],
+                            "forecast": [round(v, 4) for v in fc],
+                        })
+                    continue
+
                 if d2 == "NA":
                     lbl = d1
                     if as_share:
@@ -2357,20 +2401,22 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     _t5_product_target = _tab5_product_target if recalc_tab_level < 5 else None
     _tab5_vol_ptpp = _build_tab5_3level(
         ptpp_mv, 2, 3, 4, to_int=True,
-        chart_d1_filter=tab5_pt_label,
+        chart_d1_filter=tab5_pt_label, chart_d2_filter=tab3_label,
         sel_d2=tab3_label, sel_d3=tab2_label,
         _tab5_f=_t5_f,
         _canonical_l3_out=_tab5_canonical_l3,
         l1_target_fc=_tab5_l1_target,
         product_target_fc=_t5_product_target,
+        show_leaf=bool(tab2_label),
     )
     _tab5_shr_ptpp = _build_tab5_3level(
         ptpp_mv, 2, 3, 4, as_share=True,
-        chart_d1_filter=tab5_pt_label,
+        chart_d1_filter=tab5_pt_label, chart_d2_filter=tab3_label,
         sel_d2=tab3_label, sel_d3=tab2_label,
         _tab5_f=_t5_f,
         canonical_l3_fc=_tab5_canonical_l3,
         canonical_idx=(0, 1, 2),
+        show_leaf=bool(tab2_label),
     )
 
     # ── Backfill Tab 2 product forecasts from Tab 5 ─────────────────────────
@@ -2469,13 +2515,15 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                                    chart_d2_filter=tab2_label,
                                                    _tab5_f=_t5_f,
                                                    canonical_l3_fc=_tab5_canonical_l3,
-                                                   canonical_idx=(0, 2, 1)),
+                                                   canonical_idx=(0, 2, 1),
+                                                   show_leaf=bool(tab3_label)),
                 "payer_share":  _build_tab5_3level(ptpp_mv, 2, 4, 3, as_share=True,
                                                    chart_d1_filter=tab5_pt_label,
                                                    chart_d2_filter=tab2_label,
                                                    _tab5_f=_t5_f,
                                                    canonical_l3_fc=_tab5_canonical_l3,
-                                                   canonical_idx=(0, 2, 1)),
+                                                   canonical_idx=(0, 2, 1),
+                                                   show_leaf=bool(tab3_label)),
             },
             # dim1=product, dim2=payment_type, dim3=payer  ← derived
             "product_payment_type_payer": {
@@ -2484,13 +2532,15 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                                    chart_d2_filter=tab5_pt_label,
                                                    _tab5_f=_t5_f,
                                                    canonical_l3_fc=_tab5_canonical_l3,
-                                                   canonical_idx=(1, 2, 0)),
+                                                   canonical_idx=(1, 2, 0),
+                                                   show_leaf=bool(tab3_label)),
                 "payer_share":  _build_tab5_3level(ptpp_mv, 4, 2, 3, as_share=True,
                                                    chart_d1_filter=tab2_label,
                                                    chart_d2_filter=tab5_pt_label,
                                                    _tab5_f=_t5_f,
                                                    canonical_l3_fc=_tab5_canonical_l3,
-                                                   canonical_idx=(1, 2, 0)),
+                                                   canonical_idx=(1, 2, 0),
+                                                   show_leaf=bool(tab3_label)),
             },
         },
         "event_management": {},
@@ -2830,6 +2880,109 @@ def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tab 5 leaf-chart resync — mirrors _build_tab5_3level's own chart-building
+# rule, but works from an already-computed hierarchy TABLE instead of raw
+# transaction rows. Needed because most callers show a scenario's market_
+# analysis straight from a stored DB snapshot (never touching
+# _build_tab5_3level again), so its chart would otherwise stay frozen at
+# whichever drill-down level was active when that snapshot was last saved.
+# ---------------------------------------------------------------------------
+
+def _rebuild_tab5_leaf_chart(gran_dict: dict, chart_d1_filter, chart_d2_filter,
+                              show_leaf: bool, to_int: bool = False) -> None:
+    """
+    Rebuilds gran_dict["chart"]["series"] in place from gran_dict["table"]["rows"]
+    (a 3-level hierarchy: L1 -> children L2 -> children L3), applying the same
+    d1/d2 filter + leaf-expansion rule as _build_tab5_3level's own chart section.
+    Leaves the table untouched.
+    """
+    rows = gran_dict.get("table", {}).get("rows", [])
+    if not rows:
+        return
+    fsi = gran_dict.get("chart", {}).get("forecast_start_index", 0)
+
+    def _v(vals):
+        return [int(round(float(v))) for v in vals] if to_int else [round(float(v), 4) for v in vals]
+
+    series = []
+    for l1_row in rows:
+        d1 = l1_row.get("label", "")
+        if chart_d1_filter and d1.lower() != chart_d1_filter.lower():
+            continue
+        for l2_row in l1_row.get("children", []):
+            d2 = l2_row.get("label", "")
+            if chart_d2_filter and d2 != "NA" and d2.lower() != chart_d2_filter.lower():
+                continue
+
+            l3_children = l2_row.get("children", [])
+            leaf_here = (
+                show_leaf and bool(chart_d1_filter) and (d2 == "NA" or bool(chart_d2_filter))
+                and l3_children
+            )
+            if leaf_here:
+                prefix = d1 if d2 == "NA" else f"{d1} - {d2}"
+                for l3_row in l3_children:
+                    d3   = l3_row.get("label", "")
+                    vals = [float(v) for v in l3_row.get("values", [])]
+                    series.append({
+                        "label":    f"{prefix} - {d3}",
+                        "history":  _v(vals[:fsi]),
+                        "forecast": _v(vals[fsi:]),
+                    })
+                continue
+
+            if d2 == "NA":
+                lbl  = d1
+                vals = [float(v) for v in l1_row.get("values", [])]
+            else:
+                lbl  = f"{d1} - {d2}"
+                vals = [float(v) for v in l2_row.get("values", [])]
+            series.append({
+                "label":    lbl,
+                "history":  _v(vals[:fsi]),
+                "forecast": _v(vals[fsi:]),
+            })
+
+    gran_dict.setdefault("chart", {})["series"] = series
+
+
+def _resync_tab5_leaf_chart(market_analysis: dict, sel_payment_type=None, sel_payer=None,
+                             sel_product=None) -> dict:
+    """
+    Re-derives Tab 5's chart series (all 3 sub-view orientations, both metrics,
+    both granularities) from the CURRENT filter's drill-down level. Call this
+    on any market_analysis read from a stored scenario snapshot before
+    returning it, so a saved scenario's Tab 5 chart behaves identically to
+    Base's freshly-computed one for the same filter selection.
+    """
+    tab = market_analysis.get("payment_type_payer_product") if market_analysis else None
+    if not tab:
+        return market_analysis
+
+    # (sub-view key, chart_d1_filter, chart_d2_filter, show_leaf) -- mirrors the
+    # dim1/dim2/dim3 mapping used when these sub-views are built in
+    # _build_all_tabs_both_metrics.
+    _sv_cfg = [
+        ("payment_type_payer_product", sel_payment_type, sel_payer,        bool(sel_product)),
+        ("payment_type_product_payer", sel_payment_type, sel_product,      bool(sel_payer)),
+        ("product_payment_type_payer", sel_product,       sel_payment_type, bool(sel_payer)),
+    ]
+    for sv_key, d1f, d2f, leaf in _sv_cfg:
+        sv = tab.get(sv_key)
+        if not sv:
+            continue
+        for metric_key, to_int in (("payer_volume", True), ("payer_share", False)):
+            metric = sv.get(metric_key)
+            if not metric:
+                continue
+            for gran_key in ("monthly", "yearly"):
+                gran = metric.get(gran_key)
+                if gran:
+                    _rebuild_tab5_leaf_chart(gran, d1f, d2f, leaf, to_int=to_int)
+    return market_analysis
+
+
+# ---------------------------------------------------------------------------
 # Helper: load config or fall back to DB defaults
 # ---------------------------------------------------------------------------
 
@@ -2874,6 +3027,97 @@ def _load_config(cur, ta: str, payment_type: str = None, payer: str = None, bran
         "model_granularity": "monthly",
         "forecast_periods":  24,
     }
+
+
+# ---------------------------------------------------------------------------
+# Base — single source of truth
+#
+# apply_liver_filters persists "Base" into raw_liver.liver_scenarios exactly
+# like a real scenario (full available date range). Every OTHER place that
+# needs to show Base (activate-scenario, delete-scenario, refresh, the
+# inactive "Base" comparison row while another scenario is active, ...) must
+# read that same persisted snapshot rather than independently recomputing —
+# two separate implementations of the same math is exactly what caused
+# apply-filters vs activate-scenario Base numbers to drift apart (see
+# project memory: liver scenario filter param bug). Falls back to a fresh
+# compute — and self-heals the DB row — only when Base has never been
+# persisted, or the persisted snapshot's date range no longer covers what
+# the current config requires (train_end_date / forecast_periods changed
+# since Base was last saved).
+# ---------------------------------------------------------------------------
+
+def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
+                               train_end_year: int, train_end_month: int,
+                               forecast_periods: int, granularity: str,
+                               sel_payer=None, sel_product=None, sel_payment_type=None) -> tuple[dict, dict]:
+    """Returns (market_analysis clipped to [from_year, from_month], factors dict)."""
+    needed_end    = _add_months(date_type(train_end_year, train_end_month, 1), forecast_periods)
+    needed_end_ym = needed_end.year * 100 + needed_end.month
+
+    cur.execute(
+        "SELECT chart_data, factors, to_date FROM raw_liver.liver_scenarios WHERE scenario_name = 'Base'"
+    )
+    row = cur.fetchone()
+
+    if row:
+        chart_data, stored_factors, stored_to = row
+        raw_ma = _normalize_ma_keys((chart_data or {}).get("market_analysis", {}))
+        stored_to_ym = None
+        if stored_to:
+            _sy, _sm = _parse_ym(str(stored_to))
+            stored_to_ym = _sy * 100 + _sm
+        if raw_ma and stored_to_ym is not None and stored_to_ym >= needed_end_ym:
+            clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+            # The cached snapshot was built with whatever payer/product/payment_type
+            # was active when it was last persisted -- re-derive Tab 5's chart series
+            # for the CURRENT filter so a cache hit never shows a stale drill-down level.
+            clipped = _resync_tab5_leaf_chart(clipped, sel_payment_type, sel_payer, sel_product)
+            return clipped, (stored_factors or {})
+
+    # Missing or stale — recompute the wide snapshot fresh and self-heal the DB row,
+    # same shape as apply_liver_filters' own Base-persist block.
+    txn_months = get_transaction_distinct_months(cur, ta)
+    if txn_months:
+        wide_from_year, wide_from_month = txn_months[0]
+    else:
+        wide_from_year, wide_from_month = from_year, from_month
+    wide_forecast_periods = _extend_forecast_periods_to_widest_end(
+        cur, ta, train_end_year, train_end_month, forecast_periods
+    )
+    base_factors = _estimate_default_factors(
+        cur, ta, wide_from_year, wide_from_month, train_end_year, train_end_month, granularity
+    )
+    persist_ma, tab1_ets = _build_market_analysis_both_granularities(
+        cur, ta, wide_from_year, wide_from_month,
+        train_end_year, train_end_month, wide_forecast_periods, base_factors,
+        sel_payer=sel_payer, sel_product=sel_product, sel_payment_type=sel_payment_type,
+        scenario_name="Base",
+    )
+    persist_ma = _recompute_all_market_shares_nested(persist_ma)
+
+    _traj_start = _add_months(date_type(train_end_year, train_end_month, 1), 1).isoformat()
+    response_factors = _build_response_factors(base_factors, _traj_start)
+    response_factors["active_model"] = "ets"
+    response_factors["ets"] = {"alpha": tab1_ets.alpha, "beta": tab1_ets.beta, "gamma": tab1_ets.gamma}
+
+    wide_end_date   = _add_months(date_type(train_end_year, train_end_month, 1), wide_forecast_periods).isoformat()
+    wide_start_date = date_type(wide_from_year, wide_from_month, 1).isoformat()
+    try:
+        save_scenario(
+            cur, scenario_name="Base", ta=ta,
+            payer=sel_payer or "", product=sel_product or "",
+            from_date=wide_start_date, to_date=wide_end_date,
+            chart_data={"market_analysis": persist_ma},
+            factors=response_factors,
+        )
+        base_snapshot = extract_snapshot_from_market_analysis(persist_ma)
+        if base_snapshot:
+            save_market_events_scenario(cur, "Base", base_snapshot)
+    except Exception as _e:
+        print(f"[liver] Base snapshot self-heal skipped: {_e}")
+
+    clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(persist_ma, from_year, from_month))
+    return clipped, response_factors
 
 
 # ---------------------------------------------------------------------------
@@ -3038,6 +3282,9 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             saved_market_analysis = _clip_ma_to_from_date(saved_market_analysis, from_year, from_month)
             saved_market_analysis = _recompute_yearly_in_ma(saved_market_analysis)
             market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
+            market_analysis = _resync_tab5_leaf_chart(
+                market_analysis, _first(payload.payment_type), _first(payload.payer), _first(payload.brand)
+            )
             _ets_raw = (saved_factors_raw or {}).get("ets", {})
             tab1_ets = EtsParams(
                 alpha=float(_ets_raw.get("alpha", 0.30)),
@@ -3165,19 +3412,14 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 conn.rollback()
                 print(f"[liver] Base snapshot persist skipped: {_base_persist_err}")
         else:
-            base_factors = _estimate_default_factors(
-                cur, payload.ta, from_year, from_month,
-                train_end_year, train_end_month, granularity,
-            )
-            base_full_ma, _ = _build_market_analysis_both_granularities(
-                cur, payload.ta, from_year, from_month,
-                train_end_year, train_end_month, forecast_periods, base_factors,
+            base_full_ma, _ = _get_base_market_analysis(
+                cur, payload.ta, from_year, from_month, train_end_year, train_end_month,
+                forecast_periods, granularity,
                 sel_payer=_first(payload.payer),
                 sel_product=_first(payload.brand),
                 sel_payment_type=_first(payload.payment_type),
-                scenario_name="Base",
             )
-            base_full_ma = _recompute_all_market_shares_nested(base_full_ma)
+            conn.commit()
             # Patch the active stored scenario's Tab 4/5 gap: if the stored scenario
             # was saved with a later from_date than the current filter, its Tab 4/5
             # monthly data starts later than the current from_date. Prepend Base's
@@ -3189,10 +3431,9 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         def _inactive_stub(sc_name):
-            # Base is always freshly computed so it stays in sync with the current
-            # config (train_end_date, forecast_periods, from_date). Using the DB
-            # snapshot risks showing Base with a stale forecast_start_index when
-            # config or dates changed since Base was last active.
+            # base_full_ma came from _get_base_market_analysis: reads the persisted
+            # Base snapshot when it's still fresh for the current config, otherwise
+            # recomputes and self-heals it -- see that function's docstring.
             if sc_name == "Base":
                 return {"market_analysis": base_full_ma}
             cd     = all_saved_cd.get(sc_name, {})
@@ -3203,7 +3444,11 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 # stored data starts later than from_date (saved with a narrower filter).
                 clipped = _prepend_wide_months(base_full_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
                 clipped = _recompute_yearly_in_ma(clipped)
-                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
+                clipped = _recompute_all_market_shares_nested(clipped)
+                clipped = _resync_tab5_leaf_chart(
+                    clipped, _first(payload.payment_type), _first(payload.payer), _first(payload.brand)
+                )
+                return {"market_analysis": clipped}
             return {"market_analysis": {}}
 
         scenarios = {
@@ -3438,19 +3683,14 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         if active_scenario == "Base":
             base_full_ma_rc = market_analysis
         else:
-            _base_f = _estimate_default_factors(
-                cur, payload.ta_name, from_year, from_month,
-                train_end_year, train_end_month, granularity,
-            )
-            base_full_ma_rc, _ = _build_market_analysis_both_granularities(
-                cur, payload.ta_name, from_year, from_month,
-                train_end_year, train_end_month, forecast_periods, _base_f,
+            base_full_ma_rc, _ = _get_base_market_analysis(
+                cur, payload.ta_name, from_year, from_month, train_end_year, train_end_month,
+                forecast_periods, granularity,
                 sel_payer=market,
                 sel_product=product,
                 sel_payment_type=payment_type,
-                scenario_name="Base",
             )
-            base_full_ma_rc = _recompute_all_market_shares_nested(base_full_ma_rc)
+            conn.commit()
 
         def _inactive_stub_rc(sc_name):
             if sc_name == "Base":
@@ -3461,7 +3701,9 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
                 clipped = _prepend_wide_months(base_full_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
                 clipped = _recompute_yearly_in_ma(clipped)
-                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
+                clipped = _recompute_all_market_shares_nested(clipped)
+                clipped = _resync_tab5_leaf_chart(clipped, payment_type, market, product)
+                return {"market_analysis": clipped}
             return {"market_analysis": raw_ma}
 
         scenarios = {
@@ -3886,7 +4128,7 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
         # Load config so we can compute Base TMV
-        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payment_type or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -3894,18 +4136,14 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         )
         granularity = cfg.get("model_granularity", "monthly")
 
-        base_factors = _estimate_default_factors(
-            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
-        )
-        _base_ma, _ = _build_market_analysis_both_granularities(
-            cur, ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, base_factors,
+        _base_ma, _ = _get_base_market_analysis(
+            cur, ta, from_year, from_month, train_end_year, train_end_month,
+            forecast_periods, granularity,
             sel_payer=flt.payer or None,
             sel_product=flt.product or None,
             sel_payment_type=flt.payment_type or None,
-            scenario_name="Base",
         )
-        _base_ma = _recompute_all_market_shares_nested(_base_ma)
+        conn.commit()
 
         def _inactive_stub(sc_name):
             if sc_name == "Base":
@@ -3916,7 +4154,11 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
                 clipped = _prepend_wide_months(_base_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
                 clipped = _recompute_yearly_in_ma(clipped)
-                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
+                clipped = _recompute_all_market_shares_nested(clipped)
+                clipped = _resync_tab5_leaf_chart(
+                    clipped, flt.payment_type or None, flt.payer or None, flt.product or None
+                )
+                return {"market_analysis": clipped}
             return {"market_analysis": raw_ma}
 
         scenarios = {}
@@ -3969,34 +4211,23 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
     from_year, from_month = _parse_ym(flt.start_date)
     granularity = cfg.get("model_granularity", "monthly")
+    forecast_periods = _resolve_forecast_periods(
+        flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+    )
 
-    # Prefer the DB-saved Base (just written by apply_liver_filters) so that the
+    # Read the persisted Base snapshot (written by apply_liver_filters) so the
     # inactive Base in the creation response is bit-for-bit identical to what the
-    # user sees when Base is active — no risk of ETS/MA parameter divergence from
-    # a second independent computation.  Fall back to a fresh computation only when
-    # Base has never been persisted (e.g., first-ever load of a TA).
-    _base_db = saved.get("Base", {})
-    _base_raw_ma = _normalize_ma_keys(_base_db.get("market_analysis", {}))
-    if _base_raw_ma:
-        _base_ma = _recompute_all_market_shares_nested(
-            _clip_ma_to_from_date(_base_raw_ma, from_year, from_month)
-        )
-    else:
-        forecast_periods = _resolve_forecast_periods(
-            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
-        )
-        base_factors = _estimate_default_factors(
-            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
-        )
-        _base_ma, _ = _build_market_analysis_both_granularities(
-            cur, ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, base_factors,
-            sel_payer=flt.payer or None,
-            sel_product=flt.product or None,
-            sel_payment_type=flt.payment_type or None,
-            scenario_name="Base",
-        )
-        _base_ma = _recompute_all_market_shares_nested(_base_ma)
+    # user sees when Base is active — no risk of divergence from a second
+    # independent computation. Falls back to a fresh compute (+ self-heals the
+    # DB row) only when Base is missing or stale for the current config.
+    _base_ma, _ = _get_base_market_analysis(
+        cur, ta, from_year, from_month, train_end_year, train_end_month,
+        forecast_periods, granularity,
+        sel_payer=flt.payer or None,
+        sel_product=flt.product or None,
+        sel_payment_type=flt.payment_type or None,
+    )
+    cur.connection.commit()
 
     scenarios = {}
     for sc in available_scenarios:
@@ -4012,7 +4243,10 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
-                raw_ma = _recompute_all_market_shares_nested(clipped)
+                raw_ma  = _recompute_all_market_shares_nested(clipped)
+                raw_ma  = _resync_tab5_leaf_chart(
+                    raw_ma, flt.payment_type or None, flt.payer or None, flt.product or None
+                )
             scenarios[sc] = {"market_analysis": raw_ma}
 
     return {
@@ -4231,7 +4465,7 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
     wide_forecast_periods = None
     granularity = "monthly"
     try:
-        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payment_type or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         # Same reasoning as apply_liver_filters' Base-persist block: the
         # selected (payer, brand) combo's own forecast_periods isn't
@@ -4289,6 +4523,7 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
             cur, ta, wide_from_year, wide_from_month,
             train_end_year, train_end_month, wide_forecast_periods, factors,
             sel_payer=flt.payer or None, sel_product=flt.product or None,
+            sel_payment_type=flt.payment_type or None,
             force_tab1_ets=False,
             scenario_name=ta,
         )
@@ -4439,7 +4674,7 @@ def delete_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
         saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payment_type or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -4447,14 +4682,14 @@ def delete_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         )
         granularity = cfg.get("model_granularity", "monthly")
 
-        base_factors = _estimate_default_factors(
-            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+        _base_ma, _ = _get_base_market_analysis(
+            cur, ta, from_year, from_month, train_end_year, train_end_month,
+            forecast_periods, granularity,
+            sel_payer=flt.payer or None,
+            sel_product=flt.product or None,
+            sel_payment_type=flt.payment_type or None,
         )
-        _base_ma, _ = _build_market_analysis_both_granularities(
-            cur, ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, base_factors,
-            scenario_name="Base",
-        )
+        conn.commit()
 
         scenarios = {}
         for sc in available_scenarios:
@@ -4463,6 +4698,12 @@ def delete_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             else:
                 cd     = saved.get(sc, {})
                 raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+                if raw_ma:
+                    raw_ma = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                    raw_ma = _recompute_all_market_shares_nested(raw_ma)
+                    raw_ma = _resync_tab5_leaf_chart(
+                        raw_ma, flt.payment_type or None, flt.payer or None, flt.product or None
+                    )
                 scenarios[sc] = {"market_analysis": raw_ma}
 
         return {
@@ -4516,18 +4757,17 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             all_names.remove("Base")
         available_scenarios = ["Base"] + all_names
 
-        base_factors = _estimate_default_factors(
-            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
-        )
-        _base_ma, _ = _build_market_analysis_both_granularities(
-            cur, ta, from_year, from_month,
-            train_end_year, train_end_month, forecast_periods, base_factors,
+        _base_ma, _base_factors = _get_base_market_analysis(
+            cur, ta, from_year, from_month, train_end_year, train_end_month,
+            forecast_periods, granularity,
+            sel_payer=flt.payer or None,
+            sel_product=flt.product or None,
             sel_payment_type=flt.payment_type or None,
-            scenario_name="Base",
         )
+        conn.commit()
         if is_base:
             active_ma      = _base_ma
-            active_factors = base_factors.model_dump()
+            active_factors = _base_factors
         elif name in saved:
             active_ma      = _normalize_ma_keys(saved[name]["chart_data"].get("market_analysis", {}))
             # Clip to the user's filter window: DB stores wide data (e.g. Apr-20)
@@ -4536,6 +4776,9 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             # Apr-20 months as the comparison-table axis, making all other scenarios
             # appear to start from Apr-20 in the chart and table.
             active_ma      = _recompute_yearly_in_ma(_clip_ma_to_from_date(active_ma, from_year, from_month))
+            active_ma      = _resync_tab5_leaf_chart(
+                active_ma, flt.payment_type or None, flt.payer or None, flt.product or None
+            )
             active_factors = saved[name]["factors"]
         else:
             raise ValueError(f"Scenario '{name}' not found.")
@@ -4555,6 +4798,9 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
                 # scenarios share the same month axis in the comparison chart.
                 if raw_ma:
                     raw_ma = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                    raw_ma = _resync_tab5_leaf_chart(
+                        raw_ma, flt.payment_type or None, flt.payer or None, flt.product or None
+                    )
                 scenarios[sc] = {"market_analysis": raw_ma}
 
         # Return the REQUEST's filter dates — not DB-stored wide dates.
@@ -4655,7 +4901,7 @@ def refresh_liver(payload):
     cur  = conn.cursor()
     try:
         from_year, from_month = _parse_ym(flt.start_date)
-        cfg = _load_config(cur, payload.ta_name, payment_type=flt.payer or None, brand=flt.product or None)
+        cfg = _load_config(cur, payload.ta_name, payment_type=flt.payment_type or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
             flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
@@ -4663,17 +4909,13 @@ def refresh_liver(payload):
         granularity = cfg.get("model_granularity", "monthly")
 
         if active == "Base":
-            base_f = _estimate_default_factors(
-                cur, payload.ta_name, from_year, from_month,
-                train_end_year, train_end_month, granularity,
-            )
-            full_ma, _ = _build_market_analysis_both_granularities(
-                cur, payload.ta_name, from_year, from_month,
-                train_end_year, train_end_month, forecast_periods, base_f,
+            full_ma, _ = _get_base_market_analysis(
+                cur, payload.ta_name, from_year, from_month, train_end_year, train_end_month,
+                forecast_periods, granularity,
                 sel_payer=flt.payer or None, sel_product=flt.product or None,
                 sel_payment_type=flt.payment_type or None,
-                scenario_name="Base",
             )
+            conn.commit()
         else:
             cur.execute(
                 "SELECT chart_data, factors FROM raw_liver.liver_scenarios WHERE scenario_name = %s",
@@ -4695,6 +4937,7 @@ def refresh_liver(payload):
                     sel_payment_type=flt.payment_type or None,
                     scenario_name=active,
                 )
+                full_ma = _recompute_all_market_shares_nested(full_ma)
 
         # Merge payload's edited tab on top of the full market_analysis so the
         # user's changes override the DB values for the selected tab only.
@@ -6257,17 +6500,13 @@ def refresh_liver(payload):
                 conn2 = get_connection()
                 cur2  = conn2.cursor()
                 try:
-                    base_f = _estimate_default_factors(
-                        cur2, payload.ta_name, from_year, from_month,
-                        train_end_year, train_end_month, granularity,
-                    )
-                    base_ma2, _ = _build_market_analysis_both_granularities(
-                        cur2, payload.ta_name, from_year, from_month,
-                        train_end_year, train_end_month, forecast_periods, base_f,
+                    base_ma2, _ = _get_base_market_analysis(
+                        cur2, payload.ta_name, from_year, from_month, train_end_year, train_end_month,
+                        forecast_periods, granularity,
                         sel_payer=flt.payer or None, sel_product=flt.product or None,
                         sel_payment_type=flt.payment_type or None,
-                        scenario_name="Base",
                     )
+                    conn2.commit()
                 finally:
                     cur2.close()
                     conn2.close()
@@ -6289,7 +6528,11 @@ def refresh_liver(payload):
                 if _base_ma_rc:
                     clipped = _prepend_wide_months(_base_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
                 clipped = _recompute_yearly_in_ma(clipped)
-                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
+                clipped = _recompute_all_market_shares_nested(clipped)
+                clipped = _resync_tab5_leaf_chart(
+                    clipped, flt.payment_type or None, flt.payer or None, flt.product or None
+                )
+                return {"market_analysis": clipped}
             return {"market_analysis": raw_ma}
 
     # Strip extra scenario rows from the active scenario's TMV table.
