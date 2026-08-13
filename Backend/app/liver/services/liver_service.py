@@ -76,13 +76,9 @@ _METRIC_KEY_MAP = {"market_volume": "payer_volume", "market_share": "payer_share
 def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
     """
     Clip a market_analysis dict (nested monthly/yearly format) so that all
-    monthly chart months and table headers only cover (from_year, from_month)
-    onwards.  This prevents DB-stored wide data (e.g. Apr-20 start) from
-    appearing in responses when the user's filter starts later (e.g. Mar-22),
-    which would otherwise make the comparison table use Apr-20 column headers.
-
-    Yearly data is left unchanged.  Returns the original dict unchanged when
-    all months already start at or after from_date.
+    monthly and yearly chart months and table headers only cover (from_year,
+    from_month) onwards.  This prevents DB-stored wide data (e.g. Apr-20
+    start) from appearing in responses when the user's filter starts later.
     """
     from_ym = from_year * 100 + from_month
 
@@ -143,11 +139,34 @@ def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
                 new_row["values"] = list(row["values"])[clip_idx:]
             if "total" in row:
                 new_row["total"] = list(row["total"])[clip_idx:]
+            # L1 original length — used to compute the correct clip offset for L3
+            l1_len = len(row.get("values", row.get("total", [])))
             new_children = []
             for child in row.get("children", []):
                 nc = dict(child)
                 if "values" in child:
                     nc["values"] = list(child["values"])[clip_idx:]
+                # Clip grandchildren (L3) — e.g. product rows within each payer in Tab 5.
+                # L3 may be shorter than L1/L2 in old saved data that was stored before the
+                # _splice_hier_table fix (L3 only covered the filter window, not the full
+                # wide range). Adjust the clip index so we don't over-clip those rows.
+                gc_clip_idx = clip_idx
+                first_gc_vals = None
+                l3_list = child.get("children", [])
+                if l3_list:
+                    first_gc_vals = l3_list[0].get("values")
+                if first_gc_vals is not None and l1_len > 0:
+                    l3_len = len(first_gc_vals)
+                    gap = l1_len - l3_len  # months already trimmed from L3 front
+                    gc_clip_idx = max(0, clip_idx - gap)
+                new_grandchildren = []
+                for grandchild in l3_list:
+                    ngc = dict(grandchild)
+                    if "values" in grandchild:
+                        ngc["values"] = list(grandchild["values"])[gc_clip_idx:]
+                    new_grandchildren.append(ngc)
+                if new_grandchildren:
+                    nc["children"] = new_grandchildren
                 new_children.append(nc)
             if new_children:
                 new_row["children"] = new_children
@@ -156,6 +175,60 @@ def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
         if src_headers is not None:
             result["headers"] = src_headers[clip_idx:]
         return result
+
+    def _find_yearly_clip_idx(months: list) -> int:
+        for i, m in enumerate(months):
+            try:
+                if int(str(m).split("-")[0]) >= from_year:
+                    return i
+            except Exception:
+                pass
+        return 0
+
+    def _clip_yearly(yearly: dict) -> dict:
+        """Clip yearly chart + table to from_year onwards."""
+        if not yearly:
+            return yearly
+        chart = yearly.get("chart", {})
+        table = yearly.get("table", {})
+        months = chart.get("months", [])
+        clip_idx = _find_yearly_clip_idx(months)
+        if clip_idx == 0:
+            return yearly
+        new_months = months[clip_idx:]
+        old_fsi = chart.get("forecast_start_index", 0)
+        new_fsi = max(0, old_fsi - clip_idx)
+        new_series = []
+        for s in chart.get("series", []):
+            if "history" in s or "forecast" in s:
+                history  = list(s.get("history", []))
+                forecast = list(s.get("forecast", []))
+                hist_key, fore_key = "history", "forecast"
+            else:
+                history  = list(s.get("train_values", []))
+                forecast = list(s.get("forecast_values", []))
+                hist_key, fore_key = "train_values", "forecast_values"
+            if clip_idx <= old_fsi:
+                new_h, new_f = history[clip_idx:], forecast
+            else:
+                new_h, new_f = [], forecast[clip_idx - old_fsi:]
+            base = {k: v for k, v in s.items()
+                    if k not in ("history", "forecast", "train_values", "forecast_values")}
+            base[hist_key] = new_h
+            base[fore_key] = new_f
+            new_series.append(base)
+        new_chart = {**chart, "months": new_months, "forecast_start_index": new_fsi, "series": new_series}
+        new_rows = []
+        for row in table.get("rows", []):
+            new_row = dict(row)
+            if "values" in row:
+                new_row["values"] = list(row["values"])[clip_idx:]
+            new_rows.append(new_row)
+        src_headers = table.get("headers")
+        new_table = {**table, "rows": new_rows}
+        if src_headers is not None:
+            new_table["headers"] = src_headers[clip_idx:]
+        return {"chart": new_chart, "table": new_table}
 
     def _first_row_len(table: dict) -> int:
         """Return the value-array length of the first row in table (any shape)."""
@@ -208,7 +281,7 @@ def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
                         "chart": _clip_chart(chart),
                         "table": clipped_tbl,
                     },
-                    "yearly": metric.get("yearly", {}),
+                    "yearly": _clip_yearly(metric.get("yearly", {})),
                 }
             elif "chart" in metric:
                 # Flat (legacy) format
@@ -232,7 +305,7 @@ def _clip_ma_to_from_date(ma: dict, from_year: int, from_month: int) -> dict:
                         ct    = _clip_table(it, _table_clip_idx(ic, it, ci))
                         result[tab_key][metric_key][inner_key] = {
                             "monthly": {"chart": _clip_chart(ic), "table": ct},
-                            "yearly":  inner_data.get("yearly", {}),
+                            "yearly":  _clip_yearly(inner_data.get("yearly", {})),
                         }
                     else:
                         result[tab_key][metric_key][inner_key] = inner_data
@@ -1342,12 +1415,12 @@ def _ipf_hier_rows(hier_rows, row_targets, col_targets, max_iter=8):
             row_sum = [sum(mat[p][c][i] for c in child_set) for i in range(n)]
             tgt = row_targets.get(p, row_sum)
             for c in child_set:
-                mat[p][c] = [mat[p][c][i] * tgt[i] / row_sum[i] if row_sum[i] else 0.0 for i in range(n)]
+                mat[p][c] = [mat[p][c][i] * (tgt[i] if i < len(tgt) else row_sum[i]) / row_sum[i] if row_sum[i] else 0.0 for i in range(n)]
         for c in child_set:
             col_sum = [sum(mat[p][c][i] for p in parents) for i in range(n)]
             tgt = col_targets.get(c, col_sum)
             for p in parents:
-                mat[p][c] = [mat[p][c][i] * tgt[i] / col_sum[i] if col_sum[i] else 0.0 for i in range(n)]
+                mat[p][c] = [mat[p][c][i] * (tgt[i] if i < len(tgt) else col_sum[i]) / col_sum[i] if col_sum[i] else 0.0 for i in range(n)]
 
     new_rows = []
     for r in hier_rows:
@@ -1615,9 +1688,13 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         lbl: _series_model_months(_config_map, sel_payer or "", lbl, _wide_actual_range)
         for lbl in {r[2] for r in pd_mv}
     }
-    # Tab 3 (payment_type distribution): series label = payment_type, config key = (payment_type, sel_product)
+    # Tab 3 (payment_type distribution): series label = payment_type.
+    # Do NOT use sel_product here — payment_type distribution is a market-level view
+    # independent of which product the user has selected in the filter.  Using sel_product
+    # would make Tab 3 (and consequently Tab 5 via IPF) produce different values depending
+    # on the current display filter, breaking scenario comparison consistency.
     _tab3_mmbl = {
-        lbl: _series_model_months(_config_map, lbl, sel_product or "", _wide_actual_range)
+        lbl: _series_model_months(_config_map, lbl, "", _wide_actual_range)
         for lbl in {r[2] for r in _ptd_mv}
     }
     # Tab 4 (payment_type_product): parent=payment_type r[2], child=product r[3]
@@ -1961,11 +2038,11 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             # IPF: iteratively scale l3_fc to satisfy both:
             #   payment_type margins  → l1_target_fc  (Tab 3 values)
             #   product margins       → product_target_fc (Tab 2 values)
-            # Skipped when a specific payer/product is selected for recalculation:
-            # the model-on-selection path has already placed the user's forecast into
-            # l3_fc; running IPF would scale those values back toward MA targets and
-            # cancel the recalculation's effect.
-            if product_target_fc is not None and l3_fc and sel_d2 is None and sel_d3 is None:
+            # Always runs when product_target_fc is provided (recalc_tab_level < 5).
+            # For Tab-5 recalculation (recalc_tab_level == 5), _t5_product_target is
+            # set to None at the call site, so IPF is suppressed automatically there.
+            # The normalization block below handles the no-IPF path (product_target_fc=None).
+            if product_target_fc is not None and l3_fc:
                 _by_pt: dict   = defaultdict(list)
                 _by_prod: dict = defaultdict(list)
                 for _k in l3_fc:
@@ -2000,6 +2077,40 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                 l3_fc = {_k: [round(_v, 4) for _v in _vs] for _k, _vs in _l3_arr.items()}
 
                 # Recompute l2 and l1 from IPF-adjusted l3 so table rows are consistent.
+                for _d1 in all_d1:
+                    for _d2 in dim2_by_d1.get(_d1, set()):
+                        _d3_set = dim3_by_d1d2.get((_d1, _d2), set())
+                        l2_fc[(_d1, _d2)] = [
+                            sum(l3_fc.get((_d1, _d2, _d3), [0.0] * n_fc)[_i] for _d3 in _d3_set)
+                            for _i in range(n_fc)
+                        ]
+                    l1_fc[(_d1,)] = [
+                        sum(l2_fc.get((_d1, _d2), [0.0] * n_fc)[_i] for _d2 in dim2_by_d1.get(_d1, set()))
+                        for _i in range(n_fc)
+                    ]
+
+            # Normalize l3_fc so each PT's leaf-sum matches l1_target_fc.
+            # When IPF ran, l3_fc is already normalized — ratio ≈ 1.0 (no-op).
+            # When IPF was skipped (sel_d2/sel_d3 active), independent MA for
+            # l2_fc produces values that don't sum to l1_target_fc; this step
+            # ensures sv1 is self-consistent so sv2/sv3 totals match sv1.
+            if l1_target_fc and l3_fc:
+                _by_pt_keys: dict = {}
+                for _k in l3_fc:
+                    _by_pt_keys.setdefault(_k[0], []).append(_k)
+                for _d1, _keys in _by_pt_keys.items():
+                    _tgt = l1_target_fc.get(_d1)
+                    if not _tgt:
+                        continue
+                    _new = {k: list(l3_fc[k]) for k in _keys}
+                    for _i in range(n_fc):
+                        _s = sum(_new[k][_i] for k in _keys)
+                        if _s > 1e-10:
+                            _r = _tgt[_i] / _s
+                            for k in _keys:
+                                _new[k][_i] *= _r
+                    for k in _keys:
+                        l3_fc[k] = _new[k]
                 for _d1 in all_d1:
                     for _d2 in dim2_by_d1.get(_d1, set()):
                         _d3_set = dim3_by_d1d2.get((_d1, _d2), set())
@@ -2698,6 +2809,18 @@ def _merge_granularities(ma_monthly: dict, ma_yearly: dict) -> dict:
     return merged
 
 
+def _recompute_yearly_in_ma(ma_nested: dict) -> dict:
+    """
+    Recompute the yearly slice of a nested market_analysis from its monthly slice.
+    Used after clipping a stored scenario to the user's from_date so the yearly
+    aggregates match what the fresh Base computation would produce for the same
+    display window (avoids partial-year bias from the wide-range save computation).
+    """
+    ma_monthly, _ = _split_by_granularity(ma_nested)
+    ma_yearly     = _aggregate_monthly_to_yearly(ma_monthly)
+    return _merge_granularities(ma_monthly, ma_yearly)
+
+
 def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
     """Wrapper of _recompute_all_market_shares for the nested monthly/yearly format."""
     ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
@@ -2913,6 +3036,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             # the DB-stored wide start (e.g. Apr-20).
             saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
             saved_market_analysis = _clip_ma_to_from_date(saved_market_analysis, from_year, from_month)
+            saved_market_analysis = _recompute_yearly_in_ma(saved_market_analysis)
             market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
             _ets_raw = (saved_factors_raw or {}).get("ets", {})
             tab1_ets = EtsParams(
@@ -3054,6 +3178,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 scenario_name="Base",
             )
             base_full_ma = _recompute_all_market_shares_nested(base_full_ma)
+            # Patch the active stored scenario's Tab 4/5 gap: if the stored scenario
+            # was saved with a later from_date than the current filter, its Tab 4/5
+            # monthly data starts later than the current from_date. Prepend Base's
+            # historical months so the active scenario has the same date range as Base.
+            if saved_market_analysis:
+                _fds = f"{from_year:04d}-{from_month:02d}-01"
+                market_analysis = _prepend_wide_months(base_full_ma, market_analysis, _fds)
+                market_analysis = _recompute_yearly_in_ma(market_analysis)
+                market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         def _inactive_stub(sc_name):
             # Base is always freshly computed so it stays in sync with the current
@@ -3065,7 +3198,12 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                return {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month)}
+                clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                # Prepend Base's historical months for any tabs (e.g. Tab 4/5) whose
+                # stored data starts later than from_date (saved with a narrower filter).
+                clipped = _prepend_wide_months(base_full_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
+                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": {}}
 
         scenarios = {
@@ -3320,7 +3458,10 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             cd     = all_saved_cd_rc.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _prepend_wide_months(base_full_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
+                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
         scenarios = {
@@ -3772,7 +3913,10 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             cd     = saved.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _prepend_wide_months(_base_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
+                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
         scenarios = {}
@@ -3821,26 +3965,38 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     cur.execute("SELECT scenario_name, chart_data FROM raw_liver.liver_scenarios")
     saved = {r[0]: (r[1] or {}) for r in cur.fetchall()}
 
-    cfg = _load_config(cur, ta, flt.payer or None, flt.product or None)
+    cfg = _load_config(cur, ta, payment_type=flt.payment_type or None, brand=flt.product or None)
     train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
     from_year, from_month = _parse_ym(flt.start_date)
-    forecast_periods = _resolve_forecast_periods(
-        flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
-    )
     granularity = cfg.get("model_granularity", "monthly")
 
-    base_factors = _estimate_default_factors(
-        cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
-    )
-    _base_ma, _ = _build_market_analysis_both_granularities(
-        cur, ta, from_year, from_month,
-        train_end_year, train_end_month, forecast_periods, base_factors,
-        sel_payer=flt.payer or None,
-        sel_product=flt.product or None,
-        sel_payment_type=flt.payment_type or None,
-        scenario_name="Base",
-    )
-    _base_ma = _recompute_all_market_shares_nested(_base_ma)
+    # Prefer the DB-saved Base (just written by apply_liver_filters) so that the
+    # inactive Base in the creation response is bit-for-bit identical to what the
+    # user sees when Base is active — no risk of ETS/MA parameter divergence from
+    # a second independent computation.  Fall back to a fresh computation only when
+    # Base has never been persisted (e.g., first-ever load of a TA).
+    _base_db = saved.get("Base", {})
+    _base_raw_ma = _normalize_ma_keys(_base_db.get("market_analysis", {}))
+    if _base_raw_ma:
+        _base_ma = _recompute_all_market_shares_nested(
+            _clip_ma_to_from_date(_base_raw_ma, from_year, from_month)
+        )
+    else:
+        forecast_periods = _resolve_forecast_periods(
+            flt.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+        )
+        base_factors = _estimate_default_factors(
+            cur, ta, from_year, from_month, train_end_year, train_end_month, granularity
+        )
+        _base_ma, _ = _build_market_analysis_both_granularities(
+            cur, ta, from_year, from_month,
+            train_end_year, train_end_month, forecast_periods, base_factors,
+            sel_payer=flt.payer or None,
+            sel_product=flt.product or None,
+            sel_payment_type=flt.payment_type or None,
+            scenario_name="Base",
+        )
+        _base_ma = _recompute_all_market_shares_nested(_base_ma)
 
     scenarios = {}
     for sc in available_scenarios:
@@ -3855,7 +4011,8 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
             cd     = saved.get(sc, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                raw_ma = _recompute_all_market_shares_nested(clipped)
             scenarios[sc] = {"market_analysis": raw_ma}
 
     return {
@@ -4001,7 +4158,17 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
             for pc in pr.get("children", []):
                 wc    = w_children.get(pc.get("label", ""))
                 pre_c = list(wc.get("values", []))[:splice_idx] if wc else []
-                new_children.append({**pc, "values": pre_c + list(pc.get("values", []))})
+                # Also splice L3 grandchildren (e.g. product rows within each payer in Tab 5)
+                w_grandchildren = {gc.get("label", ""): gc for gc in wc.get("children", [])} if wc else {}
+                new_grandchildren = []
+                for pgc in pc.get("children", []):
+                    wgc   = w_grandchildren.get(pgc.get("label", ""))
+                    pre_gc = list(wgc.get("values", []))[:splice_idx] if wgc else []
+                    new_grandchildren.append({**pgc, "values": pre_gc + list(pgc.get("values", []))})
+                spliced_pc = {**pc, "values": pre_c + list(pc.get("values", []))}
+                if new_grandchildren:
+                    spliced_pc["children"] = new_grandchildren
+                new_children.append(spliced_pc)
             p_val_key = "values" if "values" in pr else "total"
             new_rows.append({**pr,
                              p_val_key:  pre_total + list(pr.get(p_val_key, [])),
@@ -4033,6 +4200,12 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
     def _splice_metric(w_metric: dict, p_metric: dict) -> dict:
         if not w_metric or not p_metric:
             return p_metric or w_metric or {}
+        # Tab 4/5 have an extra nesting level: inner_key → metric → granularity.
+        # Detect this by checking if the first value's keys are monthly/yearly
+        # (meaning p_metric is an inner-tab dict, not a metric dict).
+        first_val = next(iter(p_metric.values()), {}) if p_metric else {}
+        if isinstance(first_val, dict) and ("monthly" in first_val or "yearly" in first_val):
+            return {mk: _splice_metric(w_metric.get(mk, {}), pm) for mk, pm in p_metric.items()}
         return {gk: _splice_gran(w_metric.get(gk, {}), pg) for gk, pg in p_metric.items()}
 
     def _splice_tab(w_tab: dict, p_tab: dict) -> dict:
@@ -4071,12 +4244,29 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
         granularity = cfg.get("model_granularity", "monthly")
 
         txn_months = get_transaction_distinct_months(cur, ta)
+        cfg_ts = cfg.get("train_start_date", "")
         if txn_months:
-            wide_from_year, wide_from_month = txn_months[0]
+            _txn_year, _txn_month = txn_months[0]
         else:
-            wide_from_year, wide_from_month = _parse_ym(cfg.get("train_start_date", flt.start_date))
+            _txn_year, _txn_month = _parse_ym(cfg_ts) if cfg_ts else _parse_ym(flt.start_date)
+        # Computation must start from the config's training start so the yearly
+        # aggregates (e.g. year 2020) use the same month boundary as the fresh
+        # Base computation inside _build_all_tabs_both_metrics.  Using txn_months[0]
+        # when it predates the training start (e.g. Jan-2020 vs Apr-2020) causes a
+        # systematic yearly discrepancy: the stored scenario sums Jan–Dec while the
+        # Base sums Apr–Dec, giving different annual totals for the same year.
+        # _wide_start stays at the first actual transaction month so the date-range
+        # picker shows the full available history.
+        if cfg_ts:
+            wide_from_year, wide_from_month = _parse_ym(cfg_ts)
+            # Never go later than the first actual transaction — if the config start
+            # date is somehow newer than the first DB row, fall back to the DB row.
+            if _txn_year * 100 + _txn_month < wide_from_year * 100 + wide_from_month:
+                wide_from_year, wide_from_month = _txn_year, _txn_month
+        else:
+            wide_from_year, wide_from_month = _txn_year, _txn_month
 
-        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
+        wide_start = date_type(_txn_year, _txn_month, 1).isoformat()  # metadata: full available range
         wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
                                   wide_forecast_periods).isoformat()
     except Exception as _de:
@@ -4345,7 +4535,7 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             # Without clipping, normalizeLiverResponse picks the active scenario's
             # Apr-20 months as the comparison-table axis, making all other scenarios
             # appear to start from Apr-20 in the chart and table.
-            active_ma      = _clip_ma_to_from_date(active_ma, from_year, from_month)
+            active_ma      = _recompute_yearly_in_ma(_clip_ma_to_from_date(active_ma, from_year, from_month))
             active_factors = saved[name]["factors"]
         else:
             raise ValueError(f"Scenario '{name}' not found.")
@@ -4363,7 +4553,9 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
                 raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
                 # Clip DB-stored wide data to the user's filter window so all
                 # scenarios share the same month axis in the comparison chart.
-                scenarios[sc] = {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month) if raw_ma else raw_ma}
+                if raw_ma:
+                    raw_ma = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                scenarios[sc] = {"market_analysis": raw_ma}
 
         # Return the REQUEST's filter dates — not DB-stored wide dates.
         # Returning stored.get("from_date") (e.g. "2020-04-01") poisoned
@@ -4454,7 +4646,7 @@ def refresh_liver(payload):
     flt    = payload.selected_filter
     active = payload.scenario_name
 
-    FLAT_DIST_TABS = ["payer_distribution", "product_distribution"]
+    FLAT_DIST_TABS = ["payment_type_distribution", "product_distribution"]
     HIER_DIST_TABS = ["payer_product", "product_payer"]
     HIER_TABS      = set(HIER_DIST_TABS)
 
@@ -4881,7 +5073,7 @@ def refresh_liver(payload):
                     # Cash case: no L3, scale L2 directly
                     l2_vals = [
                         int(round(float(l2["values"][i]) * float(new_tmv[i]) / float(old_tmv[i])))
-                        if i < len(old_tmv) and old_tmv[i] else 0
+                        if i < len(old_tmv) and old_tmv[i] and i < len(l2.get("values", [])) else 0
                         for i in range(n)
                     ]
                     new_l2s.append({"label": l2["label"], "values": l2_vals, "children": []})
@@ -4891,7 +5083,7 @@ def refresh_liver(payload):
                             "label": l3["label"],
                             "values": [
                                 int(round(float(l3["values"][i]) * float(new_tmv[i]) / float(old_tmv[i])))
-                                if i < len(old_tmv) and old_tmv[i] else 0
+                                if i < len(old_tmv) and old_tmv[i] and i < len(l3.get("values", [])) else 0
                                 for i in range(n)
                             ],
                             "children": [],
@@ -5005,6 +5197,485 @@ def refresh_liver(payload):
                   [{"label": "Total", "values": total_vals}] + new_non_total,
                   to_int=True)
 
+    def _cascade_flat_to_tab4(g):
+        """IPF payment_type_product to match current payment_type_distribution × product_distribution marginals."""
+        pt_vols = {
+            r["label"]: [float(v) for v in r["values"]]
+            for r in _rows("payment_type_distribution", "payer_volume", g)
+            if r.get("label", "").lower() != "total"
+        }
+        prod_vols = {
+            r["label"]: [float(v) for v in r["values"]]
+            for r in _rows("product_distribution", "payer_volume", g)
+            if r.get("label", "").lower() != "total"
+        }
+        sv_key = "payment_type_product"
+        seed = _sv_rows("payment_type_product", sv_key, "payer_volume", g)
+        if not (seed and pt_vols and prod_vols):
+            return
+        new_rows = _ipf_hier_rows(seed, pt_vols, prod_vols)
+        sv_gran = dict(ma.get("payment_type_product", {}).get(sv_key, {})
+                       .get("payer_volume", {}).get(g, {}))
+        sv_gran.setdefault("table", {})["rows"] = new_rows
+        _sync_hier_chart(sv_gran, to_int=True)
+        _set_sv_gran("payment_type_product", sv_key, "payer_volume", g, sv_gran)
+        sv_other = "product_payment_type"
+        if sv_other in ma.get("payment_type_product", {}):
+            other_rows = _sv_rows("payment_type_product", sv_other, "payer_volume", g)
+            if other_rows:
+                sv_other_gran = dict(ma.get("payment_type_product", {}).get(sv_other, {})
+                                     .get("payer_volume", {}).get(g, {}))
+                sv_other_gran.setdefault("table", {})["rows"] = _transpose_hier(new_rows, other_rows)
+                _sync_hier_chart(sv_other_gran, to_int=True)
+                _set_sv_gran("payment_type_product", sv_other, "payer_volume", g, sv_other_gran)
+
+    def _rebuild_sv2_sv3_from_sv1(gran):
+        """
+        Derive Tab-5 sv2 (PT→Product→Payer) and sv3 (Product→PT→Payer) directly from
+        corrected sv1 (PT→Payer→Product) leaf values so all three sub-views are always
+        numerically consistent (same totals, same leaf volumes, different grouping order).
+
+        Leaf extraction rules from sv1:
+          - L2 child WITH L3 children → L2 = Payer, L3 = Products (non-Cash)
+          - L2 child with NO L3       → L2 is a Cash Product (payer promoted to "NA")
+        """
+        sv1_gran = (
+            ma.get("payment_type_payer_product", {})
+              .get("payment_type_payer_product", {})
+              .get("payer_volume", {}).get(gran, {})
+            or full_ma.get("payment_type_payer_product", {})
+                      .get("payment_type_payer_product", {})
+                      .get("payer_volume", {}).get(gran, {})
+        )
+        sv1_rows = sv1_gran.get("table", {}).get("rows", [])
+        if not sv1_rows:
+            return
+
+        fsi = sv1_gran.get("chart", {}).get("forecast_start_index", 0)
+        n = max((len(l1.get("values", [])) for l1 in sv1_rows), default=0)
+        if not n:
+            return
+
+        def _z(): return [0.0] * n
+        def _iv(vals): return [int(round(v)) for v in vals]
+        def _add(a, b): return [a[i] + b[i] for i in range(n)]
+        def _fv(raw): return [float(v) for v in raw[:n]] + [0.0] * max(0, n - len(raw))
+
+        # Extract leaf data from sv1
+        leaf = {}      # (pt, payer, prod) → [n floats]; payer="NA" for Cash
+        pt_order = []  # unique PT labels in sv1 order
+
+        for l1 in sv1_rows:
+            pt = l1.get("label", "")
+            if pt not in pt_order:
+                pt_order.append(pt)
+            for l2 in l1.get("children", []):
+                l2_lbl = l2.get("label", "")
+                l3s = l2.get("children", [])
+                if l3s:
+                    payer = l2_lbl
+                    for l3 in l3s:
+                        prod = l3.get("label", "")
+                        vals = _fv(l3.get("values", []))
+                        key = (pt, payer, prod)
+                        leaf[key] = _add(leaf[key], vals) if key in leaf else vals
+                else:
+                    prod = l2_lbl  # Cash: L2 is the product, payer = "NA"
+                    vals = _fv(l2.get("values", []))
+                    key = (pt, "NA", prod)
+                    leaf[key] = _add(leaf[key], vals) if key in leaf else vals
+
+        if not leaf:
+            return
+
+        # ── sv2: PT → Product → Payer ────────────────────────────────────────
+        from collections import defaultdict
+        pt_prods = defaultdict(lambda: defaultdict(dict))  # pt → prod → payer → vals
+        for (pt, payer, prod), vals in leaf.items():
+            pt_prods[pt][prod][payer] = vals
+
+        sv2_rows = []
+        for pt in pt_order:
+            prod_map = pt_prods.get(pt, {})
+            l2_children = []
+            for prod in sorted(prod_map.keys()):
+                payer_map = prod_map[prod]
+                l3_children = [
+                    {"label": payer, "values": _iv(vals), "children": []}
+                    for payer, vals in sorted(payer_map.items())
+                    if payer != "NA"
+                ]
+                l2_vals = _z()
+                for vals in payer_map.values():
+                    l2_vals = _add(l2_vals, vals)
+                l2_children.append({
+                    "label": prod,
+                    "values": _iv(l2_vals),
+                    "children": l3_children,
+                })
+            l1_vals = _z()
+            for l2 in l2_children:
+                l1_vals = _add(l1_vals, [float(v) for v in l2["values"]])
+            sv2_rows.append({"label": pt, "values": _iv(l1_vals), "children": l2_children})
+
+        sv2_gran = dict(
+            ma.get("payment_type_payer_product", {}).get("payment_type_product_payer", {})
+              .get("payer_volume", {}).get(gran, {})
+            or full_ma.get("payment_type_payer_product", {}).get("payment_type_product_payer", {})
+                      .get("payer_volume", {}).get(gran, {})
+        )
+        sv2_gran.setdefault("table", {})["rows"] = sv2_rows
+        sv2_gran["table"]["type"] = "hierarchy"
+        if "chart" not in sv2_gran:
+            sv2_gran["chart"] = {"forecast_start_index": fsi}
+        _sync_tab5_chart(sv2_gran, to_int=True)
+        _set_sv_gran("payment_type_payer_product", "payment_type_product_payer", "payer_volume", gran, sv2_gran)
+
+        # ── sv3: Product → PT → Payer ────────────────────────────────────────
+        prod_pts = defaultdict(lambda: defaultdict(dict))  # prod → pt → payer → vals
+        for (pt, payer, prod), vals in leaf.items():
+            prod_pts[prod][pt][payer] = vals
+
+        all_prods = sorted(prod_pts.keys())
+        sv3_rows = []
+        for prod in all_prods:
+            pt_map = prod_pts[prod]
+            l2_children = []
+            for pt in pt_order:
+                if pt not in pt_map:
+                    continue
+                payer_map = pt_map[pt]
+                l3_children = [
+                    {"label": payer, "values": _iv(vals), "children": []}
+                    for payer, vals in sorted(payer_map.items())
+                    if payer != "NA"
+                ]
+                l2_vals = _z()
+                for vals in payer_map.values():
+                    l2_vals = _add(l2_vals, vals)
+                l2_children.append({
+                    "label": pt,
+                    "values": _iv(l2_vals),
+                    "children": l3_children,
+                })
+            l1_vals = _z()
+            for l2 in l2_children:
+                l1_vals = _add(l1_vals, [float(v) for v in l2["values"]])
+            sv3_rows.append({"label": prod, "values": _iv(l1_vals), "children": l2_children})
+
+        sv3_gran = dict(
+            ma.get("payment_type_payer_product", {}).get("product_payment_type_payer", {})
+              .get("payer_volume", {}).get(gran, {})
+            or full_ma.get("payment_type_payer_product", {}).get("product_payment_type_payer", {})
+                      .get("payer_volume", {}).get(gran, {})
+        )
+        sv3_gran.setdefault("table", {})["rows"] = sv3_rows
+        sv3_gran["table"]["type"] = "hierarchy"
+        if "chart" not in sv3_gran:
+            sv3_gran["chart"] = {"forecast_start_index": fsi}
+        _sync_tab5_chart(sv3_gran, to_int=True)
+        _set_sv_gran("payment_type_payer_product", "product_payment_type_payer", "payer_volume", gran, sv3_gran)
+
+    def _scale_tab5_from_tab4(g):
+        """
+        Scale Tab 5 (PT → Payer → Product) to match Tab 4's PT totals and product distribution.
+        - L1 (PT) total       → set to Tab 4 PT total
+        - L2 (Payer) total    → scaled proportionally by PT ratio (preserve payer split)
+        - L3 (Product) values → redistributed using Tab 4's product share within each PT
+                                 so that Tab 2 → Tab 4 → Tab 5 product cascade propagates correctly
+        """
+        sv4_rows = _sv_rows("payment_type_product", "payment_type_product", "payer_volume", g)
+        if not sv4_rows:
+            return
+
+        # Build per-PT: new total and product share fractions from Tab 4
+        pt_new: dict = {}
+        pt_prod_share: dict = {}  # {pt_lbl: {prod_lbl: [share_i, ...]}}
+        for l1 in sv4_rows:
+            pt_lbl = l1.get("label", "")
+            pt_total = [float(v) for v in l1.get("values", [])]
+            pt_new[pt_lbl] = pt_total
+            shares: dict = {}
+            for child in l1.get("children", []):
+                prod_lbl = child.get("label", "")
+                prod_vals = [float(v) for v in child.get("values", [])]
+                shares[prod_lbl] = [
+                    prod_vals[i] / pt_total[i] if i < len(pt_total) and pt_total[i] else 0.0
+                    for i in range(len(pt_total))
+                ]
+            pt_prod_share[pt_lbl] = shares
+
+        _all_sv5 = set(ma.get("payment_type_payer_product", {}).keys()) | set(full_ma.get("payment_type_payer_product", {}).keys())
+        for sv5_key in _all_sv5:
+            sv5_rows = (
+                _sv_rows("payment_type_payer_product", sv5_key, "payer_volume", g)
+                or full_ma.get("payment_type_payer_product", {}).get(sv5_key, {})
+                          .get("payer_volume", {}).get(g, {}).get("table", {}).get("rows", [])
+            )
+            if not sv5_rows:
+                continue
+            n = max((len(l1.get("values", [])) for l1 in sv5_rows), default=0)
+            new_l1s = []
+            for l1 in sv5_rows:
+                pt_lbl = l1.get("label", "")
+                old_pt = [float(v) for v in l1.get("values", [])]
+                new_pt = pt_new.get(pt_lbl, old_pt)
+                prod_shares = pt_prod_share.get(pt_lbl, {})
+                new_l2s = []
+                for l2 in l1.get("children", []):
+                    old_l2 = [float(v) for v in l2.get("values", [])]
+                    # Scale payer total by PT ratio
+                    new_l2_total = [
+                        int(round(old_l2[i] * new_pt[i] / old_pt[i]))
+                        if i < len(old_pt) and old_pt[i] else 0
+                        for i in range(n)
+                    ]
+                    l3s = l2.get("children", [])
+                    if l3s and prod_shares:
+                        # Apply Tab 4's product shares to L3 within this (PT, Payer) cell
+                        new_l3s = []
+                        for l3 in l3s:
+                            prod_lbl = l3.get("label", "")
+                            share = prod_shares.get(prod_lbl, [])
+                            new_l3_vals = [
+                                int(round(share[i] * new_l2_total[i]))
+                                if i < len(share) and i < len(new_l2_total) else 0
+                                for i in range(n)
+                            ]
+                            new_l3s.append({"label": prod_lbl, "values": new_l3_vals, "children": []})
+                        # Rounding correction: make sure L3 sum == L2 total
+                        for i in range(n):
+                            diff = new_l2_total[i] - sum(
+                                l3["values"][i] if i < len(l3["values"]) else 0 for l3 in new_l3s
+                            )
+                            if diff and new_l3s:
+                                new_l3s[0]["values"][i] += diff
+                        new_l2s.append({"label": l2["label"], "values": new_l2_total, "children": new_l3s})
+                    elif l3s:
+                        # No Tab 4 product share info — fall back to PT-ratio scaling
+                        new_l3s = [
+                            {"label": l3["label"], "values": [
+                                int(round(float(l3["values"][i]) * new_pt[i] / old_pt[i]))
+                                if i < len(old_pt) and old_pt[i] else 0
+                                for i in range(n)
+                            ], "children": []}
+                            for l3 in l3s
+                        ]
+                        new_l2s.append({"label": l2["label"], "values": new_l2_total, "children": new_l3s})
+                    else:
+                        # Cash: L2 label is a product (payer="NA", no L3 children).
+                        # Apply Tab 4 product share so Tab 2 product distribution
+                        # changes propagate correctly to Cash products in Tab 5.
+                        prod_lbl = l2["label"]
+                        share = prod_shares.get(prod_lbl)
+                        if share:
+                            new_l2_vals = [
+                                int(round(share[i] * new_pt[i]))
+                                if i < len(new_pt) else 0
+                                for i in range(n)
+                            ]
+                        else:
+                            new_l2_vals = new_l2_total
+                        new_l2s.append({"label": l2["label"], "values": new_l2_vals, "children": []})
+                l1_vals = [sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_l2s)
+                           for i in range(n)]
+                new_l1s.append({"label": pt_lbl, "values": l1_vals, "children": new_l2s})
+            sv5_gran = dict(
+                ma.get("payment_type_payer_product", {}).get(sv5_key, {}).get("payer_volume", {}).get(g, {})
+                or full_ma.get("payment_type_payer_product", {}).get(sv5_key, {}).get("payer_volume", {}).get(g, {})
+            )
+            sv5_gran.setdefault("table", {})["rows"] = new_l1s
+            _sync_tab5_chart(sv5_gran, to_int=True)
+            _set_sv_gran("payment_type_payer_product", sv5_key, "payer_volume", g, sv5_gran)
+
+    def _backfill_tab4_from_tab5(g):
+        """Derive payment_type_product by summing Tab 5 L3 (product) within each L1 (PT)."""
+        sv5_rows = None
+        for k in ma.get("payment_type_payer_product", {}):
+            r = _sv_rows("payment_type_payer_product", k, "payer_volume", g)
+            if r:
+                sv5_rows = r
+                break
+        if not sv5_rows:
+            return
+        pt_prod: dict = {}
+        for l1 in sv5_rows:
+            pt_lbl = l1.get("label", "")
+            pt_prod[pt_lbl] = {}
+            for l2 in l1.get("children", []):
+                l3s = l2.get("children", [])
+                if l3s:
+                    for l3 in l3s:
+                        prod_lbl = l3.get("label", "")
+                        if not prod_lbl or prod_lbl.upper() == "NA":
+                            continue
+                        vals = [float(v) for v in l3.get("values", [])]
+                        if prod_lbl in pt_prod[pt_lbl]:
+                            pt_prod[pt_lbl][prod_lbl] = [pt_prod[pt_lbl][prod_lbl][i] + vals[i]
+                                                          for i in range(len(vals))]
+                        else:
+                            pt_prod[pt_lbl][prod_lbl] = list(vals)
+                else:
+                    # Cash: L2 is a product (payer="NA", no L3 children)
+                    prod_lbl = l2.get("label", "")
+                    if prod_lbl and prod_lbl.upper() != "NA":
+                        vals = [float(v) for v in l2.get("values", [])]
+                        if prod_lbl in pt_prod[pt_lbl]:
+                            pt_prod[pt_lbl][prod_lbl] = [pt_prod[pt_lbl][prod_lbl][i] + vals[i]
+                                                          for i in range(len(vals))]
+                        else:
+                            pt_prod[pt_lbl][prod_lbl] = list(vals)
+        sv_key = "payment_type_product"
+        seed = _sv_rows("payment_type_product", sv_key, "payer_volume", g)
+        if not seed:
+            return
+        new_rows = []
+        for parent in seed:
+            pt_lbl = parent.get("label", "")
+            prod_map = pt_prod.get(pt_lbl, {})
+            new_children = []
+            for child in parent.get("children", []):
+                prod_lbl = child.get("label", "")
+                new_vals = [int(round(v)) for v in prod_map.get(
+                    prod_lbl, [float(v) for v in child.get("values", [])])]
+                new_children.append({"label": prod_lbl, "values": new_vals})
+            n_c = max((len(c["values"]) for c in new_children), default=0)
+            pt_total = [sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_children)
+                        for i in range(n_c)]
+            new_rows.append({"label": pt_lbl, "values": pt_total, "children": new_children})
+        sv_gran = dict(ma.get("payment_type_product", {}).get(sv_key, {})
+                       .get("payer_volume", {}).get(g, {}))
+        sv_gran.setdefault("table", {})["rows"] = new_rows
+        _sync_hier_chart(sv_gran, to_int=True)
+        _set_sv_gran("payment_type_product", sv_key, "payer_volume", g, sv_gran)
+        sv_other = "product_payment_type"
+        if sv_other in ma.get("payment_type_product", {}):
+            other_rows = _sv_rows("payment_type_product", sv_other, "payer_volume", g)
+            if other_rows:
+                sv_other_gran = dict(ma.get("payment_type_product", {}).get(sv_other, {})
+                                     .get("payer_volume", {}).get(g, {}))
+                sv_other_gran.setdefault("table", {})["rows"] = _transpose_hier(new_rows, other_rows)
+                _sync_hier_chart(sv_other_gran, to_int=True)
+                _set_sv_gran("payment_type_product", sv_other, "payer_volume", g, sv_other_gran)
+
+    def _backfill_tab2_from_tab5(g):
+        """Derive product_distribution by summing Tab 5 L3 (product) across all L1 and L2."""
+        sv5_rows = None
+        for k in ma.get("payment_type_payer_product", {}):
+            r = _sv_rows("payment_type_payer_product", k, "payer_volume", g)
+            if r:
+                sv5_rows = r
+                break
+        if not sv5_rows:
+            return
+        prod_sums: dict = {}
+        for l1 in sv5_rows:
+            for l2 in l1.get("children", []):
+                l3s = l2.get("children", [])
+                if l3s:
+                    for l3 in l3s:
+                        lbl = l3.get("label", "")
+                        if not lbl or lbl.upper() == "NA":
+                            continue
+                        vals = [float(v) for v in l3.get("values", [])]
+                        if lbl in prod_sums:
+                            prod_sums[lbl] = [prod_sums[lbl][i] + vals[i] for i in range(len(vals))]
+                        else:
+                            prod_sums[lbl] = list(vals)
+                else:
+                    # Cash: L2 is a product (payer="NA", no L3 children)
+                    lbl = l2.get("label", "")
+                    if lbl and lbl.upper() != "NA":
+                        vals = [float(v) for v in l2.get("values", [])]
+                        if lbl in prod_sums:
+                            prod_sums[lbl] = [prod_sums[lbl][i] + vals[i] for i in range(len(vals))]
+                        else:
+                            prod_sums[lbl] = list(vals)
+        if not prod_sums:
+            return
+        flat_rows = _rows("product_distribution", "payer_volume", g)
+        if not flat_rows:
+            return
+        n = max((len(r.get("values", [])) for r in flat_rows), default=0)
+        new_non_total = [
+            {"label": r["label"],
+             "values": [int(round(v)) for v in prod_sums.get(r["label"],
+                        [float(v) for v in r.get("values", [])])]}
+            for r in flat_rows if r.get("label", "").lower() != "total"
+        ]
+        total_vals = [sum(r["values"][i] if i < len(r["values"]) else 0 for r in new_non_total)
+                      for i in range(n)]
+        _put_flat("product_distribution", "payer_volume", g,
+                  [{"label": "Total", "values": total_vals}] + new_non_total, to_int=True)
+
+    def _backfill_tab3_from_tab5(g):
+        """Derive payment_type_distribution from Tab 5 L1 (payment_type) row totals."""
+        sv5_rows = None
+        for k in ma.get("payment_type_payer_product", {}):
+            r = _sv_rows("payment_type_payer_product", k, "payer_volume", g)
+            if r:
+                sv5_rows = r
+                break
+        if not sv5_rows:
+            return
+        pt_sums = {l1["label"]: [float(v) for v in l1.get("values", [])] for l1 in sv5_rows}
+        flat_rows = _rows("payment_type_distribution", "payer_volume", g)
+        if not flat_rows:
+            return
+        n = max((len(r.get("values", [])) for r in flat_rows), default=0)
+        new_non_total = [
+            {"label": r["label"],
+             "values": [int(round(v)) for v in pt_sums.get(r["label"],
+                        [float(v) for v in r.get("values", [])])]}
+            for r in flat_rows if r.get("label", "").lower() != "total"
+        ]
+        total_vals = [sum(r["values"][i] if i < len(r["values"]) else 0 for r in new_non_total)
+                      for i in range(n)]
+        _put_flat("payment_type_distribution", "payer_volume", g,
+                  [{"label": "Total", "values": total_vals}] + new_non_total, to_int=True)
+
+    def _backfill_tab2_tab3_from_tab4(g):
+        """Derive product_distribution and payment_type_distribution from payment_type_product marginals."""
+        sv_key = "payment_type_product"
+        seed = _sv_rows("payment_type_product", sv_key, "payer_volume", g)
+        if not seed:
+            return
+        n = max((len(l1.get("values", [])) for l1 in seed), default=0)
+        prod_sums: dict = {}
+        for parent in seed:
+            for child in parent.get("children", []):
+                lbl = child.get("label", "")
+                vals = [float(v) for v in child.get("values", [])]
+                if lbl in prod_sums:
+                    prod_sums[lbl] = [prod_sums[lbl][i] + vals[i] for i in range(len(vals))]
+                else:
+                    prod_sums[lbl] = list(vals)
+        flat_t2 = _rows("product_distribution", "payer_volume", g)
+        if flat_t2 and prod_sums:
+            new_non_tot2 = [
+                {"label": r["label"],
+                 "values": [int(round(v)) for v in prod_sums.get(r["label"],
+                            [float(v) for v in r.get("values", [])])]}
+                for r in flat_t2 if r.get("label", "").lower() != "total"
+            ]
+            tot2 = [sum(r["values"][i] if i < len(r["values"]) else 0 for r in new_non_tot2)
+                    for i in range(n)]
+            _put_flat("product_distribution", "payer_volume", g,
+                      [{"label": "Total", "values": tot2}] + new_non_tot2, to_int=True)
+        pt_sums = {parent["label"]: [float(v) for v in parent.get("values", [])] for parent in seed}
+        flat_t3 = _rows("payment_type_distribution", "payer_volume", g)
+        if flat_t3 and pt_sums:
+            new_non_tot3 = [
+                {"label": r["label"],
+                 "values": [int(round(v)) for v in pt_sums.get(r["label"],
+                            [float(v) for v in r.get("values", [])])]}
+                for r in flat_t3 if r.get("label", "").lower() != "total"
+            ]
+            tot3 = [sum(r["values"][i] if i < len(r["values"]) else 0 for r in new_non_tot3)
+                    for i in range(n)]
+            _put_flat("payment_type_distribution", "payer_volume", g,
+                      [{"label": "Total", "values": tot3}] + new_non_tot3, to_int=True)
+
     # ── Core propagation ─────────────────────────────────────────────────────
 
     for gran in ("monthly", "yearly"):
@@ -5034,29 +5705,101 @@ def refresh_liver(payload):
                     new_vol_rows = _scale_hier_vols(old_vol_rows, old_tmv, tmv_vals)
                     _put_hier(dtab, "payer_volume", gran, new_vol_rows, to_int=True)
 
-            # Tab 4 (payment_type_product): 2-level sub-views scaled proportionally
-            for sv_key in ma.get("payment_type_product", {}):
-                old_sv_rows = (full_ma.get("payment_type_product", {}).get(sv_key, {})
-                               .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", []))
+            # Tab 4 (payment_type_product): 2-level sub-views scaled proportionally.
+            # Step 1: scale by new_tmv/old_tmv — unedited periods get scale=1.0 exactly.
+            # Step 2: correction pass for ALL periods so Tab4 total == tmv_vals exactly,
+            #         fixing both edited periods and pre-existing model drift vs Tab1.
+            # Iterate over ALL sub-views (payload + full_ma) so non-visible sub-views also get corrected.
+            _n4 = len(tmv_vals)
+            _all_sv4_keys = set(ma.get("payment_type_product", {}).keys()) | set(full_ma.get("payment_type_product", {}).keys())
+            for sv_key in _all_sv4_keys:
+                old_sv_rows = (
+                    ma.get("payment_type_product", {}).get(sv_key, {})
+                      .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", [])
+                    or full_ma.get("payment_type_product", {}).get(sv_key, {})
+                              .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", [])
+                )
                 if old_sv_rows and old_tmv:
                     new_sv_rows = _scale_hier_vols(old_sv_rows, old_tmv, tmv_vals)
-                    sv_gran = dict(ma.get("payment_type_product", {}).get(sv_key, {})
-                                   .get("payer_volume", {}).get(gran, {}))
+                    # Correction: force ALL periods to exactly match TMV
+                    for i in range(min(_n4, len(old_tmv))):
+                        actual_new = sum(
+                            float(r.get("values", [0]*_n4)[i]) if i < len(r.get("values", [])) else 0.0
+                            for r in new_sv_rows
+                        )
+                        if not actual_new or abs(actual_new - tmv_vals[i]) < 1.0:
+                            continue
+                        f = tmv_vals[i] / actual_new
+                        for parent in new_sv_rows:
+                            for child in parent.get("children", []):
+                                cv = child.get("values", [])
+                                if i < len(cv):
+                                    cv[i] = int(round(cv[i] * f))
+                            parent["values"][i] = sum(
+                                c.get("values", [0]*(_n4+1))[i] if i < len(c.get("values", [])) else 0
+                                for c in parent.get("children", [])
+                            )
+                    sv_gran = dict(
+                        ma.get("payment_type_product", {}).get(sv_key, {}).get("payer_volume", {}).get(gran, {})
+                        or full_ma.get("payment_type_product", {}).get(sv_key, {}).get("payer_volume", {}).get(gran, {})
+                    )
                     sv_gran.setdefault("table", {})["rows"] = new_sv_rows
                     _sync_hier_chart(sv_gran, to_int=True)
                     _set_sv_gran("payment_type_product", sv_key, "payer_volume", gran, sv_gran)
 
-            # Tab 5 (payment_type_payer_product): 3-level sub-views scaled proportionally
-            for sv_key in ma.get("payment_type_payer_product", {}):
-                old_sv_rows = (full_ma.get("payment_type_payer_product", {}).get(sv_key, {})
-                               .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", []))
+            # Tab 5 (payment_type_payer_product): 3-level sub-views.
+            # Same two-step approach as Tab 4.
+            # Iterate over ALL sub-views (payload + full_ma) so every orientation is corrected.
+            _n5 = len(tmv_vals)
+            _all_sv5_keys = set(ma.get("payment_type_payer_product", {}).keys()) | set(full_ma.get("payment_type_payer_product", {}).keys())
+            for sv_key in _all_sv5_keys:
+                old_sv_rows = (
+                    ma.get("payment_type_payer_product", {}).get(sv_key, {})
+                      .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", [])
+                    or full_ma.get("payment_type_payer_product", {}).get(sv_key, {})
+                              .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", [])
+                )
                 if old_sv_rows and old_tmv:
                     new_sv_rows = _scale_3level_vols(old_sv_rows, old_tmv, tmv_vals)
-                    sv_gran = dict(ma.get("payment_type_payer_product", {}).get(sv_key, {})
-                                   .get("payer_volume", {}).get(gran, {}))
+                    # Correction: force ALL periods to exactly match TMV
+                    for i in range(min(_n5, len(old_tmv))):
+                        actual_new = sum(
+                            float(l1.get("values", [0]*_n5)[i]) if i < len(l1.get("values", [])) else 0.0
+                            for l1 in new_sv_rows
+                        )
+                        if not actual_new or abs(actual_new - tmv_vals[i]) < 1.0:
+                            continue
+                        f = tmv_vals[i] / actual_new
+                        for l1 in new_sv_rows:
+                            for l2 in l1.get("children", []):
+                                l3s = l2.get("children", [])
+                                if l3s:
+                                    for l3 in l3s:
+                                        v = l3.get("values", [])
+                                        if i < len(v):
+                                            v[i] = int(round(v[i] * f))
+                                    l2["values"][i] = sum(
+                                        l3.get("values", [0]*(_n5+1))[i] if i < len(l3.get("values", [])) else 0
+                                        for l3 in l3s
+                                    )
+                                else:
+                                    v = l2.get("values", [])
+                                    if i < len(v):
+                                        v[i] = int(round(v[i] * f))
+                            l1["values"][i] = sum(
+                                l2.get("values", [0]*(_n5+1))[i] if i < len(l2.get("values", [])) else 0
+                                for l2 in l1.get("children", [])
+                            )
+                    sv_gran = dict(
+                        ma.get("payment_type_payer_product", {}).get(sv_key, {}).get("payer_volume", {}).get(gran, {})
+                        or full_ma.get("payment_type_payer_product", {}).get(sv_key, {}).get("payer_volume", {}).get(gran, {})
+                    )
                     sv_gran.setdefault("table", {})["rows"] = new_sv_rows
                     _sync_tab5_chart(sv_gran, to_int=True)
                     _set_sv_gran("payment_type_payer_product", sv_key, "payer_volume", gran, sv_gran)
+
+            # Derive sv2/sv3 from corrected sv1 so all three sub-views are consistent.
+            _rebuild_sv2_sv3_from_sv1(gran)
 
         elif tab in FLAT_DIST_TABS:
             if metric == "payer_volume":
@@ -5077,13 +5820,13 @@ def refresh_liver(payload):
             # Top-to-bottom rule: Tab2 (product_distribution) rescales Tab3 downward,
             # but Tab3 edits do NOT touch Tab2.
             if tab == "product_distribution":
-                other_flat_shares = _rows("payer_distribution", "payer_share", gran)
+                other_flat_shares = _rows("payment_type_distribution", "payer_share", gran)
                 if other_flat_shares:
-                    _put_flat("payer_distribution", "payer_volume", gran,
+                    _put_flat("payment_type_distribution", "payer_volume", gran,
                               _vol_from_share(other_flat_shares, tmv_vals), to_int=True)
 
             # Derive Tab4 (payer_product) and Tab5 (product_payer) using IPF.
-            # Row targets = Tab3 (payer) volumes — always read after redistribution above.
+            # Row targets = Tab3 (payment_type) volumes — always read after redistribution above.
             # Col targets:
             #   Tab2 edit → use Tab2 directly (just redistributed, authoritative).
             #   Tab3 edit → derive from Tab4's current column sums, which carry forward
@@ -5092,7 +5835,7 @@ def refresh_liver(payload):
             tab4_seed = _rows("payer_product", "payer_volume", gran)
             row_targets = {
                 r["label"]: [float(v) for v in r["values"]]
-                for r in _rows("payer_distribution", "payer_volume", gran)
+                for r in _rows("payment_type_distribution", "payer_volume", gran)
                 if r.get("label", "").lower() != "total"
             }
             if tab == "product_distribution":
@@ -5126,6 +5869,10 @@ def refresh_liver(payload):
                 if tab5_seed:
                     _put_hier("product_payer", "payer_volume", gran,
                               _transpose_hier(new_tab4, tab5_seed), to_int=True)
+            # Cascade flat distribution changes to Tab 4 (payment_type_product) and Tab 5
+            _cascade_flat_to_tab4(gran)
+            _scale_tab5_from_tab4(gran)
+            _rebuild_sv2_sv3_from_sv1(gran)
 
         elif tab in HIER_TABS:
             share_rows = _rows(tab, "payer_share", gran)
@@ -5213,8 +5960,12 @@ def refresh_liver(payload):
                     _put_hier("payer_product", "payer_volume", gran,
                               _transpose_hier(updated_vol, tab4_seed), to_int=True)
 
-            _backfill_flat("payer_product", "payer_distribution", gran)
+            _backfill_flat("payer_product", "payment_type_distribution", gran)
             _backfill_flat("product_payer", "product_distribution", gran)
+            # Cascade updated flat distributions to Tab 4 and Tab 5
+            _cascade_flat_to_tab4(gran)
+            _scale_tab5_from_tab4(gran)
+            _rebuild_sv2_sv3_from_sv1(gran)
 
         elif tab == "payment_type_product":
             # Determine which sub-view was edited; fall back to the first sub-view
@@ -5285,15 +6036,212 @@ def refresh_liver(payload):
                     sv_other_gran.setdefault("table", {})["rows"] = _transpose_hier(edited_rows, other_rows)
                     _sync_hier_chart(sv_other_gran, to_int=True)
                     _set_sv_gran("payment_type_product", sv_other, "payer_volume", gran, sv_other_gran)
+            # Backfill Tab 2 and Tab 3 from Tab 4 marginals, then cascade down to Tab 5
+            _backfill_tab2_tab3_from_tab4(gran)
+            _scale_tab5_from_tab4(gran)
+            _rebuild_sv2_sv3_from_sv1(gran)
 
         elif tab == "payment_type_payer_product":
-            # Sync payer_volume chart for every sub-view from the 3-level table
-            for sv_key in ma.get("payment_type_payer_product", {}):
-                sv_vol_gran = dict(ma.get("payment_type_payer_product", {}).get(sv_key, {})
-                                   .get("payer_volume", {}).get(gran, {}))
-                if sv_vol_gran.get("table", {}).get("rows"):
-                    _sync_tab5_chart(sv_vol_gran, to_int=True)
-                    _set_sv_gran("payment_type_payer_product", sv_key, "payer_volume", gran, sv_vol_gran)
+            sv1_key = "payment_type_payer_product"
+            if metric == "payer_share" and eh and " > " in eh:
+                # payer_share edit in Tab 5's 3-level (or 2-level Cash) hierarchy.
+                # edited_hierarchy = "PT > Payer > Product" (3 parts, non-Cash)
+                #                 or "PT > Product"         (2 parts, Cash)
+                parts = [p.strip() for p in eh.split(" > ")]
+                share_rows = _sv_rows("payment_type_payer_product", sv1_key, "payer_share", gran)
+                # Use full_ma for parent volumes so non-edited payment types are not
+                # contaminated by any frontend-side volume recalculation.
+                vol_rows = (
+                    full_ma.get("payment_type_payer_product", {}).get(sv1_key, {})
+                           .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", [])
+                    or _sv_rows("payment_type_payer_product", sv1_key, "payer_volume", gran)
+                )
+                n_cols = len(tmv_vals) if tmv_vals else max(
+                    (len(l1.get("values", [])) for l1 in vol_rows), default=0
+                )
+                new_share_rows = share_rows
+                new_vol_rows   = vol_rows
+
+                if len(parts) == 3:
+                    pt_lbl, payer_lbl, prod_lbl = parts
+                    # Redistribute product siblings within the edited payer so they sum to 100%.
+                    new_share_rows = []
+                    for l1 in share_rows:
+                        if l1.get("label") != pt_lbl:
+                            new_share_rows.append(l1)
+                            continue
+                        new_l2s = []
+                        for l2 in l1.get("children", []):
+                            if l2.get("label") != payer_lbl:
+                                new_l2s.append(l2)
+                                continue
+                            l3s = l2.get("children", [])
+                            edited_l3  = next((c for c in l3s if c.get("label") == prod_lbl), None)
+                            sibling_l3s = [c for c in l3s if c.get("label") != prod_lbl]
+                            if not edited_l3:
+                                new_l2s.append(l2)
+                                continue
+                            new_sibs = []
+                            for sib in sibling_l3s:
+                                new_vals = []
+                                for i in range(n_cols):
+                                    ed_v = float(edited_l3["values"][i]) if i < len(edited_l3.get("values", [])) else 0.0
+                                    remaining = max(0.0, 100.0 - ed_v)
+                                    old_sib_sum = sum(
+                                        float(s["values"][i]) if i < len(s.get("values", [])) else 0.0
+                                        for s in sibling_l3s
+                                    )
+                                    old_v = float(sib["values"][i]) if i < len(sib.get("values", [])) else 0.0
+                                    new_vals.append(
+                                        round(old_v / old_sib_sum * remaining, 4) if old_sib_sum
+                                        else round(remaining / max(1, len(sibling_l3s)), 4)
+                                    )
+                                new_sibs.append({"label": sib["label"], "values": new_vals})
+                            new_l2s.append({**l2, "children": [edited_l3] + new_sibs})
+                        new_share_rows.append({**l1, "children": new_l2s})
+
+                    # Convert redistributed L3 shares → volumes using existing L2 (payer) total.
+                    new_vol_rows = []
+                    for l1_v in vol_rows:
+                        l1_lbl_v = l1_v.get("label", "")
+                        if l1_lbl_v != pt_lbl:
+                            new_vol_rows.append(l1_v)
+                            continue
+                        share_l1 = next((s for s in new_share_rows if s.get("label") == l1_lbl_v), None)
+                        new_l2s_v = []
+                        for l2_v in l1_v.get("children", []):
+                            l2_lbl_v = l2_v.get("label", "")
+                            if l2_lbl_v != payer_lbl or share_l1 is None:
+                                new_l2s_v.append(l2_v)
+                                continue
+                            share_l2 = next((s for s in share_l1.get("children", []) if s.get("label") == l2_lbl_v), None)
+                            if share_l2 is None:
+                                new_l2s_v.append(l2_v)
+                                continue
+                            l2_total_vols = [float(v) for v in l2_v.get("values", [])]
+                            new_l3s_v = []
+                            for l3_v in l2_v.get("children", []):
+                                l3_lbl_v = l3_v.get("label", "")
+                                share_l3 = next((s for s in share_l2.get("children", []) if s.get("label") == l3_lbl_v), None)
+                                if share_l3 is None:
+                                    new_l3s_v.append(l3_v)
+                                    continue
+                                new_l3_vols = [
+                                    int(round(float(share_l3["values"][i]) / 100.0 * l2_total_vols[i]))
+                                    if i < len(share_l3.get("values", [])) and i < len(l2_total_vols) else 0
+                                    for i in range(n_cols)
+                                ]
+                                new_l3s_v.append({"label": l3_lbl_v, "values": new_l3_vols, "children": []})
+                            l2_new_vals = [
+                                sum(c["values"][i] if i < len(c.get("values", [])) else 0 for c in new_l3s_v)
+                                for i in range(n_cols)
+                            ]
+                            new_l2s_v.append({"label": l2_lbl_v, "values": l2_new_vals, "children": new_l3s_v})
+                        l1_new_vals = [
+                            sum(c["values"][i] if i < len(c.get("values", [])) else 0 for c in new_l2s_v)
+                            for i in range(n_cols)
+                        ]
+                        new_vol_rows.append({"label": l1_lbl_v, "values": l1_new_vals, "children": new_l2s_v})
+
+                elif len(parts) == 2:
+                    # Cash (no payer level): PT > Product — redistribute product siblings within PT.
+                    pt_lbl, prod_lbl = parts
+                    new_share_rows = []
+                    for l1 in share_rows:
+                        if l1.get("label") != pt_lbl:
+                            new_share_rows.append(l1)
+                            continue
+                        l2s = l1.get("children", [])
+                        edited_l2  = next((c for c in l2s if c.get("label") == prod_lbl), None)
+                        sibling_l2s = [c for c in l2s if c.get("label") != prod_lbl]
+                        if not edited_l2:
+                            new_share_rows.append(l1)
+                            continue
+                        new_sibs = []
+                        for sib in sibling_l2s:
+                            new_vals = []
+                            for i in range(n_cols):
+                                ed_v = float(edited_l2["values"][i]) if i < len(edited_l2.get("values", [])) else 0.0
+                                remaining = max(0.0, 100.0 - ed_v)
+                                old_sib_sum = sum(
+                                    float(s["values"][i]) if i < len(s.get("values", [])) else 0.0
+                                    for s in sibling_l2s
+                                )
+                                old_v = float(sib["values"][i]) if i < len(sib.get("values", [])) else 0.0
+                                new_vals.append(
+                                    round(old_v / old_sib_sum * remaining, 4) if old_sib_sum
+                                    else round(remaining / max(1, len(sibling_l2s)), 4)
+                                )
+                            new_sibs.append({"label": sib["label"], "values": new_vals})
+                        new_share_rows.append({**l1, "children": [edited_l2] + new_sibs})
+
+                    # Convert redistributed L2 shares → volumes using existing L1 (PT) total.
+                    # If L2 has L3 sub-children (payer-level edit like "Commercial > CVS"),
+                    # scale those children proportionally to the new L2 volume rather than
+                    # dropping them with children: [].
+                    new_vol_rows = []
+                    for l1_v in vol_rows:
+                        l1_lbl_v = l1_v.get("label", "")
+                        if l1_lbl_v != pt_lbl:
+                            new_vol_rows.append(l1_v)
+                            continue
+                        share_l1 = next((s for s in new_share_rows if s.get("label") == l1_lbl_v), None)
+                        if share_l1 is None:
+                            new_vol_rows.append(l1_v)
+                            continue
+                        l1_total_vols = [float(v) for v in l1_v.get("values", [])]
+                        new_l2s_v = []
+                        for l2_v in l1_v.get("children", []):
+                            l2_lbl_v = l2_v.get("label", "")
+                            share_l2 = next((s for s in share_l1.get("children", []) if s.get("label") == l2_lbl_v), None)
+                            if share_l2 is None:
+                                new_l2s_v.append(l2_v)
+                                continue
+                            new_l2_vols = [
+                                int(round(float(share_l2["values"][i]) / 100.0 * l1_total_vols[i]))
+                                if i < len(share_l2.get("values", [])) and i < len(l1_total_vols) else 0
+                                for i in range(n_cols)
+                            ]
+                            # Scale any existing L3 sub-children proportionally to the new L2 volume.
+                            old_l2_vols = [float(v) for v in l2_v.get("values", [])]
+                            new_l3s_v = []
+                            for l3_v in l2_v.get("children", []):
+                                new_l3_vols = [
+                                    int(round(float(l3_v["values"][i]) / old_l2_vols[i] * new_l2_vols[i]))
+                                    if (i < len(l3_v.get("values", [])) and i < len(old_l2_vols)
+                                            and i < len(new_l2_vols) and old_l2_vols[i]) else 0
+                                    for i in range(n_cols)
+                                ]
+                                new_l3s_v.append({"label": l3_v.get("label", ""), "values": new_l3_vols, "children": []})
+                            new_l2s_v.append({"label": l2_lbl_v, "values": new_l2_vols, "children": new_l3s_v})
+                        l1_new_vals = [
+                            sum(c["values"][i] if i < len(c.get("values", [])) else 0 for c in new_l2s_v)
+                            for i in range(n_cols)
+                        ]
+                        new_vol_rows.append({"label": l1_lbl_v, "values": l1_new_vals, "children": new_l2s_v})
+
+                # Write redistributed shares and derived volumes; sync chart.
+                sv1_share_gran = dict(ma.get("payment_type_payer_product", {}).get(sv1_key, {})
+                                      .get("payer_share", {}).get(gran, {}))
+                sv1_share_gran.setdefault("table", {})["rows"] = new_share_rows
+                _set_sv_gran("payment_type_payer_product", sv1_key, "payer_share", gran, sv1_share_gran)
+                sv1_vol_gran = dict(ma.get("payment_type_payer_product", {}).get(sv1_key, {})
+                                    .get("payer_volume", {}).get(gran, {}))
+                sv1_vol_gran.setdefault("table", {})["rows"] = new_vol_rows
+                _sync_tab5_chart(sv1_vol_gran, to_int=True)
+                _set_sv_gran("payment_type_payer_product", sv1_key, "payer_volume", gran, sv1_vol_gran)
+            else:
+                # Volume edited (or no edited_hierarchy): sync chart from the existing volume table.
+                sv1_gran = dict(ma.get("payment_type_payer_product", {}).get(sv1_key, {})
+                                .get("payer_volume", {}).get(gran, {}))
+                if sv1_gran.get("table", {}).get("rows"):
+                    _sync_tab5_chart(sv1_gran, to_int=True)
+                    _set_sv_gran("payment_type_payer_product", sv1_key, "payer_volume", gran, sv1_gran)
+            _rebuild_sv2_sv3_from_sv1(gran)
+            # Backfill upstream tabs: Tab 4 from product sums per PT, then Tab 2 and Tab 3
+            _backfill_tab4_from_tab5(gran)
+            _backfill_tab2_from_tab5(gran)
+            _backfill_tab3_from_tab5(gran)
 
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).
@@ -5330,7 +6278,18 @@ def refresh_liver(payload):
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                # Get Base MA for prepending missing Tab 4/5 history.
+                if active == "Base":
+                    _base_ma_rc = full_ma  # full_ma is fresh Base from from_date
+                else:
+                    _base_cd_rc = all_saved_cd.get("Base", {})
+                    _base_raw_rc = _normalize_ma_keys(_base_cd_rc.get("market_analysis", {}))
+                    _base_ma_rc = _clip_ma_to_from_date(_base_raw_rc, from_year, from_month) if _base_raw_rc else {}
+                if _base_ma_rc:
+                    clipped = _prepend_wide_months(_base_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
+                return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
     # Strip extra scenario rows from the active scenario's TMV table.
