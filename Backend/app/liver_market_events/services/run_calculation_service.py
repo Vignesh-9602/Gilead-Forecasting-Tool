@@ -1364,7 +1364,7 @@ def run_market_events_calculation(payload) -> dict:
             # Start from recomputed totals (pre-fill may raise per-series totals above base)
             mod_total = _recompute_total_all(mod_data, month_tuples)
             # Keep history months aligned with base
-            mod_total[:forecast_start_index] = list(base_total_all[:forecast_start_index])
+            mod_total = list(base_total_all)   
 
             # Fixed order: payer_event -> product_event -> payment_type_payer_
             # product, each pass building on the previous pass's already-
