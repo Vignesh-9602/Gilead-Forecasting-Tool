@@ -2809,6 +2809,18 @@ def _merge_granularities(ma_monthly: dict, ma_yearly: dict) -> dict:
     return merged
 
 
+def _recompute_yearly_in_ma(ma_nested: dict) -> dict:
+    """
+    Recompute the yearly slice of a nested market_analysis from its monthly slice.
+    Used after clipping a stored scenario to the user's from_date so the yearly
+    aggregates match what the fresh Base computation would produce for the same
+    display window (avoids partial-year bias from the wide-range save computation).
+    """
+    ma_monthly, _ = _split_by_granularity(ma_nested)
+    ma_yearly     = _aggregate_monthly_to_yearly(ma_monthly)
+    return _merge_granularities(ma_monthly, ma_yearly)
+
+
 def _recompute_all_market_shares_nested(market_analysis: dict) -> dict:
     """Wrapper of _recompute_all_market_shares for the nested monthly/yearly format."""
     ma_monthly, ma_yearly = _split_by_granularity(market_analysis)
@@ -3024,6 +3036,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             # the DB-stored wide start (e.g. Apr-20).
             saved_market_analysis = _normalize_ma_keys(saved_market_analysis)
             saved_market_analysis = _clip_ma_to_from_date(saved_market_analysis, from_year, from_month)
+            saved_market_analysis = _recompute_yearly_in_ma(saved_market_analysis)
             market_analysis = _recompute_all_market_shares_nested(saved_market_analysis)
             _ets_raw = (saved_factors_raw or {}).get("ets", {})
             tab1_ets = EtsParams(
@@ -3165,6 +3178,15 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
                 scenario_name="Base",
             )
             base_full_ma = _recompute_all_market_shares_nested(base_full_ma)
+            # Patch the active stored scenario's Tab 4/5 gap: if the stored scenario
+            # was saved with a later from_date than the current filter, its Tab 4/5
+            # monthly data starts later than the current from_date. Prepend Base's
+            # historical months so the active scenario has the same date range as Base.
+            if saved_market_analysis:
+                _fds = f"{from_year:04d}-{from_month:02d}-01"
+                market_analysis = _prepend_wide_months(base_full_ma, market_analysis, _fds)
+                market_analysis = _recompute_yearly_in_ma(market_analysis)
+                market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
         def _inactive_stub(sc_name):
             # Base is always freshly computed so it stays in sync with the current
@@ -3177,6 +3199,10 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                # Prepend Base's historical months for any tabs (e.g. Tab 4/5) whose
+                # stored data starts later than from_date (saved with a narrower filter).
+                clipped = _prepend_wide_months(base_full_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
                 return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": {}}
 
@@ -3433,6 +3459,8 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _prepend_wide_months(base_full_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
                 return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
@@ -3886,6 +3914,8 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                clipped = _prepend_wide_months(_base_ma, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
                 return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
@@ -3981,9 +4011,8 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
             cd     = saved.get(sc, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
-                raw_ma = _recompute_all_market_shares_nested(
-                    _clip_ma_to_from_date(raw_ma, from_year, from_month)
-                )
+                clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                raw_ma = _recompute_all_market_shares_nested(clipped)
             scenarios[sc] = {"market_analysis": raw_ma}
 
     return {
@@ -4171,6 +4200,12 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
     def _splice_metric(w_metric: dict, p_metric: dict) -> dict:
         if not w_metric or not p_metric:
             return p_metric or w_metric or {}
+        # Tab 4/5 have an extra nesting level: inner_key → metric → granularity.
+        # Detect this by checking if the first value's keys are monthly/yearly
+        # (meaning p_metric is an inner-tab dict, not a metric dict).
+        first_val = next(iter(p_metric.values()), {}) if p_metric else {}
+        if isinstance(first_val, dict) and ("monthly" in first_val or "yearly" in first_val):
+            return {mk: _splice_metric(w_metric.get(mk, {}), pm) for mk, pm in p_metric.items()}
         return {gk: _splice_gran(w_metric.get(gk, {}), pg) for gk, pg in p_metric.items()}
 
     def _splice_tab(w_tab: dict, p_tab: dict) -> dict:
@@ -4209,12 +4244,29 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
         granularity = cfg.get("model_granularity", "monthly")
 
         txn_months = get_transaction_distinct_months(cur, ta)
+        cfg_ts = cfg.get("train_start_date", "")
         if txn_months:
-            wide_from_year, wide_from_month = txn_months[0]
+            _txn_year, _txn_month = txn_months[0]
         else:
-            wide_from_year, wide_from_month = _parse_ym(cfg.get("train_start_date", flt.start_date))
+            _txn_year, _txn_month = _parse_ym(cfg_ts) if cfg_ts else _parse_ym(flt.start_date)
+        # Computation must start from the config's training start so the yearly
+        # aggregates (e.g. year 2020) use the same month boundary as the fresh
+        # Base computation inside _build_all_tabs_both_metrics.  Using txn_months[0]
+        # when it predates the training start (e.g. Jan-2020 vs Apr-2020) causes a
+        # systematic yearly discrepancy: the stored scenario sums Jan–Dec while the
+        # Base sums Apr–Dec, giving different annual totals for the same year.
+        # _wide_start stays at the first actual transaction month so the date-range
+        # picker shows the full available history.
+        if cfg_ts:
+            wide_from_year, wide_from_month = _parse_ym(cfg_ts)
+            # Never go later than the first actual transaction — if the config start
+            # date is somehow newer than the first DB row, fall back to the DB row.
+            if _txn_year * 100 + _txn_month < wide_from_year * 100 + wide_from_month:
+                wide_from_year, wide_from_month = _txn_year, _txn_month
+        else:
+            wide_from_year, wide_from_month = _txn_year, _txn_month
 
-        wide_start = date_type(wide_from_year, wide_from_month, 1).isoformat()
+        wide_start = date_type(_txn_year, _txn_month, 1).isoformat()  # metadata: full available range
         wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
                                   wide_forecast_periods).isoformat()
     except Exception as _de:
@@ -4483,7 +4535,7 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
             # Without clipping, normalizeLiverResponse picks the active scenario's
             # Apr-20 months as the comparison-table axis, making all other scenarios
             # appear to start from Apr-20 in the chart and table.
-            active_ma      = _clip_ma_to_from_date(active_ma, from_year, from_month)
+            active_ma      = _recompute_yearly_in_ma(_clip_ma_to_from_date(active_ma, from_year, from_month))
             active_factors = saved[name]["factors"]
         else:
             raise ValueError(f"Scenario '{name}' not found.")
@@ -4501,7 +4553,9 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
                 raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
                 # Clip DB-stored wide data to the user's filter window so all
                 # scenarios share the same month axis in the comparison chart.
-                scenarios[sc] = {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month) if raw_ma else raw_ma}
+                if raw_ma:
+                    raw_ma = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
+                scenarios[sc] = {"market_analysis": raw_ma}
 
         # Return the REQUEST's filter dates — not DB-stored wide dates.
         # Returning stored.get("from_date") (e.g. "2020-04-01") poisoned
@@ -6225,6 +6279,16 @@ def refresh_liver(payload):
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 clipped = _clip_ma_to_from_date(raw_ma, from_year, from_month)
+                # Get Base MA for prepending missing Tab 4/5 history.
+                if active == "Base":
+                    _base_ma_rc = full_ma  # full_ma is fresh Base from from_date
+                else:
+                    _base_cd_rc = all_saved_cd.get("Base", {})
+                    _base_raw_rc = _normalize_ma_keys(_base_cd_rc.get("market_analysis", {}))
+                    _base_ma_rc = _clip_ma_to_from_date(_base_raw_rc, from_year, from_month) if _base_raw_rc else {}
+                if _base_ma_rc:
+                    clipped = _prepend_wide_months(_base_ma_rc, clipped, f"{from_year:04d}-{from_month:02d}-01")
+                clipped = _recompute_yearly_in_ma(clipped)
                 return {"market_analysis": _recompute_all_market_shares_nested(clipped)}
             return {"market_analysis": raw_ma}
 
