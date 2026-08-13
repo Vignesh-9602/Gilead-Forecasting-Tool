@@ -3046,11 +3046,20 @@ def _load_config(cur, ta: str, payment_type: str = None, payer: str = None, bran
 # since Base was last saved).
 # ---------------------------------------------------------------------------
 
-def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
-                               train_end_year: int, train_end_month: int,
-                               forecast_periods: int, granularity: str,
-                               sel_payer=None, sel_product=None, sel_payment_type=None) -> tuple[dict, dict]:
-    """Returns (market_analysis clipped to [from_year, from_month], factors dict)."""
+def _ensure_base_snapshot(cur, ta: str, train_end_year: int, train_end_month: int,
+                           forecast_periods: int, granularity: str,
+                           sel_payer=None, sel_product=None, sel_payment_type=None) -> tuple[dict, dict]:
+    """
+    Returns (WIDE market_analysis, factors dict) for the persisted "Base" scenario:
+    reads raw_liver.liver_scenarios when the stored snapshot is still fresh for the
+    current config, otherwise recomputes it fresh and self-heals the DB row (same
+    shape as apply_liver_filters' own Base-persist block).
+
+    Unclipped by design -- callers needing a narrow display window should clip the
+    result themselves (see _get_base_market_analysis below); callers needing the
+    full historical range for splicing padding into another scenario (see
+    _compute_wide_chart_data) use it as-is.
+    """
     needed_end    = _add_months(date_type(train_end_year, train_end_month, 1), forecast_periods)
     needed_end_ym = needed_end.year * 100 + needed_end.month
 
@@ -3067,12 +3076,7 @@ def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
             _sy, _sm = _parse_ym(str(stored_to))
             stored_to_ym = _sy * 100 + _sm
         if raw_ma and stored_to_ym is not None and stored_to_ym >= needed_end_ym:
-            clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(raw_ma, from_year, from_month))
-            # The cached snapshot was built with whatever payer/product/payment_type
-            # was active when it was last persisted -- re-derive Tab 5's chart series
-            # for the CURRENT filter so a cache hit never shows a stale drill-down level.
-            clipped = _resync_tab5_leaf_chart(clipped, sel_payment_type, sel_payer, sel_product)
-            return clipped, (stored_factors or {})
+            return raw_ma, (stored_factors or {})
 
     # Missing or stale — recompute the wide snapshot fresh and self-heal the DB row,
     # same shape as apply_liver_filters' own Base-persist block.
@@ -3080,7 +3084,7 @@ def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
     if txn_months:
         wide_from_year, wide_from_month = txn_months[0]
     else:
-        wide_from_year, wide_from_month = from_year, from_month
+        wide_from_year, wide_from_month = train_end_year, train_end_month
     wide_forecast_periods = _extend_forecast_periods_to_widest_end(
         cur, ta, train_end_year, train_end_month, forecast_periods
     )
@@ -3116,8 +3120,24 @@ def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
     except Exception as _e:
         print(f"[liver] Base snapshot self-heal skipped: {_e}")
 
-    clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(persist_ma, from_year, from_month))
-    return clipped, response_factors
+    return persist_ma, response_factors
+
+
+def _get_base_market_analysis(cur, ta: str, from_year: int, from_month: int,
+                               train_end_year: int, train_end_month: int,
+                               forecast_periods: int, granularity: str,
+                               sel_payer=None, sel_product=None, sel_payment_type=None) -> tuple[dict, dict]:
+    """Returns (market_analysis clipped to [from_year, from_month], factors dict)."""
+    wide_ma, factors = _ensure_base_snapshot(
+        cur, ta, train_end_year, train_end_month, forecast_periods, granularity,
+        sel_payer, sel_product, sel_payment_type,
+    )
+    clipped = _recompute_yearly_in_ma(_clip_ma_to_from_date(wide_ma, from_year, from_month))
+    # The cached snapshot was built with whatever payer/product/payment_type was
+    # active when it was last persisted -- re-derive Tab 5's chart series for the
+    # CURRENT filter so a cache hit never shows a stale drill-down level.
+    clipped = _resync_tab5_leaf_chart(clipped, sel_payment_type, sel_payer, sel_product)
+    return clipped, factors
 
 
 # ---------------------------------------------------------------------------
@@ -4078,7 +4098,7 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
 
         factors = payload.factors if isinstance(payload.factors, dict) else payload.factors.dict()
 
-        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        wide = _compute_wide_chart_data(cur, ta, flt)
         # Store the payload's market_analysis (filter window with user edits) for the
         # chart. from_date/to_date use the wide range so activate knows the full span.
         store_from = wide.get("_wide_start") or flt.start_date
@@ -4450,18 +4470,29 @@ def _prepend_wide_months(wide_ma: dict, payload_ma: dict, filter_start: str) -> 
     return {tk: _splice_tab(wide_ma.get(tk, {}), pt) for tk, pt in payload_ma.items()}
 
 
-def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
+def _compute_wide_chart_data(cur, ta: str, flt) -> dict:
     """
-    Recompute market_analysis for the FULL available date range (first TA
-    transaction month → config forecast end) using the saved factors.
+    Returns Base's persisted market_analysis for the FULL available date range
+    (first TA transaction month → widest config forecast end), for use as the
+    pre-filter-start "padding" spliced into a saved/updated scenario via
+    _prepend_wide_months.
+
+    Deliberately reads BASE's own snapshot (via _ensure_base_snapshot) rather
+    than recomputing with the scenario's own factors: padding months are ones
+    the user never touched, so they must look exactly like Base -- the same
+    guarantee _get_base_market_analysis already gives Base's own live display.
+    Using the scenario's factors here (as this function used to) meant e.g. a
+    custom moving-average window carried backward into unedited history,
+    producing small but real value drift between Base and a saved scenario
+    for the same padding months.
 
     Always returns at least {"_wide_start": ..., "_wide_end": ...} so callers
-    store the correct available dates even when chart building fails.
+    store the correct available dates even when the snapshot lookup fails.
     Falls back to {} only if the date range itself cannot be computed.
     """
-    # Stage 1: compute the available date range independently of chart building
+    # Stage 1: compute the available date range independently of the snapshot lookup
     wide_start = wide_end = None
-    wide_from_year = wide_from_month = train_end_year = train_end_month = None
+    train_end_year = train_end_month = None
     wide_forecast_periods = None
     granularity = "monthly"
     try:
@@ -4483,22 +4514,6 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
             _txn_year, _txn_month = txn_months[0]
         else:
             _txn_year, _txn_month = _parse_ym(cfg_ts) if cfg_ts else _parse_ym(flt.start_date)
-        # Computation must start from the config's training start so the yearly
-        # aggregates (e.g. year 2020) use the same month boundary as the fresh
-        # Base computation inside _build_all_tabs_both_metrics.  Using txn_months[0]
-        # when it predates the training start (e.g. Jan-2020 vs Apr-2020) causes a
-        # systematic yearly discrepancy: the stored scenario sums Jan–Dec while the
-        # Base sums Apr–Dec, giving different annual totals for the same year.
-        # _wide_start stays at the first actual transaction month so the date-range
-        # picker shows the full available history.
-        if cfg_ts:
-            wide_from_year, wide_from_month = _parse_ym(cfg_ts)
-            # Never go later than the first actual transaction — if the config start
-            # date is somehow newer than the first DB row, fall back to the DB row.
-            if _txn_year * 100 + _txn_month < wide_from_year * 100 + wide_from_month:
-                wide_from_year, wide_from_month = _txn_year, _txn_month
-        else:
-            wide_from_year, wide_from_month = _txn_year, _txn_month
 
         wide_start = date_type(_txn_year, _txn_month, 1).isoformat()  # metadata: full available range
         wide_end   = _add_months(date_type(train_end_year, train_end_month, 1),
@@ -4506,31 +4521,19 @@ def _compute_wide_chart_data(cur, ta: str, flt, factors_dict: dict) -> dict:
     except Exception as _de:
         print(f"[liver] wide date range skipped: {_de}")
 
-    if wide_from_year is None or train_end_year is None:
+    if train_end_year is None:
         return {}
 
-    # Stage 2: build full chart data — may fail; dates are already computed above
+    # Stage 2: read (or self-heal) Base's own snapshot for that range
     try:
-        try:
-            factors = LiverFactors(**factors_dict)
-        except Exception:
-            factors = _estimate_default_factors(
-                cur, ta, wide_from_year, wide_from_month,
-                train_end_year, train_end_month, granularity,
-            )
-
-        wide_ma, _ = _build_market_analysis_both_granularities(
-            cur, ta, wide_from_year, wide_from_month,
-            train_end_year, train_end_month, wide_forecast_periods, factors,
+        wide_ma, _ = _ensure_base_snapshot(
+            cur, ta, train_end_year, train_end_month, wide_forecast_periods, granularity,
             sel_payer=flt.payer or None, sel_product=flt.product or None,
             sel_payment_type=flt.payment_type or None,
-            force_tab1_ets=False,
-            scenario_name=ta,
         )
-        wide_ma = _recompute_all_market_shares_nested(wide_ma)
         return {"market_analysis": wide_ma, "_wide_start": wide_start, "_wide_end": wide_end}
     except Exception as _e:
-        print(f"[liver] wide chart_data recompute skipped: {_e}")
+        print(f"[liver] wide chart_data lookup skipped: {_e}")
         return {"_wide_start": wide_start, "_wide_end": wide_end}
 
 
@@ -4550,7 +4553,7 @@ def create_liver_scenario(payload: SaveScenarioRequest) -> dict:
         if scenario_exists(cur, name):
             raise ValueError(f"Scenario '{name}' already exists. Use PUT /liver/save to update it.")
 
-        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        wide = _compute_wide_chart_data(cur, ta, flt)
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
@@ -4604,7 +4607,7 @@ def update_liver_scenario_new(payload: SaveScenarioRequest) -> dict:
         if not scenario_exists(cur, name):
             raise ValueError(f"Scenario '{name}' does not exist. Use POST /liver/save to create it.")
 
-        wide = _compute_wide_chart_data(cur, ta, flt, factors)
+        wide = _compute_wide_chart_data(cur, ta, flt)
         store_from = wide.get("_wide_start") or flt.start_date
         store_to   = wide.get("_wide_end")   or flt.end_date
 
