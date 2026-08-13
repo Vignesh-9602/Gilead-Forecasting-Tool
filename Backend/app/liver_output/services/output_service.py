@@ -352,78 +352,16 @@ def _filter_ma_by_selection(ma: dict, sel_payment_types: set, sel_products: set)
     return result
 
 
-def _merge_gran(scenario_grans: dict) -> dict:
-    """scenario_grans: {scenario: gran_dict}. Merges N scenarios' chart+table into one comparison gran_dict."""
-    ref = next(iter(scenario_grans.values()), {}) or {}
-    ref_chart = ref.get("chart", {})
-    ref_table = ref.get("table", {})
-    months_key = "months" if "months" in ref_chart else "years"
-
-    def _suffixed(label: str, scenario: str, style: str) -> str:
-        # TMV's own row/series is already scenario-specific (table row label ==
-        # scenario_name) or scenario-agnostic ("Total Market Volume" chart
-        # series) — don't double-suffix an already-scenario-named label.
-        if label.strip().lower() == scenario.strip().lower():
-            return label
-        return f"{label} ({scenario} Scenario)" if style == "table" else f"{label} ({scenario})"
-
-    merged_series = []
-    merged_rows = []
-    for scenario, gran in scenario_grans.items():
-        for s in (gran or {}).get("chart", {}).get("series", []):
-            merged_series.append({**s, "label": _suffixed(s.get("label", ""), scenario, "chart")})
-        for r in (gran or {}).get("table", {}).get("rows", []):
-            merged_rows.append({**r, "label": _suffixed(r.get("label", ""), scenario, "table")})
-
-    return {
-        "chart": {
-            months_key: ref_chart.get(months_key, []),
-            "forecast_start_index": ref_chart.get("forecast_start_index", 0),
-            "series": merged_series,
-        },
-        "table": {
-            **{k: v for k, v in ref_table.items() if k != "rows"},
-            "rows": merged_rows,
-        },
-    }
-
-
-def _merge_node(nodes: dict):
-    """nodes: {scenario: subtree_at_this_path}. Recurses until a leaf {chart, table} gran, merging there."""
-    sample = next((v for v in nodes.values() if isinstance(v, dict) and v), {})
-    if "chart" in sample or "table" in sample:
-        return _merge_gran(nodes)
-    keys = set()
-    for v in nodes.values():
-        if isinstance(v, dict):
-            keys |= set(v.keys())
-    return {
-        k: _merge_node({sc: (v.get(k, {}) if isinstance(v, dict) else {}) for sc, v in nodes.items()})
-        for k in keys
-    }
-
-
-def _merge_scenarios_ma(scenario_mas: dict) -> dict:
-    """scenario_mas: {scenario_name: market_analysis}. Merges into one comparison market_analysis."""
-    tab_keys = set()
-    for ma in scenario_mas.values():
-        tab_keys |= set(ma.keys())
-    tab_keys.discard("event_management")
-
-    merged = {}
-    for tab in tab_keys:
-        nodes = {sc: ma.get(tab, {}) for sc, ma in scenario_mas.items()}
-        merged[tab] = _merge_node(nodes)
-    return merged
-
-
 def apply_output_filters(payload) -> dict:
     """
     Called when the user clicks Apply Filter.
-    Saves the filter selection, then returns output_tabs (Model Input's tab
-    set: total_market_volume, product_distribution, payment_type_distribution,
-    payment_type_product, payment_type_payer_product) for every selected
-    scenario, merged into one comparison view per tab.
+    Saves the filter selection, then returns output_tabs keyed by scenario
+    name — output_tabs = {scenario_name: {"market_analysis": {...}}, ...} —
+    the same shape Liver Model Input's own apply-filters/activate-scenario
+    responses use for their "scenarios" dict, with each scenario's
+    market_analysis using Model Input's own tab set: total_market_volume,
+    product_distribution, payment_type_distribution, payment_type_product,
+    payment_type_payer_product.
     """
     conn = get_connection()
     cur = conn.cursor()
@@ -439,12 +377,12 @@ def apply_output_filters(payload) -> dict:
         sel_payment_types = set(payers)
         sel_products      = set(products)
 
-        scenario_mas = {}
+        output_tabs = {}
         for scenario in scenario_names:
             ma = _load_scenario_ma(cur, scenario, from_year, from_month)
-            scenario_mas[scenario] = _filter_ma_by_selection(ma, sel_payment_types, sel_products)
-
-        output_tabs = _merge_scenarios_ma(scenario_mas)
+            ma = _filter_ma_by_selection(ma, sel_payment_types, sel_products)
+            ma.pop("event_management", None)
+            output_tabs[scenario] = {"market_analysis": ma}
 
         selected_filter = {
             "ta":             ta,
