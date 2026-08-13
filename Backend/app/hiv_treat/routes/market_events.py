@@ -2245,6 +2245,111 @@ def add_product(
         cursor.close()
 
 
+def sync_product_in_events_payload(
+    cursor,
+    ta_name,
+    old_name,
+    new_name=None,
+    scenario_name=None,
+):
+    """Rename or remove a product across every saved event for this TA.
+
+    A product name can appear in a saved event in three places: the
+    'products' list (Market Event + Product Event), the
+    'impacted_products' list (Product Event only), and as a key of
+    'source_percentages' (Product Event only). Without this, renaming or
+    deleting a product in product_master/forecast_outputs leaves those
+    saved events pointing at a product name that no longer exists, so
+    apply_market_event_filters keeps returning the stale name.
+
+    new_name=None means "remove" (product_master delete); a string means
+    "rename" (product_master update). scenario_name scopes the sync the
+    same way delete_product scopes the forecast-row delete -- omit it to
+    touch every scenario for the TA, which is what a TA-wide rename needs.
+
+    Returns the number of forecast_outputs rows rewritten.
+    """
+    old_key = old_name.strip().upper()
+
+    query = f"""
+        SELECT id, events_payload
+        FROM {FORECAST_TABLE}
+        WHERE ta_name = %s
+          AND events_payload IS NOT NULL
+    """
+    params = [ta_name]
+
+    if scenario_name:
+        query += " AND scenario_name = %s"
+        params.append(scenario_name)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    rewritten = 0
+
+    for row in rows:
+        events = parse_events_payload(row["events_payload"])
+        if not events:
+            continue
+
+        changed = False
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            for list_key in ("products", "impacted_products"):
+                values = event.get(list_key)
+                if not isinstance(values, list):
+                    continue
+
+                new_values = []
+                for value in values:
+                    if (
+                        isinstance(value, str)
+                        and value.strip().upper() == old_key
+                    ):
+                        changed = True
+                        if new_name is not None:
+                            new_values.append(new_name)
+                        # else: drop it -- product was removed
+                    else:
+                        new_values.append(value)
+
+                event[list_key] = new_values
+
+            percentages = event.get("source_percentages")
+            if isinstance(percentages, dict):
+                matched_key = next(
+                    (
+                        key for key in percentages
+                        if isinstance(key, str)
+                        and key.strip().upper() == old_key
+                    ),
+                    None,
+                )
+                if matched_key is not None:
+                    changed = True
+                    value = percentages.pop(matched_key)
+                    if new_name is not None:
+                        percentages[new_name] = value
+
+        if changed:
+            cursor.execute(
+                f"""
+                UPDATE {FORECAST_TABLE}
+                SET events_payload = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (json.dumps(events), row["id"]),
+            )
+            rewritten += 1
+
+    return rewritten
+
+
 @router.put("/products")
 def update_product(
     payload: UpdateProductRequest,
@@ -2327,6 +2432,41 @@ def update_product(
 
         updated_product = cursor.fetchone()
 
+        # --------------------------------------------------
+        # Keep forecast_outputs.product in sync
+        # --------------------------------------------------
+        # forecast_outputs.product holds the same value as
+        # product_master.product_id -- if it isn't renamed here too, every
+        # existing forecast row becomes orphaned from the renamed product.
+        cursor.execute(
+            f"""
+            UPDATE {FORECAST_TABLE}
+            SET product = %s,
+                updated_at = now()
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.new_product_name,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        # --------------------------------------------------
+        # Keep saved market/product events in sync
+        # --------------------------------------------------
+        # apply_market_event_filters reads product names back out of
+        # events_payload -- without this, a renamed product's events keep
+        # showing the old name even though forecast_outputs.product above
+        # was just updated.
+        events_rows_updated = sync_product_in_events_payload(
+            cursor,
+            payload.ta_name,
+            payload.product_name,
+            new_name=payload.new_product_name,
+        )
+
         db.commit()
 
         return {
@@ -2341,7 +2481,8 @@ def update_product(
                 ),
                 "added_by": updated_product["added_by"],
                 "modified_by": updated_product["modified_by"]
-            }
+            },
+            "events_payload_rows_updated": events_rows_updated
         }
 
     except Exception:
@@ -2616,6 +2757,22 @@ def delete_product(
             )
             master_rows_deleted = cursor.rowcount
 
+        # --------------------------------------------------
+        # Saved market/product events
+        # --------------------------------------------------
+        # apply_market_event_filters reads product names back out of
+        # events_payload -- without this, a deleted product keeps showing
+        # up in event rows even though its forecast/master rows are gone.
+        # Scoped the same way the forecast-row delete above is: one
+        # scenario when the caller asked for one, every scenario otherwise.
+        events_rows_updated = sync_product_in_events_payload(
+            cursor,
+            payload.ta_name,
+            stored_name,
+            new_name=None,
+            scenario_name=payload.scenario_name,
+        )
+
         db.commit()
 
         return {
@@ -2625,6 +2782,7 @@ def delete_product(
             "forecast_rows_deleted": forecast_rows_deleted,
             "master_rows_deleted": master_rows_deleted,
             "share_rows_renormalized": shares_renormalized,
+            "events_payload_rows_updated": events_rows_updated,
         }
 
     except Exception:

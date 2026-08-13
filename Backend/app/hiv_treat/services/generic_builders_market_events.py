@@ -2174,11 +2174,25 @@ def build_market_event(
     # Complete table rows
     # =====================================================
 
-    market_level_share_rows = (
-        build_market_level_rows(
-            tree,
-            metric="share",
-        )
+    def _round_row_values(rows, ndigits=2):
+        """Round every numeric list in a row structure, including nested
+        children. Non-numeric lists (labels, month headers) pass through."""
+        rounded = []
+        for row in rows:
+            new_row = dict(row)
+            values = new_row.get("values")
+            if isinstance(values, list) and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+            ):
+                new_row["values"] = [round(v, ndigits) for v in values]
+            children = new_row.get("children")
+            if isinstance(children, list):
+                new_row["children"] = _round_row_values(children, ndigits)
+            rounded.append(new_row)
+        return rounded
+
+    market_level_share_rows = _round_row_values(
+        build_market_level_rows(tree, metric="share")
     )
 
     # Full Product -> Market hierarchy for table
