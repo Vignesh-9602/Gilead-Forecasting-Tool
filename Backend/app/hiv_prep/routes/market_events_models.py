@@ -196,3 +196,30 @@ class DeleteEventRequest(BaseModel):
     ]
 
     event_name: str = Field(..., min_length=1)
+
+#new product
+class AddProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    company: Optional[str] = None
+    # Optional narrowing -- omit both to seed the product into every
+    # scenario and market that exists for this TA.
+    scenarios: Optional[List[str]] = None
+    markets: Optional[List[str]] = None
+
+class UpdateProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    new_product_name: str
+
+# class DeleteProductRequest(BaseModel):
+#     ta_name: str
+#     product_name: str
+
+
+class DeleteProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    # Limit the removal to one scenario; omit to remove the product
+    # everywhere, which is what "delete the product" normally means.
+    scenario_name: Optional[str] = None

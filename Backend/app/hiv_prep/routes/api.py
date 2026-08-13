@@ -691,6 +691,124 @@ def _resolve_from_lookup(lookup, market, source, product, metric, scenario):
 # =========================================================
 # ================= ENDPOINT ================================
 # =========================================================
+
+BASELINE_SCENARIO = "Base"
+
+# Breakdowns to post-process. Both are percentage views, so 2 decimals is
+# what the stored rows already carry -- anything longer is derivation noise
+# leaking into the UI (31.419958% next to Base's 31.42%, which reads as two
+# different numbers when it's one).
+POST_PROCESSED_BREAKDOWNS = ("market_distribution", "product_distribution" ,"market_product" ,"product_market")
+
+DISPLAY_DECIMALS = 2
+
+# A row is treated as absent rather than zero only if every value is
+# exactly zero. A real product that genuinely rounds to 0.00 in one month
+# still has non-zero months and is kept.
+ZERO_TOLERANCE = 0.0
+
+
+def _round_tree(obj, ndigits=DISPLAY_DECIMALS):
+    """Round every list of numbers anywhere in a nested chart/table
+    structure, whatever its shape. Non-numeric lists (months, years,
+    labels) and everything else pass through untouched."""
+    if isinstance(obj, dict):
+        return {k: _round_tree(v, ndigits) for k, v in obj.items()}
+    if isinstance(obj, list):
+        if obj and all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) for x in obj
+        ):
+            return [round(x, ndigits) for x in obj]
+        return [_round_tree(x, ndigits) for x in obj]
+    return obj
+
+
+def _is_all_zero(values) -> bool:
+    if not values:
+        return False
+    return all(
+        isinstance(v, (int, float)) and abs(v) <= ZERO_TOLERANCE
+        for v in values
+    )
+
+
+def _drop_empty_rows(obj, keep_labels=("Overall",)):
+    """Remove table rows whose every value is zero.
+
+    A product with no rows in this scenario is ASKED for anyway -- the
+    product list is built TA-wide, not per scenario -- and the lookup
+    returns nothing, which renders as 0%. That reads as a real product
+    holding no share rather than as one that isn't in this scenario at all.
+
+    Applied to the baseline only: in a working scenario a genuine zero is
+    information ('this scenario didn't launch it'), and dropping it would
+    make scenarios disagree on row count. Base is the reference everything
+    else is compared against, so a phantom there is pure noise.
+    """
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            if key in ("rows", "children") and isinstance(value, list):
+                kept = []
+                for row in value:
+                    if (
+                        isinstance(row, dict)
+                        and row.get("label") not in keep_labels
+                        and _is_all_zero(row.get("values"))
+                    ):
+                        continue
+                    kept.append(_drop_empty_rows(row, keep_labels))
+                result[key] = kept
+            else:
+                result[key] = _drop_empty_rows(value, keep_labels)
+        return result
+    if isinstance(obj, list):
+        return [_drop_empty_rows(x, keep_labels) for x in obj]
+    return obj
+
+
+def post_process_scenarios(response: dict) -> dict:
+    """Round the percentage breakdowns to 2 decimals, and strip phantom
+    all-zero rows from the baseline's product distribution.
+
+    Done on the assembled response rather than inside the builders: the
+    product list feeding these tables is TA-wide (see get_products), so
+    every scenario is asked for every product that exists anywhere. Fixing
+    it at the source means threading a scenario through several builders;
+    this shapes the one place all of them come together."""
+    scenarios = response.get("scenarios") or {}
+
+    for scenario, block in scenarios.items():
+        market_analysis = block.get("market_analysis") or {}
+        is_baseline = str(scenario).strip().lower() == BASELINE_SCENARIO.lower()
+
+        for breakdown in POST_PROCESSED_BREAKDOWNS:
+            view = market_analysis.get(breakdown)
+            if not view:
+                continue
+
+            view = _round_tree(view)
+
+            if is_baseline and breakdown == "product_distribution":
+                view = _drop_empty_rows(view)
+
+            if is_baseline and breakdown == "market_product":
+                view = _drop_empty_rows(view)
+
+            if is_baseline and breakdown == "product_market":
+                view = _drop_empty_rows(view)
+
+            market_analysis[breakdown] = view
+
+    # The comparison charts are built from the same series, so round them
+    # to match -- otherwise the same figure appears at two precisions
+    # depending on which panel you read it in.
+    comparison = response.get("comparison_charts") or {}
+    for breakdown in POST_PROCESSED_BREAKDOWNS:
+        if breakdown in comparison:
+            comparison[breakdown] = _round_tree(comparison[breakdown])
+
+    return response
  
 @router.post("/applyfilter")
 def apply_filter(payload: ApplyScenarioRequest):
@@ -736,7 +854,9 @@ def apply_filter(payload: ApplyScenarioRequest):
  
             MIS.fetch_forecast_scenario = fetch_deterministic
             try:
-                return build_apply_scenario_response(cur, payload, config)
+                return post_process_scenarios(
+                    build_apply_scenario_response(cur, payload, config)
+                )
             finally:
                 MIS.fetch_forecast_scenario = orig_fetch
  
@@ -1278,7 +1398,6 @@ def recalculate(payload: RecalculateRequest):
 
             MIS.fetch_forecast_scenario = fetch_with_override
  
- 
             try:
                 response = MIS.build_apply_scenario_response(cur, payload, config)
  
@@ -1545,6 +1664,8 @@ def refresh_edits(payload: RefreshEditsRequest):
                 active_scenario
             )
 
+            response = post_process_scenarios(response)
+
             # --------------------------------------------------
             # 8. Debug monthly and yearly chart series
             # --------------------------------------------------
@@ -1737,6 +1858,7 @@ def apply_scenario(payload: ApplySelectedScenarioRequest):
                 )
  
             response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+
             return response
  
     except HTTPException:
