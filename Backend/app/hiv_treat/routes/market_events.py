@@ -2508,6 +2508,29 @@ def update_product(
             new_name=payload.new_product_name,
         )
 
+        # --------------------------------------------------
+        # Keep the saved filter selection in sync
+        # --------------------------------------------------
+        # get_market_event_filters restores selected_filter.products straight
+        # out of user_configurations -- without this, renaming the product
+        # that's currently the saved selection leaves that row pointing at a
+        # product_id that no longer exists in product_master.
+        cursor.execute(
+            """
+            UPDATE raw_hiv_treat.user_configurations
+            SET product = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.new_product_name,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+        user_configurations_rows_updated = cursor.rowcount
+
         db.commit()
 
         return {
@@ -2523,7 +2546,8 @@ def update_product(
                 "added_by": updated_product["added_by"],
                 "modified_by": updated_product["modified_by"]
             },
-            "events_payload_rows_updated": events_rows_updated
+            "events_payload_rows_updated": events_rows_updated,
+            "user_configurations_rows_updated": user_configurations_rows_updated
         }
 
     except Exception:
@@ -2814,6 +2838,47 @@ def delete_product(
             scenario_name=payload.scenario_name,
         )
 
+        # --------------------------------------------------
+        # Saved filter selection
+        # --------------------------------------------------
+        # get_market_event_filters restores selected_filter.products straight
+        # out of user_configurations -- without this, deleting the product
+        # that's currently the saved selection leaves that row pointing at a
+        # product_id that no longer exists. Only relevant when the master row
+        # itself was actually removed (master_rows_deleted): a scenario-scoped
+        # delete leaves the product registered, so the saved selection is
+        # still valid and shouldn't be disturbed.
+        user_configurations_rows_updated = 0
+        if master_rows_deleted:
+            cursor.execute(
+                f"""
+                SELECT product_id
+                FROM {PRODUCT_MASTER_TABLE}
+                WHERE ta_name = %s
+                  AND product_id IS NOT NULL
+                  AND UPPER(TRIM(product_id)) <> 'ALL'
+                ORDER BY product_id
+                LIMIT 1
+                """,
+                (payload.ta_name,),
+            )
+            fallback_row = cursor.fetchone()
+            # None when no products remain at all -- clears the stale
+            # selection rather than leaving it pointing at nothing.
+            fallback_product = fallback_row["product_id"] if fallback_row else None
+
+            cursor.execute(
+                """
+                UPDATE raw_hiv_treat.user_configurations
+                SET product = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ta_name = %s
+                  AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+                """,
+                (fallback_product, payload.ta_name, stored_name),
+            )
+            user_configurations_rows_updated = cursor.rowcount
+
         db.commit()
 
         return {
@@ -2824,6 +2889,7 @@ def delete_product(
             "master_rows_deleted": master_rows_deleted,
             "share_rows_renormalized": shares_renormalized,
             "events_payload_rows_updated": events_rows_updated,
+            "user_configurations_rows_updated": user_configurations_rows_updated,
         }
 
     except Exception:
