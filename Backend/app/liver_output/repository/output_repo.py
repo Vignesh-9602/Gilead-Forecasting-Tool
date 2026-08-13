@@ -98,38 +98,6 @@ def get_all_configs_for_ta(cur, ta_name: str) -> list:
 # Transaction data queries
 # ---------------------------------------------------------------------------
 
-def get_volume_by_product_payer(cur, ta: str, from_year: int, from_month: int,
-                                to_year: int, to_month: int,
-                                payers: list = None, products: list = None) -> list:
-    """
-    Return (year, month, product, payer, volume) tuples from transaction_data.
-    Filtered by TA and date range; optionally narrowed by payers and products.
-    """
-    conditions = [
-        "ta = %s",
-        "(year * 100 + month) BETWEEN (%s * 100 + %s) AND (%s * 100 + %s)",
-    ]
-    params = [ta, from_year, from_month, to_year, to_month]
-
-    if payers:
-        conditions.append("payer = ANY(%s::text[])")
-        params.append(payers)
-
-    if products:
-        conditions.append("product = ANY(%s::text[])")
-        params.append(products)
-
-    query = f"""
-        SELECT year, month, product, payer, SUM(volume) AS volume
-        FROM raw_liver.transaction_data
-        WHERE {" AND ".join(conditions)}
-        GROUP BY year, month, product, payer
-        ORDER BY year, month, product, payer
-    """
-    cur.execute(query, params)
-    return cur.fetchall()
-
-
 def get_distinct_months(cur, ta: str) -> list:
     """
     Return all distinct (year, month) pairs from transaction_data for the given TA,
