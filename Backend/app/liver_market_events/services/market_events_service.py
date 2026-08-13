@@ -649,7 +649,7 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
             build_flat_table(chart_headers, forecast_start_index, [
                 {"label": "Overall", "values": [100.0] * len(month_tuples)}
             ]),
-            build_chart("years", year_labels, y_fsi, [
+            build_chart("months", year_labels, y_fsi, [
                 {"label": "Overall", "history": y_share_hist, "forecast": y_share_fcast}
             ]),
             build_flat_table(year_labels, y_fsi, [
@@ -665,7 +665,7 @@ def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_ind
             build_flat_table(chart_headers, forecast_start_index, [
                 {"label": "Overall Payer", "values": [int(round(v)) for v in total_all]}
             ]),
-            build_chart("years", year_labels, y_fsi, [
+            build_chart("months", year_labels, y_fsi, [
                 {"label": "Overall Payer",
                  "history":  [int(round(v)) for v in y_vol_hist],
                  "forecast": [int(round(v)) for v in y_vol_fcast]}
@@ -822,7 +822,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
 
     def _share_view(hdr, fsi, is_yearly):
         n_pts = len(year_labels) if is_yearly else len(month_tuples)
-        hkey  = "years" if is_yearly else "months"
+        hkey  = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
         spy   = payer_share_y if is_yearly else payer_share_m   # payer shares
         sp    = prod_share_y  if is_yearly else prod_share_m    # product shares (parents)
         pp    = pp_share_y    if is_yearly else pp_share_m      # cross shares
@@ -885,7 +885,7 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         }
 
     def _vol_view(hdr, fsi, is_yearly):
-        hkey  = "years" if is_yearly else "months"
+        hkey  = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
         vpy   = payer_vol_y if is_yearly else payer_vol_m
         vp    = prod_vol_y  if is_yearly else prod_vol_m
         pp    = pp_vol_y    if is_yearly else pp_vol_m
@@ -1101,7 +1101,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 
     def _share_view(hdr, fsi, is_yearly):
         n_pts = len(year_labels) if is_yearly else len(month_tuples)
-        hkey  = "years" if is_yearly else "months"
+        hkey  = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
         sp    = prod_share_y   if is_yearly else prod_share_m   # product shares
         spy   = payer_share_y  if is_yearly else payer_share_m  # payer shares (parents)
         pp    = pp_share_y     if is_yearly else pp_share_m     # cross shares
@@ -1114,8 +1114,12 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
             sh_h, sh_f = spy[payer][:2]
             return sh_h + sh_f
 
-        # product_level: flat product rows; chart scoped to selected_filter products
-        pl_series = [{"label": p, "history": sp[p][0], "forecast": sp[p][1]} for p in chart_products]
+        # product_level: flat product rows; chart shows ALL products, unfiltered
+        # -- matches payer_level's behavior in _build_payer_event_metrics
+        # (this tab isn't itself a calculation target, so run-calculation
+        # never narrows its own top-level distribution view; only the
+        # payer_product_level hierarchy below is scoped by touched entities).
+        pl_series = [{"label": p, "history": sp[p][0], "forecast": sp[p][1]} for p in show_products]
         pl_rows = [{"label": "Overall", "values": [100.0] * n_pts}] + [
             {"label": p, "values": [round(v, 2) for v in _prod_vals(p)]} for p in show_products
         ]
@@ -1164,7 +1168,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         }
 
     def _vol_view(hdr, fsi, is_yearly):
-        hkey  = "years" if is_yearly else "months"
+        hkey  = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
         vp    = prod_vol_y   if is_yearly else prod_vol_m
         vpy   = payer_vol_y  if is_yearly else payer_vol_m
         pp    = pp_vol_y     if is_yearly else pp_vol_m
@@ -1182,7 +1186,8 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
             yv_h, yv_f = vpy[payer][:2]
             return yv_h + yv_f
 
-        pl_series = [{"label": p, "history": _vi(vp[p][0]), "forecast": _vi(vp[p][1])} for p in chart_products]
+        # product_level (yearly): same as monthly above -- ALL products, unfiltered.
+        pl_series = [{"label": p, "history": _vi(vp[p][0]), "forecast": _vi(vp[p][1])} for p in show_products]
         pl_rows = [{"label": "Overall", "values": overall_vals}] + [
             {"label": p, "values": _vi(_prod_vals(p))} for p in show_products
         ]
@@ -1298,7 +1303,7 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
 #                          orient):
 #         """orient: 'payment_type_product' (parent=payment_type, child=product)
 #                     'product_payment_type' (parent=product, child=payment_type)"""
-#         hkey = "years" if is_yearly else "months"
+#         hkey = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
 #         hdr  = year_labels if is_yearly else chart_headers
 #         fsi  = y_fsi if is_yearly else forecast_start_index
 #         n    = len(hdr)
@@ -1501,7 +1506,7 @@ def _build_payment_type_payer_product_metrics(
         return [int(round(v)) for v in vals]
 
     def _build_ordering(order: str, is_yearly: bool):
-        hkey = "years" if is_yearly else "months"
+        hkey = "months"  # apply_liver_filters always uses "months" as the header key, even for yearly data -- match it exactly
         hdr  = year_labels if is_yearly else chart_headers
         fsi  = y_fsi if is_yearly else n_hist
         n    = len(hdr)
