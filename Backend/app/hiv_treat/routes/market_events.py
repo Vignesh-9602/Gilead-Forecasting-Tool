@@ -475,6 +475,61 @@ def apply_market_event_filters(
             or ""
         ).strip()
 
+        # --------------------------------------------------
+        # Fall back to a valid product when the requested one no longer exists
+        # --------------------------------------------------
+        # A product can go stale the same way a scenario can -- deleted via
+        # DELETE /products (see delete_product's own user_configurations
+        # fallback) or renamed out from under a caller holding the old name.
+        # Without this, the response's selected_filter -- and what
+        # save_user_configuration persists below -- would keep echoing back
+        # a product_id that no longer exists in product_master, and every
+        # downstream build_market_event/build_product_event call would be
+        # built against a product with no data.
+        master_products = fetch_master_products(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+        )
+        product_lookup = {p.strip().upper(): p for p in master_products}
+        requested_product = (selected_filter.products or "").strip()
+
+        if requested_product.upper() not in product_lookup:
+            # Prefer whatever user_configurations.product currently holds --
+            # update_product keeps that row in sync with a rename, so a
+            # caller still holding the OLD name (its own dropdown/local state
+            # hasn't refreshed since the rename) resolves to the product's
+            # NEW name rather than an unrelated "first available" pick. Only
+            # fall back to that arbitrary default when even the saved
+            # selection is stale (e.g. the product was deleted, not renamed).
+            # Queried directly (not via get_user_configuration) -- that
+            # helper assumes a plain tuple cursor, and this route's cursor
+            # is a RealDictCursor.
+            cursor.execute(
+                """
+                SELECT product
+                FROM raw_hiv_treat.user_configurations
+                WHERE user_id = %s
+                  AND ta_name = %s
+                """,
+                ("system", payload.ta_name),
+            )
+            saved_config_row = cursor.fetchone()
+            saved_product = (
+                (saved_config_row or {}).get("product") or ""
+            ).strip()
+
+            fallback_product = (
+                product_lookup.get(saved_product.upper())
+                or (master_products[0] if master_products else "")
+            )
+            print(
+                "WARNING: requested product",
+                repr(requested_product),
+                "no longer exists for this TA -- falling back to",
+                repr(fallback_product),
+            )
+            selected_filter.products = fallback_product
+
         print("\n" + "=" * 90)
         print("APPLY MARKET EVENT FILTERS")
         print("=" * 90)
