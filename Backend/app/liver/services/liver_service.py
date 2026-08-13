@@ -1410,7 +1410,8 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                                   sel_payer=None, sel_product=None, sel_payment_type=None,
                                   force_tab1_ets=True,
                                   scenario_name="Base",
-                                  auto_model="moving_average"):
+                                  auto_model="moving_average",
+                                  recalc_tab_level=2):
     """
     Build all tabs for BOTH market_volume and market_share.
     Returns (month_labels, forecast_start_index, market_analysis_dict, tab1_ets).
@@ -1539,6 +1540,17 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     # When Tab1 is the recalculate target (force_tab1_ets=False), Tab2-5 shares stay
     # flat via simple MA — the user's growth model only applies to Tab1's total volume.
     tab25_factors = factors if force_tab1_ets else factors.model_copy(update={"active_model": "moving_average"})
+
+    # Cascade: Tab N gets the new model only if recalc_tab_level <= N.
+    # Tabs above the recalculated level keep MA (their forecasts must not change).
+    # Tab levels: 2=product_distribution, 3=payment_type_distribution,
+    #             4=payment_type_product, 5=payment_type_payer_product.
+    _ma_factors = tab25_factors.model_copy(update={"active_model": "moving_average"})
+    _t2_f = tab25_factors if recalc_tab_level <= 2 else _ma_factors
+    _t3_f = tab25_factors if recalc_tab_level <= 3 else _ma_factors
+    _t4_f = tab25_factors if recalc_tab_level <= 4 else _ma_factors
+    _t5_f = tab25_factors  # always recalculated (recalc_tab_level is at most 5)
+
     tmv_map      = {scenario_name: {(r[0], r[1]): float(r[-1]) for r in _tmv_train}}
     tab1_mv_data = _build_tab_data(tmv_map, month_range, month_labels, fsi, tab1_factors,
                                    model_start_ym=_model_start_ym, fc_offset=_fc_offset)
@@ -1621,14 +1633,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     # TMV here (e.g. rolling MA) would cause a ratio mismatch and distort displayed shares.
     _tmv_fc = tab1_mv_data.chart.series[0].forecast_values if tab1_mv_data.chart.series else []
 
-    def bflat_mv(rows_mv, rows_ms, label, to_int=False, mmbl=None):
+    def bflat_mv(rows_mv, rows_ms, label, to_int=False, mmbl=None, _f=None):
         tab_data = _build_tab_data_from_shares(
             share_series_dict=_rows_to_series(rows_ms, 2, 3),
             vol_series_dict=_rows_to_series(rows_mv, 2, 3),
             month_range=month_range,
             month_labels=month_labels,
             forecast_start_index=fsi,
-            factors=tab25_factors,
+            factors=_f if _f is not None else tab25_factors,
             tmv_fc=_tmv_fc,
             selected_label=label,
             add_total=True,
@@ -1637,22 +1649,23 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         )
         return _fmt_flat(tab_data, month_labels, fsi, to_int=to_int)
 
-    def bflat_ms(rows, label):
+    def bflat_ms(rows, label, _f=None):
+        _eff = _f if _f is not None else tab25_factors
         return _fmt_flat(
-            _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, tab25_factors,
-                            selected_label=label, auto_model=auto_model, add_total=True,
-                            fc_offset=_fc_offset),
+            _build_tab_data(_rows_to_series(rows, 2, 3), month_range, month_labels, fsi, _eff,
+                            selected_label=label, auto_model=_eff.active_model.lower() if _eff else auto_model,
+                            add_total=True, fc_offset=_fc_offset),
             month_labels, fsi,
         )
 
-    def bhier_mv(rows_mv, rows_ms, parent_lbl, child_lbl, to_int=False, mmbp=None):
+    def bhier_mv(rows_mv, rows_ms, parent_lbl, child_lbl, to_int=False, mmbp=None, _f=None):
         hier_data = _build_hierarchical_tab_data_from_shares(
             rows_ms=rows_ms,
             rows_mv=rows_mv,
             month_range=month_range,
             month_labels=month_labels,
             forecast_start_index=fsi,
-            factors=tab25_factors,
+            factors=_f if _f is not None else tab25_factors,
             selected_child=child_lbl,
             model_months_by_pair=mmbp,
             fc_offset=_fc_offset,
@@ -1660,12 +1673,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         return _fmt_hier(hier_data, month_labels, fsi, to_int=to_int,
                          chart_parent_filter=parent_lbl, chart_child_filter=child_lbl)
 
-    def bhier_ms(rows, parent_lbl, child_lbl):
+    def bhier_ms(rows, parent_lbl, child_lbl, _f=None):
+        _eff = _f if _f is not None else tab25_factors
         return _fmt_hier(
-            _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, tab25_factors,
+            _build_hierarchical_tab_data(rows, month_range, month_labels, fsi, _eff,
                                          selected_parent=parent_lbl or "",
                                          selected_child=child_lbl or "",
-                                         auto_model=auto_model, fc_offset=_fc_offset),
+                                         auto_model=_eff.active_model.lower() if _eff else auto_model,
+                                         fc_offset=_fc_offset),
             month_labels, fsi, chart_parent_filter=parent_lbl, chart_child_filter=child_lbl,
         )
 
@@ -1686,10 +1701,25 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
     # trailing average.  Uses the closure variables month_range / month_labels / fsi
     # / _tmv_fc / tab25_factors that are already in scope.
     def _build_tab5_3level(ptpp_rows, dim1_col, dim2_col, dim3_col, to_int=False, as_share=False,
-                           chart_d1_filter=None, chart_d2_filter=None):
+                           chart_d1_filter=None, chart_d2_filter=None,
+                           sel_d2=None, sel_d3=None, _tab5_f=None,
+                           canonical_l3_fc=None, canonical_idx=(0, 1, 2),
+                           _canonical_l3_out=None,
+                           l1_target_fc=None, product_target_fc=None):
+        """
+        canonical_l3_fc : when provided, skip model computation and derive l3/l2/l1 forecasts
+                          from these pre-computed (pt, payer, product) leaf volumes.
+        canonical_idx   : 3-tuple mapping (d1, d2, d3) → canonical (pt, payer, product) key.
+                          (0,1,2) = identity, (0,2,1) = swap d2/d3, (1,2,0) = rotate.
+        _canonical_l3_out : mutable dict populated with this call's l3_fc for the canonical
+                            orientation so derived orientations can read it.
+        """
         n     = len(month_range)
         n_fc  = n - fsi
         w     = min(6, fsi)
+
+        # Allow caller to override closure tab25_factors (for cascade tab-level control).
+        _eff_tab25 = _tab5_f if _tab5_f is not None else tab25_factors
 
         # aggregate
         vol3: dict = defaultdict(float)
@@ -1727,37 +1757,316 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         # ── forecast ────────────────────────────────────────────────────────
         gt_h = [float(vol0.get((y, m), 0.0)) for y, m in month_range[:fsi]]
 
-        def _h_pct(vol, key):
+        def _h_pct(vol, key, den_h=None):
+            _den = den_h if den_h is not None else gt_h
             return [
-                vol.get((y, m) + key, 0.0) / gt_h[i] * 100 if gt_h[i] else 0.0
+                vol.get((y, m) + key, 0.0) / _den[i] * 100 if _den[i] else 0.0
                 for i, (y, m) in enumerate(month_range[:fsi])
             ]
 
-        l1_fc: dict = {}
-        for d1 in all_d1:
-            s = _sh(_h(vol1, (d1,)), gt_h)
-            l1_fc[(d1,)] = [s * t for t in _tmv_fc] if _tmv_fc else [0.0] * n_fc
+        # _h_wide: history over the FULL training window (_wide_actual_range), not just the
+        # display range.  Used for all MA and share-model computations so that results are
+        # independent of the user's from_date filter (e.g. a from_date of Nov-2025 with
+        # train_end Oct-2025 gives fsi=0 / w=0 from the display range, but 6-period MA
+        # still works correctly using the full training data).
+        def _h_wide(vol, key):
+            return [float(vol.get((y, m) + key, 0.0)) for y, m in _wide_actual_range]
 
-        l2_fc: dict = {}
-        for d1 in all_d1:
-            h1 = _h(vol1, (d1,))
-            for d2 in dim2_by_d1[d1]:
-                s = _sh(_h(vol2, (d1, d2)), h1)
-                l2_fc[(d1, d2)] = [s * v for v in l1_fc[(d1,)]]
+        gt_h_wide = [float(vol0.get((y, m), 0.0)) for y, m in _wide_actual_range]
 
-        l3_fc: dict = {}
-        for (d1, d2), d3_set in dim3_by_d1d2.items():
-            h2 = _h(vol2, (d1, d2))
-            for d3 in d3_set:
-                s = _sh(_h(vol3, (d1, d2, d3)), h2)
-                l3_fc[(d1, d2, d3)] = [s * v for v in l2_fc.get((d1, d2), [0.0] * n_fc)]
+        # For moving_average: each level uses its own direct MA so the forecast is
+        # flat and self-consistent (MA is linear → child MAs sum to parent MA).
+        # For other models: apply the model to the selected label's within-parent share
+        # (sel_d2 at L2, sel_d3 at L3) and redistribute others proportionally — same
+        # approach as _build_tab_data_from_shares / _build_hierarchical_tab_data_from_shares.
+        # When no selection is set at a level, proportional (constant) shares are used.
+        use_direct_ma = (_eff_tab25.active_model.lower() if _eff_tab25 else auto_model) == "moving_average"
+        if canonical_l3_fc is not None:
+            # Derived orientation: volumes come from the canonical forecast, not the model.
+            # Always use volume-ratio share calculation (not MA of historical shares).
+            use_direct_ma = False
+        _w6 = 6  # MA window always 6 — uses full training history, not display range
+
+        # Trajectory adjustment for share-model forecasting (mirrors _build_hierarchical).
+        _fms_5 = month_range[fsi:]
+        _ak_5  = _eff_tab25.active_model.lower() if _eff_tab25 else "moving_average"
+        _fp_5  = getattr(_eff_tab25, _ak_5, None) if _eff_tab25 else None
+        _ts_5  = getattr(_fp_5, "trajectory_start", None) if _fp_5 else None
+        _ti_5  = 0
+        if _ts_5:
+            try:
+                _td_5 = datetime.fromisoformat(_ts_5[:10])
+                for _ii_5, (_fy_5, _fm_5) in enumerate(_fms_5):
+                    if datetime(_fy_5, _fm_5, 1) >= _td_5:
+                        _ti_5 = _ii_5
+                        break
+            except Exception:
+                pass
+        _traj_adj_5 = _ti_5 + _fc_offset
+        _mfc5 = n_fc + _fc_offset  # total forecast periods incl. pre-display offset
+
+        def _share_fc_5(share_hist):
+            """Apply model to a share history (full range) and return n_fc display periods."""
+            raw = _forecast_share_by_factors(share_hist, _mfc5, _eff_tab25, traj_adj=_traj_adj_5)
+            return [min(100.0, max(0.0, v)) for v in raw[_fc_offset:]]
+
+        def _sh_wide(num_wide, den_wide):
+            """Proportional share from full-range history vectors."""
+            tn = sum(num_wide[-_w6:])
+            td = sum(den_wide[-_w6:])
+            return tn / td if td else 0.0
+
+        def _rolling_ma(history, window, n_periods):
+            """Rolling MA: each forecast period slides the window by one, including prior forecasts."""
+            if not history:
+                return [0.0] * n_periods
+            buf = list(history[-window:])
+            if len(buf) < window:
+                buf = [0.0] * (window - len(buf)) + buf
+            result = []
+            for _ in range(n_periods):
+                val = round(sum(buf) / len(buf), 6)
+                result.append(val)
+                buf = buf[1:] + [val]
+            return result
+
+        if canonical_l3_fc is not None:
+            # ── Derived orientation ────────────────────────────────────────────
+            # Volumes come from the canonical (pt, payer, product) forecast.
+            # Re-index by mapping current (d1, d2, d3) → canonical key via canonical_idx.
+            ci = canonical_idx  # e.g. (0,2,1) or (1,2,0)
+
+            l3_fc: dict = {}
+            l2_fc: dict = defaultdict(lambda: [0.0] * n_fc)
+            l1_fc: dict = defaultdict(lambda: [0.0] * n_fc)
+
+            for d1 in all_d1:
+                for d2 in dim2_by_d1[d1]:
+                    d3_set = dim3_by_d1d2.get((d1, d2), set())
+                    for d3 in d3_set:
+                        dims = (d1, d2, d3)
+                        can_key = (dims[ci[0]], dims[ci[1]], dims[ci[2]])
+                        l3v = canonical_l3_fc.get(can_key, [0.0] * n_fc)
+                        l3_fc[(d1, d2, d3)] = l3v
+                        l2_fc[(d1, d2)] = [l2_fc[(d1, d2)][i] + l3v[i] for i in range(n_fc)]
+                    if not d3_set:
+                        # No non-NA d3 entries (e.g. Cash payment type has payer="NA").
+                        # Look up canonical using "NA" substituted into the d3 position so
+                        # the Cash product rows are not silently zeroed.
+                        dims_na = (d1, d2, "NA")
+                        can_key = (dims_na[ci[0]], dims_na[ci[1]], dims_na[ci[2]])
+                        l2v = canonical_l3_fc.get(can_key, [0.0] * n_fc)
+                        l2_fc[(d1, d2)] = [l2_fc[(d1, d2)][i] + l2v[i] for i in range(n_fc)]
+                # Sum all d2 contributions into l1 AFTER inner d2 loop finishes
+                for d2 in dim2_by_d1[d1]:
+                    l1_fc[(d1,)] = [l1_fc[(d1,)][i] + l2_fc[(d1, d2)][i] for i in range(n_fc)]
+            l2_fc = dict(l2_fc)
+            l1_fc = dict(l1_fc)
+
+        else:
+            # ── Canonical / standalone orientation: apply model ────────────────
+            # When l1_target_fc is provided (Tab3 payment_type volumes), L1 is
+            # anchored to Tab3 so all tabs stay numerically consistent.
+            l1_fc: dict = {}
+            for d1 in all_d1:
+                if l1_target_fc is not None:
+                    l1_fc[(d1,)] = l1_target_fc.get(d1, [0.0] * n_fc)
+                else:
+                    h1_wide = _h_wide(vol1, (d1,))
+                    if use_direct_ma:
+                        l1_fc[(d1,)] = _rolling_ma(h1_wide, _w6, n_fc)
+                    else:
+                        s = _sh_wide(h1_wide, gt_h_wide)
+                        l1_fc[(d1,)] = [s * t for t in _tmv_fc] if _tmv_fc else [0.0] * n_fc
+
+            # When l1_target_fc constrains L1, independent MA for L2/L3 would
+            # break the sum — use proportional shares instead (unless a specific
+            # selection is active, which keeps the model-on-selection path).
+            _l2_use_proportional = l1_target_fc is not None and sel_d2 is None
+
+            l2_fc: dict = {}
+            for d1 in all_d1:
+                h1_wide  = _h_wide(vol1, (d1,))
+                d2_list  = list(dim2_by_d1[d1])
+                l1_parent = l1_fc.get((d1,), [0.0] * n_fc)
+
+                if use_direct_ma and not _l2_use_proportional:
+                    for d2 in d2_list:
+                        h2_wide = _h_wide(vol2, (d1, d2))
+                        l2_fc[(d1, d2)] = _rolling_ma(h2_wide, _w6, n_fc)
+
+                elif sel_d2 is not None and sel_d2 in d2_list:
+                    sel_h2_w = _h_wide(vol2, (d1, sel_d2))
+                    sel_sh_h = [sel_h2_w[i] / h1_wide[i] * 100 if h1_wide[i] else 0.0 for i in range(len(h1_wide))]
+                    sel_sf   = _share_fc_5(sel_sh_h)
+
+                    others    = [d2 for d2 in d2_list if d2 != sel_d2]
+                    last_h1_w = h1_wide[-1] if h1_wide else 0.0
+                    last_oth  = {d2: (_h_wide(vol2, (d1, d2))[-1] / last_h1_w * 100 if last_h1_w else 0.0)
+                                 for d2 in others}
+                    oth_sum   = sum(last_oth.values())
+
+                    l2_fc[(d1, sel_d2)] = [l1_parent[i] * sel_sf[i] / 100 for i in range(n_fc)]
+                    for d2 in others:
+                        base_s = last_oth.get(d2, 0.0)
+                        l2_fc[(d1, d2)] = [
+                            l1_parent[i] * (max(0.0, 100.0 - sel_sf[i]) * base_s / oth_sum if oth_sum else 0.0) / 100
+                            for i in range(n_fc)
+                        ]
+
+                else:
+                    for d2 in d2_list:
+                        h2_wide = _h_wide(vol2, (d1, d2))
+                        s = _sh_wide(h2_wide, h1_wide)
+                        l2_fc[(d1, d2)] = [s * v for v in l1_parent]
+
+            _l3_use_proportional = l1_target_fc is not None and sel_d3 is None
+
+            l3_fc: dict = {}
+            for (d1, d2), d3_set in dim3_by_d1d2.items():
+                h2_wide   = _h_wide(vol2, (d1, d2))
+                d3_list   = sorted(d3_set)
+                l2_parent = l2_fc.get((d1, d2), [0.0] * n_fc)
+
+                if use_direct_ma and not _l3_use_proportional:
+                    for d3 in d3_list:
+                        h3_wide = _h_wide(vol3, (d1, d2, d3))
+                        l3_fc[(d1, d2, d3)] = _rolling_ma(h3_wide, _w6, n_fc)
+
+                elif sel_d3 is not None and sel_d3 in d3_set:
+                    sel_h3_w = _h_wide(vol3, (d1, d2, sel_d3))
+                    sel_sh_h = [sel_h3_w[i] / h2_wide[i] * 100 if h2_wide[i] else 0.0 for i in range(len(h2_wide))]
+                    sel_sf   = _share_fc_5(sel_sh_h)
+
+                    others    = [d3 for d3 in d3_list if d3 != sel_d3]
+                    last_h2_w = h2_wide[-1] if h2_wide else 0.0
+                    last_oth  = {d3: (_h_wide(vol3, (d1, d2, d3))[-1] / last_h2_w * 100 if last_h2_w else 0.0)
+                                 for d3 in others}
+                    oth_sum   = sum(last_oth.values())
+
+                    l3_fc[(d1, d2, sel_d3)] = [l2_parent[i] * sel_sf[i] / 100 for i in range(n_fc)]
+                    for d3 in others:
+                        base_s = last_oth.get(d3, 0.0)
+                        l3_fc[(d1, d2, d3)] = [
+                            l2_parent[i] * (max(0.0, 100.0 - sel_sf[i]) * base_s / oth_sum if oth_sum else 0.0) / 100
+                            for i in range(n_fc)
+                        ]
+
+                else:
+                    for d3 in d3_list:
+                        h3_wide = _h_wide(vol3, (d1, d2, d3))
+                        s = _sh_wide(h3_wide, h2_wide)
+                        l3_fc[(d1, d2, d3)] = [s * v for v in l2_parent]
+
+            # IPF: iteratively scale l3_fc to satisfy both:
+            #   payment_type margins  → l1_target_fc  (Tab 3 values)
+            #   product margins       → product_target_fc (Tab 2 values)
+            # Skipped when a specific payer/product is selected for recalculation:
+            # the model-on-selection path has already placed the user's forecast into
+            # l3_fc; running IPF would scale those values back toward MA targets and
+            # cancel the recalculation's effect.
+            if product_target_fc is not None and l3_fc and sel_d2 is None and sel_d3 is None:
+                _by_pt: dict   = defaultdict(list)
+                _by_prod: dict = defaultdict(list)
+                for _k in l3_fc:
+                    _by_pt[_k[0]].append(_k)
+                    _by_prod[_k[2]].append(_k)
+
+                _l3_arr = {_k: list(_v) for _k, _v in l3_fc.items()}
+                _pt_tgt = l1_target_fc or {}
+
+                for _ipf_iter in range(20):
+                    for _pt, _keys in _by_pt.items():
+                        _tgt = _pt_tgt.get(_pt)
+                        if not _tgt:
+                            continue
+                        for _i in range(n_fc):
+                            _s = sum(_l3_arr[_k][_i] for _k in _keys)
+                            if _s > 1e-10:
+                                _r = _tgt[_i] / _s
+                                for _k in _keys:
+                                    _l3_arr[_k][_i] *= _r
+                    for _prod, _keys in _by_prod.items():
+                        _tgt = product_target_fc.get(_prod)
+                        if not _tgt:
+                            continue
+                        for _i in range(n_fc):
+                            _s = sum(_l3_arr[_k][_i] for _k in _keys)
+                            if _s > 1e-10:
+                                _r = _tgt[_i] / _s
+                                for _k in _keys:
+                                    _l3_arr[_k][_i] *= _r
+
+                l3_fc = {_k: [round(_v, 4) for _v in _vs] for _k, _vs in _l3_arr.items()}
+
+                # Recompute l2 and l1 from IPF-adjusted l3 so table rows are consistent.
+                for _d1 in all_d1:
+                    for _d2 in dim2_by_d1.get(_d1, set()):
+                        _d3_set = dim3_by_d1d2.get((_d1, _d2), set())
+                        l2_fc[(_d1, _d2)] = [
+                            sum(l3_fc.get((_d1, _d2, _d3), [0.0] * n_fc)[_i] for _d3 in _d3_set)
+                            for _i in range(n_fc)
+                        ]
+                    l1_fc[(_d1,)] = [
+                        sum(l2_fc.get((_d1, _d2), [0.0] * n_fc)[_i] for _d2 in dim2_by_d1.get(_d1, set()))
+                        for _i in range(n_fc)
+                    ]
+
+            # Expose this call's l3_fc so derived orientations can read it.
+            if _canonical_l3_out is not None:
+                _canonical_l3_out.update(l3_fc)
+
+        # Precompute MA-6 of shares using full training range for the use_direct_ma path.
+        # This is used by _full (den_fc=None case) instead of sum(hist[-w:]/w which would
+        # use the short display range and give w<6 when from_date is close to train_end.
+        # _share_last6[key] = last _w6 share values from full training range.
+        # Used to seed rolling MA for share forecasts (table and chart).
+        _share_last6: dict = {}
+        if use_direct_ma:
+            _gt_wide = gt_h_wide
+            for d1 in all_d1:
+                h1_w = _h_wide(vol1, (d1,))
+                # L1: vol1 / grand_total (% of TMV) — used by chart d2=="NA" path
+                _sh1 = [h1_w[i] / _gt_wide[i] * 100 if _gt_wide[i] else 0.0 for i in range(len(h1_w))]
+                _share_last6[(d1,)] = _sh1[-_w6:] if _sh1 else []
+                for d2 in dim2_by_d1[d1]:
+                    h2_w = _h_wide(vol2, (d1, d2))
+                    # L2: vol2 / vol1 (% of L1)
+                    _sh2 = [h2_w[i] / h1_w[i] * 100 if h1_w[i] else 0.0 for i in range(len(h1_w))]
+                    _share_last6[(d1, d2)] = _sh2[-_w6:] if _sh2 else []
+                    for d3 in dim3_by_d1d2.get((d1, d2), set()):
+                        h3_w = _h_wide(vol3, (d1, d2, d3))
+                        if d2 == "NA":
+                            # Cash: product % of L1
+                            _sh3 = [h3_w[i] / h1_w[i] * 100 if h1_w[i] else 0.0 for i in range(len(h1_w))]
+                        else:
+                            # Non-cash: product % of L2
+                            _sh3 = [h3_w[i] / h2_w[i] * 100 if h2_w[i] else 0.0 for i in range(len(h2_w))]
+                        _share_last6[(d1, d2, d3)] = _sh3[-_w6:] if _sh3 else []
 
         # full (history + forecast) value series
-        def _full(vol, key, fc_dict):
+        # den_h: parent-level history list used as denominator for share mode.
+        #   None  → divide by grand total (gt_h), correct for L1.
+        #   list  → divide by that list, correct for L2 (parent=L1) and L3 (parent=L2).
+        def _full(vol, key, fc_dict, den_h=None, den_fc=None):
             if as_share:
-                hist   = _h_pct(vol, key)
-                fc_val = sum(hist[-w:]) / w if w and hist else 0.0
-                return [round(v, 4) for v in hist + [fc_val] * n_fc]
+                hist = _h_pct(vol, key, den_h=den_h)
+                if den_fc is not None and key in fc_dict:
+                    num_fc = fc_dict[key]
+                    fc = [
+                        round(num_fc[i] / den_fc[i] * 100, 4) if i < len(num_fc) and den_fc[i] else 0.0
+                        for i in range(n_fc)
+                    ]
+                else:
+                    # Rolling MA-6 of share from full training range for L2/L3 keys.
+                    # L1 key (len==1): history is always 100% (vol/vol), so MA of hist = 100.
+                    if use_direct_ma and len(key) > 1 and key in _share_last6:
+                        fc = _rolling_ma(_share_last6[key], _w6, n_fc)
+                        fc = [round(v, 4) for v in fc]
+                    else:
+                        fc_val = sum(hist[-w:]) / w if w and hist else 0.0
+                        fc = [round(fc_val, 4)] * n_fc
+                return [round(v, 4) for v in hist] + fc
             hist = _h(vol, key)
             fc   = fc_dict.get(key, [0.0] * n_fc)
             vals = hist + list(fc)
@@ -1766,30 +2075,40 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             return [round(v, 4) for v in vals]
 
         # ── build table ──────────────────────────────────────────────────────
+        # Share forecast strategy:
+        #   use_direct_ma=True  → MA of historical share values (den_fc=None → _full falls back to MA)
+        #   use_direct_ma=False → derive share from model-driven volume forecasts via den_fc
         table_rows = []
         for d1 in all_d1:
-            l1_vals     = _full(vol1, (d1,), l1_fc)
+            d1_h    = _h(vol1, (d1,))                              # L1 history → denominator for L1 and L2
+            d1_fc   = l1_fc.get((d1,), [0.0] * n_fc)             # L1 volume forecast
+            _d1_dfc = None if use_direct_ma else d1_fc            # denominator for share forecast
+            l1_vals = _full(vol1, (d1,), l1_fc, den_h=d1_h, den_fc=_d1_dfc)  # L1: always 100%
             children_l2 = []
 
             for d2 in sorted(dim2_by_d1[d1]):
                 if d2 == "NA":
-                    # dim2 is payer "NA" (Cash): products become direct level-2 children
+                    # Cash has no payer; products are promoted to L2 children of L1.
+                    # Their share = product_vol / cash_total (i.e. parent = L1).
                     for d3 in sorted(dim3_by_d1d2.get((d1, d2), set())):
                         children_l2.append({
                             "label":    d3,
-                            "values":   _full(vol3, (d1, d2, d3), l3_fc),
+                            "values":   _full(vol3, (d1, d2, d3), l3_fc, den_h=d1_h, den_fc=_d1_dfc),
                             "children": [],
                         })
                 else:
-                    lbl2     = d2
-                    d3_set   = sorted(dim3_by_d1d2.get((d1, d2), set()))
+                    lbl2    = d2
+                    d2_h    = _h(vol2, (d1, d2))                   # L2 history → denominator for L3
+                    d2_fc   = l2_fc.get((d1, d2), [0.0] * n_fc)   # L2 volume forecast
+                    _d2_dfc = None if use_direct_ma else d2_fc     # denominator for L3 share forecast
+                    d3_set  = sorted(dim3_by_d1d2.get((d1, d2), set()))
                     children_l2.append({
                         "label":  lbl2,
-                        "values": _full(vol2, (d1, d2), l2_fc),
+                        "values": _full(vol2, (d1, d2), l2_fc, den_h=d1_h, den_fc=_d1_dfc),  # L2: % of L1
                         "children": [
                             {
                                 "label":    d3,
-                                "values":   _full(vol3, (d1, d2, d3), l3_fc),
+                                "values":   _full(vol3, (d1, d2, d3), l3_fc, den_h=d2_h, den_fc=_d2_dfc),  # L3: % of L2
                                 "children": [],
                             }
                             for d3 in d3_set
@@ -1804,9 +2123,14 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
         # appears as a single series rather than being omitted.
         chart_series: list = []
 
+        # Precompute total L1 forecast for Cash (d2=="NA") chart denominator.
+        _total_l1_fc = [sum(l1_fc.get((d_,), [0.0] * n_fc)[i] for d_ in all_d1) for i in range(n_fc)]
+
         for d1 in all_d1:
             if chart_d1_filter and d1.lower() != chart_d1_filter.lower():
                 continue
+            d1_h  = _h(vol1, (d1,))             # L1 history; used as L2 denominator in share mode
+            d1_fc = l1_fc.get((d1,), [0.0] * n_fc)
             for d2 in sorted(dim2_by_d1[d1]):
                 # "NA" means this dimension has no sub-label (e.g. Cash has no payer);
                 # always include it regardless of chart_d2_filter since it can't match.
@@ -1816,17 +2140,34 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
                     lbl = d1
                     if as_share:
                         h_vals = _h_pct(vol1, (d1,))
-                        fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
-                        fc     = [round(fc_val, 4)] * n_fc
+                        if use_direct_ma:
+                            # Rolling MA-6 of share (% of TMV for Cash/L1 level)
+                            _seed = _share_last6.get((d1,), h_vals[-_w6:])
+                            fc    = [round(v, 4) for v in _rolling_ma(_seed, _w6, n_fc)]
+                        else:
+                            # Derive from model volume forecast: L1 / total_L1
+                            fc = [
+                                round(d1_fc[i] / _total_l1_fc[i] * 100, 4) if _total_l1_fc[i] else 0.0
+                                for i in range(n_fc)
+                            ]
                     else:
                         h_vals = _h(vol1, (d1,))
-                        fc     = list(l1_fc.get((d1,), [0.0] * n_fc))
+                        fc     = list(d1_fc)
                 else:
                     lbl = f"{d1} - {d2}"
                     if as_share:
-                        h_vals = _h_pct(vol2, (d1, d2))
-                        fc_val = sum(h_vals[-w:]) / w if w and h_vals else 0.0
-                        fc     = [round(fc_val, 4)] * n_fc
+                        h_vals  = _h_pct(vol2, (d1, d2), den_h=d1_h)
+                        if use_direct_ma:
+                            # Rolling MA-6 of share (% of L1 for non-Cash L2 level)
+                            _seed = _share_last6.get((d1, d2), h_vals[-_w6:])
+                            fc    = [round(v, 4) for v in _rolling_ma(_seed, _w6, n_fc)]
+                        else:
+                            # Derive from model volume forecast: L2 / L1
+                            l2_fc_v = l2_fc.get((d1, d2), [0.0] * n_fc)
+                            fc      = [
+                                round(l2_fc_v[i] / d1_fc[i] * 100, 4) if d1_fc[i] else 0.0
+                                for i in range(n_fc)
+                            ]
                     else:
                         h_vals = _h(vol2, (d1, d2))
                         fc     = list(l2_fc.get((d1, d2), [0.0] * n_fc))
@@ -1848,58 +2189,197 @@ def _build_all_tabs_both_metrics(cur, ta, from_year, from_month,
             },
         }
 
+    # Pre-compute Tab 2 (product distribution) volumes once.
+    # The per-product forecast values are used as the product-dimension (column) marginal
+    # in Tab 5's IPF step so that product totals in Tab 5 match Tab 2 exactly.
+    _pd2_tab_data = _build_tab_data_from_shares(
+        share_series_dict=_rows_to_series(pd_ms, 2, 3),
+        vol_series_dict=_rows_to_series(pd_mv, 2, 3),
+        month_range=month_range,
+        month_labels=month_labels,
+        forecast_start_index=fsi,
+        factors=_t2_f,
+        tmv_fc=_tmv_fc,
+        selected_label=tab2_label,
+        add_total=True,
+        model_months_by_label=_tab2_mmbl,
+        fc_offset=_fc_offset,
+    )
+    _pd2_vol_formatted = _fmt_flat(_pd2_tab_data, month_labels, fsi, to_int=True)
+    _tab5_product_target = {
+        s.label: list(s.forecast_values)
+        for s in _pd2_tab_data.chart.series
+        if s.label and s.label.lower() not in ("total", "total market volume")
+    }
+
+    # Pre-compute Tab 3 (payment_type distribution) volumes once.
+    # The per-payment-type forecast values become the L1 anchor for Tab 5 so that
+    # payment_type totals are identical across Tab 3 and Tab 5.
+    _ptd3_tab_data = _build_tab_data_from_shares(
+        share_series_dict=_rows_to_series(_ptd_ms, 2, 3),
+        vol_series_dict=_rows_to_series(_ptd_mv, 2, 3),
+        month_range=month_range,
+        month_labels=month_labels,
+        forecast_start_index=fsi,
+        factors=_t3_f,
+        tmv_fc=_tmv_fc,
+        selected_label=tab5_pt_label,
+        add_total=True,
+        model_months_by_label=_tab3_mmbl,
+        fc_offset=_fc_offset,
+    )
+    _ptd3_vol_formatted = _fmt_flat(_ptd3_tab_data, month_labels, fsi, to_int=True)
+    _tab5_l1_target = {
+        s.label: list(s.forecast_values)
+        for s in _ptd3_tab_data.chart.series
+        if s.label and s.label.lower() not in ("total", "total market volume")
+    }
+
+    # Pre-compute the canonical Tab 5 orientation (payment_type → payer → product).
+    # The model is applied only here; the other two sub-views derive their forecasts
+    # from this l3_fc via canonical_l3_fc, keeping all three views consistent.
+    # l1_target_fc anchors each payment_type's total to its Tab 3 value.
+    _tab5_canonical_l3: dict = {}
+    # When Tab 5 is the recalculation target, don't constrain its product
+    # margins to Tab 2's MA values — Tab 5 should freely determine product
+    # distribution, and Tab 2 will be backfilled from Tab 5 below.
+    _t5_product_target = _tab5_product_target if recalc_tab_level < 5 else None
+    _tab5_vol_ptpp = _build_tab5_3level(
+        ptpp_mv, 2, 3, 4, to_int=True,
+        chart_d1_filter=tab5_pt_label,
+        sel_d2=tab3_label, sel_d3=tab2_label,
+        _tab5_f=_t5_f,
+        _canonical_l3_out=_tab5_canonical_l3,
+        l1_target_fc=_tab5_l1_target,
+        product_target_fc=_t5_product_target,
+    )
+    _tab5_shr_ptpp = _build_tab5_3level(
+        ptpp_mv, 2, 3, 4, as_share=True,
+        chart_d1_filter=tab5_pt_label,
+        sel_d2=tab3_label, sel_d3=tab2_label,
+        _tab5_f=_t5_f,
+        canonical_l3_fc=_tab5_canonical_l3,
+        canonical_idx=(0, 1, 2),
+    )
+
+    # ── Backfill Tab 2 product forecasts from Tab 5 ─────────────────────────
+    # After a Tab 5 recalculation, product totals (summed across all payment
+    # types and payers in Tab 5) become the authoritative Tab 2 forecast so
+    # that product_distribution always reflects the most-granular computation.
+    if recalc_tab_level >= 5 and _tab5_canonical_l3:
+        n_fc = len(month_range) - fsi
+        _t2_from_t5: dict = {}
+        for (pt, payer, prod), fc_vals in _tab5_canonical_l3.items():
+            if not prod or prod.upper() == "NA":
+                continue
+            if prod in _t2_from_t5:
+                _t2_from_t5[prod] = [_t2_from_t5[prod][i] + fc_vals[i] for i in range(len(fc_vals))]
+            else:
+                _t2_from_t5[prod] = list(fc_vals)
+
+        if _t2_from_t5:
+            # Patch chart series forecast values
+            _chart_series = _pd2_vol_formatted.get("chart", {}).get("series", [])
+            for s in _chart_series:
+                lbl = s.get("label", "")
+                if lbl.lower() == "total":
+                    continue
+                if lbl in _t2_from_t5:
+                    s["forecast"] = [int(round(v)) for v in _t2_from_t5[lbl]]
+
+            # Recompute Total chart series from patched non-total series
+            _non_tot_s = [s for s in _chart_series if s.get("label", "").lower() != "total"]
+            _tot_s = next((s for s in _chart_series if s.get("label", "").lower() == "total"), None)
+            if _tot_s and _non_tot_s:
+                _tot_s["forecast"] = [
+                    int(round(sum(s["forecast"][i] if i < len(s.get("forecast", [])) else 0
+                                  for s in _non_tot_s)))
+                    for i in range(n_fc)
+                ]
+
+            # Patch table rows (values = history[:fsi] + forecast[fsi:])
+            _table_rows = _pd2_vol_formatted.get("table", {}).get("rows", [])
+            for r in _table_rows:
+                lbl = r.get("label", "")
+                if lbl.lower() == "total":
+                    continue
+                if lbl in _t2_from_t5:
+                    hist = list(r.get("values", []))[:fsi]
+                    r["values"] = hist + [int(round(v)) for v in _t2_from_t5[lbl]]
+
+            # Recompute Total table row
+            _non_tot_r = [r for r in _table_rows if r.get("label", "").lower() != "total"]
+            _tot_r = next((r for r in _table_rows if r.get("label", "").lower() == "total"), None)
+            if _tot_r and _non_tot_r:
+                _tot_r["values"] = [
+                    int(round(sum(r["values"][i] if i < len(r.get("values", [])) else 0
+                                  for r in _non_tot_r)))
+                    for i in range(len(month_labels))
+                ]
+
     market_analysis = {
         "total_market_volume": {
             "payer_volume": _fmt_flat(tab1_mv_data, month_labels, fsi, to_int=True),
             "payer_share":  tab1_ms,
         },
         "product_distribution": {
-            "payer_volume": bflat_mv(pd_mv,  pd_ms,  tab2_label, to_int=True, mmbl=_tab2_mmbl),
-            "payer_share":  bflat_ms(pd_ms,  tab2_label),
+            "payer_volume": _pd2_vol_formatted,
+            "payer_share":  bflat_ms(pd_ms,  tab2_label, _f=_t2_f),
         },
         "payment_type_distribution": {
-            "payer_volume": bflat_mv(_ptd_mv, _ptd_ms, None, to_int=True, mmbl=_tab3_mmbl),
-            "payer_share":  bflat_ms(_ptd_ms, None),
+            "payer_volume": _ptd3_vol_formatted,
+            "payer_share":  bflat_ms(_ptd_ms, tab5_pt_label, _f=_t3_f),
         },
         # Tab 4: payment_type × product (2-level); two orderings.
         # Each sub-view contains payer_volume and payer_share as metric keys.
         "payment_type_product": {
             "payment_type_product": {
-                "payer_volume": bhier_mv(pt_mv,           pt_ms,          None,       tab2_label, to_int=True, mmbp=_tab4_mmbp),
-                "payer_share":  bhier_ms(pt_ms,           None,           tab2_label),
+                "payer_volume": bhier_mv(pt_mv,           pt_ms,          None,       tab2_label, to_int=True, mmbp=_tab4_mmbp, _f=_t4_f),
+                "payer_share":  bhier_ms(pt_ms,           None,           tab2_label, _f=_t4_f),
             },
             "product_payment_type": {
-                "payer_volume": bhier_mv(_swap_pc(pt_mv), _swap_pc(pt_ms), tab2_label, None,       to_int=True),
-                "payer_share":  bhier_ms(_swap_pc(pt_ms), tab2_label,      None),
+                "payer_volume": bhier_mv(_swap_pc(pt_mv), _swap_pc(pt_ms), tab2_label, tab5_pt_label, to_int=True, _f=_t4_f),
+                "payer_share":  bhier_ms(_swap_pc(pt_ms), tab2_label,      tab5_pt_label, _f=_t4_f),
             },
         },
         # Tab 5: three 3-level views of payment_type × payer × product.
-        # Each sub-view contains payer_volume and payer_share as metric keys.
+        # CANONICAL orientation (payment_type → payer → product) is pre-computed below;
+        # the other two orientations receive its leaf forecasts so all three views are
+        # driven by the same single model run.
         "payment_type_payer_product": {
-            # dim1=payment_type, dim2=payer, dim3=product
             "payment_type_payer_product": {
-                "payer_volume": _build_tab5_3level(ptpp_mv, 2, 3, 4, to_int=True,
-                                                   chart_d1_filter=tab5_pt_label),
-                "payer_share":  _build_tab5_3level(ptpp_mv, 2, 3, 4, as_share=True,
-                                                   chart_d1_filter=tab5_pt_label),
+                "payer_volume": _tab5_vol_ptpp,
+                "payer_share":  _tab5_shr_ptpp,
             },
-            # dim1=payment_type, dim2=product, dim3=payer
+            # dim1=payment_type, dim2=product, dim3=payer  ← derived
             "payment_type_product_payer": {
                 "payer_volume": _build_tab5_3level(ptpp_mv, 2, 4, 3, to_int=True,
                                                    chart_d1_filter=tab5_pt_label,
-                                                   chart_d2_filter=tab2_label),
+                                                   chart_d2_filter=tab2_label,
+                                                   _tab5_f=_t5_f,
+                                                   canonical_l3_fc=_tab5_canonical_l3,
+                                                   canonical_idx=(0, 2, 1)),
                 "payer_share":  _build_tab5_3level(ptpp_mv, 2, 4, 3, as_share=True,
                                                    chart_d1_filter=tab5_pt_label,
-                                                   chart_d2_filter=tab2_label),
+                                                   chart_d2_filter=tab2_label,
+                                                   _tab5_f=_t5_f,
+                                                   canonical_l3_fc=_tab5_canonical_l3,
+                                                   canonical_idx=(0, 2, 1)),
             },
-            # dim1=product, dim2=payment_type, dim3=payer
+            # dim1=product, dim2=payment_type, dim3=payer  ← derived
             "product_payment_type_payer": {
                 "payer_volume": _build_tab5_3level(ptpp_mv, 4, 2, 3, to_int=True,
                                                    chart_d1_filter=tab2_label,
-                                                   chart_d2_filter=tab5_pt_label),
+                                                   chart_d2_filter=tab5_pt_label,
+                                                   _tab5_f=_t5_f,
+                                                   canonical_l3_fc=_tab5_canonical_l3,
+                                                   canonical_idx=(1, 2, 0)),
                 "payer_share":  _build_tab5_3level(ptpp_mv, 4, 2, 3, as_share=True,
                                                    chart_d1_filter=tab2_label,
-                                                   chart_d2_filter=tab5_pt_label),
+                                                   chart_d2_filter=tab5_pt_label,
+                                                   _tab5_f=_t5_f,
+                                                   canonical_l3_fc=_tab5_canonical_l3,
+                                                   canonical_idx=(1, 2, 0)),
             },
         },
         "event_management": {},
@@ -2129,6 +2609,7 @@ def _build_market_analysis_both_granularities(
     sel_payer=None, sel_product=None, sel_payment_type=None,
     force_tab1_ets=True, scenario_name="Base",
     auto_model="moving_average",
+    recalc_tab_level=2,
 ):
     """
     Builds market_analysis for both monthly and yearly granularities.
@@ -2142,6 +2623,7 @@ def _build_market_analysis_both_granularities(
         sel_payer=sel_payer, sel_product=sel_product, sel_payment_type=sel_payment_type,
         force_tab1_ets=force_tab1_ets, scenario_name=scenario_name,
         auto_model=auto_model,
+        recalc_tab_level=recalc_tab_level,
     )
     ma_yearly = _aggregate_monthly_to_yearly(ma_monthly)
 
@@ -2381,7 +2863,7 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
     cur = conn.cursor()
     try:
         cfg = _load_config(cur, payload.ta,
-                           payment_type=_first(payload.payer),
+                           payment_type=_first(payload.payment_type),
                            brand=_first(payload.brand))
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
@@ -2566,23 +3048,24 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
             base_full_ma, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, base_factors,
+                sel_payer=_first(payload.payer),
+                sel_product=_first(payload.brand),
+                sel_payment_type=_first(payload.payment_type),
                 scenario_name="Base",
             )
+            base_full_ma = _recompute_all_market_shares_nested(base_full_ma)
 
         def _inactive_stub(sc_name):
-            # Always prefer DB-persisted data — it is stable regardless of the
-            # current date filter. Clip to the user's from_date so the shared chart
-            # axis (derived from the active scenario) and the inactive stubs all start
-            # at the same month.  Without clipping, a DB-stored wide snapshot (Apr-20)
-            # causes the X-axis to drift left whenever an inactive scenario's months
-            # array is longer than the active scenario's clipped months.
+            # Base is always freshly computed so it stays in sync with the current
+            # config (train_end_date, forecast_periods, from_date). Using the DB
+            # snapshot risks showing Base with a stale forecast_start_index when
+            # config or dates changed since Base was last active.
+            if sc_name == "Base":
+                return {"market_analysis": base_full_ma}
             cd     = all_saved_cd.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
             if raw_ma:
                 return {"market_analysis": _clip_ma_to_from_date(raw_ma, from_year, from_month)}
-            # Fallback for Base when it has never been persisted yet
-            if sc_name == "Base":
-                return {"market_analysis": base_full_ma}  # freshly computed from from_year/from_month
             return {"market_analysis": {}}
 
         scenarios = {
@@ -2624,11 +3107,12 @@ def apply_liver_filters(payload: LiverApplyFiltersRequest) -> dict:
         available_months = [_month_label(y, m) for y, m in _avail_all]
 
         filter_to_save = {
-            "payer":      _first(payload.payer),
-            "product":    _first(payload.brand),
-            "start_date": payload.from_date,
-            "end_date":   end_date,
-            "scenario":   active_scenario,
+            "payer":        _first(payload.payer),
+            "product":      _first(payload.brand),
+            "payment_type": _first(payload.payment_type),
+            "start_date":   payload.from_date,
+            "end_date":     end_date,
+            "scenario":     active_scenario,
         }
         try:
             save_filter_state(cur, payload.ta, filter_to_save)
@@ -2704,18 +3188,19 @@ def _factors_from_request(f: LiverRecalculateFactors, model_type: str,
 
 
 def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
-    sf         = payload.selected_filter
-    from_date  = sf.start_date
-    market     = sf.payer
-    product    = sf.product
-    model_type = payload.model_type.lower()
+    sf           = payload.selected_filter
+    from_date    = sf.start_date
+    market       = sf.payer
+    product      = sf.product
+    payment_type = sf.payment_type
+    model_type   = payload.model_type.lower()
 
     from_year, from_month = _parse_ym(from_date)
 
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cfg = _load_config(cur, payload.ta_name, payment_type=market, brand=product)
+        cfg = _load_config(cur, payload.ta_name, payment_type=payment_type, brand=product)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         forecast_periods = _resolve_forecast_periods(
             sf.end_date, train_end_year, train_end_month, cfg["forecast_periods"]
@@ -2754,15 +3239,36 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
 
         # Tab1 only changes when the user explicitly recalculates total_market_volume.
         # For all other tabs the projection runs on share only — Tab1 stays ETS.
-        _force_ets = payload.selected_tab.lower() != "total_market_volume"
+        _selected = payload.selected_tab.lower()
+        _force_ets = _selected != "total_market_volume"
+
+        # Cascade level: only tabs AT OR BELOW the recalculated tab get the new model.
+        # Tabs above keep MA so their forecasts remain unchanged.
+        _TAB_LEVEL = {
+            "total_market_volume":       1,
+            "product_distribution":      2,
+            "prod_dist":                 2,
+            "payment_type_distribution": 3,
+            "payer_dist":                3,
+            "payment_type_product":      4,
+            "payer_product":             4,
+            "payer_prod":                4,
+            "product_payment_type":      4,
+            "prod_payer":                4,
+            "product_payer":             4,
+            "payment_type_payer_product": 5,
+            "payment_payer_prod":         5,
+        }
+        recalc_tab_level = _TAB_LEVEL.get(_selected, 2)
 
         market_analysis, tab1_ets = _build_market_analysis_both_granularities(
             cur, payload.ta_name, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, factors,
-            sel_payer=market, sel_product=product,
+            sel_payer=market, sel_product=product, sel_payment_type=payment_type,
             force_tab1_ets=_force_ets,
             scenario_name=payload.scenario_name,
             auto_model=model_type,
+            recalc_tab_level=recalc_tab_level,
         )
         market_analysis = _recompute_all_market_shares_nested(market_analysis)
 
@@ -2801,14 +3307,20 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
             base_full_ma_rc, _ = _build_market_analysis_both_granularities(
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, _base_f,
+                sel_payer=market,
+                sel_product=product,
+                sel_payment_type=payment_type,
                 scenario_name="Base",
             )
+            base_full_ma_rc = _recompute_all_market_shares_nested(base_full_ma_rc)
 
         def _inactive_stub_rc(sc_name):
             if sc_name == "Base":
                 return {"market_analysis": base_full_ma_rc}
             cd     = all_saved_cd_rc.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            if raw_ma:
+                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
             return {"market_analysis": raw_ma}
 
         scenarios = {
@@ -2823,10 +3335,12 @@ def recalculate_liver(payload: LiverRecalculateRequest) -> dict:
         return {
             "ta_name": payload.ta_name,
             "selected_filter": {
-                "payer":      market,
-                "product":    product,
-                "start_date": from_date,
-                "end_date":   end_date,
+                "payer":        market,
+                "product":      product,
+                "payment_type": payment_type,
+                "start_date":   from_date,
+                "end_date":     end_date,
+                "scenario":     active_scenario,
             },
             "available_scenarios": available_scenarios,
             "active_scenario":     active_scenario,
@@ -3063,6 +3577,94 @@ def _recompute_all_market_shares(market_analysis: dict) -> dict:
                         ms_series.append(new_ser)
                         ms_chart_map[chart_key] = new_ser
 
+    # ── Sub-view cross-tabs (Tab 5): each sub-view is a 3-level hierarchy ────
+    # Share semantics: L1 = 100%, L2 = vol2/vol1*100 (sums to 100%), L3 = vol3/vol2*100 (sums to 100%).
+    # L1 volume is derived as sum of L2 children to avoid to_int rounding drift.
+    # Cash (d2=="NA") promotes products to L2 with no L3 children — the loop
+    # handles it automatically since l3_children will be [].
+    for tab in ("payment_type_payer_product",):
+        if tab not in market_analysis:
+            continue
+        for subview_data in market_analysis[tab].values():
+            mv_data = subview_data.get("payer_volume", {})
+            ms_data = subview_data.get("payer_share", {})
+            if not ms_data or not mv_data:
+                continue
+
+            ms_rows      = ms_data.setdefault("table", {}).setdefault("rows", [])
+            ms_series    = ms_data.setdefault("chart", {}).setdefault("series", [])
+            ms_hier_map  = {r.get("label", ""): r for r in ms_rows}
+            ms_chart_map = {s.get("label", ""): s for s in ms_series}
+
+            for mv_l1 in mv_data.get("table", {}).get("rows", []):
+                l1_lbl      = mv_l1.get("label", "")
+                l2_children = mv_l1.get("children", [])
+                if not l2_children:
+                    continue
+
+                hier_n = max((len(c.get("values", [])) for c in l2_children), default=0)
+                if not hier_n:
+                    continue
+
+                l1_vol = [
+                    sum(float(c["values"][i]) for c in l2_children if i < len(c.get("values", [])))
+                    for i in range(hier_n)
+                ]
+
+                ms_l1 = ms_hier_map.get(l1_lbl)
+                if ms_l1 is None:
+                    ms_l1 = {"label": l1_lbl, "values": [], "children": []}
+                    ms_rows.append(ms_l1)
+                    ms_hier_map[l1_lbl] = ms_l1
+                ms_l1["values"] = [100.0] * hier_n
+
+                ms_l2_children = ms_l1.setdefault("children", [])
+                ms_l2_map      = {c.get("label", ""): c for c in ms_l2_children}
+
+                for mv_l2 in l2_children:
+                    l2_lbl      = mv_l2.get("label", "")
+                    l2_vals     = mv_l2.get("values", [])
+                    l3_children = mv_l2.get("children", [])
+
+                    l2_ms = [
+                        round(float(l2_vals[i]) / l1_vol[i] * 100, 4)
+                        if i < len(l2_vals) and i < hier_n and l1_vol[i] != 0
+                        else 0.0
+                        for i in range(hier_n)
+                    ]
+                    if l2_lbl in ms_l2_map:
+                        ms_l2_map[l2_lbl]["values"] = l2_ms
+                    else:
+                        new_l2 = {"label": l2_lbl, "values": l2_ms, "children": []}
+                        ms_l2_children.append(new_l2)
+                        ms_l2_map[l2_lbl] = new_l2
+
+                    # Update chart (key = "l1 - l2"); absent for Cash where chart uses just l1_lbl
+                    chart_key = f"{l1_lbl} - {l2_lbl}"
+                    if chart_key in ms_chart_map:
+                        ms_chart_map[chart_key]["history"]  = l2_ms[:fsi]
+                        ms_chart_map[chart_key]["forecast"] = l2_ms[fsi:]
+
+                    ms_l2_node = ms_l2_map[l2_lbl]
+                    ms_l3_list = ms_l2_node.setdefault("children", [])
+                    ms_l3_map  = {c.get("label", ""): c for c in ms_l3_list}
+
+                    l2_vol = [float(v) for v in l2_vals]
+                    for mv_l3 in l3_children:
+                        l3_lbl  = mv_l3.get("label", "")
+                        l3_vals = mv_l3.get("values", [])
+                        l3_ms   = [
+                            round(float(l3_vals[i]) / l2_vol[i] * 100, 4)
+                            if i < len(l3_vals) and i < hier_n and l2_vol[i] != 0
+                            else 0.0
+                            for i in range(hier_n)
+                        ]
+                        if l3_lbl in ms_l3_map:
+                            ms_l3_map[l3_lbl]["values"] = l3_ms
+                        else:
+                            ms_l3_list.append({"label": l3_lbl, "values": l3_ms, "children": []})
+                            ms_l3_map[l3_lbl] = ms_l3_list[-1]
+
     return market_analysis
 
 
@@ -3157,13 +3759,20 @@ def _persist_and_respond(payload: LiverSaveScenarioRequest, allow_overwrite: boo
         _base_ma, _ = _build_market_analysis_both_granularities(
             cur, ta, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, base_factors,
+            sel_payer=flt.payer or None,
+            sel_product=flt.product or None,
+            sel_payment_type=flt.payment_type or None,
             scenario_name="Base",
         )
+        _base_ma = _recompute_all_market_shares_nested(_base_ma)
+
         def _inactive_stub(sc_name):
             if sc_name == "Base":
                 return {"market_analysis": _base_ma}
             cd     = saved.get(sc_name, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            if raw_ma:
+                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
             return {"market_analysis": raw_ma}
 
         scenarios = {}
@@ -3226,8 +3835,13 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
     _base_ma, _ = _build_market_analysis_both_granularities(
         cur, ta, from_year, from_month,
         train_end_year, train_end_month, forecast_periods, base_factors,
+        sel_payer=flt.payer or None,
+        sel_product=flt.product or None,
+        sel_payment_type=flt.payment_type or None,
         scenario_name="Base",
     )
+    _base_ma = _recompute_all_market_shares_nested(_base_ma)
+
     scenarios = {}
     for sc in available_scenarios:
         if sc == name:
@@ -3240,6 +3854,8 @@ def _build_scenario_response(cur, name: str, ta: str, flt, factors: dict, market
         else:
             cd     = saved.get(sc, {})
             raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            if raw_ma:
+                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
             scenarios[sc] = {"market_analysis": raw_ma}
 
     return {
@@ -3689,7 +4305,7 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
     conn = get_connection()
     cur  = conn.cursor()
     try:
-        cfg = _load_config(cur, ta, payment_type=flt.payer or None, brand=flt.product or None)
+        cfg = _load_config(cur, ta, payment_type=flt.payment_type or None, brand=flt.product or None)
         train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
         from_year, from_month = _parse_ym(flt.start_date)
         forecast_periods = _resolve_forecast_periods(
@@ -3716,6 +4332,7 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         _base_ma, _ = _build_market_analysis_both_granularities(
             cur, ta, from_year, from_month,
             train_end_year, train_end_month, forecast_periods, base_factors,
+            sel_payment_type=flt.payment_type or None,
             scenario_name="Base",
         )
         if is_base:
@@ -3756,10 +4373,11 @@ def activate_liver_scenario(payload: ActivateScenarioRequest) -> dict:
         return {
             "ta_name": ta,
             "selected_filter": {
-                "start_date": flt.start_date,
-                "end_date":   flt.end_date,
-                "payer":      flt.payer,
-                "product":    flt.product,
+                "start_date":   flt.start_date,
+                "end_date":     flt.end_date,
+                "payer":        flt.payer,
+                "product":      flt.product,
+                "payment_type": flt.payment_type,
             },
             "available_scenarios": available_scenarios,
             "active_scenario": name,
@@ -3838,7 +4456,6 @@ def refresh_liver(payload):
 
     FLAT_DIST_TABS = ["payer_distribution", "product_distribution"]
     HIER_DIST_TABS = ["payer_product", "product_payer"]
-    DIST_TABS      = FLAT_DIST_TABS + HIER_DIST_TABS
     HIER_TABS      = set(HIER_DIST_TABS)
 
     # ── Load full market_analysis from DB / recompute so all tabs are populated ─
@@ -3862,6 +4479,7 @@ def refresh_liver(payload):
                 cur, payload.ta_name, from_year, from_month,
                 train_end_year, train_end_month, forecast_periods, base_f,
                 sel_payer=flt.payer or None, sel_product=flt.product or None,
+                sel_payment_type=flt.payment_type or None,
                 scenario_name="Base",
             )
         else:
@@ -3882,6 +4500,7 @@ def refresh_liver(payload):
                     cur, payload.ta_name, from_year, from_month,
                     train_end_year, train_end_month, forecast_periods, sc_f,
                     sel_payer=flt.payer or None, sel_product=flt.product or None,
+                    sel_payment_type=flt.payment_type or None,
                     scenario_name=active,
                 )
 
@@ -3940,6 +4559,19 @@ def refresh_liver(payload):
                     for r in payload_tab_rows)
                 for i in range(n)
             ]
+        elif tab in ("payment_type_product", "payment_type_payer_product"):
+            # L1 rows of any sub-view sum to TMV
+            for sv_data in (payload_ma.get(tab) or {}).values():
+                sv_rows = (sv_data.get("payer_volume", {})
+                           .get("monthly", {}).get("table", {}).get("rows", []))
+                if sv_rows:
+                    n = max((len(r.get("values", [])) for r in sv_rows), default=0)
+                    eff_tmv = [
+                        sum(float(r["values"][i]) if i < len(r.get("values", [])) else 0.0
+                            for r in sv_rows)
+                        for i in range(n)
+                    ]
+                    break
         if eff_tmv:
             tmv_mv_monthly = (ma.get("total_market_volume", {})
                                .get("payer_volume", {})
@@ -3961,7 +4593,13 @@ def refresh_liver(payload):
     ma_yearly_rederived = _aggregate_monthly_to_yearly(ma_monthly_flat)
     for _t, _metrics in ma_yearly_rederived.items():
         for _m, _yd in _metrics.items():
-            ma.setdefault(_t, {}).setdefault(_m, {})["yearly"] = _yd
+            if "chart" in _yd or "table" in _yd:
+                # Standard tab: _m is a metric key, _yd is the granularity dict {chart, table}
+                ma.setdefault(_t, {}).setdefault(_m, {})["yearly"] = _yd
+            else:
+                # Sub-view tab: _m is a sub-view key, _yd is {metric: {chart, table}}
+                for _metric_key, _metric_yd in _yd.items():
+                    ma.setdefault(_t, {}).setdefault(_m, {}).setdefault(_metric_key, {})["yearly"] = _metric_yd
 
     # ── Low-level helpers ────────────────────────────────────────────────────
 
@@ -4197,39 +4835,73 @@ def refresh_liver(payload):
             new_rows.append({"label": dp_lbl, "values": parent_total, "children": new_children})
         return new_rows
 
-    def _scale_hier_by_flat_vol(old_hier_rows, flat_vol_map):
+
+    def _sv_rows(t, sv, m, g):
+        """Rows for a sub-view tab: ma[t][sv][m][g]['table']['rows']"""
+        return ma.get(t, {}).get(sv, {}).get(m, {}).get(g, {}).get("table", {}).get("rows", [])
+
+    def _set_sv_gran(t, sv, m, g, gran_dict):
+        ma.setdefault(t, {}).setdefault(sv, {}).setdefault(m, {})[g] = gran_dict
+
+    def _sync_tab5_chart(gran_dict, to_int=False):
+        """Build chart series from 3-level table: one series per L2 node ('d1 - d2')."""
+        rows = gran_dict.get("table", {}).get("rows", [])
+        fsi  = gran_dict.get("chart", {}).get("forecast_start_index", 0)
+        def _v(vals): return [int(round(v)) for v in vals] if to_int else list(vals)
+        series = []
+        for l1_row in rows:
+            d1 = l1_row.get("label", "")
+            for l2_row in l1_row.get("children", []):
+                d2 = l2_row.get("label", "")
+                if d2 == "NA":
+                    lbl  = d1
+                    vals = [float(v) for v in l1_row.get("values", [])]
+                else:
+                    lbl  = f"{d1} - {d2}"
+                    vals = [float(v) for v in l2_row.get("values", [])]
+                series.append({
+                    "label":    lbl,
+                    "history":  _v(vals[:fsi]),
+                    "forecast": _v(vals[fsi:]),
+                })
+        gran_dict.setdefault("chart", {})["series"] = series
+
+    def _scale_3level_vols(old_rows, old_tmv, new_tmv):
         """
-        Scale each parent row so its total matches the corresponding flat_vol_map entry.
-        Children within a parent are scaled proportionally (old_child * new_parent / old_parent).
-        flat_vol_map: {parent_label: [new_vol_per_period]}
+        Scale a 3-level volume hierarchy proportionally when TMV changes.
+        L3 children scaled by new_tmv/old_tmv; L2 recomputed as sum of L3; L1 as sum of L2.
         """
+        n = len(new_tmv)
         out = []
-        for parent in old_hier_rows:
-            plbl = parent.get("label", "")
-            old_pvals = [float(v) for v in parent.get("values", [])]
-            new_pvals = flat_vol_map.get(plbl, old_pvals)
-            n = len(new_pvals)
-            children = parent.get("children", [])
-            new_children = []
-            for child in children:
-                old_cvals = [float(v) for v in child.get("values", [])]
-                new_cvals = []
-                for i in range(n):
-                    op = old_pvals[i] if i < len(old_pvals) else 0.0
-                    np_ = new_pvals[i]
-                    oc = old_cvals[i] if i < len(old_cvals) else 0.0
-                    if op:
-                        new_cvals.append(int(round(oc * np_ / op)))
-                    elif children:
-                        new_cvals.append(int(round(np_ / len(children))))
-                    else:
-                        new_cvals.append(0)
-                new_children.append({"label": child.get("label", ""), "values": new_cvals})
-            new_parent_total = [
-                sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_children)
-                for i in range(n)
-            ]
-            out.append({"label": plbl, "values": new_parent_total, "children": new_children})
+        for l1 in old_rows:
+            new_l2s = []
+            for l2 in l1.get("children", []):
+                l3_children = l2.get("children", [])
+                if not l3_children:
+                    # Cash case: no L3, scale L2 directly
+                    l2_vals = [
+                        int(round(float(l2["values"][i]) * float(new_tmv[i]) / float(old_tmv[i])))
+                        if i < len(old_tmv) and old_tmv[i] else 0
+                        for i in range(n)
+                    ]
+                    new_l2s.append({"label": l2["label"], "values": l2_vals, "children": []})
+                else:
+                    new_l3s = [
+                        {
+                            "label": l3["label"],
+                            "values": [
+                                int(round(float(l3["values"][i]) * float(new_tmv[i]) / float(old_tmv[i])))
+                                if i < len(old_tmv) and old_tmv[i] else 0
+                                for i in range(n)
+                            ],
+                            "children": [],
+                        }
+                        for l3 in l3_children
+                    ]
+                    l2_vals = [sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_l3s) for i in range(n)]
+                    new_l2s.append({"label": l2["label"], "values": l2_vals, "children": new_l3s})
+            l1_vals = [sum(c["values"][i] if i < len(c["values"]) else 0 for c in new_l2s) for i in range(n)]
+            out.append({"label": l1["label"], "values": l1_vals, "children": new_l2s})
         return out
 
     def _hier_redistribute_share(hier_rows, edited_lbl, n_cols):
@@ -4361,6 +5033,30 @@ def refresh_liver(payload):
                 if old_vol_rows and old_tmv:
                     new_vol_rows = _scale_hier_vols(old_vol_rows, old_tmv, tmv_vals)
                     _put_hier(dtab, "payer_volume", gran, new_vol_rows, to_int=True)
+
+            # Tab 4 (payment_type_product): 2-level sub-views scaled proportionally
+            for sv_key in ma.get("payment_type_product", {}):
+                old_sv_rows = (full_ma.get("payment_type_product", {}).get(sv_key, {})
+                               .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", []))
+                if old_sv_rows and old_tmv:
+                    new_sv_rows = _scale_hier_vols(old_sv_rows, old_tmv, tmv_vals)
+                    sv_gran = dict(ma.get("payment_type_product", {}).get(sv_key, {})
+                                   .get("payer_volume", {}).get(gran, {}))
+                    sv_gran.setdefault("table", {})["rows"] = new_sv_rows
+                    _sync_hier_chart(sv_gran, to_int=True)
+                    _set_sv_gran("payment_type_product", sv_key, "payer_volume", gran, sv_gran)
+
+            # Tab 5 (payment_type_payer_product): 3-level sub-views scaled proportionally
+            for sv_key in ma.get("payment_type_payer_product", {}):
+                old_sv_rows = (full_ma.get("payment_type_payer_product", {}).get(sv_key, {})
+                               .get("payer_volume", {}).get(gran, {}).get("table", {}).get("rows", []))
+                if old_sv_rows and old_tmv:
+                    new_sv_rows = _scale_3level_vols(old_sv_rows, old_tmv, tmv_vals)
+                    sv_gran = dict(ma.get("payment_type_payer_product", {}).get(sv_key, {})
+                                   .get("payer_volume", {}).get(gran, {}))
+                    sv_gran.setdefault("table", {})["rows"] = new_sv_rows
+                    _sync_tab5_chart(sv_gran, to_int=True)
+                    _set_sv_gran("payment_type_payer_product", sv_key, "payer_volume", gran, sv_gran)
 
         elif tab in FLAT_DIST_TABS:
             if metric == "payer_volume":
@@ -4520,6 +5216,85 @@ def refresh_liver(payload):
             _backfill_flat("payer_product", "payer_distribution", gran)
             _backfill_flat("product_payer", "product_distribution", gran)
 
+        elif tab == "payment_type_product":
+            # Determine which sub-view was edited; fall back to the first sub-view
+            sv_edited = payload.selected_subview or "payment_type_product"
+            sv_pairs  = {
+                "payment_type_product": "product_payment_type",
+                "product_payment_type": "payment_type_product",
+            }
+
+            # Sibling redistribution and chart sync for all sub-views
+            for sv_key in ma.get("payment_type_product", {}):
+                sv_vol_gran = dict(ma.get("payment_type_product", {}).get(sv_key, {})
+                                   .get("payer_volume", {}).get(gran, {}))
+                sv_vol_rows = sv_vol_gran.get("table", {}).get("rows", [])
+                if not sv_vol_rows:
+                    continue
+                if eh and sv_key == sv_edited and " - " in eh:
+                    edited_parent_lbl, edited_child_lbl = eh.split(" - ", 1)
+                    new_hier_rows = []
+                    for parent in sv_vol_rows:
+                        plbl = parent.get("label", "")
+                        if plbl != edited_parent_lbl:
+                            new_hier_rows.append(parent)
+                            continue
+                        children  = parent.get("children", [])
+                        cur_pt    = [float(v) for v in parent.get("values", [])]
+                        n_p       = len(cur_pt)
+                        edited_ch = next((c for c in children if c.get("label") == edited_child_lbl), None)
+                        siblings  = [c for c in children if c.get("label") != edited_child_lbl]
+                        if edited_ch:
+                            ec_vals = [
+                                min(float(edited_ch["values"][i]) if i < len(edited_ch.get("values", [])) else 0.0,
+                                    cur_pt[i] if i < len(cur_pt) else 0.0)
+                                for i in range(n_p)
+                            ]
+                            new_siblings = []
+                            for sib in siblings:
+                                sib_vals = []
+                                for i in range(n_p):
+                                    remaining    = max(0.0, cur_pt[i] - ec_vals[i])
+                                    old_sib_sum  = sum(float(s["values"][i]) if i < len(s.get("values", [])) else 0.0
+                                                       for s in siblings)
+                                    old_sv       = float(sib["values"][i]) if i < len(sib.get("values", [])) else 0.0
+                                    sib_vals.append(
+                                        round(old_sv / old_sib_sum * remaining, 4) if old_sib_sum
+                                        else round(remaining / max(1, len(siblings)), 4)
+                                    )
+                                new_siblings.append({"label": sib.get("label", ""), "values": sib_vals})
+                            new_hier_rows.append({
+                                "label":    plbl,
+                                "values":   [int(round(v)) for v in cur_pt],
+                                "children": [{"label": edited_child_lbl, "values": ec_vals}] + new_siblings,
+                            })
+                        else:
+                            new_hier_rows.append(parent)
+                    sv_vol_gran.setdefault("table", {})["rows"] = new_hier_rows
+                _sync_hier_chart(sv_vol_gran, to_int=True)
+                _set_sv_gran("payment_type_product", sv_key, "payer_volume", gran, sv_vol_gran)
+
+            # Cross-sub-view sync: transpose edited sub-view to update the other
+            sv_other = sv_pairs.get(sv_edited)
+            if sv_other and sv_other in ma.get("payment_type_product", {}):
+                edited_rows = _sv_rows("payment_type_product", sv_edited, "payer_volume", gran)
+                other_rows  = _sv_rows("payment_type_product", sv_other,  "payer_volume", gran)
+                if edited_rows and other_rows:
+                    sv_other_gran = dict(ma.get("payment_type_product", {}).get(sv_other, {})
+                                        .get("payer_volume", {}).get(gran, {}))
+                    sv_other_gran.setdefault("table", {})["rows"] = _transpose_hier(edited_rows, other_rows)
+                    _sync_hier_chart(sv_other_gran, to_int=True)
+                    _set_sv_gran("payment_type_product", sv_other, "payer_volume", gran, sv_other_gran)
+
+        elif tab == "payment_type_payer_product":
+            # Sync payer_volume chart for every sub-view from the 3-level table
+            for sv_key in ma.get("payment_type_payer_product", {}):
+                sv_vol_gran = dict(ma.get("payment_type_payer_product", {}).get(sv_key, {})
+                                   .get("payer_volume", {}).get(gran, {}))
+                if sv_vol_gran.get("table", {}).get("rows"):
+                    _sync_tab5_chart(sv_vol_gran, to_int=True)
+                    _set_sv_gran("payment_type_payer_product", sv_key, "payer_volume", gran, sv_vol_gran)
+
     # Recompute all market_share from final market_volume values so everything is consistent.
     # For hier tabs: child_share = child_vol / sum(children) * 100 (% within parent).
     # For flat tabs: row_share  = row_vol  / col_sum         * 100 (% of distribution).
@@ -4542,6 +5317,7 @@ def refresh_liver(payload):
                         cur2, payload.ta_name, from_year, from_month,
                         train_end_year, train_end_month, forecast_periods, base_f,
                         sel_payer=flt.payer or None, sel_product=flt.product or None,
+                        sel_payment_type=flt.payment_type or None,
                         scenario_name="Base",
                     )
                 finally:
@@ -4551,8 +5327,10 @@ def refresh_liver(payload):
             else:
                 return {"market_analysis": full_ma}
         else:
-            cd      = all_saved_cd.get(sc_name, {})
-            raw_ma  = _normalize_ma_keys(cd.get("market_analysis", {}))
+            cd     = all_saved_cd.get(sc_name, {})
+            raw_ma = _normalize_ma_keys(cd.get("market_analysis", {}))
+            if raw_ma:
+                raw_ma = _clip_ma_to_from_date(raw_ma, from_year, from_month)
             return {"market_analysis": raw_ma}
 
     # Strip extra scenario rows from the active scenario's TMV table.
@@ -4585,10 +5363,11 @@ def refresh_liver(payload):
         "available_scenarios": available_scenarios,
         "active_scenario":     active,
         "selected_filter": {
-            "start_date": flt.start_date,
-            "end_date":   flt.end_date,
-            "payer":      flt.payer,
-            "product":    flt.product,
+            "start_date":   flt.start_date,
+            "end_date":     flt.end_date,
+            "payer":        flt.payer,
+            "product":      flt.product,
+            "payment_type": flt.payment_type,
         },
         "scenarios":           scenarios,
     }

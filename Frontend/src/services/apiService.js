@@ -300,6 +300,16 @@ export const getLiverMarketEventsFilters = (ta = "HCV") => {
   });
 };
 
+// GET — loads every previously-saved Impact Curve Configuration row for the
+// Events Management tab, grouped by event type (product_event / payer_event
+// / payment_type_payer_product_event). This was previously imported and
+// called from ModelInput.jsx but never actually defined here, so every call
+// silently threw (caught by the surrounding try/catch) and the Events
+// Management page never listed anything on open.
+export const getLiverMarketEventsList = (taName = "HCV") => {
+  return httpClient.get(`/api/liver-market-events/market-events/${encodeURIComponent(taName)}`);
+};
+
 // GET — list products (base + newly added) for the "Manage New Products"
 // modal on the Impact Curve Configuration screen.
 export const getLiverMarketEventsProducts = (params = {}) => {
@@ -354,24 +364,12 @@ export const saveLiverMarketEventsConfig = (payload) => {
 };
 
 // DELETE — remove a single market event (Impact Curve Configuration row).
-// event_name (string) is the path param — NOT event_id; ta_name/event_type
-// are query params.
+// event_id is a path param; ta_name/event_type are query params.
 // event_type is one of: "product_event" | "payer_event" | "payment_type_payer_product_event".
-export const deleteLiverMarketEvent = (eventName, { ta_name, event_type }) => {
-  return httpClient.delete(
-    `/api/liver-market-events/${encodeURIComponent(eventName)}`,
-    {
-      params: { ta_name, event_type },
-    },
-  );
-};
-
-// GET — list all saved market events (Impact Curve Configuration rows) for
-// a therapy area, used to populate the Events Management tab's table.
-export const getLiverMarketEventsList = (taName) => {
-  return httpClient.get(
-    `/api/liver-market-events/market-events/${encodeURIComponent(taName)}`,
-  );
+export const deleteLiverMarketEvent = (eventId, { ta_name, event_type }) => {
+  return httpClient.delete(`/api/liver-market-events/${eventId}`, {
+    params: { ta_name, event_type },
+  });
 };
 
 // GET — Output screen filters for a therapy area (e.g. ta=HCV)
@@ -512,56 +510,33 @@ export const deleteHIVScenario = (payload) =>
     }
   );
 
+export const addHIVProduct = (payload) =>
+  httpClient.post(
+    "/api/hiv_treat/products",
+    payload
+  );
 
-// export const mainConversation = () => {
-//   return `api/conversations/messages`;
-// };
+export const getHIVProducts = () => {
+  return httpClient.get("/api/hiv_treat/products");
+};
 
-// export const genieConversation = () => {
-//   return `api/conversation/genie/genieResponse`;
-// };
+export const updateHIVProduct = (payload) => {
+  return httpClient.put("/api/hiv_treat/products", payload);
+};
 
-// export const mainConversationCharts = (message_id) => {
-//   return `api/conversations/${message_id}/chart_image`;
-// };
+export const deleteHIVProduct = (payload) => {
+  return httpClient.delete("/api/hiv_treat/products", {
+    data: payload,
+  });
+};
 
-// export const getConversationId = (payload) => {
-//   return httpClient.post(`/api/conversations`, payload);
-// };
 
-// export const getUserDetails = () => {
-//   return httpClient2.get(`/api/users/user_details`);
-// };
+// HIV Prep API's
 
-// export const updateChatTitles = (conv_id, title) => {
-//   return `api/conversations/${conv_id}/title`;
-// };
-// export const bookmarkChatApi = (message_id) => {
-//   return `api/conversations/message/${message_id}/bookmark`;
-// };
+export const getHIVPrepConfigurationByTherapyArea = (taName) => {
+  return httpClient.get(`/api/hiv_prep/configurations/${taName}`);
+};
 
-// export const feedbackApi = (payload) => {
-//   return httpClient.post(`/api/feedback/`, payload);
-// };
-// export const getLoginUrl = () => {
-//   return httpClient.get('/users/login');
-// };
-
-// export const getAllChats = () => {
-//   return httpClient.get(`/api/conversations/summary`);
-// };
-
-// export const deleteBookmark = (message_id, is_bookmarked) => {
-//   return httpClient.put(`/api/conversations/messages/${message_id}/bookmark`, { is_bookmarked });
-// };
-// export const chatHistoryConversation = (conv_id) => {
-//   return httpClient.get(`/api/conversations/${conv_id}/messages`);
-// };
-
-// export const bookmarkChatConversation = (message_id) => {
-//   return httpClient.get(`/api/conversations/messages/${message_id}`);
-// };
-
-// export const getRecentQuestions = (limit = 4) => {
-//   return httpClient.get(`/api/conversations/recent_questions?limit=${limit}`);
-// };
+export const saveHIVPrepConfigurations = (payload) => {
+  return httpClient.post(`/api/hiv_prep/save-configurations`, payload);
+};

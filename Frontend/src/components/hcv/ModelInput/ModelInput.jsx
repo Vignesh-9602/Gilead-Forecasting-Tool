@@ -51,53 +51,32 @@ import ModelInputTable from "./ModelInputTable";
 import MarketEventsPanel from "./MarketEventsPanel";
 import PaymentPayerProductTable from "./PaymentPayerProductTable";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-// payer_prod / prod_payer stay as two internal tab values (everything else in
-// this file and in ModelInputChart/ModelInputTable already branches on both)
-// but are shown as a single merged tab with a Hierarchy Order dropdown.
 const TABS = [
   { label: "Total Market Volume", value: "total_market" },
   { label: "Product Distribution (%)", value: "prod_dist" },
   { label: "Payment Type Distribution (%)", value: "payer_dist" },
-  // Commented out per request — the underlying "payer_prod"/"prod_payer"
-  // plumbing (TAB_KEY_MAP, HIERARCHY_TAB_VALUES, the Hierarchy Order
-  // dropdown in ModelInputTable, normalizeLiverResponse's reconciliation)
-  // is left intact so this can be re-enabled by uncommenting this one line.
-  // { label: "Payment Type / Product", value: "payer_prod" },
-  // Real 3-level hierarchy tab (Payment Type / Payer / Product) — backend
-  // data comes from market_analysis.payment_type_payer_product, mapped in
-  // normalizeLiverResponse and passed to PaymentPayerProductTable below.
   { label: "Payment type-Payer-Product", value: "payment_payer_prod" },
   { label: "Events Management", value: "manage_events" },
 ];
 
-// Tab values that share the merged "Payment Type / Product" tab slot in the tab bar.
 const HIERARCHY_TAB_VALUES = ["payer_prod", "prod_payer"];
 
 const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
-  // Backend key is "payment_type_distribution" (payer = payment type: Cash /
-  // Commercial / Medicaid / Medicare). Older responses used
-  // "payer_distribution" — normalizeLiverResponse() aliases that key onto
-  // "payment_type_distribution" too, so either shape works.
   payer_dist: "payment_type_distribution",
   payer_prod: "payer_product",
   prod_payer: "product_payer",
-  // Real 3-level hierarchy tab (Payment Type / Payer / Product). Backend key
-  // holds three pre-computed orderings — see normalizeLiverResponse's
-  // "payment_type_payer_product" handling below.
   payment_payer_prod: "payment_type_payer_product",
 };
 
-const COMPARE_OPTIONS = ["ETS 13M", "ETS 26M", "Exponential"];
 const DATE_INPUT_FORMATS = [
   "MMM-YY",
   "YYYY-MM",
   "YYYY-MM-DD",
   "YYYY-MM-DDTHH:mm:ssZ",
 ];
-// ─── Main Component ───────────────────────────────────────────────────────────
+
 export default function PBCModelInput() {
   const { showSnackbar } = useSnackbarStore();
   const { setLoading } = useLoadingStore();
@@ -105,46 +84,48 @@ export default function PBCModelInput() {
   const therapyArea = favState?.selectedTherapyArea;
   const isHCV = therapyArea && therapyArea.toLowerCase() === "hcv";
 
-  // ── State ─────────────────────────────────────────────────────────────────
+  // ── REFS ──
+  const userSelectedMetricRef = useRef(false);
+  const fetchedTaRef = useRef(null);
+  const fetchedMarketEventsTaRef = useRef(null);
+  const prevActiveTabRef = useRef("");
+  const tableScrollPositionsRef = useRef({});
+
+  // ── STATE ──
   const [activeTab, setActiveTab] = useState("total_market");
   const [scenarioSelector, setScenarioSelector] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [payerFilter, setPayerFilter] = useState("");
-  // New "PAYER FILTER" dropdown (CVS / Non CVS) — distinct from payerFilter
-  // above, which is actually the Payment Type filter (see the renamed label
-  // in the filter bar below).
   const [subPayerFilter, setSubPayerFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
-  const [metric, setMetric] = useState("market_volume");
+
+  const [tabMetrics, setTabMetrics] = useState({
+    total_market: "market_volume",
+    prod_dist: "market_share",
+    payer_dist: "market_share",
+    payment_payer_prod: "market_share",
+    payer_prod: "market_volume",
+    prod_payer: "market_volume",
+  });
+
+  const metric = tabMetrics[activeTab] || "market_volume";
+
   const [availableDates, setAvailableDates] = useState([]);
   const [chartData, setChartData] = useState(null);
   const [tableData, setTableData] = useState([]);
   const [allMetricsData, setAllMetricsData] = useState({});
   const [appliedLot, setAppliedLot] = useState("");
   const [appliedBrand, setAppliedBrand] = useState("");
-  // Separate "applied" payer/product — only updated when the user
-  // explicitly clicks Apply Filter. These drive the table highlighting so
-  // changing the dropdown alone doesn't visually shift which row is amber.
   const [appliedPayerFilter, setAppliedPayerFilter] = useState("");
   const [appliedProductFilter, setAppliedProductFilter] = useState("");
   const [appliedSubPayerFilter, setAppliedSubPayerFilter] = useState("");
-  // Same pattern for From/To Date — the chart clips comparison scenarios
-  // to this range, so it must only change on Apply Filter, not while the
-  // user is still picking dates.
   const [appliedFromDate, setAppliedFromDate] = useState("");
   const [appliedToDate, setAppliedToDate] = useState("");
-  // Save Scenario modal
   const [saveScenarioDialogOpen, setSaveScenarioDialogOpen] = useState(false);
   const [newScenarioName, setNewScenarioName] = useState("");
-  // Scenarios saved this session — shown as selectable rows in the table
-  // below the live data rows. Radio becomes active immediately on save,
-  // but chart/table data only reloads when Apply Selected Scenario is clicked.
   const [savedScenarioRows, setSavedScenarioRows] = useState([]);
   const [liverTabsRaw, setLiverTabsRaw] = useState(null);
-  // Raw, untransformed backend response (the one passed into
-  // normalizeLiverResponse). Cached so switching tabs/metric can re-derive
-  // liverTabsRaw locally instead of re-hitting the API every time.
   const [liverRawData, setLiverRawData] = useState(null);
   const [editable, setEditable] = useState(false);
   const [modelSelection, setModelSelection] = useState("ets");
@@ -169,27 +150,28 @@ export default function PBCModelInput() {
   const [autoAppliedOnMount, setAutoAppliedOnMount] = useState(false);
   const [payerOptions, setPayerOptions] = useState([]);
   const [productOptions, setProductOptions] = useState([]);
-  // Session-only market events, shared between the Total Market Volume
-  // compact panel and the Events Management tab's table (see MarketEventsPanel).
   const [marketEvents, setMarketEvents] = useState([]);
   const [indication, setIndication] = useState("");
   const [lot, setLot] = useState("");
   const [brand, setBrand] = useState("");
+
   const [totalMarketViewMode, setTotalMarketViewMode] = useState("monthly");
-  // All scenario names from the API — shown in the Compare Scenarios dropdown
+
   const [compareScenarioOptions, setCompareScenarioOptions] = useState([]);
-  // Subset the user has chosen to display; empty = show all
   const [selectedCompareScenarios, setSelectedCompareScenarios] = useState([]);
-  // True only after the user has manually toggled a checkbox in the Compare
-  // Scenarios dropdown. Until then, ALL rows in tableData are shown regardless
-  // of selectedCompareScenarios so that initial load / apply-filter always
-  // shows every scenario without waiting for state to settle.
   const [userHasCustomizedCompare, setUserHasCustomizedCompare] = useState(false);
-  const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] =
-    useState("");
+  const [tentativeRadioSelectedScenario, setTentativeRadioSelectedScenario] = useState("");
   const [currentlyAppliedScenario, setCurrentlyAppliedScenario] = useState("");
+  // Different endpoints have returned the same scenario with different
+  // casing (e.g. Run Calculation's "BASE" vs elsewhere's "Base"). Compare
+  // scenario names case-insensitively everywhere, not just ===.
+  const sameScenario = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
   const [expandedBrands, setExpandedBrands] = useState({});
-  // Table edit tracking — for refresh-table API
+  const [threeLevelExpandedRows, setThreeLevelExpandedRows] = useState({});
+  const [hierarchyOrder, setHierarchyOrder] = useState("pt-payer-product");
+
   const [tableEditing, setTableEditing] = useState(false);
   const [tableSnapshot, setTableSnapshot] = useState([]);
   const [editedHierarchies, setEditedHierarchies] = useState({});
@@ -197,12 +179,10 @@ export default function PBCModelInput() {
   const [isSavingEditChanges, setIsSavingEditChanges] = useState(false);
   const [savingMarketEvents, setSavingMarketEvents] = useState(false);
   const [runningMarketEventsCalculation, setRunningMarketEventsCalculation] = useState(false);
-  // true only after Refresh succeeds — gates the Save button
   const [isRefreshed, setIsRefreshed] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [scenarioToDelete, setScenarioToDelete] = useState("");
 
-  // ── Derived ───────────────────────────────────────────────────────────────
   const metricUnit = useMemo(() => {
     if (activeTab === "total_market") return "";
     if (metric === "market_share") return "%";
@@ -215,15 +195,15 @@ export default function PBCModelInput() {
     TABS.find((t) => t.value === activeTab)?.label ||
     (HIERARCHY_TAB_VALUES.includes(activeTab) ? "Payment Type / Product" : "Total Market Volume");
   const showScenarioControls = activeTab === "total_market";
-  // Compare Scenarios (chart-only comparison) is useful on every tab now
-  // that the API sends per-scenario chart data for all of them — gated
-  // only on there being more than one scenario to compare, not the tab.
   const showCompareScenarios = compareScenarioOptions.length > 1;
   const showMetricFilter = activeTab !== "total_market";
   const trajectoryMonthOptions =
     chartData?.months?.slice(chartData?.forecast_start_index) || [];
 
-  // ── Styles ────────────────────────────────────────────────────────────────
+  const handleTableScroll = (pos) => {
+    tableScrollPositionsRef.current[activeTab] = pos;
+  };
+
   const inputStyle = {
     bgcolor: "#fcfcfd",
     borderRadius: "8px",
@@ -245,7 +225,6 @@ export default function PBCModelInput() {
     },
   };
 
-  // ── Date helpers ──────────────────────────────────────────────────────────
   const parseDateString = (s) => {
     if (!s) return dayjs(NaN);
     const strict = dayjs(s, DATE_INPUT_FORMATS, true);
@@ -267,7 +246,6 @@ export default function PBCModelInput() {
     return "";
   };
 
-  // ── Factor sync ───────────────────────────────────────────────────────────
   const syncFactors = (factors, activeModel) => {
     setAllFactors(factors);
     setMultiplier(factors?.multiplier ?? 1);
@@ -278,13 +256,6 @@ export default function PBCModelInput() {
       setBeta(ets.beta ?? 0);
       setGamma(ets.gamma ?? 0);
     } else {
-      // Prioritize the active model's own bucket (e.g. "linear",
-      // "exponential", "scurve") over the generic "growth" bucket. The
-      // outgoing payload always sends both, so a response that also
-      // contains both was previously read growth-first — silently
-      // discarding whatever trajectory_start/total_growth/duration/k_value
-      // the user had just applied for the actually-selected model and
-      // replacing it with growth's (often stale/default) values.
       const traj = factors?.[activeModel] || factors?.growth || {};
       setTotalGrowth(traj?.total_growth ?? traj?.total_growth_pct ?? 0);
       setDuration(traj?.duration ?? 12);
@@ -300,14 +271,8 @@ export default function PBCModelInput() {
     setTableData(selected?.table || []);
   };
 
-  // The API nests each tab's data under "payer_volume" / "payer_share"
-  // (previously "market_volume" / "market_share"). The UI's internal
-  // `metric` state still uses the old "market_volume"/"market_share"
-  // values (for labels/units), so translate before indexing into
-  // anything that came from or is going back to the backend.
   const toApiMetricKey = (m) => (m === "market_share" ? "payer_share" : "payer_volume");
 
-  // ── HCV tab mapper ────────────────────────────────────────────────────────
   function normalizeLiverResponse(data, currentMetric) {
     if (!data) return { months: [], forecast_start_index: 0, tabs: {} };
     const resolvedMetric = currentMetric || metric;
@@ -323,21 +288,24 @@ export default function PBCModelInput() {
     const active =
       data.active_scenario ||
       (data.scenarios && Object.keys(data.scenarios || {})[0]);
-    const sc = data.scenarios && data.scenarios[active];
+    // Apply Filter responses nest market_analysis under scenarios[active].
+    // Run Calculation / Refresh responses put market_analysis directly on
+    // the root object with no `scenarios` wrapper at all — fall back to
+    // treating `data` itself as the scenario object in that case, otherwise
+    // ma/chartMa stay undefined and this function bails out with empty tabs
+    // even though the response is full of data.
+    const sc = data.scenarios
+      ? data.scenarios[active]
+      : (data.market_analysis ? data : undefined);
     let ma = sc && sc.market_analysis;
 
-    // The active scenario (e.g. a newly saved one) may only carry table data
-    // and no chart. Fall back to the first scenario that has chart data so
-    // the chart is never left empty after a save-scenario response.
     const hasChart = (scenarioData) => {
       const tmv = scenarioData?.market_analysis?.total_market_volume;
       const mv = tmv?.payer_volume || tmv?.payer_share || Object.values(tmv || {})[0];
-      // Support both old shape (mv.chart) and new shape (mv.monthly.chart)
       return !!(mv?.monthly?.chart?.months?.length || mv?.chart?.months?.length);
     };
-    let chartMa = ma; // preferred: active scenario
+    let chartMa = ma;
     if (!hasChart(sc) && data.scenarios) {
-      // Try Base first, then any other scenario that has chart data
       const fallbackKey =
         (data.scenarios["Base"] && hasChart(data.scenarios["Base"]) ? "Base" : null) ||
         Object.keys(data.scenarios).find((k) => hasChart(data.scenarios[k]));
@@ -348,49 +316,23 @@ export default function PBCModelInput() {
 
     if (!ma && !chartMa) return { months: [], forecast_start_index: 0, tabs: {} };
 
-    // ── Reconcile backend key/shape differences across scenarios ─────────────
-    // Different scenarios in the same apply-filters response can shape
-    // market_analysis differently. E.g. "Base" nests the Payment Type /
-    // Product hierarchy tab self-keyed with only one ordering
-    // (payment_type_product.payment_type_product) and may only expose
-    // "payment_type_distribution" (not "payer_distribution"), while other
-    // scenarios already use the flat payer_product / product_payer /
-    // payer_distribution shape this function (and TAB_KEY_MAP) expects.
-    // Normalize every scenario's market_analysis into that flat shape before
-    // building tabs, so switching scenarios/tabs never silently loses data.
     const reconcileMarketAnalysisShape = (maObj) => {
       if (!maObj) return maObj;
       const out = { ...maObj };
 
-      // The Payment Type / Product hierarchy tab can arrive nested one level
-      // deeper, holding BOTH orderings under fixed sub-keys instead of the
-      // flat payer_product / product_payer shape used elsewhere:
-      //   payment_type_product: {
-      //     payment_type_product: { payer_volume, payer_share },  // PaymentType -> Product
-      //     product_payment_type: { payer_volume, payer_share },  // Product -> PaymentType
-      //   }
-      // Unpack BOTH orderings into the flat keys this function (and
-      // TAB_KEY_MAP) expect. Previously this only unwrapped the
-      // PaymentType->Product ordering and reused it for BOTH Hierarchy Order
-      // dropdown options, silently discarding the real Product->PaymentType
-      // data (product_payment_type) whenever it was present.
       if (
         out.payment_type_product &&
         !out.payment_type_product.payer_volume &&
         !out.payment_type_product.payer_share
       ) {
         const container = out.payment_type_product;
-        const ptToProduct = container.payment_type_product; // top level = payment type
-        const productToPt = container.product_payment_type; // top level = product
+        const ptToProduct = container.payment_type_product;
+        const productToPt = container.product_payment_type;
         if (ptToProduct && !out.payer_product) out.payer_product = ptToProduct;
         if (productToPt && !out.product_payer) out.product_payer = productToPt;
-        // Normalize payment_type_product itself down to a single-ordering
-        // metric object (payer_volume/payer_share) so any other code path
-        // that still reads it directly keeps working.
         out.payment_type_product = ptToProduct || productToPt || container;
       }
 
-      // Alias the payment-type breakdown tab so it works under either name.
       if (!out.payment_type_distribution && out.payer_distribution) {
         out.payment_type_distribution = out.payer_distribution;
       }
@@ -398,11 +340,8 @@ export default function PBCModelInput() {
         out.payer_distribution = out.payment_type_distribution;
       }
 
-      // Only if, after unpacking above, one ordering genuinely has no data
-      // of its own (older/partial responses) — reuse the other ordering
-      // rather than leaving the dropdown option blank.
       if (out.payer_product && !out.product_payer) out.product_payer = out.payer_product;
-      if (out.product_payer && !out.payer_product) out.payer_product = out.product_payer;
+      if (out.product_payer && !out.payer_product) out.product_payer = out.payer_product;
 
       return out;
     };
@@ -414,7 +353,6 @@ export default function PBCModelInput() {
       if (x == null || x === "") return null;
       const n = Number(x);
       if (Number.isNaN(n)) return null;
-      
       return n;
     };
     const parseValues = (v, asPercent = false) => {
@@ -429,9 +367,6 @@ export default function PBCModelInput() {
       return [];
     };
 
-    // Use chartMa (the scenario with actual chart data) to derive months and
-    // forecast_start_index. Use ma (active scenario) for table data when available.
-    // New API structure: metric.monthly.chart / metric.monthly.table / metric.yearly.*
     const effectiveMa = ma || chartMa;
     const firstTab = chartMa
       ? (chartMa.total_market_volume || chartMa[Object.keys(chartMa)[0]])
@@ -442,7 +377,6 @@ export default function PBCModelInput() {
         firstTab.payer_share ||
         Object.values(firstTab)[0]);
 
-    // Support both old shape (metric.chart) and new shape (metric.monthly.chart)
     const getMonthlyChart = (metric) => metric?.monthly?.chart || metric?.chart || null;
     const getMonthlyTable = (metric) => metric?.monthly?.table || metric?.table || null;
     const getYearlyChart = (metric) => metric?.yearly?.chart || null;
@@ -454,7 +388,6 @@ export default function PBCModelInput() {
       (firstMetric && getMonthlyChart(firstMetric)?.forecast_start_index) || 0;
 
     const selectMetricForTab = (tabKey, tabObj) => {
-      // Force "payer_volume" if the context tab is total_market_volume
       if (tabKey === "total_market_volume") {
         return tabObj.payer_volume || Object.values(tabObj)[0];
       }
@@ -487,7 +420,6 @@ export default function PBCModelInput() {
       );
     };
 
-    // Helper to parse a chart object (monthly or yearly) into our internal format
     const parseChartObj = (rawChart, fallbackMonths, fallbackFsi, asPercent) => {
       if (!rawChart) return { months: fallbackMonths, forecast_start_index: fallbackFsi, series: [] };
       return {
@@ -503,12 +435,6 @@ export default function PBCModelInput() {
       };
     };
 
-    // Helper to parse a table object into our internal format
-    // Recursively parses rows AND their children to arbitrary depth — some
-    // tabs (e.g. Payment type-Payer-Product) nest a real 3rd hierarchy
-    // level (e.g. Commercial -> Commercial - CVS -> ASGA/GILD/Other), and a
-    // shallow one-level-deep children map would silently drop that bottom
-    // level entirely.
     const parseRow = (r, asPercent) => ({
       hierarchy: r.hierarchy || r.label || "",
       label: r.label || r.hierarchy || "",
@@ -525,29 +451,16 @@ export default function PBCModelInput() {
       };
     };
 
-    // Build tabs using chart data from chartMa and table data from ma.
-    // The union of keys from both ensures we cover all tabs.
     const allTabKeys = new Set([
       ...Object.keys(chartMa || {}),
       ...Object.keys(ma || {}),
     ]);
     const tabs = {};
 
-    // The backend's yearly series can include a genuine duplicate year
-    // bucket for whichever calendar year the forecast boundary falls
-    // inside (e.g. two separate "2023" entries — one for the January-July
-    // actuals, one for the August-December forecast months). Verified
-    // against the monthly data these are derived from, across every tab:
-    // the two buckets are meant to SUM to that year's true total — showing
-    // them as two separate partial-value columns is wrong, and so is
-    // keeping only one of them. Merges any bucket(s) sharing a label into
-    // one, summing values (recursively for nested table rows/children) and
-    // re-deriving forecast_start_index for the merged timeline.
     const mergeYearlyDuplicateBuckets = (chartObj, tableObj) => {
       const months = chartObj?.months;
       if (!months?.length) return { chart: chartObj, table: tableObj };
 
-      // Group original indices by label, preserving first-seen order.
       const groups = [];
       const groupIndexOfLabel = new Map();
       months.forEach((m, i) => {
@@ -565,8 +478,6 @@ export default function PBCModelInput() {
         groups.map((g) => g.reduce((total, i) => total + (Number(arr?.[i]) || 0), 0));
 
       const fsi = chartObj.forecast_start_index || 0;
-      // A merged bucket counts as "forecast" if any of the original months
-      // it absorbed were at/after the original forecast boundary.
       const firstForecastGroup = groups.findIndex((g) => g.some((i) => i >= fsi));
       const newFsi = firstForecastGroup === -1 ? groups.length : firstForecastGroup;
 
@@ -600,17 +511,6 @@ export default function PBCModelInput() {
       return { chart: newChart, table: newTable };
     };
 
-    // ── Real 3-level hierarchy tab: Payment Type / Payer / Product ─────────
-    // Unlike every other tab, "payment_type_payer_product" doesn't hold a
-    // single payer_volume/payer_share pair directly — it holds THREE
-    // pre-computed orderings (payment_type_payer_product,
-    // payment_type_product_payer, product_payment_type_payer), one per
-    // Hierarchy Order option in PaymentPayerProductTable. Parse each
-    // ordering with the same chart/table helpers used everywhere else and
-    // store them under tabs["payment_type_payer_product"].orders so
-    // PaymentPayerProductTable can render real backend data instead of
-    // mock/seeded values.
-
     const buildHierarchyOrderTab = () => {
       const chartOrdersObj = (chartMa || {}).payment_type_payer_product || {};
       const tableOrdersObj = (ma || {}).payment_type_payer_product || chartOrdersObj;
@@ -618,11 +518,13 @@ export default function PBCModelInput() {
         ...Object.keys(chartOrdersObj),
         ...Object.keys(tableOrdersObj),
       ]);
-      if (!orderKeys.size) return null;
+
+      const defaultOrderKeys = ["payment_type_payer_product", "payment_type_product_payer", "product_payment_type_payer"];
+      const effectiveOrderKeys = orderKeys.size ? orderKeys : new Set(defaultOrderKeys);
 
       const orders = {};
-      orderKeys.forEach((orderKey) => {
-        const chartOrderObj = chartOrdersObj[orderKey] || {};
+      effectiveOrderKeys.forEach((orderKey) => {
+        const chartOrderObj = chartOrdersObj[orderKey] || chartOrdersObj;
         const tableOrderObj = tableOrdersObj[orderKey] || chartOrderObj;
 
         const chartMetric = selectMetricForTab("payment_type_payer_product", chartOrderObj);
@@ -654,22 +556,18 @@ export default function PBCModelInput() {
         if (built) tabs[tabKey] = built;
         return;
       }
-      if (tabKey === "event_management") return; // no chart/table data on this key
+      if (tabKey === "event_management") return;
 
-      // Chart source: prefer chartMa (scenario with full chart data)
       const chartTabObj = (chartMa || {})[tabKey] || {};
       const chartSelectedMetric = selectMetricForTab(tabKey, chartTabObj);
       const isTabPercent = chartSelectedMetric === chartTabObj.payer_share;
 
-      // Table source: prefer active scenario (ma), fall back to chartMa
       const tableTabObj = (ma || {})[tabKey] || chartTabObj;
       const tableSelectedMetric = selectMetricForTab(tabKey, tableTabObj);
 
-      // Monthly data (used for chart and monthly table)
       const rawMonthlyChart = getMonthlyChart(chartSelectedMetric);
       const rawMonthlyTable = getMonthlyTable(tableSelectedMetric);
 
-      // Yearly data (pre-computed by backend, used for yearly table/chart)
       const rawYearlyChart = getYearlyChart(chartSelectedMetric);
       const rawYearlyTable = getYearlyTable(tableSelectedMetric);
 
@@ -678,15 +576,6 @@ export default function PBCModelInput() {
       let yearlyChart = rawYearlyChart ? parseChartObj(rawYearlyChart, [], 0, isTabPercent) : null;
       const yearlyTable = rawYearlyTable ? parseTableObj(rawYearlyTable, yearlyChart?.months || [], isTabPercent) : null;
 
-      // The backend's yearly.chart.series can be present but only
-      // PARTIALLY populated — some entities get real history/forecast
-      // arrays, others get empty placeholder arrays (e.g. only the
-      // currently focused payer/product combo has real yearly numbers,
-      // its siblings come back as empty stubs). The yearly TABLE reliably
-      // has complete data for every entity (same rows/children the table
-      // view already renders correctly), so: drop any chart series entries
-      // that are entirely empty, then fill in whatever's missing — by
-      // label — from the table's own rows/children.
       const hasRealValues = (s) =>
         (s?.train_values || []).some((v) => v != null) ||
         (s?.forecast_values || []).some((v) => v != null);
@@ -695,14 +584,9 @@ export default function PBCModelInput() {
         yearlyChart = { ...yearlyChart, series: (yearlyChart.series || []).filter(hasRealValues) };
       }
 
-      // Skip the trivial single-row case (Total Market Volume, "Base") —
-      // it already gets complete data directly from the backend and has
-      // its own separate per-scenario rebuild further below.
       if (yearlyTable?.rows?.length && (yearlyTable.rows.length > 1 || yearlyTable.type === "hierarchy")) {
         const yearlyHeaders = yearlyTable.headers || yearlyChart?.months || [];
         const yearlyFsi = yearlyChart?.forecast_start_index ?? (() => {
-          // Only estimate when the backend gave us no yearly chart at all
-          // (no forecast_start_index to trust) — otherwise use its own value.
           const firstForecastMonth = chart.months?.[chart.forecast_start_index];
           if (!firstForecastMonth) return yearlyHeaders.length;
           const cutoffYear = String(firstForecastMonth).slice(0, 4);
@@ -710,15 +594,6 @@ export default function PBCModelInput() {
           return idx !== -1 ? idx : yearlyHeaders.length;
         })();
 
-        // Flattens table rows (and their children, for hierarchy tabs) into
-        // the same "Parent - Child" label convention the chart's own series
-        // already use (e.g. "Cash - ASGA"). Rows literally labeled "Total"
-        // are a rollup/summary row (used across several flat tabs, e.g.
-        // Product Distribution, Payment Type Distribution) — not a real
-        // breakdown category — so they're excluded here. Otherwise a tab
-        // whose monthly chart never included a "Total" line would gain one
-        // only in Yearly view, which is both redundant (it just re-sums the
-        // other lines) and inconsistent between Monthly/Yearly.
         const flattenTableRows = (rows) => {
           const out = [];
           (rows || []).forEach((r) => {
@@ -759,11 +634,6 @@ export default function PBCModelInput() {
         return { chart, table, yearlyChart: merged.chart, yearlyTable: merged.table };
       })();
 
-      // Per-scenario series map for this tab — powers Compare Scenarios on
-      // the chart for every tab. Each entry is the full series list (e.g.
-      // one entry per product/payer) as it appears in that scenario's own
-      // chart data, so the chart can show the same product/payer line
-      // across multiple scenarios instead of only the active one.
       if (data.scenarios) {
         const scenarioSeries = {};
         Object.keys(data.scenarios).forEach((scenarioName) => {
@@ -794,15 +664,9 @@ export default function PBCModelInput() {
       }
     });
 
-    // ── Multi-scenario table rows for Total Market Volume ──────────────────
-    // Only include scenarios that have real table values. Scenarios like s03/s02
-    // that return empty market_analysis are skipped — they have no data to show.
-    // The hierarchy key is always the scenario name (not the row label inside
-    // the response, which may say "Base" for all of them).
     if (data.scenarios && Object.keys(data.scenarios).length > 0) {
       const tmvTab = tabs["total_market_volume"];
       if (tmvTab) {
-        // Use available_scenarios ordering when present, fall back to object keys
         const allScenarioNames =
           Array.isArray(data.available_scenarios) && data.available_scenarios.length
             ? data.available_scenarios
@@ -815,20 +679,13 @@ export default function PBCModelInput() {
           const metricObj = tmv
             ? (tmv.payer_volume || tmv.payer_share || Object.values(tmv)[0])
             : null;
-          if (!metricObj) return; // no data at all — skip this scenario
-          // Support both old shape (metricObj.table) and new shape (metricObj.monthly.table)
+          if (!metricObj) return;
           const rawRows = metricObj?.monthly?.table?.rows || metricObj?.table?.rows || [];
           const firstRow = rawRows[0];
-          if (!firstRow) return; // empty table — skip this scenario
+          if (!firstRow) return;
           let vals = parseValues(firstRow.values, false);
-          if (!vals.length) return; // no actual values — skip
+          if (!vals.length) return;
 
-          // Align scenario values to the chart month axis (months = active scenario's
-          // months for the current date filter). A saved scenario may have been
-          // persisted with a wider or narrower date window, so its values array can be
-          // a different length. Without alignment, value[i] is plotted at chart
-          // position i regardless of the actual month, causing values to appear to
-          // "change" whenever the date filter shifts the month axis.
           const scenarioMonths = metricObj?.monthly?.chart?.months || [];
           if (scenarioMonths.length > 0 && months.length > 0 && scenarioMonths.length !== months.length) {
             const monthToVal = {};
@@ -851,7 +708,6 @@ export default function PBCModelInput() {
           const tmvChart = tmvTab.chart || { months, forecast_start_index: fsi, series: [] };
           const chartFsi = tmvChart.forecast_start_index ?? fsi;
 
-          // Build yearly scenario rows — only for scenarios that have yearly data.
           const yearlyScenarioRows = [];
           const yearlyChartMonthsRef = tmvTab.yearlyChart?.months || [];
           allScenarioNames.forEach((scenarioName) => {
@@ -867,7 +723,6 @@ export default function PBCModelInput() {
             let yearlyVals = parseValues(firstYearlyRow.values, false);
             if (!yearlyVals.length) return;
 
-            // Align yearly values to the active scenario's yearly month axis
             const scenarioYearlyMonths = metricObj?.yearly?.chart?.months || [];
             if (scenarioYearlyMonths.length > 0 && yearlyChartMonthsRef.length > 0 && scenarioYearlyMonths.length !== yearlyChartMonthsRef.length) {
               const yearToVal = {};
@@ -893,16 +748,6 @@ export default function PBCModelInput() {
             });
           });
 
-          // Chart shows one line per scenario so the Compare Scenarios
-          // dropdown can render multiple scenarios at once. Filtering to
-          // only the checked scenarios (and highlighting the currently
-          // applied one) happens at render time in ForecastChart — mirrors
-          // how the table filters scenarioRows via selectedCompareScenarios.
-          //
-          // Use each scenario's own forecast_start_index (translated into the
-          // shared month axis) so its solid/dashed boundary matches its actual
-          // training boundary rather than the active scenario's. This prevents
-          // a 1-month mismatch when scenarios have different training end dates.
           const allScenarioChartSeries = scenarioRows.map((row) => {
             const scName = row.hierarchy || row.label || "";
             const scMetricObj = (() => {
@@ -911,7 +756,6 @@ export default function PBCModelInput() {
             })();
             const scChartMonths = scMetricObj?.monthly?.chart?.months || [];
             const scFsiRaw = scMetricObj?.monthly?.chart?.forecast_start_index ?? chartFsi;
-            // Map the scenario's forecast-start month into the shared month axis.
             const scForecastMonth = scChartMonths[scFsiRaw];
             const effectiveFsi = scForecastMonth
               ? months.findIndex((m) => (m || "").substring(0, 7) === (scForecastMonth || "").substring(0, 7))
@@ -939,8 +783,6 @@ export default function PBCModelInput() {
               ...tmvTab.table,
               rows: scenarioRows,
             },
-            // Replace yearlyTable rows with all-scenario yearly rows so the
-            // yearly view also shows every scenario, not just the active one.
             yearlyTable: yearlyScenarioRows.length
               ? {
                 ...(tmvTab.yearlyTable || { type: "flat", headers: yearlyChartMonthsRef }),
@@ -955,22 +797,15 @@ export default function PBCModelInput() {
     return { months, forecast_start_index: fsi, tabs };
   }
 
-  // Maps the response of POST /api/liver/refresh into chart + table for the
-  // currently active tab. The refresh API returns the same full scenarios
-  // payload as apply-filters, so we reuse normalizeLiverResponse + mapLiverTabToView.
-  // Falls back to a flat-shape parser if the response doesn't include scenarios.
   const mapRefreshTableResponse = (data) => {
     if (!data) return { chart: null, table: [] };
 
-    // Full scenarios payload (same shape as apply-filters response)
     if (data.scenarios || data.active_scenario) {
       const normalized = normalizeLiverResponse(data, metric);
-      // Update liverRawData so subsequent tab switches use the refreshed data
       setLiverRawData(data);
       return mapLiverTabToView(normalized, activeTab, totalMarketViewMode);
     }
 
-    // Fallback: flat shape { chart, table } — handle gracefully
     const months = data?.chart?.months || chartData?.months || [];
     const fsi =
       data?.chart?.forecast_start_index ??
@@ -1019,14 +854,8 @@ export default function PBCModelInput() {
         table: [],
       };
 
-    // Chart and table both switch to yearly backend data (pre-computed by
-    // the API) when in yearly mode — previously only the table did this;
-    // the chart always stayed on monthly data regardless of view mode.
     const activeTableData = (viewMode === "yearly" && tab.yearlyTable) ? tab.yearlyTable : tab.table;
     const activeChartData = (viewMode === "yearly" && tab.yearlyChart) ? tab.yearlyChart : tab.chart;
-    // Sliced to a new array (not just referenced) so nothing downstream can
-    // ever mutate liverTabsRaw's own month arrays in place — see the note
-    // on displayColumns for why that class of bug matters here.
     const activeMonths = (viewMode === "yearly" && tab.yearlyChart) ? (tab.yearlyChart.months || []).slice() : months.slice();
     const activeFsi = (viewMode === "yearly" && tab.yearlyChart)
       ? (tab.yearlyChart.forecast_start_index || 0)
@@ -1073,7 +902,6 @@ export default function PBCModelInput() {
           lbl.includes("market volume") ||
           lbl.includes("market share")
         ) return false;
-        // Scenario-labeled series (TMV compare): only show if checked in the dropdown
         if (compareScenarioOptions.includes(s.label)) {
           return selectedCompareScenarios.includes(s.label);
         }
@@ -1210,7 +1038,6 @@ export default function PBCModelInput() {
     };
   };
 
-  // ── Payload builders ──────────────────────────────────────────────────────
   const buildBasePayload = () => ({
     ta_name: therapyArea,
     scenario_name: scenarioSelector,
@@ -1288,19 +1115,12 @@ export default function PBCModelInput() {
 
   const buildLiverBasePayload = () => ({
     ta: therapyArea || "HCV",
-    // "payer" in this payload is the Payer Filter dropdown (CVS / Non CVS)
-    // — subPayerFilter — not the Payment Type dropdown (see payment_type
-    // below, which is what used to be sent as "payer").
     payer: subPayerFilter ? [subPayerFilter] : [],
     brand: productFilter
       ? [productFilter]
       : productOptions?.length
         ? [getFirstOption(productOptions)]
         : [],
-    // Payment Type dropdown (Cash / Commercial / Medicaid / Medicare) —
-    // payerFilter/payerOptions are the underlying state/options for this
-    // filter app-wide, even though the field itself is now called
-    // "payment_type" here to match the new payload shape.
     payment_type: payerFilter
       ? [payerFilter]
       : payerOptions?.length
@@ -1312,13 +1132,6 @@ export default function PBCModelInput() {
     scenario: currentlyAppliedScenario || scenarioSelector || "Base",
   });
 
-  // Build payload for the refresh-table API based on current (edited) table state.
-  // Expected shape:
-  // {
-  //   ta_name, selected_filter: { market, product, start_date, end_date },
-  //   scenario_name, selected_tab, selected_metric, edited_hierarchy,
-  //   factors, market_analysis
-  // }
   const buildRefreshTablePayload = (hierarchyKey) => {
     const sourceScenario =
       currentlyAppliedScenario ||
@@ -1327,7 +1140,6 @@ export default function PBCModelInput() {
       (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
       "Base";
 
-    // Resolve full market_analysis for the active scenario
     let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis || {};
     if (!fullMarketAnalysis && liverRawData?.scenarios) {
       const matchedKey = Object.keys(liverRawData.scenarios).find(
@@ -1339,47 +1151,27 @@ export default function PBCModelInput() {
     }
     fullMarketAnalysis = fullMarketAnalysis || {};
 
-    // The backend expects ALL tabs in market_analysis.
-    // Spread fullMarketAnalysis (all tabs) and patch only the active tab's rows.
     const backendTabKey = TAB_KEY_MAP[activeTab] || activeTab;
 
-    // Build the current table values to send as the edited market_analysis.
-    // The backend expects the SAME hierarchical structure as the original
-    // market_analysis, with edited values patched in.
-    //
-    // For hierarchical tabs (payer_product, product_payer): rows have children[].
-    //   tableData stores these as flat rows: "Payer - Product" hierarchy strings.
-    //   We rebuild the hierarchy by looking up the original raw table structure
-    //   and patching each row's values from tableData's monthly_data.
-    //
-    // For flat tabs (total_market_volume, product_distribution, payer_distribution):
-    //   rows are flat — we emit them as-is from tableData.
     const months = chartData?.months || [];
     const activeMetric = toApiMetricKey(metric);
 
-    // Helper: extract values array from a row's monthly_data in month order
     const rowToValues = (row) =>
       months.map((m) => {
         const v = row?.monthly_data?.[m];
         return v == null ? 0 : Number(v);
       });
 
-    // Build a lookup map from hierarchy key -> tableData row (for fast access)
     const tableDataMap = {};
     tableData.forEach((row) => {
       tableDataMap[row.hierarchy] = row;
     });
 
-    // Determine if the active tab uses a hierarchical table structure.
     const isHierarchicalTab =
       backendTabKey === "payer_product" || backendTabKey === "product_payer";
 
     let tableRows;
     if (isHierarchicalTab) {
-      // Rebuild hierarchical rows from the original raw table structure,
-      // patching in edited values from tableData.
-      // The original rows are in liverRawData -> scenarios -> activeScenario
-      // -> market_analysis -> [tab] -> [metric] -> monthly -> table -> rows
       const origRows =
         fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.monthly?.table?.rows ||
         fullMarketAnalysis?.[backendTabKey]?.[activeMetric]?.table?.rows ||
@@ -1387,13 +1179,11 @@ export default function PBCModelInput() {
 
       tableRows = origRows.map((origRow) => {
         const parentLabel = origRow.label || origRow.hierarchy || "";
-        // Parent row: look up edited values from tableData (keyed by parentLabel)
         const parentTableRow = tableDataMap[parentLabel];
         const parentValues = parentTableRow
           ? rowToValues(parentTableRow)
           : (origRow.values || origRow.total || []);
 
-        // Child rows: look up edited values using "Parent - Child" key
         const children = (origRow.children || []).map((origChild) => {
           const childKey = `${parentLabel} - ${origChild.label}`;
           const childTableRow = tableDataMap[childKey];
@@ -1413,7 +1203,6 @@ export default function PBCModelInput() {
         return rebuilt;
       });
     } else {
-      // Flat tabs: emit rows directly from tableData
       tableRows = tableData.map((row) => ({
         label: row.hierarchy,
         values: rowToValues(row),
@@ -1422,7 +1211,6 @@ export default function PBCModelInput() {
 
     const tableType = isHierarchicalTab ? "hierarchical" : "flat";
 
-    // All tabs in market_analysis; only active tab's monthly table rows patched.
     const mergedMarketAnalysis = {
       ...fullMarketAnalysis,
       [backendTabKey]: {
@@ -1440,7 +1228,6 @@ export default function PBCModelInput() {
       },
     };
 
-    // Send only the active model's factors to keep the payload lean
     const activeFactors = {
       multiplier,
       multiplier_horizon: multiplierHorizon,
@@ -1457,8 +1244,6 @@ export default function PBCModelInput() {
         }),
     };
 
-    // Use the backend's own resolved selected_filter when available —
-    // it has the correct train_start_date and end_date that _resolve_forecast_periods needs.
     const backendSf = liverRawData?.selected_filter || {};
 
     const endDate = backendSf.end_date || toDate || "";
@@ -1475,10 +1260,8 @@ export default function PBCModelInput() {
         start_date: startDate,
         end_date: endDate,
       },
-      // Provide the exact positional arg names that _resolve_forecast_periods() expects
       train_end_month: endDate,
       cfg_periods: forecastPeriods,
-      // Also keep forecast_periods for backward compat
       forecast_periods: forecastPeriods,
       scenario_name: sourceScenario,
       selected_tab: backendTabKey,
@@ -1491,13 +1274,6 @@ export default function PBCModelInput() {
     };
   };
 
-  // ── Effects ───────────────────────────────────────────────────────────────
-  // Guards against firing fetchMetricFilters more than once for the same
-  // therapyArea (e.g. a parent re-render passing an equal-but-new context
-  // object, or any effect re-trigger that doesn't represent an actual TA
-  // change) — this was contributing to the duplicate "filters"/"HCV
-  // config"/"apply-filters" calls seen on load.
-  const fetchedTaRef = useRef(null);
   useEffect(() => {
     if (!therapyArea) return;
     if (fetchedTaRef.current === therapyArea) return;
@@ -1505,16 +1281,6 @@ export default function PBCModelInput() {
     fetchMetricFilters();
   }, [therapyArea]);
 
-  // Separate from the fetchMetricFilters effect above on purpose: that one
-  // requires a real therapyArea (it branches on isHCV internally), but the
-  // market-events list endpoint already defaults to "HCV" server-side, so
-  // this shouldn't be blocked by the same guard. If therapyArea never
-  // resolves to a truthy value at all, the effect above silently never
-  // calls fetchMetricFilters either — worth confirming in the console
-  // whether that's ALSO missing on refresh, which would point to
-  // `favState?.selectedTherapyArea` not being populated yet rather than
-  // anything specific to market events.
-  const fetchedMarketEventsTaRef = useRef(null);
   useEffect(() => {
     const resolvedTa = therapyArea || "HCV";
     if (fetchedMarketEventsTaRef.current === resolvedTa) return;
@@ -1522,11 +1288,6 @@ export default function PBCModelInput() {
     fetchSavedMarketEvents();
   }, [therapyArea]);
 
-  // Re-fetch every time the Events Management tab is opened, so it always
-  // reflects the latest saved state (e.g. events created/deleted from the
-  // Total Market Volume panel's compact list, or in another browser tab)
-  // rather than only whatever was loaded once on initial mount.
-  const prevActiveTabRef = useRef(activeTab);
   useEffect(() => {
     const enteredManageEvents =
       activeTab === "manage_events" && prevActiveTabRef.current !== "manage_events";
@@ -1538,27 +1299,23 @@ export default function PBCModelInput() {
 
   useLayoutEffect(() => {
     if (!filtersLoaded) return;
-    // Events Management / the mock 3-level tab have no chart/metric/table of their own.
-    if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
+    if (activeTab === "manage_events") return;
 
-    let targetMetric = "market_volume";
-    if (activeTab === "total_market") {
-      targetMetric = "market_volume";
-    } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
-      targetMetric = "market_share";
-    } else if (activeTab === "payer_prod" || activeTab === "prod_payer") {
-      targetMetric = "market_volume";
+    let targetMetric = metric;
+    if (!userSelectedMetricRef.current) {
+      if (activeTab === "total_market") {
+        targetMetric = "market_volume";
+      } else if (activeTab === "prod_dist" || activeTab === "payer_dist" || activeTab === "payment_payer_prod") {
+        targetMetric = "market_share";
+      } else if (activeTab === "payer_prod" || activeTab === "prod_payer") {
+        targetMetric = "market_volume";
+      }
     }
 
-    // Set per-tab model default only when the model is at the other tab's
-    // default (i.e. the user hasn't explicitly chosen a non-default model).
-    // We do NOT call setModelSelection on initial load when syncFactors has
-    // already set the correct model from the backend — only change it when
-    // the user switches tabs and the current model is clearly a "wrong default".
     const isDefaultForOtherTab =
       activeTab === "total_market"
-        ? modelSelection === "moving_average"  // switching TO total_market, was moving_average
-        : modelSelection === "ets";            // switching AWAY from total_market, was ets
+        ? modelSelection === "moving_average"
+        : modelSelection === "ets";
     if (isDefaultForOtherTab && modelSelection) {
       const newDefault = activeTab === "total_market" ? "ets" : "moving_average";
       setModelSelection(newDefault);
@@ -1571,7 +1328,27 @@ export default function PBCModelInput() {
 
     if (isHCV && liverRawData) {
       const nextLiverTabsRaw = normalizeLiverResponse(liverRawData, targetMetric);
-      setLiverTabsRaw(nextLiverTabsRaw);
+
+      // Don't blindly overwrite: if this normalization run came up short on
+      // the hierarchy orders (e.g. a stale/edge-case response shape), keep
+      // whatever orders were already in state instead of wiping them out.
+      setLiverTabsRaw((prev) => {
+        if (prev?.tabs?.payment_type_payer_product?.orders && !nextLiverTabsRaw?.tabs?.payment_type_payer_product?.orders) {
+          return {
+            ...nextLiverTabsRaw,
+            tabs: {
+              ...(nextLiverTabsRaw?.tabs || {}),
+              payment_type_payer_product: {
+                ...(nextLiverTabsRaw?.tabs?.payment_type_payer_product || {}),
+                orders: prev.tabs.payment_type_payer_product.orders,
+              },
+            },
+          };
+        }
+        return nextLiverTabsRaw;
+      });
+
+      if (activeTab === "payment_payer_prod") return;
 
       const { chart, table } = mapLiverTabToView(
         nextLiverTabsRaw,
@@ -1581,20 +1358,12 @@ export default function PBCModelInput() {
       );
       setChartData(chart);
       setTableData(table);
-    } else if (metric !== targetMetric) {
+    } else if (metric !== targetMetric && activeTab !== "payment_payer_prod") {
       handleApplyFilterWithMetric(targetMetric);
     }
   }, [activeTab, filtersLoaded, isHCV, liverRawData, totalMarketViewMode]);
 
-
-
   useEffect(() => {
-    // For HCV, fetchMetricFilters already fully populates the initial view
-    // (GET /liver/filters, and a single cfg-driven apply call when a saved
-    // config exists). A second, separate handleApplyFilter() call here was
-    // firing an extra duplicate apply-filters request on every load — skip
-    // it entirely for HCV; non-HCV therapy areas still need it since they
-    // don't get pre-populated by fetchMetricFilters in the same way.
     if (!filtersLoaded || autoAppliedOnMount || isHCV) return;
     (async () => {
       try {
@@ -1624,55 +1393,31 @@ export default function PBCModelInput() {
 
   useEffect(() => {
     if (!liverTabsRaw) return;
-    // Events Management / the mock 3-level tab have no chart/table of their own.
     if (activeTab === "manage_events" || activeTab === "payment_payer_prod") return;
 
-    // Keep the chart/table in sync for all non-tab-switch updates too, but
-    // avoid the extra tab-switch render chain by letting the tab-change path
-    // handle the transformation first.
     const { chart, table } = mapLiverTabToView(liverTabsRaw, activeTab, totalMarketViewMode, metric);
     setChartData(chart);
     setTableData(table);
 
-    // Auto-expand every parent row for the Payer/Product hierarchy tabs —
-    // the wireframe always shows the full nested Payment Type -> Product
-    // (or Product -> Payment Type) grid at once, never collapsed by
-    // default. Individual rows / Collapse All still work afterwards.
-    let nextExpandedBrands = {};
-    if (activeTab === "payer_prod" || activeTab === "prod_payer") {
-      const parentNames = Array.from(
-        new Set(table.filter((r) => !(r.hierarchy || "").includes(" - ")).map((r) => r.hierarchy)),
-      );
-      parentNames.forEach((name) => {
-        nextExpandedBrands[name] = true;
-        if (currentlyAppliedScenario) nextExpandedBrands[`${name} (${currentlyAppliedScenario})`] = true;
-      });
-    } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
-      nextExpandedBrands = currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {};
-    }
-
-    setExpandedBrands((prev) => {
-      const prevKeys = Object.keys(prev || {});
-      const nextKeys = Object.keys(nextExpandedBrands || {});
-      if (
-        prevKeys.length === nextKeys.length &&
-        prevKeys.every((key) => prev[key] === nextExpandedBrands[key])
-      ) {
-        return prev;
+    if (Object.keys(expandedBrands).length === 0) {
+      let nextExpandedBrands = {};
+      if (activeTab === "payer_prod" || activeTab === "prod_payer") {
+        const parentNames = Array.from(
+          new Set(table.filter((r) => !(r.hierarchy || "").includes(" - ")).map((r) => r.hierarchy)),
+        );
+        parentNames.forEach((name) => {
+          nextExpandedBrands[name] = true;
+          if (currentlyAppliedScenario) nextExpandedBrands[`${name} (${currentlyAppliedScenario})`] = true;
+        });
+      } else if (activeTab === "prod_dist" || activeTab === "payer_dist") {
+        nextExpandedBrands = currentlyAppliedScenario ? { [currentlyAppliedScenario]: true } : {};
       }
-      return nextExpandedBrands;
-    });
+      if (Object.keys(nextExpandedBrands).length > 0) {
+        setExpandedBrands(nextExpandedBrands);
+      }
+    }
   }, [activeTab, liverTabsRaw, totalMarketViewMode, currentlyAppliedScenario, appliedPayerFilter, appliedProductFilter, payerFilter, productFilter]);
 
-  // For non-Total-Market tabs, when Compare Scenarios has other scenarios
-  // selected, build each OTHER scenario's own chart series for the tab
-  // currently being viewed — reusing normalizeLiverResponse's full
-  // reconciliation (same fixes the applied scenario gets: the nested
-  // payment_type_product unwrap, the yearly duplicate-year dedupe, etc.) by
-  // temporarily treating that scenario as "active". These are ADDED
-  // alongside the applied scenario's own per-category breakdown in the
-  // chart, never replacing it — see ModelInputChart's isTotalMarket branch
-  // for why a full replace was wrong here previously.
   const otherScenarioChartSeries = useMemo(() => {
     if (activeTab === "total_market" || activeTab === "manage_events" || activeTab === "payment_payer_prod") return [];
     if (!liverRawData?.scenarios) return [];
@@ -1693,16 +1438,6 @@ export default function PBCModelInput() {
     return out;
   }, [activeTab, liverRawData, selectedCompareScenarios, currentlyAppliedScenario, totalMarketViewMode, metric]);
 
-  // Same idea as otherScenarioChartSeries above, but for the Payment
-  // type-Payer-Product tab specifically — it's excluded from that memo
-  // (its data isn't a flat series list, it's the 3 pre-computed hierarchy
-  // orderings PaymentPayerProductTable's own Hierarchy Order dropdown
-  // switches between) and previously had no Compare Scenarios support at
-  // all, so other scenarios' data never appeared in this tab's chart.
-  // Builds each OTHER selected scenario's full orders map the same way
-  // buildHierarchyOrderTab does for the applied scenario, keyed by
-  // scenario name; PaymentPayerProductTable picks out whichever ordering
-  // matches its own currently-selected Hierarchy Order.
   const otherScenarioHierarchyData = useMemo(() => {
     if (activeTab !== "payment_payer_prod") return {};
     if (!liverRawData?.scenarios) return {};
@@ -1727,25 +1462,18 @@ export default function PBCModelInput() {
       if (!currentlyAppliedScenario) setCurrentlyAppliedScenario(names[0]);
       if (!tentativeRadioSelectedScenario)
         setTentativeRadioSelectedScenario(names[0]);
-      // compareScenarioOptions / selectedCompareScenarios are managed by
-      // initializeCompareScenarios which is called with the raw API response —
-      // no override here.
     }
   }, [filterOptions.scenario_names]);
 
-  // Exit table edit mode whenever the user switches tabs.
   useEffect(() => {
     if (tableEditing) {
-      // setTableData(tableSnapshot);
       setEditedHierarchies({});
       setIsRefreshed(false);
       setTableEditing(false);
       setEditable(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
-  // ── API ───────────────────────────────────────────────────────────────────
   const fetchMetricFilters = async () => {
     try {
       setLoading(true);
@@ -1772,11 +1500,6 @@ export default function PBCModelInput() {
           console.warn("Failed to load HCV config", err);
         }
 
-        // GET /api/liver/filters — called once on initial load (no
-        // payer/brand params) to seed the Payer/Product dropdown options
-        // and the available FROM/TO DATE range. Response shape:
-        // { ta_name, markets: [...], products: [...], available_months: [...],
-        //   selected_filter: { market, product, start_date, end_date } }
         const fallbackPayers = ["Commercial", "Medicare", "Medicaid"];
         const fallbackProducts = ["GILD", "ASGA", "others"];
         let filtersData = null;
@@ -1809,33 +1532,10 @@ export default function PBCModelInput() {
         if (availMonths.length) setAvailableDates(availMonths);
 
         const sfInitial = filtersData?.selected_filter || {};
-        // Saved filter (sfInitial) takes priority: it reflects the user's last
-        // explicit apply. Fall back to config dates only when there is no saved state.
-        //
-        // NOTE: sfInitial.payer now echoes the NEW Payer Filter (CVS / Non
-        // CVS) — buildLiverBasePayload sends "payment_type" for the Payment
-        // Type dropdown and "payer" for the CVS/Non CVS one (see the recent
-        // payload restructure). Reading sfInitial.payer into the Payment
-        // Type dropdown here was seeding it with "CVS"/"Non CVS", which
-        // isn't in payerOptions (Cash/Commercial/Medicaid/Medicare) — every
-        // chart that filters by the applied payment type then matched zero
-        // series and rendered blank. Prefer sfInitial.payment_type (in case
-        // the backend starts echoing it under the new name), falling back
-        // to the first real option instead of the now-mismatched
-        // sfInitial.payer.
         if (!localPayer)
           localPayer =
             sfInitial.payment_type ||
             (norm.payers?.length ? getFirstOption(norm.payers) : "");
-        // Only accept sfInitial.payer for the Payer Filter dropdown if it's
-        // actually one of its two valid options — the backend isn't
-        // consistently sending the new CVS/Non CVS value in this field yet
-        // (it's been observed echoing back a payment-type value like
-        // "Cash" here too), and blindly assigning that into a dropdown
-        // whose only MenuItems are "CVS"/"Non CVS" made it render whatever
-        // garbage value came back (renderValue shows the raw selection
-        // regardless of whether it matches a real option). Leave it unset
-        // rather than show an invalid selection.
         if (!localSubPayer) {
           localSubPayer = ["CVS", "Non CVS"].includes(sfInitial.payer) ? sfInitial.payer : "";
         }
@@ -1843,8 +1543,6 @@ export default function PBCModelInput() {
           localProduct =
             sfInitial.product ||
             (norm.products?.length ? getFirstOption(norm.products) : "");
-        // Saved filter overrides config: the user's last explicit apply is the source of truth.
-        // fromDate must match an availableDates entry exactly (Mon-YY format) for safeFrom to work.
         if (sfInitial.start_date) {
           const sfStartParsed = parseDateString(sfInitial.start_date);
           const matchedFrom = sfStartParsed.isValid()
@@ -1862,8 +1560,6 @@ export default function PBCModelInput() {
         setPayerFilter(localPayer);
         setProductFilter(localProduct);
         setSubPayerFilter(localSubPayer);
-        // Stamp the applied values immediately so the default highlight
-        // shows on first load without waiting for an explicit Apply click.
         setAppliedPayerFilter(localPayer);
         setAppliedProductFilter(localProduct);
         setAppliedSubPayerFilter(localPayer === "Cash" ? "" : localSubPayer);
@@ -1916,8 +1612,6 @@ export default function PBCModelInput() {
             data?.active_scenario || availScenarios[0] || "Base";
           setScenarioSelector(activeScenarioKey);
 
-          // Dates resolved by the backend — normalise start_date to Mon-YY format
-          // so it matches an availableDates entry and safeFrom resolves correctly.
           const sf = data?.selected_filter || {};
           if (sf.start_date) {
             const sfP = parseDateString(sf.start_date);
@@ -1945,8 +1639,6 @@ export default function PBCModelInput() {
           setLiverTabsRaw(normalized);
           setLiverRawData(data);
           initializeCompareScenarios(data);
-          // Prefer the backend's full available_months (DB start → forecast end)
-          // over the chart's month list, which only covers the model range.
           if (data?.available_months?.length) setAvailableDates(data.available_months);
           else if (normalized?.months?.length) setAvailableDates(normalized.months);
           setEditable(false);
@@ -2051,30 +1743,10 @@ export default function PBCModelInput() {
     }
   };
 
-  // Called whenever the PAYER FILTER or PRODUCT FILTER dropdown changes.
-  // Hits GET /api/liver/filters with the newly selected payer/product and
-  // repopulates from-date, to-date, available scenarios, the projection
-  // factors, and the chart/table directly from the backend response —
-  // matching the same response shape used on initial load.
-  // NOTE: Payer/Product filter changes are pure local state — no API call
-  // fires until the user explicitly clicks "Apply Filter". (Previously a
-  // refreshLiverFilters() call fired on every dropdown change to keep the
-  // From/To Date options in sync with the new payer/product; removed since
-  // that's still an API call happening before Apply Filter is clicked.)
-
-  // Resolves the model to use from a backend active_model value.
-  // Rules:
-  //   - total_market tab default is "ets" if the backend sent nothing/null.
-  //   - All other tabs default to "linear" if the backend sent "ets" or nothing
-  //     (ETS is now allowed on any tab, but "ets" is only the default on
-  //     total_market).
-  //   - A concrete non-null value from the backend is always respected.
   const resolveModelForTab = (backendModel) => {
     if (!backendModel) {
       return activeTab === "total_market" ? "ets" : "moving_average";
     }
-    // If we're NOT on total_market and the backend explicitly returned "ets",
-    // honour it — the user may have saved an ETS scenario on another tab.
     return backendModel;
   };
 
@@ -2303,7 +1975,6 @@ export default function PBCModelInput() {
     try {
       setLoading(true);
       if (isHCV) {
-        // Resolve source scenario robustly
         const sourceScenario =
           currentlyAppliedScenario ||
           scenarioSelector ||
@@ -2311,8 +1982,6 @@ export default function PBCModelInput() {
           (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
           "Base";
 
-        // Resolve market_analysis — try exact key match first, then case-insensitive,
-        // then fall back to the first available scenario's market_analysis.
         let marketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis;
         if (!marketAnalysis && liverRawData?.scenarios) {
           const matchedKey = Object.keys(liverRawData.scenarios).find(
@@ -2338,21 +2007,16 @@ export default function PBCModelInput() {
           market_analysis: marketAnalysis,
         };
 
-        console.log("[SaveScenario] payload:", JSON.stringify(payload, null, 2));
-
         const resp = await saveLiverScenario(payload);
 
         showSnackbar("Scenario saved successfully", "success");
 
-        // Add to scenario list if not already present.
         setFilterOptions((prev) => {
           const names = prev.scenario_names || [];
           if (names.includes(scenarioNameFromDialog)) return prev;
           return { ...prev, scenario_names: [...names, scenarioNameFromDialog] };
         });
 
-        // If the save response includes updated chart/table data, load it
-        // directly into the view so the new scenario row shows real values.
         const respData = resp?.data || {};
         if (respData && Object.keys(respData).length) {
           const activeScenarioKey =
@@ -2373,17 +2037,12 @@ export default function PBCModelInput() {
             setLiverTabsRaw(normalized);
             setLiverRawData(respData);
             initializeCompareScenarios(respData, scenarioNameFromDialog);
-            // mapLiverTabToView will re-run via the liverTabsRaw effect,
-            // which updates chartData and tableData automatically.
           }
         }
 
         setTentativeRadioSelectedScenario(scenarioNameFromDialog);
         setCurrentlyAppliedScenario(scenarioNameFromDialog);
 
-        // Add to savedScenarioRows so it appears in the table immediately.
-        // Only skip adding it if the API response already includes it as a
-        // scenario with its own table data in groupedTableHierarchy.
         setSavedScenarioRows((prev) => {
           const scenarioInResponse =
             respData?.scenarios?.[scenarioNameFromDialog] ||
@@ -2394,7 +2053,6 @@ export default function PBCModelInput() {
             : [...prev, scenarioNameFromDialog];
         });
 
-        // Match handleConfirmSave: a successful save always exits edit mode.
         setEditedHierarchies({});
         setIsRefreshed(false);
         setTableEditing(false);
@@ -2431,7 +2089,6 @@ export default function PBCModelInput() {
     }
   };
 
-  // ── Table edit / refresh handlers ────────────────────────────────────────
   const handleEnterTableEdit = () => {
     setTableSnapshot(tableData.map((r) => ({ ...r, monthly_data: { ...r.monthly_data } })));
     setEditedHierarchies({});
@@ -2448,15 +2105,10 @@ export default function PBCModelInput() {
     setEditable(false);
   };
 
-  // Called by the Save button after Refresh has already synced data with the backend.
-  // Just closes edit mode — no additional API call needed.
-  // Base scenario → POST /api/liver/save-scenario (save as new via modal).
-  // Other scenario → PUT /api/liver/update-scenario (update in place).
   const handleConfirmSave = async () => {
     const activeScenario = currentlyAppliedScenario || scenarioSelector || "";
     const isBase = activeScenario.toLowerCase() === "base";
 
-    // Resolve full market_analysis for the active scenario
     let marketAnalysis = liverRawData?.scenarios?.[activeScenario]?.market_analysis;
     if (!marketAnalysis && liverRawData?.scenarios) {
       const matchedKey = Object.keys(liverRawData.scenarios).find(
@@ -2469,13 +2121,11 @@ export default function PBCModelInput() {
     marketAnalysis = marketAnalysis || {};
 
     if (isBase) {
-      // Base is read-only — prompt user to name a new scenario (POST flow)
       setNewScenarioName("");
       setSaveScenarioDialogOpen(true);
       return;
     }
 
-    // Non-Base → PUT /api/liver/update-scenario
     const backendSf = liverRawData?.selected_filter || {};
     const updatePayload = {
       ta_name: therapyArea || "HCV",
@@ -2527,32 +2177,18 @@ export default function PBCModelInput() {
     try {
       setSavingTable(true);
       setLoading(true);
-      // Previously this looped once per edited row, firing N near-identical
-      // requests (each call already carries every current edit baked into
-      // tableData) and keeping only the last response. That both wasted
-      // calls and risked the backend treating each call as "only this one
-      // row changed," reverting earlier edits made in the same session.
-      // Send everything in a single call instead.
       const payload = buildRefreshTablePayload(editedKeys);
-      console.log("[RefreshTable] calling refreshLiverTable with payload:", JSON.stringify(payload, null, 2));
       const response = await refreshLiverTable(payload);
       const lastRawData = response?.data || {};
       if (lastRawData) {
-        // mapRefreshTableResponse handles both the new full-scenarios shape
-        // and the legacy flat shape. For the full-scenarios shape it also
-        // calls setLiverRawData internally so all tabs stay in sync.
         const { chart, table } = mapRefreshTableResponse(lastRawData);
         setChartData(chart);
         setTableData(table);
 
-        // If the response was a full scenarios payload, normalizeLiverResponse
-        // already ran inside mapRefreshTableResponse; update liverTabsRaw so
-        // that switching tabs re-derives the correct view from fresh data.
         if (lastRawData.scenarios || lastRawData.active_scenario) {
           const normalized = normalizeLiverResponse(lastRawData, metric);
           setLiverTabsRaw(normalized);
         } else {
-          // Legacy flat response: patch only the current tab in liverTabsRaw.
           const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
           setLiverTabsRaw((prev) => {
             const base = prev || { months: chart?.months || [], forecast_start_index: chart?.forecast_start_index || 0, tabs: {} };
@@ -2596,12 +2232,7 @@ export default function PBCModelInput() {
     }
   };
 
-  // Same idea as handleSaveTableChanges/buildRefreshTablePayload above, but
-  // for the Payment type-Payer-Product tab's real 3-level nested hierarchy
-  // (market_analysis.payment_type_payer_product.{orderKey}), which doesn't
-  // fit the standard tabs' flat tableData/editedHierarchies shape — this
-  // tab tracks its own edits locally (see PaymentPayerProductTable's
-  // editedCells) and hands them to this handler instead.
+  // SAFE RECONCILIATION FIX: Preserves nested `orders` mapping to prevent blank page crashes
   const handleSaveHierarchyTableChanges = async ({ editedCells, backendOrderKey, columns, rows }) => {
     const editedKeys = Object.keys(editedCells || {});
     if (!editedKeys.length) {
@@ -2621,7 +2252,16 @@ export default function PBCModelInput() {
         (liverRawData?.scenarios ? Object.keys(liverRawData.scenarios)[0] : "Base") ||
         "Base";
 
-      let fullMarketAnalysis = liverRawData?.scenarios?.[sourceScenario]?.market_analysis || {};
+      // liverRawData may come from either Apply Filter (market_analysis nested
+      // under scenarios[name]) or Run Calculation (market_analysis at the
+      // root, no `scenarios` wrapper). Reading only the nested shape silently
+      // produced an empty market_analysis whenever liverRawData had the
+      // Run Calculation shape, which sent a gutted payload to refreshLiverTable
+      // and made "Refresh" fail. Fall back to the root object in that case.
+      let fullMarketAnalysis = liverRawData?.scenarios
+        ? liverRawData.scenarios[sourceScenario]?.market_analysis
+        : liverRawData?.market_analysis;
+
       if (!fullMarketAnalysis && liverRawData?.scenarios) {
         const matchedKey = Object.keys(liverRawData.scenarios).find(
           (k) => k.toLowerCase() === sourceScenario.toLowerCase()
@@ -2637,10 +2277,6 @@ export default function PBCModelInput() {
       const orderObj = container[backendOrderKey] || {};
       const origRows = orderObj?.[activeMetric]?.monthly?.table?.rows || [];
 
-      // Group edited cells by row.key -> { columnIndex: newValue }. Cell
-      // keys are "<rowKey>::<colKey>" — rowKey itself can contain "::" only
-      // if a label did, which none of these do, so splitting on the last
-      // occurrence is safe.
       const editsByRowKey = {};
       editedKeys.forEach((cellKey) => {
         const sep = cellKey.lastIndexOf("::");
@@ -2653,8 +2289,6 @@ export default function PBCModelInput() {
         editsByRowKey[rowKey][col.indices[0]] = Number(editedCells[cellKey]) || 0;
       });
 
-      // Reconstruct each edited row's FULL values array: start from what's
-      // currently displayed, patch in only the columns actually changed.
       const patchedValuesByRowKey = {};
       Object.keys(editsByRowKey).forEach((rowKey) => {
         const row = (rows || []).find((r) => r.key === rowKey);
@@ -2665,10 +2299,22 @@ export default function PBCModelInput() {
         patchedValuesByRowKey[rowKey] = base;
       });
 
-      // Walk the ORIGINAL nested rows (arbitrary depth) and patch in the
-      // new values wherever the accumulated "Parent > Child > ..." path
-      // matches an edited row — same path convention PaymentPayerProductTable
-      // uses to build row.key (see flattenRealRows).
+      // Track every ancestor path of an edited row, so their aggregate
+      // totals can be recalculated as well, not just the exact edited row.
+      const touchedAncestorPaths = new Set();
+      Object.keys(patchedValuesByRowKey).forEach((path) => {
+        const parts = path.split(" > ");
+        for (let i = 1; i < parts.length; i++) {
+          touchedAncestorPaths.add(parts.slice(0, i).join(" > "));
+        }
+      });
+      const sumArrays = (arrs) => {
+        const length = arrs.reduce((max, a) => Math.max(max, (a || []).length), 0);
+        return Array.from({ length }, (_, i) =>
+          arrs.reduce((sum, a) => sum + (Number(a?.[i]) || 0), 0)
+        );
+      };
+
       const patchTree = (nodes, ancestorPath) =>
         (nodes || []).map((n) => {
           const label = n.label || n.hierarchy || "";
@@ -2676,13 +2322,55 @@ export default function PBCModelInput() {
           const next = { ...n };
           if (n.children?.length) next.children = patchTree(n.children, path);
           if (patchedValuesByRowKey[path]) {
+            // This exact row was edited — use the typed value directly.
             const newVals = patchedValuesByRowKey[path];
             if (Array.isArray(next.total)) next.total = newVals;
             else next.values = newVals;
+          } else if (touchedAncestorPaths.has(path) && next.children?.length) {
+            // Not edited directly, but a descendant was — roll the
+            // aggregate up from the (already patched) children instead of
+            // sending the stale pre-edit total for this row.
+            const childArrays = next.children.map(
+              (c) => (Array.isArray(c.total) ? c.total : c.values) || []
+            );
+            const rolledUp = sumArrays(childArrays);
+            if (Array.isArray(next.total)) next.total = rolledUp;
+            else next.values = rolledUp;
           }
           return next;
         });
       const patchedRows = patchTree(origRows, "");
+
+      // The chart's own series (history/forecast) is a separate, coarser
+      // (max 2-level) representation of the same tree. It was never being
+      // patched, so it kept pointing at pre-edit numbers even though
+      // table.rows was patched — if the backend uses chart series as the
+      // source of truth for recompute, the edit would be invisible to it.
+      // Derive matching series values from the same patched/rolled-up tree.
+      const rawChart = orderObj?.[activeMetric]?.monthly?.chart;
+      const chartFsiForPatch = rawChart?.forecast_start_index ?? 0;
+      const patchedSeriesByLabel = {};
+      patchedRows.forEach((r) => {
+        const rLabel = r.label || r.hierarchy || "";
+        if (r.children?.length) {
+          r.children.forEach((c) => {
+            const cLabel = c.label || c.hierarchy || "";
+            patchedSeriesByLabel[`${rLabel} - ${cLabel}`] =
+              (Array.isArray(c.total) ? c.total : c.values) || [];
+          });
+        } else {
+          patchedSeriesByLabel[rLabel] = (Array.isArray(r.total) ? r.total : r.values) || [];
+        }
+      });
+      const patchedChartSeries = (rawChart?.series || []).map((s) => {
+        const patched = patchedSeriesByLabel[s.label];
+        if (!patched) return s;
+        return {
+          ...s,
+          history: patched.slice(0, chartFsiForPatch),
+          forecast: patched.slice(chartFsiForPatch),
+        };
+      });
 
       const mergedMarketAnalysis = {
         ...fullMarketAnalysis,
@@ -2695,6 +2383,7 @@ export default function PBCModelInput() {
               monthly: {
                 ...(orderObj?.[activeMetric]?.monthly || {}),
                 table: { type: "hierarchical", rows: patchedRows },
+                chart: rawChart ? { ...rawChart, series: patchedChartSeries } : rawChart,
               },
             },
           },
@@ -2746,10 +2435,38 @@ export default function PBCModelInput() {
       const response = await refreshLiverTable(payload);
       const respData = response?.data || {};
       if (respData && Object.keys(respData).length) {
-        const normalized = normalizeLiverResponse(respData, metric);
-        setLiverTabsRaw(normalized);
         setLiverRawData(respData);
+        const normalized = normalizeLiverResponse(respData, metric);
+        
+        // Preserve nested hierarchy orders mapping to prevent empty state rendering
+        setLiverTabsRaw((prev) => {
+          const updatedTabs = { ...(normalized?.tabs || {}) };
+          if (prev?.tabs?.payment_type_payer_product?.orders) {
+            updatedTabs.payment_type_payer_product = {
+              ...(updatedTabs.payment_type_payer_product || {}),
+              orders: {
+                ...prev.tabs.payment_type_payer_product.orders,
+                ...(updatedTabs.payment_type_payer_product?.orders || {}),
+              },
+            };
+          }
+          return {
+            ...(normalized || {}),
+            tabs: updatedTabs,
+          };
+        });
+
         initializeCompareScenarios(respData);
+
+        // Keep FE scenario state in sync with what the backend actually
+        // returned — different endpoints have used different casing for the
+        // same scenario (e.g. Run Calculation's "BASE" vs this endpoint's
+        // "Base"). Without this, currentlyAppliedScenario goes stale after
+        // Refresh and later lookups keyed by scenario name silently miss.
+        if (respData.active_scenario) {
+          setCurrentlyAppliedScenario(respData.active_scenario);
+          setTentativeRadioSelectedScenario(respData.active_scenario);
+        }
       }
 
       setIsRefreshed(false);
@@ -2766,19 +2483,19 @@ export default function PBCModelInput() {
     }
   };
 
-  // Switches the active metric (Market Volume / Market Share) for the table.
-  // Exits table edit mode first so the snapshot is never stale, then either
-  // re-derives locally from cached raw data (HCV) or re-applies filters.
   const handleMetricChange = async (nm) => {
-    // Exit edit mode before switching metric so tableSnapshot
-    // is never stale and cancel always restores correct data.
+    userSelectedMetricRef.current = true;
+    setTabMetrics((prev) => ({
+      ...prev,
+      [activeTab]: nm,
+    }));
+
     if (tableEditing) {
       setTableData(tableSnapshot);
       setEditedHierarchies({});
       setTableEditing(false);
       setEditable(false);
     }
-    setMetric(nm);
     if (nm !== "market_share") setBrand("");
     if (isHCV && liverRawData) {
       setLiverTabsRaw(normalizeLiverResponse(liverRawData, nm));
@@ -2789,18 +2506,81 @@ export default function PBCModelInput() {
 
   const handleDownloadTable = () => {
     try {
+      const isYearly = totalMarketViewMode === "yearly";
+
+      if (activeTab === "payment_payer_prod") {
+        const activeOrderKey = TAB_KEY_MAP[activeTab];
+        const realOrder = liverTabsRaw?.tabs?.[activeOrderKey]?.orders?.[ORDER_TO_BACKEND_KEY?.["pt-payer-product"] || "payment_type_payer_product"];
+        const realTable = isYearly ? realOrder?.yearlyTable : realOrder?.table;
+
+        const headers = realTable?.headers?.length
+          ? realTable.headers
+          : availableDates || [];
+        const formattedHeaders = isYearly
+          ? headers
+          : headers.map((h) => formatDateLabel(h));
+
+        const headerRow = ["Hierarchy Path", ...formattedHeaders];
+        const csvRows = [headerRow];
+
+        const extractHierarchyRows = (nodes, ancestorLabels = []) => {
+          (nodes || []).forEach((node) => {
+            const currentPath = [...ancestorLabels, node.label || node.hierarchy || ""].join(" > ");
+            const vals = Array.isArray(node.total) ? node.total : node.values || [];
+
+            const rowValues = headers.map((_, idx) => {
+              const v = vals[idx];
+              if (v == null) return "";
+              return metric === "market_share"
+                ? `${Number(v).toFixed(1)}%`
+                : Math.round(Number(v)).toString();
+            });
+
+            csvRows.push([currentPath, ...rowValues]);
+
+            if (node.children?.length) {
+              extractHierarchyRows(node.children, [...ancestorLabels, node.label || node.hierarchy || ""]);
+            }
+          });
+        };
+
+        if (realTable?.rows?.length) {
+          extractHierarchyRows(realTable.rows);
+        }
+
+        const csvContent = csvRows
+          .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
+          .join("\n");
+
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${activeTabLabel.replace(/\s+/g, "_")}_Full_Hierarchy.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return;
+      }
+
       const months = chartData?.months || [];
-      const headerRow = ["Product / LOT", ...months.map((m) => formatDateLabel(m))];
+      const formattedHeaders = months.map((m) => (isYearly ? m : formatDateLabel(m)));
+      const headerRow = ["Product / Scenario", ...formattedHeaders];
+
       const rows = tableData.map((r) => [
         r.hierarchy,
         ...months.map((m) => {
           const v = r.monthly_data?.[m];
-          return v == null ? "" : v;
+          if (v == null) return "";
+          return metricUnit === "%" ? `${Number(v).toFixed(1)}%` : Math.round(Number(v));
         }),
       ]);
+
       const csv = [headerRow, ...rows]
         .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))
         .join("\n");
+
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -2811,34 +2591,29 @@ export default function PBCModelInput() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (e) {
+      console.error("Failed to download CSV:", e);
       showSnackbar("Failed to download table", "error");
     }
   };
 
-  // ── UI handlers ───────────────────────────────────────────────────────────
-
-  // Seed Compare Scenarios dropdown from the API response's available_scenarios.
-  // Called after every apply-filters / save-scenario / initial load response.
   const initializeCompareScenarios = (response, appliedScenario) => {
     const scenarios =
       response?.available_scenarios ||
       (response?.scenarios ? Object.keys(response.scenarios) : []);
 
-    // Always include the newly saved/applied scenario even if the API
-    // response doesn't list it in available_scenarios / scenarios keys.
+    // Different endpoints have returned different casing for the same
+    // scenario (e.g. Run Calculation's "BASE" vs Refresh's "Base"). A plain
+    // `.includes` check treats those as two different scenarios and adds a
+    // bogus duplicate that silently fails to load if ever selected. Compare
+    // case-insensitively instead.
     const toAdd = appliedScenario || currentlyAppliedScenario || "";
-    const merged = toAdd && !scenarios.includes(toAdd)
+    const alreadyPresent = toAdd && scenarios.some((s) => s.toLowerCase() === toAdd.toLowerCase());
+    const merged = toAdd && !alreadyPresent
       ? [...scenarios, toAdd]
       : scenarios;
 
     if (!merged.length) return;
     setCompareScenarioOptions(merged);
-    // Only default to "select all" on first load (nothing chosen yet) or
-    // before the user has ever touched the dropdown. Once the user has
-    // customized their selection, preserve it across apply-filter /
-    // save-scenario / refresh calls — just drop any scenario names that no
-    // longer exist in the new list. Previously this ran unconditionally on
-    // every call, silently re-checking scenarios the user had unchecked.
     setSelectedCompareScenarios((prev) => {
       if (!userHasCustomizedCompare || !prev.length) return merged;
       const stillValid = prev.filter((name) => merged.includes(name));
@@ -2846,10 +2621,6 @@ export default function PBCModelInput() {
     });
   };
 
-  // Mirrors HIV's Compare Scenarios <Select multiple> onChange: the
-  // currently applied scenario is always force-included in the selection
-  // (its MenuItem/Checkbox are also disabled below so it can't be
-  // unchecked directly).
   const handleCompareScenarioChange = (e) => {
     let value = e.target.value;
     if (currentlyAppliedScenario && !value.includes(currentlyAppliedScenario)) {
@@ -2867,68 +2638,60 @@ export default function PBCModelInput() {
     setDeleteDialogOpen(true);
   };
 
-  // ── Market Events (Total Market Volume panel + Events Management tab) ─────
-  // Reverse of the row mapping in handleSaveMarketEventsToServer below —
-  // turns a saved backend row back into this component's local event shape.
-  const EVENT_TYPE_FROM_API = {
-    product_event: "Product",
-    payer_event: "Payer",
-    payment_type_payer_product_event: "PaymentType_Payer_Product",
+  const EVENT_TYPE_TO_API = {
+    Product: "product_event",
+    Payer: "payment_type_event",
+    PaymentType_Payer_Product: "payment_type_payer_product_event",
   };
+  const EVENT_TYPE_FROM_API = Object.fromEntries(
+    Object.entries(EVENT_TYPE_TO_API).map(([feType, beType]) => [beType, feType]),
+  );
+
   const CURVE_TYPE_FROM_API = {
     linear: "Linear",
     exponential: "Exponential",
     logarithmic: "Logarithmic",
     scurve: "S-Curve",
   };
+  const toArray = (val) => {
+    if (Array.isArray(val)) return val.filter((v) => v !== null && v !== undefined && v !== "");
+    if (typeof val === "string") {
+      return val
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    if (val === null || val === undefined) return [];
+    return [val];
+  };
+
   const mapApiRowToLocalEvent = (row, fallbackEventType) => {
     const apiEventType = row.event_type || fallbackEventType || "product_event";
+    const feEventType = EVENT_TYPE_FROM_API[apiEventType] || "Product";
+    const isPPPRow = feEventType === "PaymentType_Payer_Product";
     return {
-      // Local list key only — the backend identifies/deletes events by
-      // event_name (string), not event_id, so fall back to the name (or a
-      // generated key) when event_id isn't present on the row.
       id: row.event_id ?? row.event_name ?? `evt_${Math.random().toString(36).slice(2)}`,
-      eventType: EVENT_TYPE_FROM_API[apiEventType] || "Product",
+      eventType: feEventType,
       name: row.event_name || "",
-      paymentTypes: row.payment_types || [],
-      products: row.products || [],
-      payers: row.payers || [],
-      // The "impacted" list's field name varies by event category —
-      // product events impact payers/products, payer events impact
-      // payment types, etc. — so check every variant seen in the API
-      // response rather than a single hardcoded key.
-      impactedItems:
-        row.impacted_products ||
-        row.impacted_payment_types ||
-        row.impacted_payers ||
-        row.impacted_items ||
-        [],
+      paymentTypes: isPPPRow ? toArray(row.payment_types) : [],
+      products: toArray(row.products),
+      payers: isPPPRow ? toArray(row.payers) : toArray(row.payment_types),
+      impactedItems: toArray(
+        row.impacted_products ??
+          row.impacted_payment_types ??
+          row.impacted_payers ??
+          row.impacted_items,
+      ),
       sourcePercentages: row.source_percentages || {},
       startDate: row.start_date || "",
       peakPercent: Number(row.peak_percent) || 0,
       months: Number(row.months) || 0,
       curveType: CURVE_TYPE_FROM_API[row.curve_type] || "Linear",
       factor: Number(row.factor) || 0,
-      // Loaded straight from the backend, so it definitely exists there —
-      // Delete should call the API for this one (see handleDeleteMarketEvent).
       persisted: true,
     };
   };
 
-  // GET /api/liver-market-events/market-events/{ta_name} — loads every
-  // previously-saved Impact Curve Configuration row for the Events
-  // Management tab (and the Total Market Volume panel's event list) so
-  // they survive a page refresh. Response shape (confirmed):
-  // {
-  //   events_management: {
-  //     product_event: { impact_curve_configuration: { rows: [...] } },
-  //     payer_event: { impact_curve_configuration: { rows: [...] } },
-  //     payment_type_payer_product_event: { impact_curve_configuration: { rows: [...] } },
-  //   }
-  // }
-  // Each row does NOT carry its own event_type — it's implied by which of
-  // the three category keys it lives under — so that key is stamped onto
-  // each row before mapping.
   const fetchSavedMarketEvents = async () => {
     try {
       const res = await getLiverMarketEventsList(therapyArea || "HCV");
@@ -2939,38 +2702,43 @@ export default function PBCModelInput() {
       if (eventsManagement) {
         rawRows = [
           "product_event",
-          "payer_event",
+          "payment_type_event",
           "payment_type_payer_product_event",
         ].flatMap((eventType) => {
-          const rows =
-            eventsManagement?.[eventType]?.impact_curve_configuration?.rows || [];
+          const rows = eventsManagement?.[eventType]?.impact_curve_configuration?.rows || [];
           return rows.map((r) => ({ ...r, event_type: r.event_type || eventType }));
         });
-      } else {
-        // Fallback for older/alternate response shapes.
-        rawRows =
-          data?.impact_curve_configuration?.rows ||
-          data?.events ||
-          data?.rows ||
-          data?.market_events ||
-          (Array.isArray(data) ? data : []);
       }
 
-      // Always sync to whatever the server returned — including an empty
-      // list, so a tab reopen after every event was deleted correctly
-      // clears the local table instead of leaving stale rows behind.
       setMarketEvents(
-        Array.isArray(rawRows) ? rawRows.map((r) => mapApiRowToLocalEvent(r, r.event_type)) : [],
+        Array.isArray(rawRows) ? rawRows.map((r) => mapApiRowToLocalEvent(r, r.event_type)) : []
       );
     } catch (error) {
       console.error("Failed to fetch saved market events:", error);
     }
   };
 
-  // Adds/updates a row locally (from the Add/Edit Event form's "Save Event"
-  // button) and immediately persists the full event list to the backend —
-  // there's no separate "batch save" step anymore, every Save Event click
-  // hits the API directly.
+  const buildMarketEventRow = (evt) => {
+    const isPPPEvt = evt.eventType === "PaymentType_Payer_Product";
+    const isPayerEvt = evt.eventType === "Payer";
+
+    return {
+      event_id: typeof evt.id === "number" ? evt.id : 0,
+      event_name: evt.name,
+      start_date: evt.startDate,
+      peak_percent: Number(evt.peakPercent) || 0,
+      months: Number(evt.months) || 0,
+      curve_type: CURVE_TYPE_TO_API[evt.curveType] || String(evt.curveType || "").toLowerCase(),
+      factor: evt.curveType === "Linear" ? 0 : Number(evt.factor) || 0,
+      payment_types: (isPPPEvt ? evt.paymentTypes : evt.payers) || [],
+      payers: isPPPEvt ? (evt.payers || []) : [],
+      products: evt.products || [],
+      source_percentages: evt.sourcePercentages || {},
+      impacted_products: isPayerEvt ? [] : (evt.impactedItems || []),
+      impacted_payment_types: isPayerEvt ? (evt.impactedItems || []) : [],
+    };
+  };
+
   const handleSaveMarketEvent = async (event) => {
     const idx = marketEvents.findIndex((e) => e.id === event.id);
     const nextEvents =
@@ -2981,9 +2749,6 @@ export default function PBCModelInput() {
     await handleSaveMarketEventsToServer(nextEvents);
   };
 
-  // Maps the UI's curve-type labels ("Linear", "S-Curve", ...) onto the
-  // lowercase, no-hyphen keys the backend uses everywhere else (factors.linear
-  // / .exponential / .logarithmic / .scurve — see syncFactors/handleApplyFilter).
   const CURVE_TYPE_TO_API = {
     Linear: "linear",
     Exponential: "exponential",
@@ -2991,51 +2756,28 @@ export default function PBCModelInput() {
     "S-Curve": "scurve",
   };
 
-  // Maps the "Add Event" menu's event type onto the backend's event_type /
-  // selected_tab enum — confirmed by the delete endpoint's own parameter
-  // list (product_event / payer_event / payment_type_payer_product_event),
-  // shared by both the save and delete calls below.
-  const EVENT_TYPE_TO_API = {
-    Product: "product_event",
-    Payer: "payer_event",
-    PaymentType_Payer_Product: "payment_type_payer_product_event",
-  };
-
-  // DELETE /api/liver-market-events/{event_name} — removes a single Impact
-  // Curve Configuration row from the backend (identified by its event NAME,
-  // not a numeric event_id), then drops it locally.
-  // NOTE: previously this skipped the network call entirely for events
-  // that hadn't been through a successful Save yet (tracked via
-  // evt.persisted), on the theory that a client-only event_id would just
-  // 404. That made Delete look like it "wasn't hitting" the API at all
-  // during testing. Always call the API now — a 404 for a genuinely
-  // never-saved event is still surfaced (see catch below) instead of
-  // silently doing nothing over the network.
-  const handleDeleteMarketEvent = async (eventId) => {
-    const evt = marketEvents.find((e) => e.id === eventId);
-    if (!evt) return;
+  const handleDeleteMarketEvent = async (evt) => {
+    if (!evt || !evt.name) return;
 
     try {
       setLoading(true);
+      const apiEventType = EVENT_TYPE_TO_API[evt.eventType] || "product_event";
+
       await deleteLiverMarketEvent(evt.name, {
         ta_name: therapyArea || "HCV",
-        event_type: EVENT_TYPE_TO_API[evt.eventType] || "product_event",
+        event_type: apiEventType,
       });
-      setMarketEvents((prev) => prev.filter((e) => e.id !== eventId));
+
+      await fetchSavedMarketEvents();
       showSnackbar("Market event deleted successfully", "success");
     } catch (error) {
       console.error("Failed to delete market event:", error);
-      const msg = error?.response?.data || error?.message || "Unknown error";
-      // A 404/not-found here means this event only ever existed locally
-      // (never went through a successful Save) — the backend has nothing
-      // to delete, so remove it locally instead of leaving a dead row the
-      // user can't get rid of. Any other failure (network, 500, etc.)
-      // leaves the row in place and surfaces the real error.
       const status = error?.response?.status;
       if (status === 404) {
-        setMarketEvents((prev) => prev.filter((e) => e.id !== eventId));
+        setMarketEvents((prev) => prev.filter((e) => e.id !== evt.id));
         showSnackbar("Event removed (it was never saved to the server)", "success");
       } else {
+        const msg = error?.response?.data || error?.message || "Failed to delete market event";
         showSnackbar(typeof msg === "string" ? msg : "Failed to delete market event", "error");
       }
     } finally {
@@ -3043,12 +2785,6 @@ export default function PBCModelInput() {
     }
   };
 
-  // POST /api/liver-market-events/save — persists every row currently in
-  // the Events Management table (Impact Curve Configuration) for the
-  // currently applied filters. Accepts an explicit events array (used by
-  // handleSaveMarketEvent right after a local add/edit, so the just-added
-  // row is included even though setMarketEvents hasn't re-rendered yet) —
-  // falls back to current state when called without one.
   const handleSaveMarketEventsToServer = async (eventsOverride) => {
     const eventsToSave = eventsOverride || marketEvents;
     if (!eventsToSave.length) {
@@ -3059,72 +2795,31 @@ export default function PBCModelInput() {
       setSavingMarketEvents(true);
       setLoading(true);
 
-      // "selected_tab" is a single top-level field even though events of
-      // different types can coexist in the table — using the most recently
-      // added/edited event's type as the best available signal. Adjust this
-      // if the backend expects something else (e.g. the tab most recently
-      // open in the UI).
-      const lastEvent = eventsToSave[eventsToSave.length - 1];
-      const selectedTab = EVENT_TYPE_TO_API[lastEvent?.eventType] || "product_event";
-
-      // Top-level selected_filter wants payment_types/payers/products as
-      // arrays; the app's global filter state only tracks single applied
-      // values (appliedPayerFilter/appliedProductFilter), so those are
-      // wrapped into single-element arrays. payerOptions doubles as the
-      // "payment type" master list app-wide (see PaymentPayerProductTable /
-      // MarketEventsPanel, which both reuse payerOptions for the Payment
-      // Type select), so the same applied value is used for both.
-      const appliedPayerArr = appliedPayerFilter ? [appliedPayerFilter] : [];
-      const appliedProductArr = appliedProductFilter ? [appliedProductFilter] : [];
-
-      const payload = {
-        ta_name: therapyArea || "HCV",
-        selected_filter: {
-          payment_types: appliedPayerArr,
-          payers: appliedPayerArr,
-          products: appliedProductArr,
-          start_date: resolveFromDate() || liverRawData?.selected_filter?.start_date || "",
-          end_date: toDate || liverRawData?.selected_filter?.end_date || "",
-        },
-        selected_tab: selectedTab,
-        impact_curve_configuration: {
-          rows: eventsToSave.map((evt) => {
-            const isPayerEvent = evt.eventType === "Payer";
-            return {
-              event_id: evt.id,
-              event_name: evt.name,
-              start_date: evt.startDate,
-              peak_percent: Number(evt.peakPercent) || 0,
-              months: Number(evt.months) || 0,
-              curve_type: CURVE_TYPE_TO_API[evt.curveType] || String(evt.curveType || "").toLowerCase(),
-              factor: evt.curveType === "Linear" ? 0 : Number(evt.factor) || 0,
-              // Singular representative payment type alongside the full
-              // payment_types array — first selected value, or "" if none.
-              payment_type: evt.paymentTypes?.[0] || "",
-              payment_types: evt.paymentTypes || [],
-              payers: evt.payers || [],
-              products: evt.products || [],
-              source_percentages: evt.sourcePercentages || {},
-              // impactedItems holds product names for Product/PPP events and
-              // payer names for Payer events (see MarketEventsPanel's
-              // impactOptions logic) — the payload has no "impacted_payers"
-              // slot, so Payer-event impacts are omitted here rather than
-              // mis-filed under impacted_products.
-              impacted_products: isPayerEvent ? [] : evt.impactedItems || [],
-              // The UI never computes impacted payment types (impact is
-              // always against payers or products — see MarketEventsPanel's
-              // isPayerEvent/isPPPEvent branching), so this is always empty
-              // under the current form. Revisit if that changes.
-              impacted_payment_types: [],
-            };
-          }),
-        },
+      const selectedFilter = {
+        payment_types: payerOptions || [],
+        payers: [],
+        products: productOptions || [],
+        start_date: resolveFromDate() || liverRawData?.selected_filter?.start_date || "",
+        end_date: toDate || liverRawData?.selected_filter?.end_date || "",
       };
 
-      await saveLiverMarketEventsConfig(payload);
-      // Marked mostly as bookkeeping now (Delete no longer checks this —
-      // it always calls the API) — kept in case it's useful metadata later.
-      setMarketEvents((prev) => prev.map((e) => ({ ...e, persisted: true })));
+      const groupsByType = eventsToSave.reduce((acc, evt) => {
+        (acc[evt.eventType] ||= []).push(evt);
+        return acc;
+      }, {});
+
+      await Promise.all(
+        Object.entries(groupsByType).map(([evtType, evts]) =>
+          saveLiverMarketEventsConfig({
+            ta_name: therapyArea || "HCV",
+            selected_filter: selectedFilter,
+            selected_tab: EVENT_TYPE_TO_API[evtType] || "product_event",
+            impact_curve_configuration: { rows: evts.map(buildMarketEventRow) },
+          })
+        )
+      );
+
+      await fetchSavedMarketEvents();
       showSnackbar("Market event saved successfully", "success");
     } catch (error) {
       console.error("Failed to save market events:", error);
@@ -3136,32 +2831,84 @@ export default function PBCModelInput() {
     }
   };
 
-  // POST /api/liver-market-events/run-calculation — triggers a recalculation
-  // of the Impact Curve Configuration for the currently applied filters.
-  // Wired to the "Run Calculation" button next to the Market Events
-  // dropdown on the Total Market Volume panel.
-  // NOTE: payload shape here is a best-effort guess (ta_name only) —
-  // mirror handleSaveMarketEventsToServer's payload above if the backend
-  // actually needs selected_filter/impact_curve_configuration too.
-  const handleRunMarketEventsCalculation = async () => {
+  const handleRunMarketEventsCalculation = async (selectedEventIdsFromPanel) => {
     try {
       setRunningMarketEventsCalculation(true);
       setLoading(true);
-      await runLiverMarketEventsCalculation({ ta_name: therapyArea || "HCV" });
-      showSnackbar("Market events calculation started successfully", "success");
+
+      const formattedStartDate = resolveFromDate()
+        ? dayjs(resolveFromDate(), DATE_INPUT_FORMATS).format("YYYY-MM-01")
+        : "2020-04-01";
+
+      const formattedEndDate = toDate
+        ? dayjs(toDate, DATE_INPUT_FORMATS).format("YYYY-MM-01")
+        : "2027-09-01";
+
+      const currentScenario = currentlyAppliedScenario || scenarioSelector || "BASE";
+      const normalizedScenario = currentScenario.toLowerCase() === "base"
+        ? "BASE"
+        : currentScenario;
+
+      const activeSelectedIds = Array.isArray(selectedEventIdsFromPanel) && selectedEventIdsFromPanel.length > 0
+        ? selectedEventIdsFromPanel
+        : marketEvents.map((e) => e.id);
+
+      const filteredEvents = marketEvents
+        .filter((evt) => activeSelectedIds.includes(evt.id))
+        .map((evt) => ({
+          event_name: evt.name,
+          event_type: EVENT_TYPE_TO_API[evt.eventType] || "product_event",
+        }));
+
+      const payload = {
+        ta_name: therapyArea || "HCV",
+        selected_filter: {
+          scenario_name: normalizedScenario,
+          payment_type: payerFilter
+            ? [payerFilter]
+            : payerOptions?.length
+              ? [payerOptions[0]]
+              : ["Commercial"],
+          products: productFilter
+            ? [productFilter]
+            : productOptions?.length
+              ? [productOptions[0]]
+              : ["ASGA"],
+          start_date: formattedStartDate,
+          end_date: formattedEndDate,
+        },
+        events: filteredEvents,
+      };
+
+      const response = await runLiverMarketEventsCalculation(payload);
+      const respData = response?.data || {};
+
+      if (respData && Object.keys(respData).length) {
+        setLiverRawData(respData);
+        const normalized = normalizeLiverResponse(respData, metric);
+        setLiverTabsRaw(normalized);
+
+        const { chart, table } = mapLiverTabToView(normalized, activeTab, totalMarketViewMode, metric);
+        setChartData(chart);
+        setTableData(table);
+
+        if (respData.available_months?.length) setAvailableDates(respData.available_months);
+        initializeCompareScenarios(respData);
+      }
+
+      showSnackbar("Market events calculation completed successfully!", "success");
     } catch (error) {
       console.error("Failed to run market events calculation:", error);
-      const msg = error?.response?.data || error?.message || "Unknown error";
-      showSnackbar(typeof msg === "string" ? msg : "Failed to run calculation", "error");
+      const msg = error?.response?.data?.detail || error?.response?.data || error?.message || "Unknown error";
+      showSnackbar(typeof msg === "string" ? msg : JSON.stringify(msg), "error");
     } finally {
       setRunningMarketEventsCalculation(false);
       setLoading(false);
     }
   };
 
-  // Keeps the app-wide product master in sync when a new product is added
-  // from the Add Event modal's "+ Add new product" option.
-  const handleAddMarketEventProduct = async (productName) => {    await addLiverMarketEventsProduct({ product_name: productName });
+  const handleAddMarketEventProduct = async (productName) => {
+    await addLiverMarketEventsProduct({ product_name: productName });
     setProductOptions((prev) => (prev.includes(productName) ? prev : [...prev, productName]));
   };
 
@@ -3207,7 +2954,7 @@ export default function PBCModelInput() {
   };
 
   const clickTableEdit = () => setEditable(true);
- const applySelectedScenario = async () => {
+  const applySelectedScenario = async () => {
     const chosenScenario = tentativeRadioSelectedScenario;
     if (!chosenScenario) {
       showSnackbar("Please select a scenario to apply", "error");
@@ -3218,10 +2965,6 @@ export default function PBCModelInput() {
       setLoading(true);
       const backendSf = liverRawData?.selected_filter || {};
 
-      // Always use the UI's current filter dates (resolveFromDate / toDate) first.
-      // backendSf.start_date can carry the DB-stored wide date (e.g. "2020-04-01")
-      // from a previous activate response, which would cause Base to expand to the
-      // full wide range on the 2nd click. UI state is always the source of truth here.
       const payload = {
         ta_name: therapyArea || "HCV",
         selected_filter: {
@@ -3233,45 +2976,21 @@ export default function PBCModelInput() {
         scenario_name: chosenScenario,
       };
 
-      // Hit the new activation endpoint
-      console.log("[applySelectedScenario] payload →", JSON.stringify({
-        start_date: payload.selected_filter.start_date,
-        scenario_name: payload.scenario_name,
-      }));
       const response = await activateLiverScenario(payload);
       const respData = response?.data;
-      // Debug: log the first month for each scenario's TMV chart so we can confirm
-      // whether the backend is clipping to the filter window or returning wide data.
-      if (respData?.scenarios) {
-        const dbgMonths = {};
-        Object.entries(respData.scenarios).forEach(([sc, sd]) => {
-          const tmv = sd?.market_analysis?.total_market_volume;
-          const mv = tmv?.payer_volume || tmv?.payer_share || (tmv && Object.values(tmv)[0]);
-          const ch = mv?.monthly?.chart || mv?.chart;
-          dbgMonths[sc] = ch?.months?.[0] ?? "(no chart)";
-        });
-        console.log("[applySelectedScenario] response scenario first-months →", dbgMonths);
-      }
 
-      // Update UI configurations
       setCurrentlyAppliedScenario(chosenScenario);
 
-      // Keep the newly applied scenario checked in the Compare dropdown
       setSelectedCompareScenarios((prev) => {
         if (prev.includes(chosenScenario)) return prev;
         return [...prev, chosenScenario];
       });
 
-      // If the backend returns updated full scenario data layout, process it.
-      // Otherwise, fall back to manipulating local cache state.
       if (respData && (respData.scenarios || respData.active_scenario)) {
         const normalized = normalizeLiverResponse(respData, metric);
         setLiverTabsRaw(normalized);
         setLiverRawData(respData);
 
-        // Sync factor controls (trajectory_start, total_growth, etc.) from the
-        // activated scenario's stored factors so the recalculate panel reflects
-        // what was used when the scenario was saved.
         const activatedScenarioObj = respData.scenarios?.[chosenScenario] || null;
         const f = activatedScenarioObj?.factors || {};
         if (Object.keys(f).length) {
@@ -3300,7 +3019,6 @@ export default function PBCModelInput() {
   const handleCellChange = (hierarchyKey, colName, value) => {
     const numericValue = value === "" ? null : Number(value);
     if (numericValue !== null && Number.isNaN(numericValue)) return;
-    // Any new edit invalidates the previous refresh — user must Refresh again
     setIsRefreshed(false);
     setTableData((prevTable) =>
       prevTable.map((row) => {
@@ -3319,11 +3037,9 @@ export default function PBCModelInput() {
     setEditedHierarchies((prev) => ({ ...prev, [hierarchyKey]: true }));
   };
 
-
   const safeFrom = (availableDates || []).includes(fromDate) ? fromDate : "";
   const safeTo = toDate;
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <Box sx={{ p: 3 }}>
       <Paper
@@ -3508,10 +3224,6 @@ export default function PBCModelInput() {
                   onChange={(e) => {
                     const val = e.target.value;
                     setPayerFilter(val);
-                    // "Cash" has no Payer (CVS/Non CVS) breakdown in the
-                    // backend data — the Payer Filter dropdown right below
-                    // has nothing valid to select in that case, so it's
-                    // disabled and its stale selection is cleared.
                     if (val === "Cash") setSubPayerFilter("");
                   }}
                   displayEmpty
@@ -3637,13 +3349,6 @@ export default function PBCModelInput() {
             <Button
               variant="contained"
               onClick={handleApplyFilter}
-              // "Cash" has no Payer (PAYER FILTER / CVS-Non CVS) breakdown,
-              // so that dropdown is disabled and doesn't need a selection
-              // in that case — but for any other Payment Type, both the
-              // Payment Type and Payer Filter dropdowns must have a real
-              // selection before Apply Filter is allowed. Previously only
-              // the date range was checked here, so Apply Filter could be
-              // clicked with Payer Filter left on "Select".
               disabled={
                 !resolveFromDate() ||
                 !toDate ||
@@ -4078,8 +3783,6 @@ export default function PBCModelInput() {
                         disabled={!editable}
                         displayEmpty
                         renderValue={(sel) => {
-                          // Use dayjs to avoid the UTC-midnight timezone shift
-                          // that makes new Date("YYYY-MM-DD") display one day off.
                           if (!sel) return "Select";
                           const p = parseDateString(sel);
                           return p.isValid() ? p.format("MMM-YY") : sel;
@@ -4091,8 +3794,6 @@ export default function PBCModelInput() {
                               ? chartData.months.slice(chartData.forecast_start_index)
                               : trajectoryMonthOptions;
 
-                          // Show all forecast months so the user can pick any
-                          // start date (including going back to an earlier one).
                           const opts = forecastMonths.length ? forecastMonths : trajectoryMonthOptions;
 
                           return opts.map((m) => (
@@ -4191,9 +3892,6 @@ export default function PBCModelInput() {
           }}
         >
           {TABS.map((tab) => {
-            // "Payment Type / Product" is one displayed tab but maps to two internal
-            // activeTab values (payer_prod / prod_payer) toggled via the
-            // Hierarchy Order dropdown inside ModelInputTable.
             const isActive =
               tab.value === "payer_prod"
                 ? HIERARCHY_TAB_VALUES.includes(activeTab)
@@ -4235,11 +3933,6 @@ export default function PBCModelInput() {
 
         {/* ── TAB CONTENT ── */}
         <Box sx={{ p: 3 }}>
-          {/* Market Events — compact panel matching the wireframe. Shown on
-              every tab except Events Management (which has its own full
-              table variant right below), so it stays visible for Product
-              Distribution / Payment Type Distribution / Payment Type-Product
-              too, not just Total Market Volume. */}
           {activeTab !== "manage_events" && (
             <MarketEventsPanel
               variant="compact"
@@ -4279,9 +3972,6 @@ export default function PBCModelInput() {
               appliedPayerFilter={appliedPayerFilter}
               appliedProductFilter={appliedProductFilter}
               appliedSubPayerFilter={appliedSubPayerFilter}
-              // Real backend data for the 3 pre-computed hierarchy orderings
-              // (falls back to the mock generator inside the component when
-              // a given ordering isn't present in the response).
               hierarchyData={liverTabsRaw?.tabs?.payment_type_payer_product?.orders}
               otherScenarioHierarchyData={otherScenarioHierarchyData}
               appliedScenario={currentlyAppliedScenario}
@@ -4299,13 +3989,18 @@ export default function PBCModelInput() {
               savingTable={savingTable}
               isSavingEditChanges={isSavingEditChanges}
               editedHierarchies={editedHierarchies}
-              appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+              appliedScenarioReady={!!currentlyAppliedScenario && sameScenario(currentlyAppliedScenario, tentativeRadioSelectedScenario)}
               setNewScenarioName={setNewScenarioName}
               setSaveScenarioDialogOpen={setSaveScenarioDialogOpen}
+              expandedRows={threeLevelExpandedRows}
+              setExpandedRows={setThreeLevelExpandedRows}
+              hierarchyOrder={hierarchyOrder}
+              setHierarchyOrder={setHierarchyOrder}
+              tableScrollPosition={tableScrollPositionsRef.current[activeTab]}
+              onTableScroll={handleTableScroll}
             />
           ) : (
             <>
-          {/* Chart — collapsible, matches HIV's Market Analysis Chart accordion */}
           <Accordion
             defaultExpanded
             disableGutters
@@ -4344,7 +4039,6 @@ export default function PBCModelInput() {
             </AccordionDetails>
           </Accordion>
 
-          {/* ── MARKET METRICS TABLE ── */}
           <ModelInputTable
             activeTab={activeTab}
             activeTabLabel={activeTabLabel}
@@ -4360,7 +4054,7 @@ export default function PBCModelInput() {
             compareScenarioOptions={compareScenarioOptions}
             currentlyAppliedScenario={currentlyAppliedScenario}
             tentativeRadioSelectedScenario={tentativeRadioSelectedScenario}
-            appliedScenarioReady={!!currentlyAppliedScenario && currentlyAppliedScenario === tentativeRadioSelectedScenario}
+            appliedScenarioReady={!!currentlyAppliedScenario && sameScenario(currentlyAppliedScenario, tentativeRadioSelectedScenario)}
             userHasCustomizedCompare={userHasCustomizedCompare}
             savedScenarioRows={savedScenarioRows}
             appliedProductFilter={appliedProductFilter}
@@ -4394,13 +4088,14 @@ export default function PBCModelInput() {
             handleCellChange={handleCellChange}
             onDeleteScenario={handleDeleteScenario}
             onDeleteScenarioClick={handleDeleteScenarioClick}
+            tableScrollPosition={tableScrollPositionsRef.current[activeTab]}
+            onTableScroll={handleTableScroll}
           />
             </>
           )}
         </Box>
       </Paper>
 
-      {/* ── Delete Scenario Dialog ── */}
       <Dialog
         open={deleteDialogOpen}
         onClose={() => {
@@ -4440,7 +4135,6 @@ export default function PBCModelInput() {
         </DialogActions>
       </Dialog>
 
-      {/* ── Save Scenario Dialog ── */}
       <Dialog
         open={saveScenarioDialogOpen}
         onClose={() => setSaveScenarioDialogOpen(false)}

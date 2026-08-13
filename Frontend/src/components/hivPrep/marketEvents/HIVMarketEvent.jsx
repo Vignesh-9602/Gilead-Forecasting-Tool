@@ -1559,7 +1559,7 @@ export default function HIVMarketEvent() {
 
                             <Box>
 
-                                <Button
+                                {/* <Button
                                     variant="outlined"
                                     onClick={(e) => {
                                         e.stopPropagation();
@@ -1580,7 +1580,7 @@ export default function HIVMarketEvent() {
                                     }}
                                 >
                                     Manage New Products
-                                </Button>
+                                </Button> */}
 
                                 <Button
                                     variant="contained"
@@ -3246,9 +3246,6 @@ export default function HIVMarketEvent() {
                     onClose={() => setOpenManageProducts(false)}
                     products={products}
                     setProducts={setProducts}
-                    therapyArea={therapyArea}
-                    scenarioName={scenarioName}
-                    onProductSaved={() => handleApplyFilter()}
                 />
             </Paper>
 

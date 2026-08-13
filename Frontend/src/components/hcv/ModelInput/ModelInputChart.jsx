@@ -1,10 +1,10 @@
 import React, { useMemo } from "react";
 import { Box } from "@mui/material";
 import Plot from "react-plotly.js";
-const PlotComponent = Plot.default || Plot;
 import dayjs from "dayjs";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const PlotComponent = Plot.default || Plot;
+
 const DATE_INPUT_FORMATS = [
   "MMM-YY",
   "YYYY-MM",
@@ -15,16 +15,8 @@ const DATE_INPUT_FORMATS = [
 const getScenarioColor = (index) =>
   `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
 
-// Palette used to color individual breakdown lines (payment type / product /
-// etc.) on non-Total-Market tabs, so each line is visually distinct.
-const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4"];
+const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4", "#3b82f6", "#ef4444"];
 
-// ─── ForecastChart ────────────────────────────────────────────────────────────
-// NOTE: This component is only ever rendered for the "standard" tabs
-// (total_market, prod_dist, payer_dist, payer_prod, prod_payer) — ModelInput
-// renders PaymentPayerProductTable (with its own real-data chart) for the
-// "payment_payer_prod" tab instead, so no 3-level-hierarchy handling belongs
-// here.
 const ForecastChart = React.memo(function ForecastChart({
   chartData,
   productFilter,
@@ -39,15 +31,8 @@ const ForecastChart = React.memo(function ForecastChart({
   filterFromYM,
   filterToYM,
   viewMode = "monthly",
-  // Other selected Compare-Scenarios' series for the current tab (built by
-  // ModelInput via normalizeLiverResponse per scenario) — added alongside
-  // the applied scenario's own breakdown on non-Total-Market tabs.
   otherScenarioSeries = [],
 }) {
-  // ══════════════════════════════════════════════════════════════════════════
-  // ALL HOOKS MUST BE CALLED UNCONDITIONALLY — no early returns before here.
-  // ══════════════════════════════════════════════════════════════════════════
-
   const months = chartData?.months || [];
   const fsi = chartData?.forecast_start_index || 0;
   const series = chartData?.series || [];
@@ -74,7 +59,6 @@ const ForecastChart = React.memo(function ForecastChart({
       ? compareScenarioOptions
       : (appliedScenario ? [appliedScenario] : []));
 
-  // ── Scenario color map (MUST be called unconditionally as a hook) ──────
   const scenarioNamesForColoring = Array.from(
     new Set([
       ...(compareScenarioOptions.length ? compareScenarioOptions : []),
@@ -94,10 +78,6 @@ const ForecastChart = React.memo(function ForecastChart({
     return map;
   }, [scenarioNamesForColoring]);
 
-  // ═══════════════════════════════════════════════════════════════════════
-  // ALL HOOKS ABOVE — conditional logic and early returns safe from here.
-  // ═══════════════════════════════════════════════════════════════════════
-
   if (!months.length || !series.length) {
     return (
       <Box sx={{ p: 4, textAlign: "center", color: "#94a3b8", fontSize: "14px" }}>
@@ -116,20 +96,15 @@ const ForecastChart = React.memo(function ForecastChart({
       scenario: s.label,
     }));
   } else {
-    // Non-Total-Market tabs (Product Distribution, Payment Type
-    // Distribution, Payment Type / Product) always show the applied
-    // scenario's own breakdown — one line per payment type / product /
-    // hierarchy leaf. When Compare Scenarios has other scenarios selected,
-    // their equivalent lines are ADDED alongside (never replacing) the
-    // applied scenario's breakdown, tagged with their scenario name so
-    // they're colored/labeled distinctly (see getSeriesColor below).
     filteredSeries = [
       ...(series || []).map((s) => ({ ...s, scenario: s.scenario || "" })),
       ...(otherScenarioSeries || []),
     ];
   }
 
-  const isFilterFocusMode = !isTotalMarket && (!!currentBrand || !!currentPayer);
+  const isMultipleScenariosSelected = selectedCompareScenarios.length > 1;
+  const isFilterFocusMode = !isTotalMarket && isMultipleScenariosSelected && (!!currentBrand || !!currentPayer);
+
   if (isFilterFocusMode) {
     filteredSeries = filteredSeries.filter((s) => {
       const label = (s.label || "").toLowerCase();
@@ -146,19 +121,9 @@ const ForecastChart = React.memo(function ForecastChart({
   }
 
   const getSeriesColor = (item, index) => {
-    if (activeTab === "total_market") {
-      const scenarioName = item?.scenario || item?.label || "";
-      if (scenarioName && scenarioColorMap[scenarioName]) {
-        return scenarioColorMap[scenarioName];
-      }
-      return getScenarioColor(index);
-    }
-    // Other-scenario comparison lines get their scenario's color (matching
-    // Total Market Volume's convention) so they read as "a different
-    // scenario" at a glance; the applied scenario's own breakdown lines
-    // each get their own distinct palette color, never grouped by scenario.
-    if (item?.scenario && item.scenario !== appliedScenario && scenarioColorMap[item.scenario]) {
-      return scenarioColorMap[item.scenario];
+    const scenarioName = item?.scenario || item?.label || "";
+    if (scenarioName && scenarioColorMap[scenarioName]) {
+      return scenarioColorMap[scenarioName];
     }
     return CHART_PALETTE[index % CHART_PALETTE.length];
   };
@@ -168,27 +133,25 @@ const ForecastChart = React.memo(function ForecastChart({
 
     let isSelectedTrace = s.scenario ? s.scenario === appliedScenario : true;
 
-    if (activeTab === "prod_dist" && currentBrand) {
-      isSelectedTrace = isSelectedTrace && seriesLabel === currentBrand;
-    } else if (activeTab === "payer_dist" && currentPayer) {
-      isSelectedTrace = isSelectedTrace && seriesLabel === currentPayer;
-    } else if (
-      (activeTab === "payer_prod" || activeTab === "prod_payer") &&
-      currentPayer &&
-      currentBrand
-    ) {
-      isSelectedTrace =
-        isSelectedTrace &&
-        seriesLabel.includes(currentPayer) &&
-        seriesLabel.includes(currentBrand);
-    } else if (!isTotalMarket && !s.scenario) {
-      isSelectedTrace =
-        (currentBrand && seriesLabel.includes(currentBrand)) ||
-        (currentPayer && seriesLabel.includes(currentPayer));
+    if (isMultipleScenariosSelected) {
+      if (activeTab === "prod_dist" && currentBrand) {
+        isSelectedTrace = isSelectedTrace && seriesLabel === currentBrand;
+      } else if (activeTab === "payer_dist" && currentPayer) {
+        isSelectedTrace = isSelectedTrace && seriesLabel === currentPayer;
+      } else if (
+        (activeTab === "payer_prod" || activeTab === "prod_payer") &&
+        currentPayer &&
+        currentBrand
+      ) {
+        isSelectedTrace =
+          isSelectedTrace &&
+          seriesLabel.includes(currentPayer) &&
+          seriesLabel.includes(currentBrand);
+      }
     }
 
-    const width = isSelectedTrace ? 3.5 : 1.5;
-    const color = isSelectedTrace ? "#f59e0b" : getSeriesColor(s, idx);
+    const width = isSelectedTrace ? 3 : 1.5;
+    const color = getSeriesColor(s, idx);
 
     const name =
       s.scenario && s.scenario !== s.label

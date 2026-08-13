@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from app.db.connection import get_connection
 
-EventType = Literal["product_event", "payer_event", "payment_type_payer_product_event"]
+EventType = Literal["product_event", "payment_type_event", "payment_type_payer_product_event"]
 
 
 # ============================================================
@@ -23,7 +23,7 @@ class SelectedFilter(BaseModel):
 # ============================================================
 ALL_EVENT_TYPES: tuple[EventType, ...] = (
     "product_event",
-    "payer_event",
+    "payment_type_event",
     "payment_type_payer_product_event",
 )
 
@@ -55,13 +55,14 @@ class EventRow(BaseModel):
     """event_id present = existing row to update, absent/None = new row to insert.
 
     'payers' is only meaningful for payment_type_payer_product_event rows —
-    product_event and payer_event never use it (ignored/stored empty if sent).
-    payer_event now distributes across payment types (Commercial, Medicaid, ...),
-    not payers (CVS, Non-CVS) — hence impacted_payment_types, not impacted_payers.
+    product_event and payment_type_event never use it (ignored/stored empty if sent).
+    payment_type_event (formerly payer_event) distributes across payment types
+    (Commercial, Medicaid, ...), not payers (CVS, Non-CVS) — hence
+    impacted_payment_types, not impacted_payers.
 
     'payment_types' is the ONLY payment-type field, used by all three event
-    types: single-select-as-list for payer_event/product_event's own context,
-    multi-select for payment_type_payer_product_event's context.
+    types: single-select-as-list for payment_type_event/product_event's own
+    context, multi-select for payment_type_payer_product_event's context.
     """
     event_id: Optional[int] = None
     event_name: str
@@ -75,7 +76,7 @@ class EventRow(BaseModel):
     products: list[str] = []
     source_percentages: dict[str, float] = {}
     impacted_products: Optional[list[str]] = None       # product_event, payment_type_payer_product_event
-    impacted_payment_types: Optional[list[str]] = None  # payer_event
+    impacted_payment_types: Optional[list[str]] = None  # payment_type_event
 
 
 class ImpactCurveConfiguration(BaseModel):
@@ -155,7 +156,7 @@ def _rows_to_response(db_rows: list, event_type: str) -> list[dict]:
             row["impacted_products"] = r[11] or []
         elif event_type == "product_event":
             row["impacted_products"] = r[11] or []
-        else:  # payer_event — now distributes by payment_type, not payer
+        else:  # payment_type_event — distributes by payment_type, not payer
             row["impacted_payment_types"] = r[11] or []
 
         result.append(row)
@@ -188,7 +189,7 @@ def save_market_events(payload: SaveEventRequest) -> dict:
             elif event_type == "product_event":
                 payers = []
                 impacted = row.impacted_products or []
-            else:  # payer_event — distributes by payment_type
+            else:  # payment_type_event — distributes by payment_type
                 payers = []
                 impacted = row.impacted_payment_types or []
 
@@ -305,7 +306,17 @@ def get_events_for_calculation(ta_name: str, events: list) -> dict[str, list[dic
                     f"event_type={db_event_type}: {sorted(missing)}"
                 )
 
-            tab = "payment_type_payer_product" if db_event_type == "payment_type_payer_product_event" else db_event_type
+            if db_event_type == "payment_type_payer_product_event":
+                tab = "payment_type_payer_product"
+            elif db_event_type == "payment_type_event":
+                # External name (this session's rename) -- run_calculation_
+                # service.py's internal code still uses "payer_event"
+                # throughout (tab branching, _ALL_TABS, _build_event_input,
+                # etc.), which was deliberately left unchanged. Translate
+                # here, at the boundary, so nothing internal needs touching.
+                tab = "payer_event"
+            else:
+                tab = db_event_type
             for r in db_rows:
                 row = {
                     "event_name":         r[1],
@@ -329,6 +340,97 @@ def get_events_for_calculation(ta_name: str, events: list) -> dict[str, list[dic
                     row["impacted_products"] = r[11] or []
                 grouped.setdefault(tab, []).append(row)
         return grouped
+    finally:
+        cur.close()
+        conn.close()
+
+def rename_product_in_market_events(ta_name: str, old_name: str, new_name: str) -> int:
+    """
+    Updates every market_event_configuration row referencing old_name in
+    products, source_percentages (keys), or impacted_entities, replacing it
+    with new_name. Returns count of rows touched.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, products, source_percentages, impacted_entities
+            FROM raw_liver.market_event_configuration
+            WHERE ta_name = %s
+        """, (ta_name,))
+        rows = cur.fetchall()
+        touched = 0
+        for event_id, products, source_pcts, impacted in rows:
+            changed = False
+            if old_name in (products or []):
+                products = [new_name if p == old_name else p for p in products]
+                changed = True
+            if source_pcts and old_name in source_pcts:
+                source_pcts = {(new_name if k == old_name else k): v for k, v in source_pcts.items()}
+                changed = True
+            if old_name in (impacted or []):
+                impacted = [new_name if p == old_name else p for p in impacted]
+                changed = True
+            if changed:
+                cur.execute("""
+                    UPDATE raw_liver.market_event_configuration
+                    SET products = %s, source_percentages = %s, impacted_entities = %s
+                    WHERE id = %s
+                """, (Json(products), Json(source_pcts), Json(impacted), event_id))
+                touched += 1
+        conn.commit()
+        return touched
+    finally:
+        cur.close()
+        conn.close()
+
+
+def delete_product_from_market_events(ta_name: str, product_name: str) -> dict:
+    """
+    Deletes any event where product_name is the SELECTED entity
+    (products[0] for product_event/payment_type_payer_product_event --
+    the whole event is meaningless without it). For every other row,
+    strips product_name from products/source_percentages/impacted_entities
+    instead of deleting the row entirely.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, event_type, products, source_percentages, impacted_entities
+            FROM raw_liver.market_event_configuration
+            WHERE ta_name = %s
+        """, (ta_name,))
+        rows = cur.fetchall()
+        deleted, updated = 0, 0
+        for event_id, event_type, products, source_pcts, impacted in rows:
+            is_selected = (
+                event_type in ("product_event", "payment_type_payer_product_event")
+                and products and products[0] == product_name
+            )
+            if is_selected:
+                cur.execute("DELETE FROM raw_liver.market_event_configuration WHERE id = %s", (event_id,))
+                deleted += 1
+                continue
+            changed = False
+            if product_name in (products or []):
+                products = [p for p in products if p != product_name]
+                changed = True
+            if source_pcts and product_name in source_pcts:
+                source_pcts = {k: v for k, v in source_pcts.items() if k != product_name}
+                changed = True
+            if product_name in (impacted or []):
+                impacted = [p for p in impacted if p != product_name]
+                changed = True
+            if changed:
+                cur.execute("""
+                    UPDATE raw_liver.market_event_configuration
+                    SET products = %s, source_percentages = %s, impacted_entities = %s
+                    WHERE id = %s
+                """, (Json(products), Json(source_pcts), Json(impacted), event_id))
+                updated += 1
+        conn.commit()
+        return {"deleted_rows": deleted, "updated_rows": updated}
     finally:
         cur.close()
         conn.close()

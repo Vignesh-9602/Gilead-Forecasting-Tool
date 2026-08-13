@@ -8,6 +8,7 @@ from app.liver_market_events.schemas.market_events_schema import (
     CreateProductRequest,
     UpdateProductRequest,
 )
+from app.liver_market_events.services.Events_Management import (rename_product_in_market_events,delete_product_from_market_events)
 from app.liver_market_events.repository.market_events_repo import (
     get_payers,
     get_products,
@@ -572,6 +573,46 @@ def _ratio_for(leaf_totals: dict, pt_payer_map: dict, prod: str, pt: str) -> dic
     n = len(payers)
     return {py: 1.0 / n for py in payers}
 
+def _reconcile_children_to_parent(children_values: list, parent_values: list) -> list:
+    """
+    Rescale each month's children volumes so they sum EXACTLY to the
+    already-computed parent total for that month. The parent (e.g.
+    total_all, or a reconciled higher-level parent) is NEVER itself
+    adjusted -- only children get rescaled.
+
+    Necessary because the parent total and each child are independently
+    forecasted (separate ETS runs on differently-shaped series), so
+    nothing structurally guarantees children sum to the parent in
+    forecast months, even though they always do in real history. Left
+    unreconciled, this shows up as >100%/<100% share totals.
+
+    A single uniform scale factor per month preserves relative
+    proportions among children, so an event's redistribution shape
+    (which entity gained/lost, and by how much relative to its siblings)
+    is unaffected -- only the small forecast-divergence residual gets
+    absorbed. Guards against dividing by ~0 (leaves values as-is if the
+    children's sum is effectively zero that month).
+
+    children_values: list of per-entity value lists, all the same length
+        as parent_values, e.g. [[v_ASGA_m0, v_ASGA_m1, ...], [v_GILD_m0, ...]].
+    parent_values: the authoritative total per month.
+
+    Returns a NEW list of lists (does not mutate input).
+    """
+    if not children_values:
+        return children_values
+    n_months = len(parent_values)
+    rescaled = [list(vals) for vals in children_values]
+    for i in range(n_months):
+        child_sum = sum(vals[i] for vals in children_values)
+        target = parent_values[i]
+        if child_sum > 0 and abs(child_sum - target) > 1e-6:
+            scale = target / child_sum
+            for vals in rescaled:
+                vals[i] = max(0.0, vals[i] * scale)
+    return rescaled
+
+
 def _build_overall_event_metrics(month_tuples, chart_headers, forecast_start_index, total_all) -> dict:
     """
     Overall event — single view level wrapped in the same view_options pattern
@@ -674,44 +715,70 @@ def _build_payer_event_metrics(data, month_tuples, chart_headers, forecast_start
         chart_pairs = [(p, py) for p in chart_products for py in chart_payers]
 
     # ── Per-payer monthly volumes and shares ──────────────────────────────────
+    # Reconciled to total_all (never itself adjusted) so payer shares always
+    # sum to exactly 100% in forecast months -- see _reconcile_children_to_parent.
     payer_vol_m   = {}   # payer → (hist, fcast, all_vals)
     payer_share_m = {}   # payer → (share_hist, share_fcast, share_all)
 
+    _payer_raw_all = {}
     for payer in show_payers:
-        hist, fcast, all_vals = build_values_for_series(
+        _h, _f, all_vals = build_values_for_series(
             data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn,
             treat_zero_as_missing=treat_zero_as_missing,
         )
+        _payer_raw_all[payer] = all_vals
+
+    _payer_reconciled = _reconcile_children_to_parent(
+        [_payer_raw_all[py] for py in show_payers], total_all
+    )
+    for py, all_vals in zip(show_payers, _payer_reconciled):
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
-        payer_vol_m[payer]   = (hist, fcast, all_vals)
-        payer_share_m[payer] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
+        payer_vol_m[py]   = (all_vals[:n_hist], all_vals[n_hist:], all_vals)
+        payer_share_m[py] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
 
     # ── Per-product monthly volumes (parents in hierarchy) ───────────────────
+    # Same reconciliation, also against total_all.
     prod_vol_m   = {}   # product → (hist, fcast, all_vals)
     prod_share_m = {}   # product → (share_hist, share_fcast, share_all)
 
+    _prod_raw_all = {}
     for product in show_products:
-        hist, fcast, all_vals = build_values_for_series(
+        _h, _f, all_vals = build_values_for_series(
             data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn,
             treat_zero_as_missing=treat_zero_as_missing,
         )
+        _prod_raw_all[product] = all_vals
+
+    _prod_reconciled = _reconcile_children_to_parent(
+        [_prod_raw_all[p] for p in show_products], total_all
+    )
+    for p, all_vals in zip(show_products, _prod_reconciled):
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
-        prod_vol_m[product]   = (hist, fcast, all_vals)
-        prod_share_m[product] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
+        prod_vol_m[p]   = (all_vals[:n_hist], all_vals[n_hist:], all_vals)
+        prod_share_m[p] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
 
     # ── Per-(product×payer) monthly volumes and shares ────────────────────────
+    # Reconciled per-product against that product's OWN (already-reconciled)
+    # total in prod_vol_m -- cascading reconciliation, not against total_all
+    # directly, so this level's children sum to their immediate parent.
     pp_vol_m   = {}   # (product, payer) → (hist, fcast, all_vals)
     pp_share_m = {}   # (product, payer) → share_all
 
     for product in show_products:
+        _pp_raw_all = {}
         for payer in show_payers:
-            h, f, av = build_values_for_series(
+            _h, _f, av = build_values_for_series(
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
                 forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
             )
+            _pp_raw_all[payer] = av
+        _pp_reconciled = _reconcile_children_to_parent(
+            [_pp_raw_all[py] for py in show_payers], prod_vol_m[product][2]
+        )
+        for py, av in zip(show_payers, _pp_reconciled):
             sh_all = [compute_share(av[i], prod_vol_m[product][2][i]) for i in range(len(av))]
-            pp_vol_m[(product, payer)]   = (h, f, av)
-            pp_share_m[(product, payer)] = sh_all
+            pp_vol_m[(product, py)]   = (av[:n_hist], av[n_hist:], av)
+            pp_share_m[(product, py)] = sh_all
 
     # ── Yearly aggregation ────────────────────────────────────────────────────
     year_labels, y_tot_hist, y_tot_fcast, y_fsi = aggregate_monthly_to_yearly(
@@ -928,44 +995,69 @@ def _build_product_event_metrics(data, month_tuples, chart_headers, forecast_sta
         chart_pairs = [(py, p) for py in chart_payers for p in chart_products]
 
     # ── Per-product monthly volumes and shares ────────────────────────────────
+    # Reconciled to total_all (never itself adjusted) so product shares always
+    # sum to exactly 100% in forecast months -- see _reconcile_children_to_parent.
     prod_vol_m   = {}   # product → (hist, fcast, all_vals)
     prod_share_m = {}   # product → (share_hist, share_fcast, share_all)
 
+    _prod_raw_all = {}
     for product in show_products:
-        hist, fcast, all_vals = build_values_for_series(
+        _h, _f, all_vals = build_values_for_series(
             data, month_tuples, forecast_start_index, product=product, forecast_fn=forecast_fn,
             treat_zero_as_missing=treat_zero_as_missing,
         )
+        _prod_raw_all[product] = all_vals
+
+    _prod_reconciled = _reconcile_children_to_parent(
+        [_prod_raw_all[p] for p in show_products], total_all
+    )
+    for p, all_vals in zip(show_products, _prod_reconciled):
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
-        prod_vol_m[product]   = (hist, fcast, all_vals)
-        prod_share_m[product] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
+        prod_vol_m[p]   = (all_vals[:n_hist], all_vals[n_hist:], all_vals)
+        prod_share_m[p] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
 
     # ── Per-payer monthly volumes (parents in hierarchy) ─────────────────────
+    # Same reconciliation, also against total_all.
     payer_vol_m   = {}   # payer → (hist, fcast, all_vals)
     payer_share_m = {}   # payer → (share_hist, share_fcast, share_all)
 
+    _payer_raw_all = {}
     for payer in show_payers:
-        hist, fcast, all_vals = build_values_for_series(
+        _h, _f, all_vals = build_values_for_series(
             data, month_tuples, forecast_start_index, payer=payer, forecast_fn=forecast_fn,
             treat_zero_as_missing=treat_zero_as_missing,
         )
+        _payer_raw_all[payer] = all_vals
+
+    _payer_reconciled = _reconcile_children_to_parent(
+        [_payer_raw_all[py] for py in show_payers], total_all
+    )
+    for py, all_vals in zip(show_payers, _payer_reconciled):
         sh_all = [compute_share(all_vals[i], total_all[i]) for i in range(len(all_vals))]
-        payer_vol_m[payer]   = (hist, fcast, all_vals)
-        payer_share_m[payer] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
+        payer_vol_m[py]   = (all_vals[:n_hist], all_vals[n_hist:], all_vals)
+        payer_share_m[py] = (sh_all[:n_hist], sh_all[n_hist:], sh_all)
 
     # ── Per-(payer×product) monthly volumes and shares ────────────────────────
+    # Reconciled per-payer against that payer's OWN (already-reconciled)
+    # total in payer_vol_m -- cascading reconciliation, one level deeper.
     pp_vol_m   = {}   # (payer, product) → (hist, fcast, all_vals)
     pp_share_m = {}   # (payer, product) → share_all
 
     for payer in show_payers:
+        _pp_raw_all = {}
         for product in show_products:
-            h, f, av = build_values_for_series(
+            _h, _f, av = build_values_for_series(
                 data, month_tuples, forecast_start_index, product=product, payer=payer,
                 forecast_fn=forecast_fn, treat_zero_as_missing=treat_zero_as_missing,
             )
+            _pp_raw_all[product] = av
+        _pp_reconciled = _reconcile_children_to_parent(
+            [_pp_raw_all[p] for p in show_products], payer_vol_m[payer][2]
+        )
+        for p, av in zip(show_products, _pp_reconciled):
             sh_all = [compute_share(av[i], payer_vol_m[payer][2][i]) for i in range(len(av))]
-            pp_vol_m[(payer, product)]   = (h, f, av)
-            pp_share_m[(payer, product)] = sh_all
+            pp_vol_m[(payer, p)]   = (av[:n_hist], av[n_hist:], av)
+            pp_share_m[(payer, p)] = sh_all
 
     # ── Yearly aggregation ────────────────────────────────────────────────────
     year_labels, y_tot_hist, y_tot_fcast, y_fsi = aggregate_monthly_to_yearly(
@@ -1339,6 +1431,42 @@ def _build_payment_type_payer_product_metrics(
                 )
                 leaf_vol_m[(prod, pt, None)] = h + f
 
+    # Reconcile payment_type-level totals (each = sum of its own leaves) to
+    # total_all. Nothing above otherwise ties this tab's numbers back to the
+    # authoritative total, since every leaf is independently derived from
+    # data's own per-cell forecast (the same source _build_payer_event_
+    # metrics/_build_product_event_metrics pull from and reconcile). A
+    # single uniform per-payment_type scale factor, applied to every leaf
+    # underneath it, fixes the top level AND automatically keeps the payer/
+    # product sub-levels internally consistent -- uniform scaling never
+    # changes relative proportions, so no separate cascade pass is needed.
+    _pt_raw_totals = {}
+    for pt in show_payment_types:
+        if _has_split(pt):
+            leaves_here = [leaf_vol_m[(prod, pt, py)] for prod in show_products for py in pt_payer_map[pt]]
+        else:
+            leaves_here = [leaf_vol_m[(prod, pt, None)] for prod in show_products]
+        _pt_raw_totals[pt] = [sum(vals[i] for vals in leaves_here) for i in range(len(month_tuples))]
+
+    _pt_reconciled = _reconcile_children_to_parent(
+        [_pt_raw_totals[pt] for pt in show_payment_types], total_all
+    )
+    for pt, recon_total in zip(show_payment_types, _pt_reconciled):
+        raw_total = _pt_raw_totals[pt]
+        scale = [
+            (recon_total[i] / raw_total[i]) if raw_total[i] > 0 else 1.0
+            for i in range(len(month_tuples))
+        ]
+        if _has_split(pt):
+            for prod in show_products:
+                for py in pt_payer_map[pt]:
+                    key = (prod, pt, py)
+                    leaf_vol_m[key] = [v * scale[i] for i, v in enumerate(leaf_vol_m[key])]
+        else:
+            for prod in show_products:
+                key = (prod, pt, None)
+                leaf_vol_m[key] = [v * scale[i] for i, v in enumerate(leaf_vol_m[key])]
+
     year_labels, y_tot_h, y_tot_f, y_fsi = aggregate_monthly_to_yearly(
         month_tuples, total_all, forecast_start_index
     )
@@ -1403,7 +1531,7 @@ def _build_payment_type_payer_product_metrics(
                             sh = _pct_of(leaf_vol[(prod, pt, payer)], payer_total)  # product % of payer total
                             l3_share.append({"label": prod, "values": sh})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{pt} - {payer} - {prod}"
+                                lbl = f"{payer} - {prod}"
                                 vol = leaf_vol[(prod, pt, payer)]
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                                 share_series.append({"label": lbl, "history": sh[:fsi], "forecast": sh[fsi:]})
@@ -1431,7 +1559,7 @@ def _build_payment_type_payer_product_metrics(
                                 prod_total[i] += v
                             l3_vol.append({"label": payer, "values": _vi(vol)})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{pt} - {prod} - {payer}"
+                                lbl = f"{prod} - {payer}"
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l3_share = []
                         for payer, l3v in zip(pt_payer_map[pt], l3_vol):
@@ -1459,7 +1587,7 @@ def _build_payment_type_payer_product_metrics(
                                 pt_total_here[i] += v
                             l3_vol.append({"label": payer, "values": _vi(vol)})
                             if (prod, pt, payer) in chart_keys:
-                                lbl = f"{prod} - {pt} - {payer}"
+                                lbl = f"{pt} - {payer}"
                                 vol_series.append({"label": lbl, "history": _vi(vol[:fsi]), "forecast": _vi(vol[fsi:])})
                         l3_share = []
                         for payer in pt_payer_map[pt]:
@@ -1536,8 +1664,8 @@ def _pick_level(metric_view: dict, level_key: str) -> dict:
 def build_market_analysis_response(event_tabs: dict) -> dict:
     """
     Re-projects event_tabs (payer_event/product_event/overall_event +
-    payment_type_product + payment_type_payer_product) into the 5-tab
-    market_analysis shape. Pure re-projection -- never mutates event_tabs.
+    payment_type_payer_product) into the 4-tab market_analysis shape.
+    Pure re-projection -- never mutates event_tabs.
     """
     overall_mv = event_tabs.get("overall_event", {}).get("metrics_views", {})
     payer_mv   = event_tabs.get("payer_event",   {}).get("metrics_views", {})
@@ -1556,9 +1684,42 @@ def build_market_analysis_response(event_tabs: dict) -> dict:
             "payer_volume": _pick_level(product_mv.get("product_volume", {}), "product_level"),
             "payer_share":  _pick_level(product_mv.get("product_share",  {}), "product_level"),
         },
-        "payment_type_product":       event_tabs.get("payment_type_product", {}).get("metrics_views", {}),
         "payment_type_payer_product": event_tabs.get("payment_type_payer_product", {}).get("metrics_views", {}),
     }
+def _clean_table_for_response(obj, scenario_name: str = "Total") -> None:
+    """
+    Strips the redundant headers/forecast_start_index/editable keys that
+    build_flat_table/build_hierarchy_table (shared with Liver's own
+    pipeline) always bake into every table dict, and renames the top
+    "Overall"/"Overall Payer" row label to match apply_liver_filters's
+    convention: the literal scenario name for total_market_volume's own
+    row ("Overall Payer" -> e.g. "Base"), "Total" everywhere else.
+
+    The label rename happens ONLY here, at the response layer. Every
+    internal comparison against the literal string "Overall" (redistribution/
+    edit logic, snapshot extraction, etc.) is deliberately left untouched --
+    those ~30 call sites all still rely on "Overall" as their sentinel
+    identifier, and renaming it there would be a much larger, higher-risk
+    change for no functional benefit, since this function runs last and
+    only reshapes what's actually returned to the client.
+
+    Mutates obj in place; walks the whole response tree once.
+    """
+    if isinstance(obj, dict):
+        if "rows" in obj and ("headers" in obj or "editable" in obj or "forecast_start_index" in obj):
+            obj.pop("headers", None)
+            obj.pop("forecast_start_index", None)
+            obj.pop("editable", None)
+            obj.setdefault("type", "flat")
+        if obj.get("label") == "Overall Payer":
+            obj["label"] = scenario_name
+        elif obj.get("label") == "Overall":
+            obj["label"] = "Total"
+        for v in obj.values():
+            _clean_table_for_response(v, scenario_name)
+    elif isinstance(obj, list):
+        for item in obj:
+            _clean_table_for_response(item, scenario_name)
 # ---------------------------------------------------------------------------
 # POST /refresh — redistribution helpers + apply edits
 # ---------------------------------------------------------------------------
@@ -3246,7 +3407,7 @@ def update_market_events_product(product_name: str, payload: UpdateProductReques
 
         events_touched = 0
         try:
-            events_touched = rename_product_in_impact_rows(cur, "HCV", product_name, new_name)
+            events_touched = rename_product_in_market_events("HCV", product_name, new_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()
@@ -3283,7 +3444,7 @@ def delete_market_events_product(product_name: str) -> dict:
 
         cascade = {"deleted_rows": 0, "updated_rows": 0}
         try:
-            cascade = delete_product_from_impact_rows(cur, "HCV", product_name)
+            cascade = delete_product_from_market_events("HCV", product_name)
             conn.commit()
         except Exception as _cascade_err:
             conn.rollback()

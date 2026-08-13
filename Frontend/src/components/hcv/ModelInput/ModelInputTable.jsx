@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useLayoutEffect, useRef } from "react";
 import {
   Box,
   Paper,
@@ -19,13 +19,9 @@ import UnfoldLessIcon from "@mui/icons-material/UnfoldLess";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import dayjs from "dayjs";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 const TAB_KEY_MAP = {
   total_market: "total_market_volume",
   prod_dist: "product_distribution",
-  // Backend key is "payment_type_distribution" — aliased both ways so
-  // responses using either name still resolve (kept in sync with the same
-  // map in ModelInput.jsx).
   payer_dist: "payment_type_distribution",
   payer_prod: "payer_product",
   prod_payer: "product_payer",
@@ -38,7 +34,6 @@ const DATE_INPUT_FORMATS = [
   "YYYY-MM-DDTHH:mm:ssZ",
 ];
 
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
 const parseDateString = (s) => {
   if (!s) return dayjs(NaN);
   const strict = dayjs(s, DATE_INPUT_FORMATS, true);
@@ -46,10 +41,12 @@ const parseDateString = (s) => {
   const relaxed = dayjs(s);
   return relaxed.isValid() ? relaxed : dayjs(NaN);
 };
+
 const formatDateLabel = (s) => {
   const p = parseDateString(s);
   return p.isValid() ? p.format("MMM-YY") : s || "";
 };
+
 const toYearMonth = (s) => {
   const p = parseDateString(s);
   return p.isValid() ? p.format("YYYY-MM") : s || "";
@@ -68,9 +65,7 @@ const tagHierarchyWithScenario = (hierarchy, scenarioName) => {
   return `${hierarchy} (${scenarioName})`;
 };
 
-// ─── MarketMetricsTable ───────────────────────────────────────────────────────
 const ModelInputTable = React.memo(function ModelInputTable({
-  // Data / derived inputs
   activeTab,
   activeTabLabel,
   onActiveTabChange,
@@ -95,7 +90,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
   appliedToDate,
   expandedBrands,
   filterOptions,
-  // Edit / flags
   tableEditing,
   isRefreshed,
   savingTable,
@@ -104,7 +98,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
   showMetricFilter,
   showScenarioControls,
   showCompareScenarios,
-  // Setters / handlers
   setExpandedBrands,
   setNewScenarioName,
   setSaveScenarioDialogOpen,
@@ -121,22 +114,47 @@ const ModelInputTable = React.memo(function ModelInputTable({
   handleCellChange,
   onDeleteScenario,
   onDeleteScenarioClick,
+  tableScrollPosition,
+  onTableScroll,
 }) {
+  const tableContainerRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (tableContainerRef.current && tableScrollPosition) {
+      tableContainerRef.current.scrollTop = tableScrollPosition.scrollTop || 0;
+      tableContainerRef.current.scrollLeft = tableScrollPosition.scrollLeft || 0;
+    }
+  }, [tableScrollPosition]);
+
+  const handleContainerScroll = (e) => {
+    if (onTableScroll) {
+      onTableScroll({
+        scrollTop: e.target.scrollTop,
+        scrollLeft: e.target.scrollLeft,
+      });
+    }
+  };
+
   const isPercentTab = metric === "market_share";
   const isScenarioParentTab = activeTab === "prod_dist" || activeTab === "payer_dist";
-  // "payment_payer_prod" is rendered by PaymentPayerProductTable instead of
-  // this component — isThreeLevelTab is always false here, but kept as a
-  // guard in a few shared functions below for defensiveness.
   const isThreeLevelTab = activeTab === "payment_payer_prod";
 
-  // ── Forecast helper ─────────────────────────────────────────────────────────
+  // Different endpoints (Run Calculation vs Apply Filter/Refresh) have
+  // returned the same scenario with different casing (e.g. "BASE" vs
+  // "Base"). Every exact === comparison against a scenario name is a
+  // latent bug: it silently drops highlighting/protection for that
+  // scenario the moment casing doesn't match. Compare case-insensitively
+  // everywhere a scenario name is checked.
+  const sameScenario = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+  const isBaseScenario = (name) => sameScenario(name, "Base");
+
   const isForecastMonth = (col) => {
     if (!chartData?.months?.length || chartData?.forecast_start_index == null)
       return false;
     return chartData.months.slice(chartData.forecast_start_index).includes(col);
   };
 
-  // ── Cell formatter ──────────────────────────────────────────────────────────
   const formatCellValue = (val) => {
     if (val == null) return "—";
     const num = Number(val);
@@ -163,9 +181,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
     setExpandedBrands({});
   };
 
-  // ─── Standard (non-3-level) tagged rows + hierarchy ────────────────────────
   const taggedTableRows = useMemo(() => {
-    if (isThreeLevelTab) return []; // 3-level tab uses its own row generation
+    if (isThreeLevelTab) return [];
 
     if (activeTab === "total_market") {
       return tableData.map((row) => ({ ...row, scenario: row.hierarchy, cleanHierarchy: row.hierarchy }));
@@ -181,13 +198,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
     const activeMetricKey = toApiMetricKey(metric);
     const fallbackMonths = chartData?.months || [];
 
-    // Same nested-shape quirk normalizeLiverResponse() reconciles for the
-    // *active* scenario also applies to *other* (raw, un-reconciled)
-    // scenarios shown via Compare Scenarios: a scenario's market_analysis
-    // may hold the Payment Type / Product hierarchy nested under
-    // payment_type_product.{payment_type_product|product_payment_type}
-    // instead of flat payer_product / product_payer keys. Without this
-    // fallback, that scenario's compare-overlay rows silently disappear.
     const resolveBackendTabObj = (scenarioMA) => {
       const direct = scenarioMA?.[backendTabKey];
       if (direct) return direct;
@@ -213,7 +223,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
 
     const out = [];
     scenarioNames.forEach((scenarioName) => {
-      if (scenarioName === currentlyAppliedScenario) {
+      if (sameScenario(scenarioName, currentlyAppliedScenario)) {
         tableData.forEach((row) => {
           out.push({
             ...row,
@@ -280,9 +290,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
     compareScenarioOptions,
   ]);
 
-  // ── Hierarchy grouping (standard 2-level tabs) ────────────────────────────
   const groupedTableHierarchy = useMemo(() => {
-    if (isThreeLevelTab) return []; // guard kept for safety; always false here
+    if (isThreeLevelTab) return [];
 
     if (isScenarioParentTab) {
       const byScenario = {};
@@ -327,13 +336,12 @@ const ModelInputTable = React.memo(function ModelInputTable({
             is_applied: entry.rows.some((r) => r.is_applied),
           },
           children,
-          isScenarioOverlay: scenarioName !== currentlyAppliedScenario,
+          isScenarioOverlay: !sameScenario(scenarioName, currentlyAppliedScenario),
           isScenarioGroup: true,
         };
       });
     }
 
-    // total_market, Payer-Product, Product-Payer
     const map = {};
     taggedTableRows.forEach((row) => {
       const raw = row.hierarchy || "";
@@ -387,15 +395,12 @@ const ModelInputTable = React.memo(function ModelInputTable({
         mainRow,
         children: entry.children,
         isScenarioOverlay:
-          activeTab === "total_market" ? false : entry.scenario !== currentlyAppliedScenario,
+          activeTab === "total_market" ? false : !sameScenario(entry.scenario, currentlyAppliedScenario),
       };
     });
   }, [isThreeLevelTab, activeTab, isScenarioParentTab, taggedTableRows, chartData, currentlyAppliedScenario, isPercentTab]);
 
-  // ── Monthly / Yearly toggle helpers ──────────────────────────────────────
   const displayColumns = useMemo(() => {
-    // Guard kept for safety; always false here (payment_payer_prod is
-    // rendered by PaymentPayerProductTable instead of this component).
     if (isThreeLevelTab) return [];
 
     const backendKey = TAB_KEY_MAP[activeTab] || activeTab;
@@ -500,7 +505,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
     return monthsInYear.some((m) => isForecastMonth(m));
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <Paper
       id="volumeSection"
@@ -511,7 +515,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
         overflow: "hidden",
       }}
     >
-      {/* Table controls row */}
       {(() => {
         const primaryButtonStyle = {
           height: "35px",
@@ -577,7 +580,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 Save Scenario
               </Button>
 
-              {/* Expand/Collapse only for standard tabs with children */}
               {!isThreeLevelTab && groupedTableHierarchy.some((g) => g.children?.length > 0) && (
                 <>
                   <Tooltip title="Expand All">
@@ -602,7 +604,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 flexWrap: "wrap",
               }}
             >
-              {/* Hierarchy Order — 2-level tab (Payer/Product) */}
               {activeTab === "payer_prod" || activeTab === "prod_payer" ? (
                 <FormControl size="small" sx={{ minWidth: 190 }}>
                   <Select
@@ -626,7 +627,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 </FormControl>
               ) : null}
 
-              {/* Metric filter */}
               {showMetricFilter && filterOptions?.metric_filters?.length > 0 && (
                 <FormControl sx={{ ...tableInputStyle, minWidth: "160px" }}>
                   <Select
@@ -647,7 +647,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 </FormControl>
               )}
 
-              {/* Monthly / Yearly switch */}
               <Box
                 sx={{
                   display: "flex",
@@ -684,7 +683,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 ))}
               </Box>
 
-              {/* Download / Save / Edit / Refresh / Cancel — only for standard tabs */}
               {!isThreeLevelTab && (
                 <>
                   <Tooltip title="Download table as CSV">
@@ -782,7 +780,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         }}
                       >
                         {compareScenarioOptions.map((option) => {
-                          const isActive = option === currentlyAppliedScenario;
+                          const isActive = sameScenario(option, currentlyAppliedScenario);
                           return (
                             <MenuItem key={option} value={option} disabled={isActive}>
                               <Checkbox
@@ -806,8 +804,9 @@ const ModelInputTable = React.memo(function ModelInputTable({
         );
       })()}
 
-      {/* ── TABLE ── */}
       <Box
+        ref={tableContainerRef}
+        onScroll={handleContainerScroll}
         sx={{
           backgroundColor: "white",
           maxHeight: 500,
@@ -822,14 +821,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
             fontSize: "14px",
           }}
         >
-          {/* ═══════════════════════════════════════════════════════════════
-              STANDARD TABS (total_market, prod_dist, payer_dist,
-              payer_prod, prod_payer) — "payment_payer_prod" is rendered by
-              PaymentPayerProductTable instead, so this component only ever
-              needs the 2-level logic below.
-              ═══════════════════════════════════════════════════════════════ */}
           <>
-              {/* THEAD */}
               <Box component="thead">
                 <Box component="tr" sx={{ position: "relative", isolation: "isolate" }}>
                   <Box
@@ -879,11 +871,9 @@ const ModelInputTable = React.memo(function ModelInputTable({
                 </Box>
               </Box>
 
-              {/* TBODY */}
               <Box component="tbody">
                 {tableData.length === 0 ? (
                   <>
-                    {/* Empty state – Live Engine row */}
                     <Box
                       component="tr"
                       sx={{
@@ -966,9 +956,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
                       })}
                     </Box>
 
-                    {/* Empty state – Compare rows */}
                     {selectedCompareScenarios.map((scen) => {
-                      const isApplied = currentlyAppliedScenario === scen;
+                      const isApplied = sameScenario(currentlyAppliedScenario, scen);
                       return (
                         <Box
                           component="tr"
@@ -1003,7 +992,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                 name="activeScenarioRadio"
                                 value={scen}
                                 checked={
-                                  tentativeRadioSelectedScenario === scen
+                                  sameScenario(tentativeRadioSelectedScenario, scen)
                                 }
                                 onChange={() =>
                                   handleActiveScenarioRadioChange(scen)
@@ -1072,8 +1061,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         if (!userHasCustomizedCompare) return true;
                         if (!selectedCompareScenarios.length) return true;
                         return (
-                          group.brandName === currentlyAppliedScenario ||
-                          selectedCompareScenarios.includes(group.brandName)
+                          sameScenario(group.brandName, currentlyAppliedScenario) ||
+                          selectedCompareScenarios.some((s) => sameScenario(s, group.brandName))
                         );
                       })
                       .map((group) => {
@@ -1082,7 +1071,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         const showChildren = isExpanded;
 
                         const isSelected =
-                          tentativeRadioSelectedScenario === group.brandName;
+                          sameScenario(tentativeRadioSelectedScenario, group.brandName);
 
                         const currentBrand = (
                           appliedProductFilter ||
@@ -1117,7 +1106,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
 
                         const isAppliedScenarioGroup =
                           activeTab === "total_market"
-                            ? (group.brandName || "") === (currentlyAppliedScenario || "")
+                            ? sameScenario(group.brandName, currentlyAppliedScenario)
                             : !group.isScenarioOverlay;
                         const isEditEligible = (() => {
                           if (!tableEditing) return false;
@@ -1132,7 +1121,6 @@ const ModelInputTable = React.memo(function ModelInputTable({
 
                         return (
                           <React.Fragment key={group.brandName}>
-                            {/* Parent */}
                             <Box
                               component="tr"
                               onClick={() => {
@@ -1255,7 +1243,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                     </Typography>
                                   </Box>
 
-                                  {activeTab === "total_market" && group.brandName !== "Base" && (
+                                  {activeTab === "total_market" && !isBaseScenario(group.brandName) && (
                                     <Tooltip title="Delete Scenario">
                                       <IconButton
                                         size="small"
@@ -1376,7 +1364,8 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                         backgroundColor: isHighlightedChild ? "#fffbeb" : "white",
                                         borderRight: "2px solid #e2e8f0",
                                         p: "10px 16px",
-                                        pl: "40px",
+                                        pl: "48px",
+                                        boxSizing: "border-box",
                                         minWidth: 220,
                                         maxWidth: 220,
                                       }}
@@ -1450,17 +1439,16 @@ const ModelInputTable = React.memo(function ModelInputTable({
                         );
                       })}
 
-                    {/* Saved-scenario rows */}
-                    {activeTab === "total_market" && savedScenarioRows
+                    {savedScenarioRows
                       .filter(
                         (name) =>
                           !groupedTableHierarchy.some(
-                            (g) => g.brandName === name,
+                            (g) => sameScenario(g.brandName, name),
                           ),
                       )
                       .map((name) => {
                         const isSelected =
-                          tentativeRadioSelectedScenario === name;
+                          sameScenario(tentativeRadioSelectedScenario, name);
                         return (
                           <Box
                             component="tr"
@@ -1519,7 +1507,7 @@ const ModelInputTable = React.memo(function ModelInputTable({
                                     {name}
                                   </Typography>
                                 </Box>
-                                {name !== "Base" && (
+                                {!isBaseScenario(name) && (
                                   <Tooltip title="Delete Scenario">
                                     <IconButton
                                       size="small"
