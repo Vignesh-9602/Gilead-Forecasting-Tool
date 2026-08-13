@@ -14,13 +14,54 @@ from app.hiv_prep.routes.Events_Calculation import (
 )
 
 METRICS = ("market_share", "market_volume")
+
+# A product's split ACROSS markets -- for each (market, product), that
+# market's share of the product's OWN total. Stored per cell at
+# source_of_market='ALL' and read by the Product-Channel / Channel-Product
+# views. It is NOT part of METRICS: no event targets it directly, it's a
+# roll-up recomputed from market_share after events land (see
+# recompute_product_market_split). Left out of the write path, a new
+# product ends up with real shares but a pm of zero, and the views that
+# read it hand its volume to the other products.
+PM_METRIC = "market_share_pm"
 YEARLY_AGG = {"market_share": "average", "market_volume": "sum"}
 CURVE_TYPES = ["Linear", "Exponential", "Logarithmic", "SCurve"]
 TABLE = "raw_hiv_prep.forecast_outputs"
 CONFIG_TABLE = "raw_hiv_prep.forecast_configurations"
+PRODUCT_MASTER_TABLE = "raw_hiv_prep.product_master_hiv_prep"
 OVERALL_LABEL = "Overall"
 TABS = ("market_event", "product_event", "overall_event")
 BASELINE_SCENARIO = "Base"  # never written back to
+
+# Seeding materializes a registered product into ONE scenario -- whichever
+# one the calculation is running against. Loading a screen is not the same
+# as working in a scenario, so the load path does not seed by default:
+# merely opening every scenario in the dropdown would otherwise create the
+# product in all of them. Flip to True if you want a product to appear
+# (at zero) as soon as any scenario is opened.
+SEED_ON_LOAD = False
+
+# The baseline scenario is never written to -- persist_events_to_db already
+# returns early for it, and seeding is a write too. Left ungated, running a
+# calculation while Base is selected inserts new product rows into the
+# untouched baseline. Flip to True only if you want registered products to
+# exist (at zero) in Base as well.
+SEED_BASELINE_SCENARIO = False
+
+# A (market, product) cell may have both a canonical source_of_market='ALL'
+# row AND per-channel rows (ADAP / Federal / IQVIA / Kaiser / Unknown).
+# The canonical row IS the market-wide total; the channel rows are that
+# product's share WITHIN each channel. Blending them together treats the
+# total as a fifth channel and produces a value that is neither -- and
+# because the blended result is then written back onto all five rows, the
+# read->blend->write->read cycle is not idempotent and the total drifts
+# further from its channels on every run.
+#
+# True: read the canonical row as the cell's value, and propagate the
+# event's delta out to the channel rows on write so they stay in step
+# without ever feeding back into a read. Blending is kept only for cells
+# that genuinely have no canonical row.
+PREFER_CANONICAL_CELL_ROW = True
 
 # product_event tab: parent = market,  child = product
 # market_event  tab: parent = product, child = market
@@ -89,7 +130,13 @@ def fetch_series(
     scenarios stored split by payer/channel (see _aggregate_by_cell).
     source_of_market="ALL" matches both the literal 'ALL' and legacy empty-
     string rows -- some rows were written before source normalization was
-    added, so an exact-string match on 'ALL' silently misses them."""
+    added, so an exact-string match on 'ALL' silently misses them.
+
+    Every batch is re-indexed onto one canonical month grid before it is
+    returned (see _align_rows) -- a newly created product's row has no
+    history and may store a shorter months array / forecast_start_index=0,
+    which would otherwise shift every series it is later summed or
+    charted with."""
     where = ["scenario_name = %s", "ta_name = %s", "metric = %s"]
     params: List = [scenario_name, ta_name, metric]
 
@@ -121,19 +168,22 @@ def fetch_series(
     series = []
     for market_name, product_name, channel, forecast_data in rows:
         data = _parse_forecast_data(forecast_data)
-        history = data.get("train_values", [])
+        history = data.get("train_values", []) or []
         series.append({
             "label": product_name if label_field == "product" else market_name,
             "market": market_name,
             "product": product_name,
             "source_of_market": channel or "",
             "synthesized": False,
-            "months": data.get("months", []),
+            "months": data.get("months", []) or [],
             "history": history,
-            "forecast": data.get("forecast_values", []),
+            "forecast": data.get("forecast_values", []) or [],
             "forecast_start_index": data.get("forecast_start_index", len(history)),
         })
-    return series
+
+    # New entities (zero-history products) come back short/ragged -- align
+    # every batch onto one grid so all downstream positional zips hold.
+    return _align_rows(series, ta_name)
 
 
 def _fetch_overall_series(scenario_name: str, ta_name: str, metric: str) -> List[dict]:
@@ -164,36 +214,49 @@ def _fetch_overall_series(scenario_name: str, ta_name: str, metric: str) -> List
     return rows
 
 
+def _empty_series(months: Optional[List[str]] = None, fsi: int = 0) -> dict:
+    """All-zero series on a given window -- used wherever a group legitimately
+    has no rows (e.g. a parent whose only child is a product with no volume
+    yet), so callers never index into an empty list."""
+    months = list(months or [])
+    fsi = min(fsi, len(months))
+    return {
+        "months": months,
+        "forecast_start_index": fsi,
+        "history": [0.0] * fsi,
+        "forecast": [0.0] * (len(months) - fsi),
+    }
+
+
 def _sum_series(rows: List[dict]) -> dict:
-    """Elementwise sum -- valid for genuinely additive quantities (volume)."""
-    months = rows[0]["months"]
-    fsi = rows[0]["forecast_start_index"]
-    history = [0.0] * fsi
-    forecast = [0.0] * (len(months) - fsi)
+    """Elementwise sum -- valid for genuinely additive quantities (volume).
+    Keyed by month LABEL and referenced off the widest row, so a new product
+    contributing only forecast months adds into the right months instead of
+    being off by the length of everyone else's history."""
+    if not rows:
+        return _empty_series()
+    reference = max(rows, key=lambda r: len(r["months"]))
+    months, fsi = reference["months"], reference["forecast_start_index"]
+    totals = {m: 0.0 for m in months}
     for r in rows:
-        for i, v in enumerate(r["history"][:fsi]):
-            history[i] = round(history[i] + v, 4)
-        for i, v in enumerate(r["forecast"][:len(forecast)]):
-            forecast[i] = round(forecast[i] + v, 4)
-    return {"months": months, "forecast_start_index": fsi, "history": history, "forecast": forecast}
+        for m, v in zip(r["months"], r["history"] + r["forecast"]):
+            if m in totals:
+                totals[m] = round(totals[m] + v, 4)
+    values = [totals[m] for m in months]
+    return {"months": months, "forecast_start_index": fsi,
+            "history": values[:fsi], "forecast": values[fsi:]}
 
 
 def _average_series(rows: List[dict]) -> dict:
     """Equal-weighted average -- fallback only, when no channel weights exist."""
-    months = rows[0]["months"]
-    fsi = rows[0]["forecast_start_index"]
-    n_hist, n_fore = fsi, len(months) - fsi
-    history = [0.0] * n_hist
-    forecast = [0.0] * n_fore
-    for r in rows:
-        for i, v in enumerate(r["history"][:n_hist]):
-            history[i] += v
-        for i, v in enumerate(r["forecast"][:n_fore]):
-            forecast[i] += v
+    if not rows:
+        return _empty_series()
+    summed = _sum_series(rows)
     k = len(rows)
-    history = [round(v / k, 4) for v in history]
-    forecast = [round(v / k, 4) for v in forecast]
-    return {"months": months, "forecast_start_index": fsi, "history": history, "forecast": forecast}
+    values = [round(v / k, 4) for v in summed["history"] + summed["forecast"]]
+    fsi = summed["forecast_start_index"]
+    return {"months": summed["months"], "forecast_start_index": fsi,
+            "history": values[:fsi], "forecast": values[fsi:]}
 
 
 def _fetch_channel_weights(scenario_name: str, ta_name: str, market: str,
@@ -268,13 +331,28 @@ def _aggregate_by_cell(rows: List[dict], metric: str, scenario_name: str, ta_nam
             aggregated.append(group_rows[0])
             continue
 
+        # The canonical source_of_market='ALL' row IS this cell's total --
+        # for every product, not only for product='ALL'. Per-channel rows
+        # sharing the key are the product's share within that channel and
+        # must never be averaged into the total (see PREFER_CANONICAL_CELL_ROW
+        # and the note in fetch_baseline). They ride along as sibling_rows so
+        # the write path can keep them in step.
+        canonical = next(
+            (r for r in group_rows
+             if not r.get("source_of_market") or r["source_of_market"] == "ALL"),
+            None,
+        )
+        if canonical is not None and (product == "ALL" or PREFER_CANONICAL_CELL_ROW):
+            cell = dict(canonical)
+            siblings = [r for r in group_rows if r is not canonical]
+            if siblings:
+                cell["sibling_rows"] = siblings
+                cell["_baseline_forecast"] = list(canonical["forecast"])
+            aggregated.append(cell)
+            continue
+
         if product == "ALL":
-            canonical = next(
-                (r for r in group_rows
-                 if not r.get("source_of_market") or r["source_of_market"] == "ALL"),
-                group_rows[0],
-            )
-            aggregated.append(canonical)
+            aggregated.append(group_rows[0])
             continue
 
         if metric == "market_volume":
@@ -370,9 +448,17 @@ def fetch_baseline(event: EventInput, metric: str):
     )
 
 
-def fetch_available_entities(scenario_name: str, ta_name: str) -> Dict[str, List[str]]:
-    """Every distinct product/market for this scenario/ta, excluding the
-    synthetic 'ALL' row. Used for FE dropdowns and to scope chart/table views."""
+def fetch_available_entities(scenario_name: str, ta_name: str,
+                             include_registered: bool = False) -> Dict[str, List[str]]:
+    """Every distinct product/market for THIS scenario, excluding the
+    synthetic 'ALL' row. Used for FE dropdowns and to scope chart/table views.
+
+    Scenario-scoped on purpose: a product materialized into one scenario
+    must not appear in another where it has no rows. The master-table union
+    is therefore opt-in (include_registered=True) rather than automatic --
+    run_calculation seeds the scenario first, so by the time this runs the
+    product already has its rows and the union would add nothing except
+    products belonging to other scenarios."""
     query = f"SELECT DISTINCT market, product FROM {TABLE} WHERE scenario_name = %s AND ta_name = %s"
     conn = get_connection()
     try:
@@ -383,8 +469,28 @@ def fetch_available_entities(scenario_name: str, ta_name: str) -> Dict[str, List
         conn.close()
 
     markets = sorted({m for m, p in rows if m not in (None, "ALL")})
-    products = sorted({p for m, p in rows if p not in (None, "ALL")})
-    return {"markets": markets, "products": products}
+    products = {p for m, p in rows if p not in (None, "ALL")}
+    if include_registered:
+        products |= set(fetch_registered_products(ta_name))
+    return {"markets": markets, "products": sorted(products)}
+
+
+def fetch_registered_products(ta_name: str) -> List[str]:
+    """Products registered in the master table. A product created via the
+    add-product API but not yet seeded into forecast_outputs exists only
+    here -- without this it can never be picked in an event, because the
+    dropdowns are built from forecast_outputs. Safety net only: seeding at
+    creation time (see _seed_forecast_rows_for_new_product in the products
+    route) is what makes a new product behave like every other one."""
+    query = f"SELECT DISTINCT product_id FROM {PRODUCT_MASTER_TABLE} WHERE ta_name = %s"
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, [ta_name])
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return sorted({r[0] for r in rows if r[0] and r[0] != "ALL"})
 
 
 def fetch_available_scenarios(ta_name: str) -> List[str]:
@@ -419,23 +525,287 @@ def fetch_forecast_config(ta_name: str) -> Optional[dict]:
     return config
 
 
-def fetch_available_months(ta_name: str) -> List[str]:
-    """Full date range (history + forecast) for the FE's date-range picker."""
-    config = fetch_forecast_config(ta_name)
-    if not config:
+# ======================================================
+# 1c. LAZY PRODUCT SEEDING
+# ======================================================
+# Products are registered in the master table alone (see the add-product
+# route) -- nothing is written to forecast_outputs at creation time. They
+# are materialized here instead, the first time a calculation runs for a
+# given scenario: zero history, zero forecast, on the same rows every other
+# product occupies.
+#
+# Doing it lazily rather than at creation means a product added today
+# automatically appears in scenarios created tomorrow, with no backfill.
+
+def _zeroed_forecast_data(data: dict) -> dict:
+    """Copy a template row's forecast_data with every numeric series zeroed,
+    keeping months, forecast_start_index and any other structural keys
+    exactly as they are.
+
+    Zeroing by structure rather than rebuilding from months/fsi means rows
+    whose JSON carries extra arrays, or which omit train_values entirely,
+    still come out shaped like their neighbours -- everything downstream
+    reads these positionally, so shape is what matters."""
+    zeroed = {}
+    for key, value in data.items():
+        if isinstance(value, list) and value and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
+        ):
+            zeroed[key] = [0.0] * len(value)
+        else:
+            zeroed[key] = value
+
+    months = zeroed.get("months") or []
+    if months:
+        fsi = zeroed.get("forecast_start_index")
+        if fsi is None:
+            fsi = len(zeroed.get("train_values") or [])
+        fsi = max(0, min(int(fsi), len(months)))
+        zeroed["forecast_start_index"] = fsi
+        zeroed.setdefault("train_values", [0.0] * fsi)
+        zeroed.setdefault("forecast_values", [0.0] * (len(months) - fsi))
+
+    return zeroed
+
+
+def _fetch_seed_templates(cur, scenario_name: str, ta_name: str) -> List[tuple]:
+    """The full set of row keys a product needs in this scenario, taken as
+    the UNION across every product that already has rows.
+
+    Previously this mirrored a single reference product -- whichever had
+    the most rows. That inherits any gap the reference itself has: a
+    product seeded from a reference with no Retail rows ends up Non-retail
+    only, which then shows up as a product missing from one market in
+    every view built from it. The union can only be as complete as the
+    scenario's best-covered combination of products, which is the right
+    bar.
+
+    One representative forecast_data per key supplies the month grid; the
+    values are zeroed before insert, so which product it came from doesn't
+    matter.
+    """
+    cur.execute(
+        f"""
+        SELECT DISTINCT ON (metric, market, COALESCE(NULLIF(source_of_market, ''), 'ALL'))
+               metric,
+               market,
+               source_of_market,
+               forecast_data
+        FROM {TABLE}
+        WHERE ta_name = %s
+          AND scenario_name = %s
+          AND product IS NOT NULL
+          AND UPPER(TRIM(product)) <> 'ALL'
+        ORDER BY metric,
+                 market,
+                 COALESCE(NULLIF(source_of_market, ''), 'ALL'),
+                 product
+        """,
+        [ta_name, scenario_name],
+    )
+    return cur.fetchall()
+
+
+def seed_missing_products(scenario_name: str, ta_name: str) -> List[str]:
+    """Materialize every registered product that has no rows in this
+    scenario yet. Idempotent -- existing rows are never touched, so this is
+    safe to call on every calculation.
+
+    Returns the names of the products actually seeded."""
+    if scenario_name == BASELINE_SCENARIO and not SEED_BASELINE_SCENARIO:
+        # Same rule as persist_events_to_db: Base stays the untouched
+        # baseline. Inserting rows into it is still a modification, even
+        # when every value is zero.
+        print(f"INFO: skipping seeding for baseline scenario "
+              f"{BASELINE_SCENARIO!r} -- it is never written to")
         return []
 
-    train_start = datetime.strptime(config["train_start_date"], "%Y-%m-%d").date()
-    train_end = datetime.strptime(config["train_end_date"], "%Y-%m-%d").date()
-    forecast_periods = config.get("forecast_periods", 0) or 0
-    forecast_end = train_end + relativedelta(months=forecast_periods)
+    registered = set(fetch_registered_products(ta_name))
+    if not registered:
+        return []
 
-    months = []
-    cursor = train_start
-    while cursor <= forecast_end:
-        months.append(cursor.strftime("%Y-%m-%d"))
-        cursor += relativedelta(months=1)
-    return months
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT DISTINCT product FROM {TABLE} "
+                f"WHERE ta_name = %s AND scenario_name = %s",
+                [ta_name, scenario_name],
+            )
+            existing = {r[0] for r in cur.fetchall() if r[0]}
+
+            missing = sorted(p for p in registered if p not in existing)
+            if not missing:
+                return []
+
+            templates = _fetch_seed_templates(cur, scenario_name, ta_name)
+            if not templates:
+                # Nothing to model on -- a scenario with no per-product rows
+                # at all. Better to say so than to invent a month grid.
+                print(f"WARNING: cannot seed {missing} into scenario "
+                      f"{scenario_name!r} -- no existing product rows to "
+                      f"use as a template")
+                return []
+
+            seeded = []
+            for product in missing:
+                inserted = 0
+                for metric, market, source_of_market, forecast_data in templates:
+                    payload = json.dumps(
+                        _zeroed_forecast_data(_parse_forecast_data(forecast_data))
+                    )
+                    cur.execute(
+                        f"""
+                        INSERT INTO {TABLE}
+                            (scenario_name, ta_name, metric, market, product,
+                             source_of_market, forecast_data, updated_at)
+                        SELECT %s, %s, %s, %s, %s, %s, %s::jsonb, now()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM {TABLE}
+                            WHERE scenario_name = %s AND ta_name = %s AND metric = %s
+                              AND market = %s AND product = %s
+                              AND COALESCE(NULLIF(source_of_market, ''), 'ALL')
+                                = COALESCE(NULLIF(%s, ''), 'ALL')
+                        )
+                        """,
+                        [
+                            scenario_name, ta_name, metric, market, product,
+                            source_of_market, payload,
+                            scenario_name, ta_name, metric, market, product,
+                            source_of_market,
+                        ],
+                    )
+                    inserted += cur.rowcount
+
+                if inserted:
+                    seeded.append(product)
+                    print(f"INFO: seeded {inserted} zero rows for product "
+                          f"{product!r} in scenario {scenario_name!r}")
+
+        conn.commit()
+        return seeded
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ======================================================
+# 1b. CANONICAL MONTH GRID  (new-entity support)
+# ======================================================
+# A brand-new product has no history: its stored train_values are empty
+# (or all zeros) and its forecast_start_index may be 0, while every
+# established series in the same batch has fsi = N. Every aggregation
+# helper in this module zips series BY POSITION and reads
+# months/forecast_start_index off rows[0], so one ragged series silently
+# shifts everything it is summed, blended or charted with.
+#
+# Rather than special-casing each helper, every series is re-indexed onto
+# one grid, matched BY MONTH LABEL, as soon as it leaves the DB (see
+# fetch_series -> _align_rows). Months a series has no value for become
+# 0.0, which for a new product is exactly its pre-launch history.
+
+_FORECAST_GRID_CACHE: Dict[str, Optional[Tuple[List[str], int]]] = {}
+
+
+def reset_forecast_grid_cache() -> None:
+    """Cleared at the top of run_calculation so a config edit mid-session is
+    never served from a stale grid."""
+    _FORECAST_GRID_CACHE.clear()
+
+
+def get_forecast_grid(ta_name: str) -> Optional[Tuple[List[str], int]]:
+    """(months, forecast_start_index) for the whole TA, derived from the
+    training/forecast window config. Used as the FALLBACK grid only --
+    when a batch contains an established series, that series' own window
+    wins (see _canonical_grid), since the config may have been edited
+    after these forecasts were generated."""
+    if ta_name in _FORECAST_GRID_CACHE:
+        return _FORECAST_GRID_CACHE[ta_name]
+
+    grid = None
+    config = fetch_forecast_config(ta_name)
+    if config:
+        train_start = datetime.strptime(config["train_start_date"], "%Y-%m-%d").date()
+        train_end = datetime.strptime(config["train_end_date"], "%Y-%m-%d").date()
+        forecast_end = train_end + relativedelta(months=config.get("forecast_periods", 0) or 0)
+
+        months: List[str] = []
+        fsi = 0
+        cursor = train_start
+        while cursor <= forecast_end:
+            months.append(cursor.strftime("%Y-%m-%d"))
+            if cursor <= train_end:
+                fsi += 1
+            cursor += relativedelta(months=1)
+        if months:
+            grid = (months, fsi)
+
+    _FORECAST_GRID_CACHE[ta_name] = grid
+    return grid
+
+
+def _canonical_grid(rows: List[dict], ta_name: str) -> Tuple[List[str], int]:
+    """Widest month window in the batch. forecast_start_index is taken from
+    an ESTABLISHED row (one that actually has history) rather than from
+    rows[0] -- a new product's own fsi of 0 would otherwise declare the
+    entire window to be forecast for every series in the batch. Falls back
+    to the TA config only when every row in the batch is a new entity."""
+    all_months = sorted({m for r in rows for m in r["months"]})
+    established = [r for r in rows if r["months"] and r["forecast_start_index"] > 0]
+
+    if established:
+        reference = max(established, key=lambda r: len(r["months"]))
+        ref_fsi = reference["forecast_start_index"]
+        if ref_fsi >= len(reference["months"]):
+            return all_months, len(all_months)  # nothing is forecast
+        first_forecast = reference["months"][ref_fsi]
+        return all_months, sum(1 for m in all_months if m < first_forecast)
+
+    grid = get_forecast_grid(ta_name)
+    if grid:
+        config_months, config_fsi = grid
+        all_months = sorted(set(all_months) | set(config_months))
+        if config_fsi < len(config_months):
+            first_forecast = config_months[config_fsi]
+            return all_months, sum(1 for m in all_months if m < first_forecast)
+    return all_months, 0
+
+
+def align_series_to_grid(series: dict, months: List[str], fsi: int) -> dict:
+    """Re-index one series onto `months`, matched by month label. Months the
+    series has no value for become 0.0 -- for a new product that is its
+    entire pre-launch history, which is the correct value, not a gap."""
+    existing = dict(zip(series["months"], series["history"] + series["forecast"]))
+    values = []
+    for m in months:
+        v = existing.get(m)
+        values.append(0.0 if v is None else v)
+    return {
+        **series,
+        "months": list(months),
+        "forecast_start_index": fsi,
+        "history": values[:fsi],
+        "forecast": values[fsi:],
+    }
+
+
+def _align_rows(rows: List[dict], ta_name: str) -> List[dict]:
+    if not rows:
+        return rows
+    months, fsi = _canonical_grid(rows, ta_name)
+    if not months:
+        return rows
+    return [align_series_to_grid(r, months, fsi) for r in rows]
+
+
+def fetch_available_months(ta_name: str) -> List[str]:
+    """Full date range (history + forecast) for the FE's date-range picker --
+    same grid every series is aligned to, so the picker and the data can
+    never disagree."""
+    grid = get_forecast_grid(ta_name)
+    return list(grid[0]) if grid else []
 
 
 def fetch_tab_baseline(tab: str, metric: str, scenario_name: str, ta_name: str, entities: dict) -> List[dict]:
@@ -469,7 +839,12 @@ def _apply_curve_to_series(series: dict, curve_months: List[str], curve_values: 
     what the underlying baseline forecast does).
     mode="add": curve_values[pos] is added onto the existing forecast
     (used for impacted/sibling entities -- they move relative to their
-    own trend, not toward an absolute target)."""
+    own trend, not toward an absolute target).
+
+    A new product's baseline forecast is whatever was forecasted for it and
+    its history is all zeros, so both modes behave normally here -- the
+    zero history is never touched (only indices at/after
+    forecast_start_index are written)."""
     series = copy.deepcopy(series)
     applied = False
     if not curve_months or not curve_values:
@@ -565,6 +940,61 @@ def _cell_key(event: EventInput, label: str, context: str) -> Tuple[str, str]:
     return ("ALL", "ALL")
 
 
+def _zero_cell_series(template: Optional[dict], ta_name: str, market: str,
+                      product: str, label_field: str) -> Optional[dict]:
+    """Zero baseline for a (market, product) cell that has no stored row --
+    shaped like a fetch_series row so every downstream helper treats it
+    identically. Window is copied from a sibling cell when one is already
+    loaded, else from the TA config grid."""
+    if template is not None:
+        months, fsi = list(template["months"]), template["forecast_start_index"]
+    else:
+        grid = get_forecast_grid(ta_name)
+        if not grid:
+            return None
+        months, fsi = grid
+        months = list(months)
+    return {
+        "label": product if label_field == "product" else market,
+        "market": market,
+        "product": product,
+        "source_of_market": "ALL",
+        "synthesized": False,
+        "new_entity": True,
+        "months": months,
+        "forecast_start_index": fsi,
+        "history": [0.0] * fsi,
+        "forecast": [0.0] * (len(months) - fsi),
+    }
+
+
+def _ensure_event_cells(cache_by_cell: Dict[Tuple[str, str], dict], event: EventInput,
+                        keys_by_label: Dict[str, Tuple[str, str]]) -> None:
+    """A product created after this scenario's forecasts were written has no
+    stored row for some (market, product) pairs. Without this, its keys are
+    simply absent from the cache, no curve is ever applied, and the event
+    fails the overlap check with a misleading 422. Seed a zero baseline
+    instead -- zero history, zero baseline forecast -- so the curve has
+    something to land on.
+
+    Left non-synthesized on purpose: persist_events_to_db still attempts the
+    UPDATE, and if there really is no row behind the cell, its existing
+    rowcount-0 warning surfaces that instead of dropping the write in
+    silence."""
+    if event.event_scope == EventScope.OVERALL_EVENT:
+        return
+    label_field = "product" if event.event_scope == EventScope.PRODUCT_EVENT else "market"
+    template = next(iter(cache_by_cell.values()), None)
+    for key in keys_by_label.values():
+        if key in cache_by_cell:
+            continue
+        row = _zero_cell_series(template, event.ta_name, key[0], key[1], label_field)
+        if row is not None:
+            cache_by_cell[key] = row
+            print(f"INFO: no stored market_share row for market={key[0]!r} "
+                  f"product={key[1]!r} -- treating as a new entity (zero baseline)")
+
+
 GridFetchCache = Dict[Tuple[str, str, Tuple[str, ...], Tuple[str, ...]], List[dict]]
 
 
@@ -638,15 +1068,24 @@ def _reconcile_product_event_market(
         else:
             targets = sibling_rows
 
-        weight_total = sum(r["forecast"][i] for r in targets if i < len(r["forecast"]))
-        if weight_total <= 0:
+        if not targets:
             continue
+
+        weight_total = sum(r["forecast"][i] for r in targets if i < len(r["forecast"]))
+        # Proportional redistribution is undefined when every target sits at
+        # zero this month (all-new products, or a market whose siblings
+        # haven't launched yet) -- split the residual evenly instead of
+        # skipping, or the column stops summing to 100.
+        even_split = residual / len(targets) if weight_total <= 0 else None
 
         for row in targets:
             if i >= len(row["forecast"]):
                 continue
-            weight_pct = row["forecast"][i] / weight_total
-            new_value = round(row["forecast"][i] + residual * weight_pct, 4)
+            if even_split is not None:
+                delta = even_split
+            else:
+                delta = residual * (row["forecast"][i] / weight_total)
+            new_value = round(row["forecast"][i] + delta, 4)
             if bounds is not None:
                 new_value = max(bounds[0], min(bounds[1], new_value))
             row["forecast"][i] = new_value
@@ -689,9 +1128,8 @@ def _apply_market_scale_to_siblings(
 
             row["forecast"] = new_combined[fsi:n] if n < len(combined) else new_combined[fsi:]
             share_cache[(row["market"], row["product"])] = row
-from typing import Dict, List, Tuple
 
- 
+
 def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
     """
     Like normalize_shares_to_100, but any product with a directly-saved
@@ -700,12 +1138,12 @@ def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
     proportionally by volume to fill whatever share is left over
     (100 - sum of pinned shares at that index), so all siblings still
     sum to 100 at every time index.
- 
+
     pinned_shares: dict label -> list[float] | None
     """
     num = len(labels)
     normalized = [[0.0] * n for _ in range(num)]
- 
+
     for t in range(n):
         pinned_total = 0.0
         free_indices = []
@@ -716,7 +1154,7 @@ def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
                 pinned_total += pin[t]
             else:
                 free_indices.append(c)
- 
+
         remaining = max(0.0, 100.0 - pinned_total)
         free_total_vol = sum(
             children_values_list[c][t] if t < len(children_values_list[c]) else 0
@@ -728,7 +1166,7 @@ def normalize_shares_with_pins(children_values_list, labels, pinned_shares, n):
                 normalized[c][t] = round((val / free_total_vol) * remaining, 2)
             else:
                 normalized[c][t] = 0.0
- 
+
     return normalized
 
 
@@ -741,7 +1179,13 @@ def _market_event_volume_conserving_shares(
     impacted_markets: List[Tuple[str, float]],
     event,
 ) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
-    
+    """Re-splits `product`'s FIXED total volume across the touched markets.
+    Returns ({}, {}) when that pool doesn't exist -- e.g. a product created
+    after this scenario was forecast, or one still at zero everywhere.
+    The caller falls back to plain curve application in that case (see
+    apply_events_to_baseline): with no pool to conserve, the curve defines
+    the product's share in each market directly instead."""
+
     share_cache = cache["market_share"]
     volume_cache = cache["market_volume"]
     bounds = CLAMP_BOUNDS["market_share"]
@@ -798,10 +1242,19 @@ def _market_event_volume_conserving_shares(
         prod_combined = prod_row["history"] + prod_row["forecast"]
         prod_share = [prod_combined[i] if i < len(prod_combined) else 0.0 for i in range(n)]
         product_vols[market] = [market_vols[market][i] * prod_share[i] / 100.0 for i in range(n)]
-    
+
     # `product`'s fixed total across just the touched markets -- the pool
     # being re-split; never changes because of this event.
     product_total_vol = [sum(product_vols[m][i] for m in touched_markets) for i in range(n)]
+
+    # No pool at all: a brand-new product has zero volume in every touched
+    # market, so every target below would come out as a hard zero. Bail so
+    # the caller can apply the curve directly instead of silently writing
+    # zeros over the product's own forecast.
+    if not any(product_total_vol):
+        print(f"BAILOUT: product={product!r} has no baseline volume across "
+              f"{touched_markets} -- nothing to redistribute")
+        return {}, {}
 
     baseline_cross_pct = [
         round(product_vols[selected_market][i] / product_total_vol[i] * 100, 4) if product_total_vol[i] else 0.0
@@ -940,6 +1393,10 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                 baseline_rows = fetch_baseline(event, "market_share")  # pulls ALL contexts at once
                 for row in baseline_rows:
                     cache["market_share"].setdefault((row["market"], row["product"]), row)
+                # A product created after this scenario was forecast may have
+                # no row for some cells -- seed a zero baseline so its curve
+                # has something to land on.
+                _ensure_event_cells(cache["market_share"], event, keys_by_label)
 
             baseline_pct = 0.0
             if event.event_scope != EventScope.OVERALL_EVENT:
@@ -970,28 +1427,46 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                     baseline_rows = fetch_baseline(event, metric)
                     for row in baseline_rows:
                         cache[metric].setdefault((row["market"], row["product"]), row)
+                    # market_share only -- market_volume has no per-cell DB
+                    # row (it's derived in _derive_volume_grid), so seeding
+                    # zeros there would fabricate rows that don't exist.
+                    if metric == "market_share":
+                        _ensure_event_cells(cache[metric], event, keys_by_label)
 
                 if event.event_scope == EventScope.MARKET_EVENT and metric == "market_share":
                     impacted_weights = [(e.name, e.weight) for e in (event.impacted_entities or [])]
                     new_forecasts, market_scale = _market_event_volume_conserving_shares(
                         cache, event.scenario_name, event.ta_name, context,
                         event.selected_entity, impacted_weights, event)
-                    for market, forecast in new_forecasts.items():
-                        key = (market, context)
-                        if key not in cache["market_share"]:
-                            continue
-                        cache["market_share"][key]["forecast"] = forecast
-                        event_touched_forecast = True
 
                     if new_forecasts:
+                        for market, forecast in new_forecasts.items():
+                            key = (market, context)
+                            if key not in cache["market_share"]:
+                                continue
+                            cache["market_share"][key]["forecast"] = forecast
+                            event_touched_forecast = True
+
                         work_key = (event.scenario_name, event.ta_name, context)
                         entry = market_event_work.setdefault(
                             work_key, {"touched_markets": set(), "market_scale": {}})
                         entry["touched_markets"].update(new_forecasts.keys())
                         entry["market_scale"].update(market_scale)   # <-- carry it forward
+                        continue
+
+                    # Nothing to re-split: the product has no baseline volume
+                    # in any touched market (a product created after this
+                    # scenario was forecast, or one still at zero). Fall
+                    # through to plain curve application -- the curve then
+                    # DEFINES the product's share in each market rather than
+                    # redistributing a fixed pool between them.
+                    print(f"INFO: volume-conserving reconcile unavailable for "
+                          f"product={context!r}, event={event.event_name!r} -- "
+                          f"applying curves directly")
+
+                elif event.event_scope == EventScope.MARKET_EVENT and metric == "market_volume":
                     continue
-                if event.event_scope == EventScope.MARKET_EVENT and metric == "market_volume":
-                    continue
+
                 bounds = CLAMP_BOUNDS.get(metric)
                 selected_label = event.selected_entity or OVERALL_LABEL
                 for label, curve in curves.items():
@@ -1020,6 +1495,15 @@ def apply_events_to_baseline(events: List[EventInput], entities: Dict[str, List[
                     event_touched_forecast = event_touched_forecast or applied
 
             if not event_touched_forecast:
+                # Distinguish "this entity has no forecast rows at all" (a
+                # newly created product whose rows were never written) from
+                # a genuine window mismatch -- the two need different fixes.
+                if not any(k in cache["market_share"] for k in keys_by_label.values()):
+                    raise HTTPException(422, detail=(
+                        f"Event '{event.event_name}' references entities with no stored "
+                        f"market_share rows in scenario '{event.scenario_name}' "
+                        f"(context={context}). If this is a newly created product, its "
+                        f"forecast rows must be written to {TABLE} first."))
                 raise HTTPException(422, detail=(
                     f"Event '{event.event_name}' (context={context}, start_date={event.start_date}, "
                     f"duration_months={event.duration_months}) does not overlap the forecast window."))
@@ -1090,27 +1574,23 @@ def _derive_volume_grid(
     overall_volume: List[dict],
 ) -> List[dict]:
     """market_volume has no per-cell DB row -- derived at display time as
-    cell's market_share% applied to the current overall total. Not persisted."""
+    cell's market_share% applied to the current overall total. Not persisted.
+
+    Lookups are by month LABEL and tolerant of misses: a market with no
+    canonical ALL row, or a month a series doesn't cover, yields 0.0 for
+    that cell rather than raising -- a new product/market must not be able
+    to take down the whole view."""
     if not overall_volume or not share_grid:
         return []
     overall = overall_volume[0]
-    # print("\n========== _derive_volume_grid ==========")
-    # print("Overall Volume History:", overall["history"])
-    # print("Overall Volume Forecast:", overall["forecast"])
     overall_month_index = {m: i for i, m in enumerate(overall["months"])}
-    market_share_lookup = {}
 
+    market_share_lookup: Dict[str, Dict[str, float]] = {}
     for row in market_share_all:
-        market_share_lookup[row["market"]] = {
-            "months": row["months"],
-            "forecast_start_index": row["forecast_start_index"],
-            "values": row["history"] + row["forecast"],
-        }
-    # print("\n========== Market Share Lookup ==========")
+        market_share_lookup[row["market"]] = dict(
+            zip(row["months"], row["history"] + row["forecast"])
+        )
 
-    # for market, info in market_share_lookup.items():
-    #     print(f"\n{market}")
-    #     print(info["values"])
     def _total_at(month: str) -> Optional[float]:
         oi = overall_month_index.get(month)
         if oi is None:
@@ -1122,53 +1602,36 @@ def _derive_volume_grid(
 
     derived = []
     for cell in share_grid:
-        # print(f"\nMarket={cell['market']} Product={cell['product']}")
-        # print("Share:", cell["history"] + cell["forecast"])
         combined_share = cell["history"] + cell["forecast"]
+        by_month = market_share_lookup.get(cell["market"])
+        if by_month is None:
+            # No canonical (market, "ALL") share row -- can't scale this
+            # cell to volume. Zero rather than crash; the market_share
+            # views are unaffected.
+            print(f"WARNING: no market-level ALL share row for market="
+                  f"{cell['market']!r} -- derived volume is 0 for its cells")
+            by_month = {}
+
         values = []
         for month, share_pct in zip(cell["months"], combined_share):
             total = _total_at(month)
-            if total is not None:
-                market_share_info = market_share_lookup[cell["market"]]
-
-                market_idx = market_share_info["months"].index(month)
-
-                market_share = market_share_info["values"][market_idx]
-
-
-                market_volume = total * market_share / 100
-                volume = round(
-                    market_volume * share_pct / 100,
-                    2,
-                )
-                volume = round(
-                    market_volume * share_pct / 100,
-                    2,
-                )
-
-                values.append(volume)
-            else:
+            market_share = by_month.get(month)
+            if total is None or market_share is None:
                 values.append(0.0)
+                continue
+            # Unrounded on purpose -- _round_metrics_views does the single
+            # rounding pass at the end. Rounding to 2 here and then to 0
+            # there rounds the same number twice, which can shift a cell by
+            # an extra half unit for no benefit.
+            market_volume = total * market_share / 100
+            values.append(market_volume * share_pct / 100)
+
         fsi = cell["forecast_start_index"]
         derived.append({
             "market": cell["market"], "product": cell["product"],
             "months": cell["months"], "forecast_start_index": fsi,
             "history": values[:fsi], "forecast": values[fsi:],
         })
-    # print("\n========== Derived Market Totals ==========")
-
-    market_totals = _group_series_by_field(derived, "market")
-
-
-    print("\n========== Derived Product Totals ==========")
-
-    product_totals = _group_series_by_field(derived, "product")
-
-    for p in product_totals:
-        print(
-            p["label"],
-            p["history"] + p["forecast"]
-        )
     return derived
 
 
@@ -1267,9 +1730,12 @@ def _monthly_parent_child_view(
         Parent = sum(children)
 
     For market_share:
-        Parent = parent's volume as a % of the OVERALL market volume.
-        Children = each child's volume as a % of the OVERALL market volume.
-        (Parent's children therefore sum to the parent's own share, not to 100.)
+        Parent share is 100% -- each parent's own internal breakdown, so
+        its children sum to 100 under it.
+
+    A parent whose children are all new products (no volume yet) has no
+    volume rows to fold; that yields an all-zero parent total and 0.00%
+    children rather than an index error.
     """
     months = grid[0]["months"]
     fsi = grid[0]["forecast_start_index"]
@@ -1286,11 +1752,12 @@ def _monthly_parent_child_view(
         if metric == "market_share":
 
             volume_children = [
-                r for r in volume_grid
+                r for r in (volume_grid or [])
                 if r[parent_field] == label
             ]
 
-            parent_volume = _sum_series(volume_children)
+            parent_volume = (_sum_series(volume_children) if volume_children
+                             else _empty_series(months, fsi))
             parent_totals = parent_volume["history"] + parent_volume["forecast"]
 
             # Parent share is always 100% -- this hierarchy shows each
@@ -1301,8 +1768,6 @@ def _monthly_parent_child_view(
             parent_forecast = parent_shares[fsi:]
             parent_values = parent_shares
 
-            # print("Parent Shares:", parent_shares)
-
             children = []
             for child in volume_children:
                 child_volumes = child["history"] + child["forecast"]
@@ -1310,12 +1775,6 @@ def _monthly_parent_child_view(
                     round(cv / pv * 100, 2) if pv else 0.0
                     for cv, pv in zip(child_volumes, parent_totals)
                 ]
-
-                # print(
-                #     f"\nChild: {child[child_field]}",
-                #     "\nVolumes:", child_volumes,
-                #     "\nShares :", shares
-                # )
 
                 children.append({
                     "label": child[child_field],
@@ -1374,48 +1833,16 @@ def _monthly_parent_child_view(
 
 
 def _group_series_by_field(grid: List[dict], field: str) -> List[dict]:
-
-    # print("\n========== _group_series_by_field ==========")
-    # print("Grouping by:", field)
-
     grouped: Dict[str, List[dict]] = {}
-
     for row in grid:
-        print(
-            f"Input -> Market={row['market']}, "
-            f"Product={row['product']}"
-        )
-        print(row["history"] + row["forecast"])
-
         grouped.setdefault(row[field], []).append(row)
 
-    print("\nGrouped Values:")
-
     result = []
-
     for label, rows in grouped.items():
-
-        print(f"\nGroup: {label}")
-
-        for r in rows:
-            print(
-                f"  {r['market']} | {r['product']}"
-            )
-            print("   ", r["history"] + r["forecast"])
-
-        summed = _sum_series(rows)
-
-        print("Summed:")
-        print(summed["history"] + summed["forecast"])
-
-        result.append(
-            {
-                "label": label,
-                **summed,
-            }
-        )
-
+        result.append({"label": label, **_sum_series(rows)})
     return result
+
+
 def _monthly_flat_view_from_canonical_rows(rows: List[dict]) -> Tuple[dict, List[dict]]:
 
     if not rows:
@@ -1430,6 +1857,7 @@ def _monthly_flat_view_from_canonical_rows(rows: List[dict]) -> Tuple[dict, List
     flat_rows = [{"label": r["market"], "values": r["history"] + r["forecast"]} for r in rows]
     return chart, flat_rows
 
+
 def _monthly_flat_view(
     grid: List[dict],
     child_field: str,
@@ -1442,52 +1870,36 @@ def _monthly_flat_view(
     hierarchy chart (grouped by parent_field), not just the same rows
     re-labeled without children, so it needs its own chart.
     Returns (monthly_chart, flat_rows)."""
-    # print("\n========== _monthly_flat_view ==========")
-    # print("Child field:", child_field)
+    if not grid:
+        return {"months": [], "forecast_start_index": 0, "series": []}, []
 
     months = grid[0]["months"]
     fsi = grid[0]["forecast_start_index"]
     if overall_volume_series is None:
-        print("\nUsing _group_series_by_field()")
         child_series = _group_series_by_field(grid, child_field)
     else:
-        print("\nUsing volume-based market share calculation")
-
         grouped = _group_series_by_field(grid, child_field)
-
-        overall = overall_volume_series["history"] + overall_volume_series["forecast"]
+        overall_by_month = dict(
+            zip(overall_volume_series["months"],
+                overall_volume_series["history"] + overall_volume_series["forecast"])
+        )
 
         child_series = []
-
         for g in grouped:
-
             values = g["history"] + g["forecast"]
-
             shares = []
+            for month, v in zip(g["months"], values):
+                total = overall_by_month.get(month)
+                shares.append(round((v / total) * 100, 2) if total else 0.0)
 
-            # print(f"\nProcessing {g['label']}")
-
-            for v, total in zip(values, overall):
-                share = round((v / total) * 100, 2) if total else 0.0
-                shares.append(share)
-
-            # print("Volume :", values)
-            # print("Overall:", overall)
-            # print("Share  :", shares)
-
+            g_fsi = g["forecast_start_index"]
             child_series.append({
                 "label": g["label"],
                 "months": g["months"],
-                "forecast_start_index": g["forecast_start_index"],
-                "history": shares[:g["forecast_start_index"]],
-                "forecast": shares[g["forecast_start_index"]:],
+                "forecast_start_index": g_fsi,
+                "history": shares[:g_fsi],
+                "forecast": shares[g_fsi:],
             })
-    print("\nResult from _group_series_by_field:")
-    for s in child_series:
-        print(
-            f"{s['label']}:",
-            s["history"] + s["forecast"]
-        )
 
     monthly_chart = {
         "months": months,
@@ -1495,9 +1907,6 @@ def _monthly_flat_view(
         "series": [{"label": s["label"], "history": s["history"], "forecast": s["forecast"]} for s in child_series],
     }
     flat_rows = [{"label": s["label"], "values": s["history"] + s["forecast"]} for s in child_series]
-    print("\nFinal Flat Rows:")
-    for r in flat_rows:
-        print(r)
     return monthly_chart, flat_rows
 
 
@@ -1608,19 +2017,6 @@ def _yearly_parent_child_view(
     yearly_fsi = years.index(first_forecast_year)
 
     #
-    # Overall market volume, rolled up to yearly, used as the denominator
-    # for every share calculated below (parent AND child).
-    #
-    overall_yearly = None
-    overall_totals = None
-    if overall_volume_series is not None:
-        overall_yearly = _to_yearly_chart(
-            [{"label": OVERALL_LABEL, **overall_volume_series}],
-            "sum",
-        )["series"][0]
-        overall_totals = overall_yearly["history"] + overall_yearly["forecast"]
-
-    #
     # Group rows by parent
     #
     by_parent: Dict[str, List[dict]] = {}
@@ -1682,9 +2078,9 @@ def _yearly_parent_child_view(
             )
 
             #
-            # Child share = child's own yearly volume as a % of the
-            # OVERALL market's yearly volume, so children under a parent
-            # sum to that parent's real share instead of to 100.
+            # Child share = child's own yearly volume as a % of its
+            # parent's yearly volume. A product that launches mid-window
+            # is simply 0.00 in the years before it has volume.
             #
             shares = [
                 round(cv / pv * 100, 2) if pv else 0.0
@@ -1710,6 +2106,7 @@ def _yearly_parent_child_view(
 
     return parent_yearly, hierarchy_rows
 
+
 def _resolve_coverage(row: dict) -> Optional[CoverageInput]:
     """Coverage is inferred purely from whether the FE included the coverage
     fields on the row -- there's no separate enable_coverage flag sent by
@@ -1725,6 +2122,7 @@ def _resolve_coverage(row: dict) -> Optional[CoverageInput]:
         peak_pct=row["coverage_peak_percent"],
         peak_months=row["coverage_peak_months"],
     )
+
 
 def _yearly_overall_row(years: List[str], metric: str,
                          overall_volume_series: Optional[dict] = None) -> Optional[dict]:
@@ -1747,6 +2145,7 @@ def _yearly_overall_row(years: List[str], metric: str,
         return None
     s = yearly["series"][0]
     return {"label": OVERALL_LABEL, "values": s["history"] + s["forecast"]}
+
 
 def _monthly_cell_shares(volume_grid: List[dict], cell_pairs: Set[Tuple[str, str]],
                           parent_field: str, child_field: str) -> dict:
@@ -1792,13 +2191,15 @@ def _monthly_cell_shares(volume_grid: List[dict], cell_pairs: Set[Tuple[str, str
             "forecast": shares[fsi:],
         })
     return {"months": months, "forecast_start_index": fsi, "series": series}
+
+
 def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent_field: str, child_field: str,
                                   agg: str, overall_series: Optional[dict] = None,
                                   volume_grid: Optional[List[dict]] = None,
                                   overall_volume_series: Optional[dict] = None,
                                   scope_cells: Optional[Set[Tuple[str, str]]] = None,
-                                  market_share_all: Optional[List[dict]] = None) -> dict:   # <-- new param
-    
+                                  market_share_all: Optional[List[dict]] = None) -> dict:
+
     levels = TAB_VIEW_LEVELS[tab]
     view_options = [
         {"label": levels["flat_label"], "value": levels["flat_key"]},
@@ -1828,28 +2229,6 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
     # ---- monthly: hierarchy chart groups by parent; flat chart groups by
     # child, summed across parents -- two different series sets, not one
     # chart shared between the levels ----
-    print("\n================ build_hierarchical_dual_view ================")
-    print("Tab    :", tab)
-    print("Metric :", metric)
-    print("Parent :", parent_field)
-    print("Child  :", child_field)
-
-    if metric == "market_share":
-        print("\nGrid (share):")
-        for r in grid:
-            print(
-                r[parent_field],
-                r[child_field],
-                r["history"] + r["forecast"]
-            )
-
-        print("\nVolume Grid:")
-        for r in volume_grid:
-            print(
-                r[parent_field],
-                r[child_field],
-                r["history"] + r["forecast"]
-            )
     monthly_parent_chart, hierarchy_rows, overall_row = _monthly_parent_child_view(
         grid,
         parent_field,
@@ -1857,7 +2236,7 @@ def build_hierarchical_dual_view(tab: str, metric: str, grid: List[dict], parent
         overall_series,
         metric,
         volume_grid,
-        overall_volume_series,   # <-- add this
+        overall_volume_series,
     )
 
     # Once markets/products are selected in selected_filter, the hierarchy
@@ -2049,11 +2428,11 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
     scope_cells = _selected_filter_cells(tab, entities, selected_filter or {})
 
     share_grid = fetch_grid(
-    scenario_name,
-    ta_name,
-    "market_share",
-    markets,
-    products,
+        scenario_name,
+        ta_name,
+        "market_share",
+        markets,
+        products,
     )
 
     if cache is not None:
@@ -2061,6 +2440,18 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             share_grid,
             cache["market_share"],
         )
+        # A cell the event created from scratch (new product with no stored
+        # row) exists only in the cache -- fetch_grid never returned it, so
+        # the overlay above can't place it. Append it so the new product
+        # actually shows up in the tables/charts.
+        known = {(c["market"], c["product"]) for c in share_grid}
+        for (market, product), row in cache["market_share"].items():
+            if product == "ALL" or market == "ALL":
+                continue
+            if (market, product) in known:
+                continue
+            if market in markets and product in products:
+                share_grid.append(copy.deepcopy(row))
 
     overall_share = None
     if share_grid:
@@ -2084,25 +2475,12 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             cache["market_share"].get((row["market"], row["product"]), row)
             for row in market_share_all
         ]
-    for row in market_share_all:
-        print(
-            f"DEBUG id(all_row) in build_hierarchy_views [{row['market']}]:",
-            id(row), row["forecast"]
-        )
-    # print("\n========== Market Share ALL ==========")
-    # for row in market_share_all:
-    #     print(
-    #         row["market"],
-    #         row["product"],
-    #         row["history"] + row["forecast"]
-    #     )
-    # print("\n========== Overall_volume_rows ==========")
-    # print(overall_volume_rows)
+
     volume_grid = _derive_volume_grid(
-            share_grid,
-            market_share_all,
-            overall_volume_rows,
-        )
+        share_grid,
+        market_share_all,
+        overall_volume_rows,
+    )
 
     share_grid = _clip_series_list(share_grid, start_date, end_date)
     volume_grid = _clip_series_list(volume_grid, start_date, end_date)
@@ -2117,7 +2495,7 @@ def _build_hierarchy_views(tab: str, scenario_name: str, ta_name: str, entities:
             tab, "market_share", share_grid, parent_field, child_field, YEARLY_AGG["market_share"],
             overall_series=overall_share, volume_grid=volume_grid,
             overall_volume_series=overall_volume_series, scope_cells=scope_cells,
-            market_share_all=market_share_all_clipped),                                    # <-- new
+            market_share_all=market_share_all_clipped),
         "market_volume": build_hierarchical_dual_view(
             tab, "market_volume", volume_grid, parent_field, child_field, YEARLY_AGG["market_volume"],
             overall_series=overall_volume_series, volume_grid=volume_grid,
@@ -2144,12 +2522,18 @@ def _to_monthly_chart(series_list: List[dict]) -> dict:
 
 
 def _to_yearly_chart(series_list: List[dict], agg: str) -> dict:
+    """Bucketed by each series' OWN months, not series_list[0]'s -- a series
+    that covers a shorter window (or none at all) simply contributes 0.0 to
+    the years it doesn't reach, instead of reading another series' months."""
     if not series_list:
         return {"years": [], "forecast_start_index": 0, "series": []}
 
-    months = series_list[0]["months"]
-    fsi = series_list[0]["forecast_start_index"]
+    reference = max(series_list, key=lambda s: len(s["months"]))
+    months = reference["months"]
+    fsi = reference["forecast_start_index"]
     years = sorted({m[:4] for m in months})
+    if not years:
+        return {"years": [], "forecast_start_index": 0, "series": []}
     first_forecast_year = months[fsi][:4] if fsi < len(months) else years[-1]
     yearly_fsi = years.index(first_forecast_year)
 
@@ -2157,7 +2541,7 @@ def _to_yearly_chart(series_list: List[dict], agg: str) -> dict:
     for s in series_list:
         combined = s["history"] + s["forecast"]
         by_year: Dict[str, List[float]] = {}
-        for m, v in zip(months, combined):
+        for m, v in zip(s["months"], combined):
             by_year.setdefault(m[:4], []).append(v)
         values = []
         for y in years:
@@ -2219,10 +2603,13 @@ def _wrap_overall_view(view: dict) -> dict:
 
 
 def _forecast_start_date_from(series_by_metric: Dict[str, List[dict]]) -> Optional[str]:
+    """First forecast month. Rows with fsi == 0 are skipped -- an all-forecast
+    row is what a brand-new product looks like, and taking months[0] from it
+    would report the start of history as the forecast start for the whole tab."""
     for rows in series_by_metric.values():
         for row in rows:
             fsi = row["forecast_start_index"]
-            if fsi < len(row["months"]):
+            if 0 < fsi < len(row["months"]):
                 return row["months"][fsi]
     return None
 
@@ -2297,6 +2684,19 @@ def build_latest_metrics_views(tab: str, scenario_name: str, ta_name: str, entit
 # market_share to 2 decimals, market_volume to whole numbers.
 
 ROUND_DIGITS: Dict[str, int] = {"market_share": 2, "market_volume": 0}
+
+# Precision written to the DB. Kept identical to what the FE displays, so a
+# stored share and a displayed share are the same number -- any other view
+# deriving volume from these rows (Model Inputs) then lands on the same
+# figure this module's own views do. Storing 4 decimals while showing 2 was
+# what put the two screens 1-5 units apart on a ~70,000 market: at that
+# scale one unit in the second decimal of a share is ~7 units of volume.
+#
+# This is the STORAGE boundary only. Internal working precision stays at 4
+# decimals (see the note above ROUND_DIGITS) -- reconciliation and channel
+# blending need stable intermediates, and rounding those to 2 would make
+# the sum-to-100 residual bigger, not smaller.
+STORE_DECIMALS: Dict[str, int] = {"market_share": 2, "market_volume": 2, PM_METRIC: 2}
 
 
 def _round_tree(obj, ndigits: int):
@@ -2381,7 +2781,16 @@ def row_to_event(row: dict, tab: str, scenario_name: str, ta_name: str) -> Event
 
     impacted_names = [n for n in row.get(impacted_field, []) if n != selected_entity]
     if not impacted_names and row.get("source_percentages"):
-        impacted_names = [n for n in row["source_percentages"] if n != selected_entity]
+        # Only entries with a POSITIVE share are actually giving up share.
+        # The FE sends the full product list in source_percentages with 0
+        # for every product the user left unset, so taking every key made
+        # each of them an impacted entity -- they'd get a zero curve, a row
+        # in the output, and a place in the reconciliation targets despite
+        # never having been selected.
+        impacted_names = [
+            name for name, weight in row["source_percentages"].items()
+            if name != selected_entity and (weight or 0) > 0
+        ]
     weights = _resolve_weights(row, impacted_names)
     impacted_entities = [ImpactedEntity(name=n, weight=w) for n, w in zip(impacted_names, weights)] or None
 
@@ -2395,86 +2804,427 @@ def row_to_event(row: dict, tab: str, scenario_name: str, ta_name: str) -> Event
 
 def tab_config(tab: str, entities: Dict[str, List[str]]) -> dict:
     """`entities` is the full universe, not selected_filter -- always every
-    selectable product/market for redistribution."""
+    selectable product/market for redistribution. A product added by the
+    add-product API is included automatically, since entities comes from a
+    live DISTINCT over the outputs table unioned with the product master.
+
+    products/markets are returned for EVERY tab, including overall_event.
+    They previously appeared only on market_event/product_event, so on the
+    overall_event tab the FE had no list to populate its filter dropdowns
+    from. The impact_* keys stay tab-specific -- those drive the
+    redistribution pickers, which genuinely differ per tab."""
     all_products = entities["products"]
     all_markets = entities["markets"]
-    config = {"curve_types": CURVE_TYPES}
+    config = {
+        "curve_types": CURVE_TYPES,
+        "products": all_products,
+        "markets": all_markets,
+    }
     if tab == "market_event":
-        config.update(products=all_products, markets=all_markets, impact_markets=all_markets)
+        config["impact_markets"] = all_markets
     elif tab == "product_event":
-        config.update(products=all_products, markets=all_markets, impact_products=all_products)
+        config["impact_products"] = all_products
     return config
 
 
 # ======================================================
-# 5. DB WRITE-BACK
+# 5. WRITE-BACK PIPELINE
 # ======================================================
 # Requires (run once): ALTER TABLE raw_hiv_prep.forecast_outputs
 #   ADD COLUMN IF NOT EXISTS events_payload JSONB;
-# Only market_share cells are written -- market_volume has no per-cell row,
-# it's purely a display-time derivation (_derive_volume_grid).
-# Synthesized cells (summed/blended/averaged, no single backing row) are
-# skipped -- known gap, not resolved here.
+#
+# Every row this scenario owns is rebuilt here, in one pass, with exactly
+# ONE writer per row. That single-owner rule is the point of this section:
+# the previous design had the curve application, a sibling-delta step and
+# three separate roll-ups all touching market_share rows, and their
+# ordering was load-bearing but invisible. Deltas got applied twice, rows
+# drifted out of agreement with each other, and the symptom always
+# surfaced somewhere else -- on whichever product happened to be correct,
+# because the views normalize children to their parent.
+#
+# The stored rows and what owns each:
+#
+#   (market, product, 'ALL')      canonical within-market share
+#                                 <- the event cache
+#   (market, product, <source>)   same share measured inside one source
+#                                 <- rescaled so their WEIGHTED sum equals
+#                                    the canonical
+#   ('ALL', product, 'ALL')       product's share of the whole portfolio
+#                                 <- summed from the cells
+#   market_share_pm               each market's share of a product's own
+#                                 cross-market total
+#                                 <- derived from cell volumes
+#   (market, 'ALL', <source>)     each source's share of its market
+#                                 <- scaled with the market total, these
+#                                    are COMPONENTS and must keep summing
+#                                    to it
+#
+# The invariants that tie them together, all checked before anything is
+# written (see validate_write_set):
+#
+#   1. products in a market sum to 100
+#   2. a product's per-source rows, weighted by source share, equal its
+#      canonical row
+#   3. sources in a market sum to 100
+#   4. products' portfolio shares sum to 100
+#   5. a product's market_share_pm rows sum to 100
+#
+# A view that rebuilds a market from its sources and a view that reads the
+# canonical row land on the same number if and only if 1-3 hold.
 
-def _distribute_synthesized_write(metric: str, series: dict) -> List[Tuple[str, str, str, str, List[float]]]:
-    source_rows = series.get("source_rows")
-    if not source_rows:
-        return []
+# How far a sum may drift from its target before it's reported. Two
+# decimals are stored, so a handful of hundredths across a dozen rows is
+# rounding; anything larger is a real inconsistency.
+INVARIANT_TOLERANCE = 0.05
 
-    new_forecast = series["forecast"]
-    old_forecast = series.get("_baseline_forecast", new_forecast)
-    updates = []
+# One row to write: its identity, the full value series, and the DB row it
+# came from (for months / forecast_start_index).
+WriteRow = Dict[str, object]
 
-    if metric == "market_volume":
-        old_total = sum(old_forecast) or 1.0
-        for src in source_rows:
-            channel_share = sum(src["forecast"]) / old_total
-            scaled = [round(v * channel_share, 4) for v in new_forecast]
-            updates.append((metric, src["market"], src["product"], src["source_of_market"], scaled))
-    else:
-        deltas = [round(n - o, 4) for n, o in zip(new_forecast, old_forecast)]
-        bounds = CLAMP_BOUNDS.get(metric)
-        for src in source_rows:
-            adjusted = [
-                round(v + (deltas[i] if i < len(deltas) else 0.0), 4)
-                for i, v in enumerate(src["forecast"])
-            ]
-            if bounds is not None:
-                adjusted = [max(bounds[0], min(bounds[1], v)) for v in adjusted]
-            updates.append((metric, src["market"], src["product"], src["source_of_market"], adjusted))
 
-    return updates
+def _row_values(row: dict) -> List[float]:
+    return list(row["history"]) + list(row["forecast"])
+
+
+def _weighted(values_by_source: Dict[str, List[float]],
+              weights_by_source: Dict[str, List[float]],
+              index: int) -> Optional[float]:
+    """Weighted average across sources at one month, or None when no source
+    carries any weight there."""
+    numerator = 0.0
+    denominator = 0.0
+    for source, values in values_by_source.items():
+        weights = weights_by_source.get(source)
+        if weights is None or index >= len(weights) or index >= len(values):
+            continue
+        numerator += weights[index] * values[index]
+        denominator += weights[index]
+    if not denominator:
+        return None
+    return numerator / denominator
+
+
+def build_write_set(cache: CacheType, scenario_name: str, ta_name: str,
+                    entities: Dict[str, List[str]]) -> Tuple[List[WriteRow], List[str]]:
+    """Rebuild every row this scenario owns from the post-event cache.
+
+    Returns (write_set, warnings). The write set is complete and internally
+    consistent -- persist_events_to_db does nothing but write it."""
+    share_cache = cache["market_share"]
+    markets = entities.get("markets", [])
+    products = entities.get("products", [])
+    write_set: List[WriteRow] = []
+
+    if not markets or not products:
+        return write_set, []
+
+    # ---- inputs -------------------------------------------------------
+    # Canonical per-cell shares: the DB grid with this run's events over it.
+    grid_rows = fetch_grid(scenario_name, ta_name, "market_share", markets, products)
+    canonical: Dict[Tuple[str, str], dict] = {}
+    for row in grid_rows:
+        key = (row["market"], row["product"])
+        canonical[key] = share_cache.get(key, row)
+    # Cells that exist only in the cache (a product materialized this run).
+    for key, row in share_cache.items():
+        market, product = key
+        if product == "ALL" or market == "ALL":
+            continue
+        if key not in canonical and market in markets and product in products:
+            canonical[key] = row
+
+    # Per-source rows for those same cells, and each source's weight.
+    source_rows: Dict[Tuple[str, str], Dict[str, dict]] = {}
+    for row in fetch_series(scenario_name, ta_name, "market_share",
+                            label_field="product", market=markets, products=products,
+                            source_of_market=None):
+        source = row.get("source_of_market") or "ALL"
+        if source == "ALL":
+            continue
+        source_rows.setdefault((row["market"], row["product"]), {})[source] = row
+
+    market_total_rows: Dict[str, dict] = {}
+    weight_rows: Dict[str, Dict[str, dict]] = {}
+    for row in fetch_series(scenario_name, ta_name, "market_share",
+                            label_field="market", market=markets, products=["ALL"],
+                            source_of_market=None):
+        source = row.get("source_of_market") or "ALL"
+        key = (row["market"], "ALL")
+        if source == "ALL":
+            market_total_rows[row["market"]] = share_cache.get(key, row)
+        else:
+            weight_rows.setdefault(row["market"], {})[source] = row
+
+    overall_volume_rows = _fetch_overall_series(scenario_name, ta_name, "market_volume")
+    overall_volume = overall_volume_rows[0] if overall_volume_rows else None
+
+    months = next(iter(canonical.values()))["months"] if canonical else []
+    n = len(months)
+
+    # ---- 1. canonical cells, normalized so each market sums to 100 -----
+    # The event path reconciles this already; renormalizing is a safety net
+    # that also absorbs the hundredths lost to 2-decimal storage.
+    for market in markets:
+        cells = [(p, canonical[(market, p)]) for p in products if (market, p) in canonical]
+        if not cells:
+            continue
+        values = {p: _row_values(row) for p, row in cells}
+        for i in range(n):
+            total = sum(v[i] for v in values.values() if i < len(v))
+            if not total or abs(total - 100.0) <= 1e-9:
+                continue
+            for p in values:
+                if i < len(values[p]):
+                    values[p][i] = values[p][i] * 100.0 / total
+        for product, row in cells:
+            write_set.append({
+                "metric": "market_share", "market": market, "product": product,
+                "source": "ALL", "values": values[product], "template": row,
+            })
+
+    canonical_values = {
+        (w["market"], w["product"]): w["values"]
+        for w in write_set if w["metric"] == "market_share" and w["source"] == "ALL"
+    }
+
+    # ---- 2. per-source cells, pinned to their canonical ----------------
+    # Their weighted sum IS the canonical value, so rescaling by
+    # canonical / weighted-sum keeps the real variation between sources
+    # while making the two readings agree. This is the ONLY place these
+    # rows are written.
+    for (market, product), by_source in source_rows.items():
+        target = canonical_values.get((market, product))
+        if target is None:
+            continue
+        weights = {s: _row_values(r) for s, r in weight_rows.get(market, {}).items()}
+        if not weights:
+            continue
+
+        values_by_source = {s: _row_values(r) for s, r in by_source.items()}
+        for i in range(n):
+            current = _weighted(values_by_source, weights, i)
+            wanted = target[i] if i < len(target) else 0.0
+            for source, values in values_by_source.items():
+                if i >= len(values):
+                    continue
+                if current is None or current == 0:
+                    # No baseline shape to preserve -- every source takes
+                    # the canonical value, which is self-consistent.
+                    values[i] = wanted
+                else:
+                    values[i] = values[i] * wanted / current
+
+        for source, row in by_source.items():
+            write_set.append({
+                "metric": "market_share", "market": market, "product": product,
+                "source": source, "values": values_by_source[source], "template": row,
+            })
+
+    # ---- 3. market totals and their source components ------------------
+    # (market, 'ALL', <source>) rows sum to their market total, so they
+    # scale with it rather than shifting by its delta.
+    for market, row in market_total_rows.items():
+        new_values = _row_values(row)
+        write_set.append({
+            "metric": "market_share", "market": market, "product": "ALL",
+            "source": "ALL", "values": new_values, "template": row,
+        })
+
+        components = weight_rows.get(market, {})
+        if not components:
+            continue
+        baseline_total = _row_values(
+            fetch_series(scenario_name, ta_name, "market_share", label_field="market",
+                         market=market, products=["ALL"], source_of_market="ALL")[0]
+        ) if market not in share_cache else None
+
+        for source, comp_row in components.items():
+            values = _row_values(comp_row)
+            if baseline_total:
+                for i in range(min(n, len(values))):
+                    old = baseline_total[i] if i < len(baseline_total) else 0.0
+                    new = new_values[i] if i < len(new_values) else 0.0
+                    if old:
+                        values[i] = values[i] * new / old
+            write_set.append({
+                "metric": "market_share", "market": market, "product": "ALL",
+                "source": source, "values": values, "template": comp_row,
+            })
+
+    # ---- 4. cell volumes, and the two roll-ups derived from them -------
+    cell_volume: Dict[Tuple[str, str], List[float]] = {}
+    if overall_volume:
+        overall_by_month = dict(zip(overall_volume["months"], _row_values(overall_volume)))
+        market_share_by_month = {
+            market: dict(zip(row["months"], _row_values(row)))
+            for market, row in market_total_rows.items()
+        }
+        for (market, product), values in canonical_values.items():
+            weights = market_share_by_month.get(market, {})
+            volumes = []
+            for i, month in enumerate(months):
+                total = overall_by_month.get(month)
+                market_pct = weights.get(month)
+                if total is None or market_pct is None or i >= len(values):
+                    volumes.append(0.0)
+                    continue
+                volumes.append(total * market_pct / 100.0 * values[i] / 100.0)
+            cell_volume[(market, product)] = volumes
+
+    product_volume: Dict[str, List[float]] = {}
+    for (market, product), volumes in cell_volume.items():
+        totals = product_volume.setdefault(product, [0.0] * n)
+        for i, v in enumerate(volumes[:n]):
+            totals[i] += v
+    overall_by_index = [0.0] * n
+    for totals in product_volume.values():
+        for i, v in enumerate(totals[:n]):
+            overall_by_index[i] += v
+
+    # ('ALL', product): share of the whole portfolio.
+    for row in fetch_series(scenario_name, ta_name, "market_share",
+                            label_field="product", market="ALL", products=products,
+                            source_of_market="ALL"):
+        totals = product_volume.get(row["product"])
+        if totals is None:
+            continue
+        values = [
+            round(totals[i] / overall_by_index[i] * 100, 4) if overall_by_index[i] else 0.0
+            for i in range(n)
+        ]
+        write_set.append({
+            "metric": "market_share", "market": "ALL", "product": row["product"],
+            "source": "ALL", "values": values, "template": row,
+        })
+
+    # market_share_pm: each market's share of a product's own total.
+    for row in fetch_series(scenario_name, ta_name, PM_METRIC,
+                            label_field="product", market=markets, products=products,
+                            source_of_market="ALL"):
+        volumes = cell_volume.get((row["market"], row["product"]))
+        totals = product_volume.get(row["product"])
+        if volumes is None or totals is None:
+            continue
+        values = [
+            round(volumes[i] / totals[i] * 100, 4) if i < len(totals) and totals[i] else 0.0
+            for i in range(n)
+        ]
+        write_set.append({
+            "metric": PM_METRIC, "market": row["market"], "product": row["product"],
+            "source": "ALL", "values": values, "template": row,
+        })
+
+    warnings = validate_write_set(write_set, markets, products, n)
+    return write_set, warnings
+
+
+def validate_write_set(write_set: List[WriteRow], markets: List[str],
+                       products: List[str], n: int) -> List[str]:
+    """Check every invariant the views depend on, before anything is
+    written. A violation reported here names the market, product and month
+    directly -- the alternative is discovering it as two screens quietly
+    disagreeing three tabs away."""
+    warnings: List[str] = []
+    by_key = {(w["metric"], w["market"], w["product"], w["source"]): w["values"]
+              for w in write_set}
+
+    def _report(label: str, market: str, product: str, index: int,
+                actual: float, target: float) -> None:
+        warnings.append(
+            f"INVARIANT {label}: market={market} product={product} "
+            f"month_index={index} -- got {actual:.4f}, expected {target:.4f}"
+        )
+
+    # 1. products in a market sum to 100
+    for market in markets:
+        rows = [by_key[k] for k in by_key
+                if k[0] == "market_share" and k[1] == market
+                and k[2] in products and k[3] == "ALL"]
+        if not rows:
+            continue
+        for i in range(n):
+            total = sum(r[i] for r in rows if i < len(r))
+            if abs(total - 100.0) > INVARIANT_TOLERANCE:
+                _report("products-sum-to-100", market, "*", i, total, 100.0)
+                break
+
+    # 2. per-source rows weight to their canonical
+    for market in markets:
+        weights = {k[3]: by_key[k] for k in by_key
+                   if k[0] == "market_share" and k[1] == market
+                   and k[2] == "ALL" and k[3] != "ALL"}
+        if not weights:
+            continue
+        for product in products:
+            values_by_source = {k[3]: by_key[k] for k in by_key
+                                if k[0] == "market_share" and k[1] == market
+                                and k[2] == product and k[3] != "ALL"}
+            target = by_key.get(("market_share", market, product, "ALL"))
+            if not values_by_source or target is None:
+                continue
+            for i in range(n):
+                actual = _weighted(values_by_source, weights, i)
+                if actual is None or i >= len(target):
+                    continue
+                if abs(actual - target[i]) > INVARIANT_TOLERANCE:
+                    _report("sources-weight-to-canonical", market, product, i, actual, target[i])
+                    break
+
+    # 3. sources in a market sum to 100
+    for market in markets:
+        rows = [by_key[k] for k in by_key
+                if k[0] == "market_share" and k[1] == market
+                and k[2] == "ALL" and k[3] != "ALL"]
+        if not rows:
+            continue
+        for i in range(n):
+            total = sum(r[i] for r in rows if i < len(r))
+            if abs(total - 100.0) > INVARIANT_TOLERANCE:
+                _report("sources-sum-to-100", market, "ALL", i, total, 100.0)
+                break
+
+    # 4. portfolio shares sum to 100
+    portfolio = [by_key[k] for k in by_key
+                 if k[0] == "market_share" and k[1] == "ALL" and k[3] == "ALL"]
+    if portfolio:
+        for i in range(n):
+            total = sum(r[i] for r in portfolio if i < len(r))
+            if abs(total - 100.0) > INVARIANT_TOLERANCE:
+                _report("portfolio-sums-to-100", "ALL", "*", i, total, 100.0)
+                break
+
+    # 5. a product's market_share_pm rows sum to 100
+    for product in products:
+        rows = [by_key[k] for k in by_key if k[0] == PM_METRIC and k[2] == product]
+        if not rows:
+            continue
+        for i in range(n):
+            total = sum(r[i] for r in rows if i < len(r))
+            # A product with no volume anywhere legitimately sums to 0.
+            if total and abs(total - 100.0) > INVARIANT_TOLERANCE:
+                _report("pm-sums-to-100", "*", product, i, total, 100.0)
+                break
+
+    for msg in warnings:
+        print(f"WARNING: {msg}")
+    return warnings
 
 
 def persist_events_to_db(
     scenario_name: str,
     ta_name: str,
     rows: List[dict],
-    cache: CacheType,
+    write_set: List[WriteRow],
 ) -> List[str]:
-    """Writes post-event forecast_values + the FE row config back onto their
-    source rows. Skipped for Base (stays untouched baseline).
+    """Write the prepared set. No arithmetic here on purpose -- everything
+    was decided in build_write_set, so a value that reaches this function
+    is written verbatim (bar the storage rounding).
 
-    Returns a list of human-readable warnings for any update that targeted
-    a (market, source, product, metric) combination with no matching DB
-    row -- the caller should surface these (e.g. in the API response) so a
-    silently-dropped write is never mistaken for a successfully applied
-    event."""
-    if scenario_name == BASELINE_SCENARIO:
-        return []
+    Skipped for Base, which stays the untouched baseline.
 
-    updates: List[Tuple[str, str, str, str, List[float]]] = []
-    for metric, by_cell in cache.items():
-        for series in by_cell.values():
-            if not series.get("synthesized"):
-                updates.append((
-                    metric, series["market"], series["product"],
-                    series.get("source_of_market") or "ALL",
-                    series["forecast"],
-                ))
-            else:
-                updates.extend(_distribute_synthesized_write(metric, series))
-    if not updates:
+    Returns warnings for rows that matched nothing in the DB, so a
+    silently-dropped write is never mistaken for an applied event."""
+    if scenario_name == BASELINE_SCENARIO or not write_set:
         return []
 
     events_payload = json.dumps(rows)
@@ -2483,7 +3233,30 @@ def persist_events_to_db(
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            for metric, market, product, source_of_market, forecast_values in updates:
+            for entry in write_set:
+                template = entry["template"]
+                metric = entry["metric"]
+                fsi = template["forecast_start_index"]
+                values = entry["values"]
+
+                expected = len(template["months"]) - fsi
+                forecast = values[fsi:]
+                if expected > 0 and len(forecast) != expected:
+                    # jsonb_set replaces forecast_values and leaves months
+                    # alone, so a short array would leave the row claiming
+                    # more months than it carries -- and every later read
+                    # pads the gap with zeros, silently blanking a product.
+                    msg = (f"REFUSED {metric} | market={entry['market']} | "
+                           f"product={entry['product']} | source={entry['source']} -- "
+                           f"{len(forecast)} values for a {expected}-month forecast")
+                    print(f"ERROR: {msg}")
+                    warnings.append(msg)
+                    continue
+
+                digits = STORE_DECIMALS.get(metric)
+                if digits is not None:
+                    forecast = [round(v, digits) for v in forecast]
+
                 cur.execute(
                     f"""
                     UPDATE {TABLE}
@@ -2497,16 +3270,16 @@ def persist_events_to_db(
                     AND COALESCE(NULLIF(source_of_market, ''), 'ALL') = %s
                     """,
                     [
-                        json.dumps(forecast_values),
+                        json.dumps(forecast),
                         events_payload,
                         scenario_name, ta_name, metric,
-                        market, product, source_of_market,
+                        entry["market"], entry["product"], entry["source"],
                     ],
                 )
                 if cur.rowcount == 0:
-                    msg = (f"No matching row for {metric} | market={market} | "
-                           f"product={product} | source={source_of_market} -- "
-                           f"this cell's event change was NOT persisted")
+                    msg = (f"No matching row for {metric} | market={entry['market']} | "
+                           f"product={entry['product']} | source={entry['source']} -- "
+                           f"not persisted")
                     print(f"WARNING: {msg}")
                     warnings.append(msg)
         conn.commit()
@@ -2524,12 +3297,17 @@ def persist_events_to_db(
 # ======================================================
 
 def run_calculation(payload: dict) -> dict:
+    # Config-derived month grid is memoized per TA for the duration of a
+    # request only -- a product added (or the window edited) between calls
+    # must never be served from a stale grid.
+    reset_forecast_grid_cache()
+
     tab = payload["selected_tab"]
     ta_name = payload["ta_name"]
     selected_filter = payload["selected_filter"]
     scenario_name = selected_filter["scenario_name"]
     raw_rows = payload["impact_curve_configuration"]["rows"]
-    print("DEBUG raw_rows:", raw_rows) 
+    print("DEBUG raw_rows:", raw_rows)
 
     # Assign a stable event_id to every row missing one, for FE keying.
     rows = [
@@ -2540,6 +3318,13 @@ def run_calculation(payload: dict) -> dict:
         }
         for idx, row in enumerate(raw_rows)
     ]
+
+    # Materialize any registered product that has no rows in THIS scenario
+    # yet -- zero history, zero forecast, scoped to scenario_name alone.
+    # Other scenarios are untouched; each one materializes the product the
+    # first time a calculation is run against it. Must run BEFORE entities
+    # are read, since every dropdown and grid cell derives from that query.
+    seeded_products = seed_missing_products(scenario_name, ta_name)
 
     # Full universe, reused for every tab's dropdown config + view scoping.
     entities = fetch_available_entities(scenario_name, ta_name)
@@ -2555,8 +3340,19 @@ def run_calculation(payload: dict) -> dict:
         selected_filter=selected_filter,
     )
 
+    # The (ALL, product) roll-up rows behind the Product Distribution (%)
+    # view are never touched by an event directly -- rebuild them from the
+    # post-event grid so that view moves with the per-cell ones.
+    # Rebuild every row this scenario owns -- canonical cells, their
+    # per-source rows, the market totals and both roll-ups -- as one
+    # internally consistent set, with the invariants checked before
+    # anything is written. See section 5.
+    write_set, invariant_warnings = build_write_set(
+        cache, scenario_name, ta_name, entities)
+
     # Persist before building the other two tabs so their fresh DB reads pick up this run's changes.
-    persist_events_to_db(scenario_name, ta_name, rows, cache)
+    persist_warnings = invariant_warnings + persist_events_to_db(
+        scenario_name, ta_name, rows, write_set)
 
     # Every tab computed and returned so the FE can switch without a round trip.
     event_tabs = {}
@@ -2580,10 +3376,47 @@ def run_calculation(payload: dict) -> dict:
             "metrics_views": _round_metrics_views(metrics_views),
         }
 
+    return _assemble_response(
+        ta_name=ta_name,
+        selected_filter=selected_filter,
+        tab=tab,
+        entities=entities,
+        available_scenarios=available_scenarios,
+        available_months=available_months,
+        forecast_start_date=forecast_start_date,
+        rows=rows,
+        event_tabs=event_tabs,
+        warnings=persist_warnings,
+        seeded_products=seeded_products,
+    )
+
+
+# ======================================================
+# 7. INITIAL LOAD -- same response, no events
+# ======================================================
+
+def _assemble_response(ta_name: str, selected_filter: dict, tab: str,
+                       entities: Dict[str, List[str]], available_scenarios: List[str],
+                       available_months: List[str], forecast_start_date: Optional[str],
+                       rows: List[dict], event_tabs: dict,
+                       warnings: Optional[List[str]] = None,
+                       seeded_products: Optional[List[str]] = None) -> dict:
+    """One response shape for both the initial load and Run Calculation, so
+    the FE never has to branch on which call produced the payload.
+
+    available_products / available_channels are lifted to the top level:
+    the filter bar needs them regardless of which tab is active, and
+    digging them out of the active tab's impact_curve_configuration meant
+    the dropdowns came up empty whenever that tab didn't carry them.
+    `market` is the channel dimension in this schema (Retail / Non-retail),
+    hence the alias -- both keys hold the same list."""
     return {
         "ta_name": ta_name,
         "available_scenarios": available_scenarios,
         "available_months": available_months,
+        "available_products": entities.get("products", []),
+        "available_markets": entities.get("markets", []),
+        "available_channels": entities.get("markets", []),
         "selected_filter": selected_filter,
         "selected_tab": tab,
         "impact_curve_configuration": {
@@ -2593,4 +3426,75 @@ def run_calculation(payload: dict) -> dict:
         },
         "metric_filters": METRIC_FILTERS,
         "event_tabs": event_tabs,
+        # Surfaced so a cell whose write found no DB row (e.g. a new product
+        # missing a market_share row for some market) is visible to the FE
+        # instead of failing silently.
+        "warnings": warnings or [],
+        # Products materialized into this scenario during this call, at zero.
+        "seeded_products": seeded_products or [],
     }
+
+
+def load_calculation(payload: dict) -> dict:
+    """Initial page load: identical response to run_calculation, but with no
+    events applied and nothing persisted -- every tab reads the latest
+    stored values.
+
+    This exists because entities (and therefore every dropdown) were only
+    ever computed inside run_calculation, so nothing populated the filters
+    until the user pressed Run Calculation. Point the screen's load
+    endpoint at this.
+
+    `selected_filter` may arrive empty on a cold load -- scenario falls
+    back to the first available, and an absent start/end date simply means
+    no display clipping."""
+    reset_forecast_grid_cache()
+
+    ta_name = payload["ta_name"]
+    selected_filter = dict(payload.get("selected_filter") or {})
+    tab = payload.get("selected_tab") or TABS[0]
+
+    available_scenarios = fetch_available_scenarios(ta_name)
+    scenario_name = selected_filter.get("scenario_name") or (
+        available_scenarios[0] if available_scenarios else BASELINE_SCENARIO)
+    selected_filter["scenario_name"] = scenario_name
+
+    # Off by default -- see SEED_ON_LOAD. Loading a scenario shouldn't
+    # create rows in it; only running a calculation should.
+    seeded_products = (
+        seed_missing_products(scenario_name, ta_name) if SEED_ON_LOAD else []
+    )
+
+    entities = fetch_available_entities(scenario_name, ta_name)
+    available_months = fetch_available_months(ta_name)
+    date_range = (selected_filter.get("start_date"), selected_filter.get("end_date"))
+
+    event_tabs = {}
+    for t in TABS:
+        metrics_views, tab_forecast_start_date = build_latest_metrics_views(
+            t, scenario_name, ta_name, entities, date_range=date_range,
+            selected_filter=selected_filter,
+        )
+        event_tabs[t] = {
+            "impact_curve_configuration": {
+                **tab_config(t, entities),
+                "forecast_start_date": tab_forecast_start_date,
+                "rows": [],  # no events on load
+            },
+            "metrics_views": _round_metrics_views(metrics_views),
+        }
+
+    forecast_start_date = event_tabs[tab]["impact_curve_configuration"]["forecast_start_date"]
+
+    return _assemble_response(
+        ta_name=ta_name,
+        selected_filter=selected_filter,
+        tab=tab,
+        entities=entities,
+        available_scenarios=available_scenarios,
+        available_months=available_months,
+        forecast_start_date=forecast_start_date,
+        rows=[],
+        event_tabs=event_tabs,
+        seeded_products=seeded_products,
+    )

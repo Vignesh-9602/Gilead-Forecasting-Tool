@@ -119,11 +119,11 @@ def get_market_event_filters(
         # Available Products
         cursor.execute(
             """
-            SELECT DISTINCT product
-            FROM raw_hiv_prep.forecast_outputs
+            SELECT DISTINCT product_id as product
+            FROM raw_hiv_prep.product_master_hiv_prep
             WHERE ta_name = %s
-            AND product IS NOT NULL
-            AND UPPER(TRIM(product)) <> 'ALL'
+            AND product_id IS NOT NULL
+            AND UPPER(TRIM(product_id)) <> 'ALL'
             ORDER BY product
             """,
             (ta_name,),
@@ -389,6 +389,59 @@ def debug_product_volume_consistency(
             },
         )
 
+PRODUCT_MASTER_TABLE = "raw_hiv_prep.product_master_hiv_prep"
+
+# Tabs that carry product pickers, and which keys in their
+# impact_curve_configuration hold a product list. overall_event has neither.
+PRODUCT_LIST_KEYS = {
+    "market_event": ("products",),                     # Channel Event: Products column
+    "product_event": ("products", "impact_products"),  # Product Event: Products + Impacted Products
+}
+
+
+def fetch_master_products(cursor, ta_name):
+    """Every active product registered for the TA.
+
+    product_id holds the display name here (product_name holds a short
+    code, e.g. Truvada / Tru123), and product_id is also what
+    forecast_outputs stores in its `product` column -- so it's the value
+    the pickers must use. NULL active_flag counts as active: rows created
+    before the flag was being set would otherwise disappear."""
+    cursor.execute(
+        f"""
+        SELECT DISTINCT TRIM(product_id) AS product
+        FROM {PRODUCT_MASTER_TABLE}
+        WHERE ta_name = %s
+          AND product_id IS NOT NULL
+          AND UPPER(TRIM(product_id)) <> 'ALL'
+          AND UPPER(COALESCE(NULLIF(TRIM(active_flag), ''), 'Y')) <> 'N'
+        ORDER BY 1
+        """,
+        (ta_name,),
+    )
+    return [row["product"] for row in cursor.fetchall() if row["product"]]
+
+
+def apply_master_products_to_events(event_tabs, master_products):
+    """Union the master product list into each tab's pickers.
+
+    Union rather than replace: a product that has forecast data but is
+    missing from (or deactivated in) the master table stays selectable,
+    so this can only ever add options, never silently remove one that
+    already works."""
+    if not master_products:
+        return
+
+    for tab_name, keys in PRODUCT_LIST_KEYS.items():
+        config = (event_tabs.get(tab_name) or {}).get("impact_curve_configuration")
+        if not isinstance(config, dict):
+            continue
+        for key in keys:
+            existing = config.get(key) or []
+            config[key] = sorted(set(existing) | set(master_products))
+
+BASELINE_SCENARIO = "Base"   # module level, next to the table constants
+
 @router.post("/apply_market_event_filters")
 def apply_market_event_filters(
     payload: ApplyFiltersRequest,
@@ -651,6 +704,44 @@ def apply_market_event_filters(
             event_name="product_event",
             event=product_event,
         )
+
+        
+        # =====================================================
+        # 6b. Product pickers from the master table
+        # =====================================================
+        # The tree only knows products that have rows in forecast_outputs,
+        # so a newly registered product never reaches the dropdowns. The
+        # pickers list what's selectable, not what has data -- take them
+        # from the master table instead.
+        #
+        # Except in Base. Nothing materializes a product there (seeding
+        # skips the baseline) and nothing persists an event against it, so
+        # offering a product with no rows would only produce a selection
+        # that silently does nothing. Base shows what it actually has.
+
+        is_baseline = scenario_name.strip().lower() == BASELINE_SCENARIO.lower()
+
+        if is_baseline:
+            print(
+                "SKIPPING master product injection -- "
+                f"scenario {scenario_name!r} is the baseline"
+            )
+        else:
+            master_products = fetch_master_products(
+                cursor=cursor,
+                ta_name=payload.ta_name,
+            )
+
+            print("MASTER PRODUCTS:", master_products)
+
+            apply_master_products_to_events(
+                event_tabs={
+                    "overall_event": overall_event,
+                    "market_event": market_event,
+                    "product_event": product_event,
+                },
+                master_products=master_products,
+            )
 
         # =====================================================
         # 7. Response
@@ -2004,3 +2095,699 @@ def delete_event_endpoint(
             status_code=500,
             detail=f"Failed to delete event: {str(exc)}",
         )
+
+#new product
+
+@router.get("/products")
+def get_products(db=Depends(get_connection)):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                product_id,
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            FROM raw_hiv_prep.product_master_hiv_prep
+            ORDER BY product_name
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        return {
+            "products": [
+                {
+                    "product_id": row["product_id"],
+                    "product_name": row["product_id"],
+                    "date_added": row["date_added"].strftime("%Y-%m-%d")
+                    if row.get("date_added")
+                    else None,
+                    "added_by": row["added_by"],
+                    "modified_by": row["modified_by"],
+                }
+                for row in rows
+            ]
+        }
+
+    finally:
+        cursor.close()
+
+
+PRODUCT_MASTER_TABLE = "raw_hiv_prep.product_master_hiv_prep"
+
+
+class AddProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    company: Optional[str] = None
+
+
+@router.post("/products")
+def add_product(
+    payload: AddProductRequest,
+    db=Depends(get_connection)
+):
+    """Registers a product. Nothing is written to forecast_outputs here --
+    the product is materialized into a scenario the first time
+    run_calculation is called for it (see seed_missing_products in
+    Market_Events_Run_Calculation), with zero history and zero forecast.
+
+    That keeps creation cheap and scenario-agnostic: a product added today
+    lands in scenarios that don't exist yet, without a backfill step.
+    """
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        user_id = "system"  # Replace with actual logged-in user
+
+        # product_id holds the display name in this table (product_name
+        # holds a short code, e.g. Truvada / Tru123), so the uniqueness
+        # check belongs on product_id -- it's also what forecast_outputs
+        # stores in its `product` column.
+        cursor.execute(
+            f"""
+            SELECT 1
+            FROM {PRODUCT_MASTER_TABLE}
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (payload.ta_name, payload.product_name)
+        )
+
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail="Product already exists."
+            )
+
+        # active_flag is set explicitly -- left NULL, the product is
+        # excluded by anything filtering on 'Y'.
+        cursor.execute(
+            f"""
+            INSERT INTO {PRODUCT_MASTER_TABLE}
+            (
+                ta_name,
+                product_id,
+                product_name,
+                active_flag,
+                company,
+                date_added,
+                added_by,
+                modified_by
+            )
+            VALUES (%s, %s, %s, 'Y', %s, CURRENT_DATE, %s, %s)
+            RETURNING
+                product_id,
+                product_name,
+                active_flag,
+                company,
+                date_added,
+                added_by,
+                modified_by
+            """,
+            (
+                payload.ta_name,
+                payload.product_name,
+                payload.product_name,
+                payload.company,
+                user_id,
+                user_id,
+            )
+        )
+
+        product = cursor.fetchone()
+        db.commit()
+
+        return {
+            "message": "Product added successfully",
+            "product": {
+                "product_id": product["product_id"],
+                # product_id is the display name here.
+                "product_name": product["product_id"],
+                "product_code": product["product_name"],
+                "active_flag": product["active_flag"],
+                "company": product["company"],
+                "date_added": product["date_added"].strftime("%Y-%m-%d"),
+                "added_by": product["added_by"],
+                "modified_by": product["modified_by"],
+            },
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
+
+
+def sync_product_in_events_payload(
+    cursor,
+    ta_name,
+    old_name,
+    new_name=None,
+    scenario_name=None,
+):
+    """Rename or remove a product across every saved event for this TA.
+
+    A product name can appear in a saved event in three places: the
+    'products' list (Market Event + Product Event), the
+    'impacted_products' list (Product Event only), and as a key of
+    'source_percentages' (Product Event only). Without this, renaming or
+    deleting a product in product_master/forecast_outputs leaves those
+    saved events pointing at a product name that no longer exists, so
+    apply_market_event_filters keeps returning the stale name.
+
+    new_name=None means "remove" (product_master delete); a string means
+    "rename" (product_master update). scenario_name scopes the sync the
+    same way delete_product scopes the forecast-row delete -- omit it to
+    touch every scenario for the TA, which is what a TA-wide rename needs.
+
+    Returns the number of forecast_outputs rows rewritten.
+    """
+    old_key = old_name.strip().upper()
+
+    query = f"""
+        SELECT id, events_payload
+        FROM {FORECAST_TABLE}
+        WHERE ta_name = %s
+          AND events_payload IS NOT NULL
+    """
+    params = [ta_name]
+
+    if scenario_name:
+        query += " AND scenario_name = %s"
+        params.append(scenario_name)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    rewritten = 0
+
+    for row in rows:
+        events = parse_events_payload(row["events_payload"])
+        if not events:
+            continue
+
+        changed = False
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            for list_key in ("products", "impacted_products"):
+                values = event.get(list_key)
+                if not isinstance(values, list):
+                    continue
+
+                new_values = []
+                for value in values:
+                    if (
+                        isinstance(value, str)
+                        and value.strip().upper() == old_key
+                    ):
+                        changed = True
+                        if new_name is not None:
+                            new_values.append(new_name)
+                        # else: drop it -- product was removed
+                    else:
+                        new_values.append(value)
+
+                event[list_key] = new_values
+
+            percentages = event.get("source_percentages")
+            if isinstance(percentages, dict):
+                matched_key = next(
+                    (
+                        key for key in percentages
+                        if isinstance(key, str)
+                        and key.strip().upper() == old_key
+                    ),
+                    None,
+                )
+                if matched_key is not None:
+                    changed = True
+                    value = percentages.pop(matched_key)
+                    if new_name is not None:
+                        percentages[new_name] = value
+
+        if changed:
+            cursor.execute(
+                f"""
+                UPDATE {FORECAST_TABLE}
+                SET events_payload = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (json.dumps(events), row["id"]),
+            )
+            rewritten += 1
+
+    return rewritten
+
+
+@router.put("/products")
+def update_product(
+    payload: UpdateProductRequest,
+    db=Depends(get_connection)
+):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        user_id = "system"  # Replace with actual logged-in user
+
+        # Check if existing product exists
+        cursor.execute(
+            """
+            SELECT
+                product_id,
+                date_added,
+                added_by
+            FROM raw_hiv_prep.product_master_hiv_prep
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        existing_product = cursor.fetchone()
+
+        if not existing_product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found."
+            )
+
+        # Check if new product name already exists
+        cursor.execute(
+            """
+            SELECT 1
+            FROM raw_hiv_prep.product_master_hiv_prep
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.ta_name,
+                payload.new_product_name
+            )
+        )
+
+        if cursor.fetchone():
+            raise HTTPException(
+                status_code=400,
+                detail="Product already exists."
+            )
+
+        # Update product
+        cursor.execute(
+            """
+            UPDATE raw_hiv_prep.product_master_hiv_prep
+            SET
+                product_name = %s,
+                product_id = %s,
+                modified_by = %s
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_name)) = UPPER(TRIM(%s))
+            RETURNING
+                product_name,
+                date_added,
+                added_by,
+                modified_by
+            """,
+            (
+                payload.new_product_name,
+                payload.new_product_name,  # product_id same as product_name
+                user_id,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        updated_product = cursor.fetchone()
+
+        # --------------------------------------------------
+        # Keep forecast_outputs.product in sync
+        # --------------------------------------------------
+        # forecast_outputs.product holds the same value as
+        # product_master.product_id -- if it isn't renamed here too, every
+        # existing forecast row becomes orphaned from the renamed product.
+        cursor.execute(
+            f"""
+            UPDATE {FORECAST_TABLE}
+            SET product = %s,
+                updated_at = now()
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.new_product_name,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+
+        # --------------------------------------------------
+        # Keep saved market/product events in sync
+        # --------------------------------------------------
+        # apply_market_event_filters reads product names back out of
+        # events_payload -- without this, a renamed product's events keep
+        # showing the old name even though forecast_outputs.product above
+        # was just updated.
+        events_rows_updated = sync_product_in_events_payload(
+            cursor,
+            payload.ta_name,
+            payload.product_name,
+            new_name=payload.new_product_name,
+        )
+
+        db.commit()
+
+        return {
+            "message": "Product updated successfully",
+            "product": {
+                "product_id": updated_product["product_name"],  # product_id same as product_name
+                "product_name": updated_product["product_name"],
+                "date_added": (
+                    updated_product["date_added"].strftime("%Y-%m-%d")
+                    if updated_product["date_added"]
+                    else None
+                ),
+                "added_by": updated_product["added_by"],
+                "modified_by": updated_product["modified_by"]
+            },
+            "events_payload_rows_updated": events_rows_updated
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
+
+
+# @router.delete("/products")
+# def delete_product(
+#     payload: DeleteProductRequest,
+#     db=Depends(get_connection)
+# ):
+#     cursor = db.cursor(cursor_factory=RealDictCursor)
+
+#     try:
+#         # Check if product exists
+#         cursor.execute(
+#             """
+#             SELECT product_id
+#             FROM raw_hiv_prep.product_master_hiv_prep
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#             """,
+#             (
+#                 payload.ta_name,
+#                 payload.product_name
+#             )
+#         )
+
+#         product = cursor.fetchone()
+
+#         if not product:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Product not found."
+#             )
+
+#         # Delete product
+#         cursor.execute(
+#             """
+#             DELETE FROM raw_hiv_prep.product_master_hiv_prep
+#             WHERE ta_name = %s
+#               AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+#             """,
+#             (
+#                 payload.ta_name,
+#                 payload.product_name
+#             )
+#         )
+
+#         db.commit()
+
+#         return {
+#             "message": "Product deleted successfully",
+#             "deleted_product": payload.product_name
+#         }
+
+#     except Exception:
+#         db.rollback()
+#         raise
+
+#     finally:
+#         cursor.close()
+
+
+PRODUCT_MASTER_TABLE = "raw_hiv_prep.product_master_hiv_prep"
+FORECAST_TABLE = "raw_hiv_prep.forecast_outputs"
+
+SHARE_DECIMALS = 2
+
+
+class DeleteProductRequest(BaseModel):
+    ta_name: str
+    product_name: str
+    # Limit the removal to one scenario; omit to remove the product
+    # everywhere, which is what "delete the product" normally means.
+    scenario_name: Optional[str] = None
+
+
+def _parse_forecast_data(raw) -> dict:
+    if isinstance(raw, str):
+        return json.loads(raw) if raw.strip() else {}
+    return raw or {}
+
+
+def normalize_shares_after_delete(cursor, ta_name: str,
+                                  scenarios: Optional[List[str]] = None) -> int:
+    """Rescale each group of sibling product shares back to 100.
+
+    Deleting a product that held share leaves its siblings summing to less
+    than 100. Every view reading these rows then shows a market that
+    doesn't add up, and any view that normalizes children to their parent
+    inflates whoever is left by an arbitrary amount instead.
+
+    A "group" is one (scenario, metric, market, source_of_market): the set
+    of products measured against the same whole. That covers per-market
+    product shares, per-source shares, AND the market='ALL' portfolio
+    shares, since all three are groups whose members sum to 100.
+
+    market_share_pm is deliberately untouched -- it splits ONE product
+    across markets, so removing a different product doesn't disturb it.
+
+    Returns the number of rows rewritten.
+    """
+    query = f"""
+        SELECT id, scenario_name, metric, market, product,
+               COALESCE(NULLIF(source_of_market, ''), 'ALL') AS som,
+               forecast_data
+        FROM {FORECAST_TABLE}
+        WHERE ta_name = %s
+          AND metric = 'market_share'
+          AND product IS NOT NULL
+          AND UPPER(TRIM(product)) <> 'ALL'
+    """
+    params: List = [ta_name]
+
+    if scenarios:
+        query += " AND scenario_name = ANY(%s)"
+        params.append(list(scenarios))
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    groups = {}
+    for row in rows:
+        key = (row["scenario_name"], row["metric"], row["market"], row["som"])
+        groups.setdefault(key, []).append(row)
+
+    rewritten = 0
+
+    for key, members in groups.items():
+
+        parsed = [
+            (row, _parse_forecast_data(row["forecast_data"]))
+            for row in members
+        ]
+
+        for field in ("train_values", "forecast_values"):
+
+            length = max(
+                (len(data.get(field) or []) for _, data in parsed),
+                default=0,
+            )
+
+            for index in range(length):
+
+                total = 0.0
+                for _, data in parsed:
+                    values = data.get(field) or []
+                    if index < len(values):
+                        total += float(values[index] or 0)
+
+                # Every sibling is zero at this index -- nothing to scale,
+                # and no basis for inventing a split.
+                if total <= 0:
+                    continue
+
+                # Already sums to 100 (within storage rounding).
+                if abs(total - 100.0) <= 0.01:
+                    continue
+
+                factor = 100.0 / total
+                for _, data in parsed:
+                    values = data.get(field) or []
+                    if index < len(values):
+                        values[index] = round(
+                            float(values[index] or 0) * factor,
+                            SHARE_DECIMALS,
+                        )
+
+        for row, data in parsed:
+            cursor.execute(
+                f"""
+                UPDATE {FORECAST_TABLE}
+                SET forecast_data = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                [json.dumps(data), row["id"]],
+            )
+            rewritten += cursor.rowcount
+
+    return rewritten
+
+
+@router.delete("/products")
+def delete_product(
+    payload: DeleteProductRequest,
+    db=Depends(get_connection)
+):
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Check if product exists
+        cursor.execute(
+            f"""
+            SELECT product_id
+            FROM {PRODUCT_MASTER_TABLE}
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+            """,
+            (payload.ta_name, payload.product_name),
+        )
+
+        product = cursor.fetchone()
+
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found.",
+            )
+
+        # The name as stored, not as typed -- forecast_outputs.product holds
+        # the same value as product_master.product_id, and the lookup above
+        # was case-insensitive.
+        stored_name = product["product_id"]
+
+        # --------------------------------------------------
+        # Forecast rows
+        # --------------------------------------------------
+        # Deleted first and in the SAME transaction as the master row.
+        # All metrics, markets, sources and scenarios go -- including Base,
+        # or the product reappears the moment anyone runs a calculation,
+        # since seeding models new products on whatever rows already exist.
+        forecast_params = [payload.ta_name, stored_name]
+        scenario_clause = ""
+        if payload.scenario_name:
+            scenario_clause = "AND scenario_name = %s"
+            forecast_params.append(payload.scenario_name)
+
+        cursor.execute(
+            f"""
+            DELETE FROM {FORECAST_TABLE}
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+              {scenario_clause}
+            """,
+            forecast_params,
+        )
+        forecast_rows_deleted = cursor.rowcount
+
+        # --------------------------------------------------
+        # Renormalize the survivors
+        # --------------------------------------------------
+        # The deleted product's share has to go somewhere: without this,
+        # every group it belonged to now sums to less than 100.
+        shares_renormalized = 0
+        if forecast_rows_deleted:
+            shares_renormalized = normalize_shares_after_delete(
+                cursor,
+                payload.ta_name,
+                [payload.scenario_name] if payload.scenario_name else None,
+            )
+
+        # --------------------------------------------------
+        # Master row
+        # --------------------------------------------------
+        # Kept when the caller scoped the delete to one scenario -- the
+        # product still exists, it just no longer participates there.
+        master_rows_deleted = 0
+        if not payload.scenario_name:
+            cursor.execute(
+                f"""
+                DELETE FROM {PRODUCT_MASTER_TABLE}
+                WHERE ta_name = %s
+                  AND UPPER(TRIM(product_id)) = UPPER(TRIM(%s))
+                """,
+                (payload.ta_name, payload.product_name),
+            )
+            master_rows_deleted = cursor.rowcount
+
+        # --------------------------------------------------
+        # Saved market/product events
+        # --------------------------------------------------
+        # apply_market_event_filters reads product names back out of
+        # events_payload -- without this, a deleted product keeps showing
+        # up in event rows even though its forecast/master rows are gone.
+        # Scoped the same way the forecast-row delete above is: one
+        # scenario when the caller asked for one, every scenario otherwise.
+        events_rows_updated = sync_product_in_events_payload(
+            cursor,
+            payload.ta_name,
+            stored_name,
+            new_name=None,
+            scenario_name=payload.scenario_name,
+        )
+
+        db.commit()
+
+        return {
+            "message": "Product deleted successfully",
+            "deleted_product": stored_name,
+            "scenario_name": payload.scenario_name,
+            "forecast_rows_deleted": forecast_rows_deleted,
+            "master_rows_deleted": master_rows_deleted,
+            "share_rows_renormalized": shares_renormalized,
+            "events_payload_rows_updated": events_rows_updated,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        cursor.close()
