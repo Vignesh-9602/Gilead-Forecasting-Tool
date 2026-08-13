@@ -846,7 +846,12 @@ export default function PBCModelInput() {
       tabs = {},
     } = tabsPayload;
     const backendKey = TAB_KEY_MAP[uiTabKey] || uiTabKey;
-    const tab = tabs[backendKey] || tabs[Object.keys(tabs)[0]] || null;
+    // Only use this tab's own data. Falling back to Object.keys(tabs)[0]
+    // (some other, unrelated tab) when this one is missing silently shows
+    // the wrong data instead of an honest "no data" state — e.g. Run
+    // Calculation omits payer_product/product_payer entirely, and that
+    // fallback was displaying Total Market's scenario chart in their place.
+    const tab = tabs[backendKey] || null;
     const activeMetricKey = toApiMetricKey(metricKey);
     if (!tab)
       return {
@@ -1418,18 +1423,25 @@ export default function PBCModelInput() {
     }
   }, [activeTab, liverTabsRaw, totalMarketViewMode, currentlyAppliedScenario, appliedPayerFilter, appliedProductFilter, payerFilter, productFilter]);
 
+  const resolveScenarioKey = (scenariosObj, name) => {
+    if (!scenariosObj || !name) return undefined;
+    if (scenariosObj[name]) return name;
+    return Object.keys(scenariosObj).find((k) => sameScenario(k, name));
+  };
+
   const otherScenarioChartSeries = useMemo(() => {
     if (activeTab === "total_market" || activeTab === "manage_events" || activeTab === "payment_payer_prod") return [];
     if (!liverRawData?.scenarios) return [];
     const otherNames = (selectedCompareScenarios || []).filter(
-      (name) => name && name !== currentlyAppliedScenario,
+      (name) => name && !sameScenario(name, currentlyAppliedScenario),
     );
     if (!otherNames.length) return [];
 
     const out = [];
     otherNames.forEach((name) => {
-      if (!liverRawData.scenarios[name]) return;
-      const scenarioTabs = normalizeLiverResponse({ ...liverRawData, active_scenario: name }, metric);
+      const resolvedKey = resolveScenarioKey(liverRawData.scenarios, name);
+      if (!resolvedKey) return;
+      const scenarioTabs = normalizeLiverResponse({ ...liverRawData, active_scenario: resolvedKey }, metric);
       const { chart } = mapLiverTabToView(scenarioTabs, activeTab, totalMarketViewMode, metric);
       (chart?.series || []).forEach((s) => {
         out.push({ ...s, scenario: name });
@@ -1442,14 +1454,15 @@ export default function PBCModelInput() {
     if (activeTab !== "payment_payer_prod") return {};
     if (!liverRawData?.scenarios) return {};
     const otherNames = (selectedCompareScenarios || []).filter(
-      (name) => name && name !== currentlyAppliedScenario,
+      (name) => name && !sameScenario(name, currentlyAppliedScenario),
     );
     if (!otherNames.length) return {};
 
     const out = {};
     otherNames.forEach((name) => {
-      if (!liverRawData.scenarios[name]) return;
-      const scenarioTabs = normalizeLiverResponse({ ...liverRawData, active_scenario: name }, metric);
+      const resolvedKey = resolveScenarioKey(liverRawData.scenarios, name);
+      if (!resolvedKey) return;
+      const scenarioTabs = normalizeLiverResponse({ ...liverRawData, active_scenario: resolvedKey }, metric);
       const orders = scenarioTabs?.tabs?.payment_type_payer_product?.orders;
       if (orders) out[name] = orders;
     });
@@ -2894,6 +2907,17 @@ export default function PBCModelInput() {
 
         if (respData.available_months?.length) setAvailableDates(respData.available_months);
         initializeCompareScenarios(respData);
+
+        // Keep FE scenario state in sync with what the backend returned.
+        // Without this, currentlyAppliedScenario stays stale/empty after
+        // Run Calculation, and otherScenarioChartSeries's "exclude the
+        // applied scenario" filter fails to exclude it — producing a
+        // duplicate trace (e.g. "Cash" and "Cash (BASE)" both showing the
+        // same data) alongside the genuine comparison scenario's trace.
+        if (respData.active_scenario) {
+          setCurrentlyAppliedScenario(respData.active_scenario);
+          setTentativeRadioSelectedScenario(respData.active_scenario);
+        }
       }
 
       showSnackbar("Market events calculation completed successfully!", "success");
