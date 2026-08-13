@@ -8,6 +8,7 @@ from app.hiv_treat.services.market_event_helpers import *
 from app.hiv_treat.services.calculation_tree_market_events import *
 from app.hiv_treat.services.generic_builders_market_events import *
 from app.hiv_treat.services.edit_helpers import *
+from app.hiv_treat.services.HIV_Treat_Retaining_Filters import save_user_configuration
 
 router = APIRouter()
 
@@ -97,6 +98,21 @@ def get_market_event_filters(
             if row["scenario_name"]
         ]
 
+        # The previously-selected scenario may have since been deleted (see
+        # DELETE /scenarios/{scenario_name} in api.py, which removes its rows
+        # from forecast_outputs) -- user_configurations still has the stale
+        # name, and returning it as-is would restore a selection that no
+        # longer exists. Fall back to whatever "Base" row is actually present
+        # (case-insensitive match, since casing has drifted before -- see
+        # BASELINE_SCENARIO), or the literal default if even that is missing.
+        scenario_lookup = {s.strip().upper(): s for s in scenarios}
+        saved_scenario_name = (config["scenario_name"] or "").strip()
+        effective_scenario_name = (
+            scenario_lookup.get(saved_scenario_name.upper())
+            or scenario_lookup.get(BASELINE_SCENARIO.upper())
+            or BASELINE_SCENARIO
+        )
+
         # Available Markets
         cursor.execute(
             """
@@ -168,7 +184,7 @@ def get_market_event_filters(
             "products": products,
             "available_months": available_months,
             "selected_filter": {
-                "scenario_name": config["scenario_name"],
+                "scenario_name": effective_scenario_name,
                 "markets": config["market"],
                 "products": config["product"],
                 "start_date": config["start_date"].strftime("%Y-%m-%d")
@@ -828,12 +844,35 @@ def apply_market_event_filters(
 
         print("=" * 90 + "\n")
 
+        # --------------------------------------------------
+        # Persist the applied selection
+        # --------------------------------------------------
+        # So a later GET /get_market_event_filters (e.g. after navigating
+        # away and back) restores this scenario/market/product instead of
+        # whatever Model Input's own /applyfilter last saved -- this route
+        # never wrote to user_configurations before, so the selection made
+        # here was never actually the one that came back.
+        save_user_configuration(
+            cur=cursor,
+            user_id="system",
+            ta_name=payload.ta_name,
+            scenario_name=scenario_name,
+            market=selected_filter.markets,
+            product=selected_filter.products,
+            start_date=selected_filter.start_date,
+            end_date=selected_filter.end_date,
+        )
+        db.commit()
+
         return response
 
     except HTTPException:
+        db.rollback()
         raise
 
     except ValueError as exc:
+        db.rollback()
+
         print("\n[APPLY FILTERS VALIDATION ERROR]")
         print(
             "ERROR TYPE:",
@@ -850,6 +889,8 @@ def apply_market_event_filters(
         ) from exc
 
     except Exception as exc:
+        db.rollback()
+
         print("\n[APPLY FILTERS ERROR]")
         print(
             "ERROR TYPE:",
