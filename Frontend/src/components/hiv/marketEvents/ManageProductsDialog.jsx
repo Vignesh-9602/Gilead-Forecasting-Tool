@@ -34,6 +34,7 @@ export default function ManageProductsDialog({
     therapyArea,
     onProductSaved,
     scenarioName,
+    onRefreshProducts
 }) {
 
     const { showSnackbar } = useSnackbarStore();
@@ -290,6 +291,11 @@ export default function ManageProductsDialog({
                 "success"
             );
 
+            // Refresh the screen with the new product
+            if (onRefreshProducts) {
+                await onRefreshProducts();
+            }
+
             if (onProductSaved) {
                 await onProductSaved();
             }
@@ -325,7 +331,7 @@ export default function ManageProductsDialog({
         const payload = {
             ta_name: therapyArea,
             product_name: deleteProduct.product_name,
-            scenario_name: scenarioName,
+            // scenario_name: scenarioName,
         };
 
         try {
@@ -341,6 +347,10 @@ export default function ManageProductsDialog({
                 response?.message || "Product deleted successfully",
                 "success"
             );
+
+            if (onRefreshProducts) {
+                await onRefreshProducts();
+            }
 
             if (onProductSaved) {
                 await onProductSaved();

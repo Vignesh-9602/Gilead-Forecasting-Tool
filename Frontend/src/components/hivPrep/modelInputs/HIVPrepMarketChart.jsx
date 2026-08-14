@@ -14,7 +14,7 @@ import Plot from "react-plotly.js";
 
 const PlotComponent = Plot.default || Plot;
 
-export default function HIVMarketChart({ chartData, activeTab, selectedMarket, selectedProduct }) {
+export default function HIVPrepMarketChart({ chartData, activeTab, selectedMarket, selectedProduct }) {
 
     // if (!chartData) return null;
 
