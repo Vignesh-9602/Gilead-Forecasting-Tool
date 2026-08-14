@@ -475,6 +475,61 @@ def apply_market_event_filters(
             or ""
         ).strip()
 
+        # --------------------------------------------------
+        # Fall back to a valid product when the requested one no longer exists
+        # --------------------------------------------------
+        # A product can go stale the same way a scenario can -- deleted via
+        # DELETE /products (see delete_product's own user_configurations
+        # fallback) or renamed out from under a caller holding the old name.
+        # Without this, the response's selected_filter -- and what
+        # save_user_configuration persists below -- would keep echoing back
+        # a product_id that no longer exists in product_master, and every
+        # downstream build_market_event/build_product_event call would be
+        # built against a product with no data.
+        master_products = fetch_master_products(
+            cursor=cursor,
+            ta_name=payload.ta_name,
+        )
+        product_lookup = {p.strip().upper(): p for p in master_products}
+        requested_product = (selected_filter.products or "").strip()
+
+        if requested_product.upper() not in product_lookup:
+            # Prefer whatever user_configurations.product currently holds --
+            # update_product keeps that row in sync with a rename, so a
+            # caller still holding the OLD name (its own dropdown/local state
+            # hasn't refreshed since the rename) resolves to the product's
+            # NEW name rather than an unrelated "first available" pick. Only
+            # fall back to that arbitrary default when even the saved
+            # selection is stale (e.g. the product was deleted, not renamed).
+            # Queried directly (not via get_user_configuration) -- that
+            # helper assumes a plain tuple cursor, and this route's cursor
+            # is a RealDictCursor.
+            cursor.execute(
+                """
+                SELECT product
+                FROM raw_hiv_treat.user_configurations
+                WHERE user_id = %s
+                  AND ta_name = %s
+                """,
+                ("system", payload.ta_name),
+            )
+            saved_config_row = cursor.fetchone()
+            saved_product = (
+                (saved_config_row or {}).get("product") or ""
+            ).strip()
+
+            fallback_product = (
+                product_lookup.get(saved_product.upper())
+                or (master_products[0] if master_products else "")
+            )
+            print(
+                "WARNING: requested product",
+                repr(requested_product),
+                "no longer exists for this TA -- falling back to",
+                repr(fallback_product),
+            )
+            selected_filter.products = fallback_product
+
         print("\n" + "=" * 90)
         print("APPLY MARKET EVENT FILTERS")
         print("=" * 90)
@@ -2508,6 +2563,29 @@ def update_product(
             new_name=payload.new_product_name,
         )
 
+        # --------------------------------------------------
+        # Keep the saved filter selection in sync
+        # --------------------------------------------------
+        # get_market_event_filters restores selected_filter.products straight
+        # out of user_configurations -- without this, renaming the product
+        # that's currently the saved selection leaves that row pointing at a
+        # product_id that no longer exists in product_master.
+        cursor.execute(
+            """
+            UPDATE raw_hiv_treat.user_configurations
+            SET product = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ta_name = %s
+              AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+            """,
+            (
+                payload.new_product_name,
+                payload.ta_name,
+                payload.product_name
+            )
+        )
+        user_configurations_rows_updated = cursor.rowcount
+
         db.commit()
 
         return {
@@ -2523,7 +2601,8 @@ def update_product(
                 "added_by": updated_product["added_by"],
                 "modified_by": updated_product["modified_by"]
             },
-            "events_payload_rows_updated": events_rows_updated
+            "events_payload_rows_updated": events_rows_updated,
+            "user_configurations_rows_updated": user_configurations_rows_updated
         }
 
     except Exception:
@@ -2814,6 +2893,47 @@ def delete_product(
             scenario_name=payload.scenario_name,
         )
 
+        # --------------------------------------------------
+        # Saved filter selection
+        # --------------------------------------------------
+        # get_market_event_filters restores selected_filter.products straight
+        # out of user_configurations -- without this, deleting the product
+        # that's currently the saved selection leaves that row pointing at a
+        # product_id that no longer exists. Only relevant when the master row
+        # itself was actually removed (master_rows_deleted): a scenario-scoped
+        # delete leaves the product registered, so the saved selection is
+        # still valid and shouldn't be disturbed.
+        user_configurations_rows_updated = 0
+        if master_rows_deleted:
+            cursor.execute(
+                f"""
+                SELECT product_id
+                FROM {PRODUCT_MASTER_TABLE}
+                WHERE ta_name = %s
+                  AND product_id IS NOT NULL
+                  AND UPPER(TRIM(product_id)) <> 'ALL'
+                ORDER BY product_id
+                LIMIT 1
+                """,
+                (payload.ta_name,),
+            )
+            fallback_row = cursor.fetchone()
+            # None when no products remain at all -- clears the stale
+            # selection rather than leaving it pointing at nothing.
+            fallback_product = fallback_row["product_id"] if fallback_row else None
+
+            cursor.execute(
+                """
+                UPDATE raw_hiv_treat.user_configurations
+                SET product = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ta_name = %s
+                  AND UPPER(TRIM(product)) = UPPER(TRIM(%s))
+                """,
+                (fallback_product, payload.ta_name, stored_name),
+            )
+            user_configurations_rows_updated = cursor.rowcount
+
         db.commit()
 
         return {
@@ -2824,6 +2944,7 @@ def delete_product(
             "master_rows_deleted": master_rows_deleted,
             "share_rows_renormalized": shares_renormalized,
             "events_payload_rows_updated": events_rows_updated,
+            "user_configurations_rows_updated": user_configurations_rows_updated,
         }
 
     except Exception:
