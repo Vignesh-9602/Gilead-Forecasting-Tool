@@ -10,8 +10,10 @@ from typing import List
 class SelectedFilter(BaseModel):
     """The filter values the user has selected."""
     scenario_names: List[str]   # multiple scenarios can be selected (comparison view)
-    payers: List[str]           # multiple payers can be selected
-    products: List[str]         # multiple products can be selected
+    payers: List[str] = []      # legacy alias for payment_type — kept for older callers
+    payment_type: List[str] = []  # Cash/Commercial/Medicaid/Medicare — what payer_master lists
+    payer: List[str] = []       # the real payer sub-dimension (CVS/Non CVS)
+    products: List[str] = []    # multiple products can be selected
     start_date: str             # "YYYY-MM-DD"
     end_date: str                # "YYYY-MM-DD"
 
@@ -40,11 +42,23 @@ class OutputFiltersResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ApplyFiltersRequest(BaseModel):
-    """Request body for POST /api/liver-output/apply-filters."""
+    """
+    Request body for POST /api/liver-output/apply-filters.
+
+    payment_type (Cash/Commercial/Medicaid/Medicare) is the primary field;
+    "payers" is accepted as a legacy alias for it (the frontend currently
+    sends both, identical, during its own migration — see Output.jsx's
+    fetchOutputAnalysis comment) and is used only when payment_type is empty.
+    "payer" is the real payer sub-dimension (CVS/Non CVS) — previously
+    accepted by the frontend but silently dropped here since it wasn't a
+    declared field at all (Pydantic ignores unknown fields by default).
+    """
     ta: str = "HCV"
     scenario_names: List[str]
-    payers: List[str]
-    products: List[str]
+    payers: List[str] = []
+    payment_type: List[str] = []
+    payer: List[str] = []
+    products: List[str] = []
     start_date: str
     end_date: str
     selected_metric: str = "payer_volume"   # pass-through UI state; response always includes both metrics
