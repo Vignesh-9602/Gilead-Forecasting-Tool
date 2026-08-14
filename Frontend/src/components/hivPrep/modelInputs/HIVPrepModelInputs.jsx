@@ -24,8 +24,8 @@ import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { GlobalContext } from "../../../context/Provider";
 
 import dayjs from "dayjs";
-import HIVMarketAnalysis from "./HIVMarketAnalysis";
-import { getHIVModelInputFilters, applyHIVScenario, recalculateHIVScenario, editHIVScenario, saveHIVScenario, applySelectedHIVScenario, updateHIVScenario } from "../../../services/apiService";
+import HIVPrepMarketAnalysis from "./HIVPrepMarketAnalysis";
+import { getHIVPrepModelInputFilters, applyHIVPrepScenario, recalculateHIVPrepScenario, editHIVPrepScenario, saveHIVPrepScenario, applySelectedHIVPrepScenario, updateHIVPrepScenario, deleteHIVPrepScenario } from "../../../services/apiService";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 const globalConfigDateLocaleText = {
@@ -33,7 +33,7 @@ const globalConfigDateLocaleText = {
     fieldYearPlaceholder: () => "YYYY",
 };
 
-export default function HIVModelInput() {
+export default function HIVPrepModelInput() {
     const { favState } = useContext(GlobalContext);
 
     const therapyArea = favState?.selectedTherapyArea || "HIV";
@@ -184,7 +184,7 @@ export default function HIVModelInput() {
         try {
             setLoading(true);
 
-            const response = await getHIVModelInputFilters(therapyArea);
+            const response = await getHIVPrepModelInputFilters(therapyArea);
             const resData = response?.data;
 
             setAvailableMonths(resData?.available_months || []);
@@ -210,7 +210,7 @@ export default function HIVModelInput() {
                     },
                 };
 
-                const applyResponse = await applyHIVScenario(payload);
+                const applyResponse = await applyHIVPrepScenario(payload);
 
                 const scenario =
                     applyResponse.data.scenarios[
@@ -292,7 +292,7 @@ export default function HIVModelInput() {
             };
 
             const response =
-                await applyHIVScenario(payload);
+                await applyHIVPrepScenario(payload);
 
             const scenario =
                 response.data.scenarios[
@@ -454,7 +454,7 @@ export default function HIVModelInput() {
             console.log("paylod--->", payload)
 
             const response =
-                await recalculateHIVScenario(
+                await recalculateHIVPrepScenario(
                     payload
                 );
 
@@ -559,7 +559,7 @@ export default function HIVModelInput() {
 
             // console.log("Edit Payload", payload);
 
-            const response = await editHIVScenario(payload);
+            const response = await editHIVPrepScenario(payload);
 
             const scenario =
                 response.data.scenarios[
@@ -654,7 +654,7 @@ export default function HIVModelInput() {
             console.log("Save Scenario Payload", payload);
 
             const response =
-                await saveHIVScenario(payload);
+                await saveHIVPrepScenario(payload);
 
             const scenario =
                 response.data.scenarios[
@@ -744,7 +744,7 @@ export default function HIVModelInput() {
                 ),
             };
 
-            const response = await updateHIVScenario(
+            const response = await updateHIVPrepScenario(
                 activeScenario,
                 payload
             );
@@ -791,7 +791,7 @@ export default function HIVModelInput() {
             );
 
             const response =
-                await applySelectedHIVScenario(payload);
+                await applySelectedHIVPrepScenario(payload);
 
             const scenario =
                 response.data.scenarios[
@@ -848,7 +848,7 @@ export default function HIVModelInput() {
                 scenario_name: scenarioName,
             };
 
-            const response = await deleteHIVScenario(payload);
+            const response = await deleteHIVPrepScenario(payload);
 
             const scenario =
                 response.data.scenarios[
@@ -1662,7 +1662,7 @@ export default function HIVModelInput() {
                 {/* )} */}
 
             </Paper>
-            <HIVMarketAnalysis
+            <HIVPrepMarketAnalysis
                 marketAnalysis={marketAnalysis}
                 allScenariosData={allScenariosData}
                 availableScenarios={availableScenarios}

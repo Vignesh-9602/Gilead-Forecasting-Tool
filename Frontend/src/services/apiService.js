@@ -540,3 +540,129 @@ export const getHIVPrepConfigurationByTherapyArea = (taName) => {
 export const saveHIVPrepConfigurations = (payload) => {
   return httpClient.post(`/api/hiv_prep/save-configurations`, payload);
 };
+
+
+export const getHIVPrepModelInputFilters = (taName) => {
+  return httpClient.get("/api/hiv_prep/model-input-filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+};
+
+export const applyHIVPrepScenario = (payload) => {
+  return httpClient.post(
+    "/api/hiv_prep/applyfilter",
+    payload
+  );
+};
+
+export const recalculateHIVPrepScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/recalculate",
+    payload
+  );
+
+export const editHIVPrepScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/refresh-edits",
+    payload
+  );
+
+
+export const saveHIVPrepScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/save-scenarios",
+    payload
+  );
+
+export const applySelectedHIVPrepScenario = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/apply_selected_scenario",
+    payload
+  );
+
+export const updateHIVPrepScenario = (scenarioName, payload) =>
+  httpClient.put(
+    `/api/hiv_prep/scenarios/${encodeURIComponent(scenarioName)}`,
+    payload
+  );
+
+export const deleteHIVPrepScenario = (payload) =>
+  httpClient.delete(
+    `/api/hiv_prep/scenarios/${payload.scenario_name}`,
+    {
+      data: payload,
+    }
+  );
+
+
+export const getHIVPrepMarketEventFilters = (taName) =>
+  httpClient.get("/api/hiv_prep/get_market_event_filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+
+export const applyHIVPrepMarketEventFilter = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/apply_market_event_filters",
+    payload
+  );
+
+export const runHIVPrepMarketEventCalculation = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/run-calculation",
+    payload
+  );
+
+export const editHIVPrepImpactCurveTable = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/edit_save",
+    payload
+  );
+
+export const deleteHIVMarketEvent = (payload) => {
+  return httpClient.delete("/api/hiv_treat/delete-event", {
+    data: payload,
+  });
+};
+
+export const deleteHIVPrepMarketEvent = (payload) => {
+  return httpClient.delete("/api/hiv_prep/delete-event", {
+    data: payload,
+  });
+};
+
+export const addHIVPrepProduct = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/products",
+    payload
+  );
+
+export const getHIVPrepProducts = () => {
+  return httpClient.get("/api/hiv_prep/products");
+};
+
+export const updateHIVPrepProduct = (payload) => {
+  return httpClient.put("/api/hiv_prep/products", payload);
+};
+
+export const deleteHIVPrepProduct = (payload) => {
+  return httpClient.delete("/api/hiv_prep/products", {
+    data: payload,
+  });
+};
+
+export const getHIVPrepOutputFilters = (taName) =>
+  httpClient.get("/api/hiv_prep/get_output_screen_filters", {
+    params: {
+      ta_name: taName,
+    },
+  });
+
+export const applyHIVPrepOutputFilters = (payload) =>
+  httpClient.post(
+    "/api/hiv_prep/output-screen/apply-filters",
+    payload
+  );

@@ -2,11 +2,10 @@ import React, { useState, useEffect } from "react";
 import { Box } from "@mui/material";
 import Header from "../components/Header";
 import SnackbarNotification from "../components/snackBar/SnackBar";
-// import PBCModelInput from "../components/hcv/ModelInput/ModelInput";
 import HIVPrepGlobalConfigurations from "../components/hivPrep/globalConfigurations/HIVPrepGlobalConfigurations";
-// import HIVModelInput from "../components/hiv/modelInputs/HIVModelInputs";
-// import HIVMarketEvent from "../components/hiv/marketEvents/HIVMarketEvent";
-// import HIVOutput from "../components/hiv/output/HIVOutput";
+import HIVPrepModelInput from "../components/hivPrep/modelInputs/HIVPrepModelInputs";
+import HIVPrepMarketEvent from "../components/hivPrep/marketEvents/HIVPrepMarketEvent";
+import HIVPrepOutput from "../components/hivPrep/output/HIVPrepOutput";
 
 const tabs = [
     "Configurations",
@@ -29,14 +28,14 @@ export default function HIVPrepLayout() {
             case "Configurations":
                 return <HIVPrepGlobalConfigurations />;
 
-            // case "Model Inputs":
-            //     return <HIVModelInput />;
+            case "Model Inputs":
+                return <HIVPrepModelInput />;
 
-            // case "Market Events":
-            //     return <HIVMarketEvent />;
+            case "Market Events":
+                return <HIVPrepMarketEvent />;
 
-            // case "Output":
-            //     return <HIVOutput />;
+            case "Output":
+                return <HIVPrepOutput />;
 
             default:
                 return (

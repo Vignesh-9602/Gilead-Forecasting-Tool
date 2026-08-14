@@ -41,7 +41,7 @@ import { GlobalContext } from "../../../context/Provider";
 import { marketEventMock } from "./updatedMock";
 import HIVImpactCurveChart from "./HIVMEChart";
 import HIVImpactCurveTable from "./HIVMETable";
-import { getHIVMarketEventFilters, applyHIVMarketEventFilter, runHIVMarketEventCalculation, editHIVImpactCurveTable } from "../../../services/apiService";
+import { getHIVPrepMarketEventFilters, applyHIVPrepMarketEventFilter, runHIVPrepMarketEventCalculation, editHIVPrepImpactCurveTable, deleteHIVPrepMarketEvent } from "../../../services/apiService";
 import { useSnackbarStore, useLoadingStore } from "../../../stores";
 
 import DownloadIcon from "@mui/icons-material/Download";
@@ -57,7 +57,7 @@ const globalConfigDateLocaleText = {
     fieldYearPlaceholder: () => "YYYY",
 };
 
-export default function HIVMarketEvent() {
+export default function HIVPrepMarketEvent() {
 
     const { favState } = useContext(GlobalContext);
 
@@ -143,6 +143,7 @@ export default function HIVMarketEvent() {
             ? rows.map((row) => ({
                 ...createEmptyRow(currentConfig),
                 ...row,
+                isNew: false, // <-- Marks backend rows as already saved!
             }))
             : [createEmptyRow(currentConfig)];
 
@@ -193,7 +194,8 @@ export default function HIVMarketEvent() {
 
     const createEmptyRow = (config) => ({
 
-        id: Date.now(),
+        id: Date.now() + Math.random(), // <-- Unique ID for UI rendering
+        isNew: true,                    // <-- Marks as an unsaved row
 
         event_name: "",
 
@@ -271,47 +273,138 @@ export default function HIVMarketEvent() {
 
     // }, [openImpactDialog, activeTab, currentConfig]);
 
+    // const fetchFilters = async () => {
+    //     try {
+    //         setLoading(true);
+
+    //         const { data: response } =
+    //             await getHIVPrepMarketEventFilters(therapyArea);
+
+    //         setAvailableScenarios(
+    //             response.available_scenarios || []
+    //         );
+
+    //         setAvailableMonths(
+    //             response.available_months || []
+    //         );
+
+    //         setAvailableMarkets(response.markets || []);
+    //         setAvailableProducts(response.products || []);
+
+    //         const filter = response.selected_filter || {};
+
+    //         setScenarioName(
+    //             filter.scenario_name || ""
+    //         );
+
+    //         setSelectedMarkets(
+    //             filter.markets || []
+    //         );
+
+    //         setSelectedProducts(
+    //             filter.products || []
+    //         );
+
+    //         setFromDate(
+    //             filter.start_date || ""
+    //         );
+
+    //         setToDate(
+    //             filter.end_date || ""
+    //         );
+
+    //         // Auto populate the screen
+    //         await handleApplyFilter(filter);
+
+    //     } catch (error) {
+    //         console.error(
+    //             "Failed to fetch market event filters",
+    //             error
+    //         );
+    //         showSnackbar(
+    //             "Failed to fetch market event filters",
+    //             "error"
+    //         );
+    //     } finally {
+    //         setLoading(false);
+    //     }
+    // };
+
+    const applyFilterResponse = (response) => {
+
+        setAvailableScenarios(
+            response.available_scenarios || []
+        );
+
+        setAvailableMonths(
+            response.available_months || []
+        );
+
+        setAvailableMarkets(response.markets || []);
+        setAvailableProducts(response.products || []);
+
+        const filter = response.selected_filter || {};
+
+        setScenarioName(
+            filter.scenario_name || ""
+        );
+
+        setSelectedMarkets(
+            filter.markets || []
+        );
+
+        setSelectedProducts(
+            filter.products || []
+        );
+
+        setFromDate(
+            filter.start_date || ""
+        );
+
+        setToDate(
+            filter.end_date || ""
+        );
+
+        return filter;
+
+    };
+
+    // GET only — refreshes dropdown options, does NOT call apply-filter
+    const refreshFilterOptions = async () => {
+
+        try {
+
+            const { data: response } =
+                await getHIVPrepMarketEventFilters(therapyArea);
+
+            applyFilterResponse(response);
+
+        } catch (error) {
+
+            console.error(
+                "Failed to refresh market event filters",
+                error
+            );
+
+            showSnackbar(
+                "Failed to refresh filters",
+                "error"
+            );
+
+        }
+
+    };
+
     const fetchFilters = async () => {
         try {
             setLoading(true);
 
             const { data: response } =
-                await getHIVMarketEventFilters(therapyArea);
+                await getHIVPrepMarketEventFilters(therapyArea);
 
-            setAvailableScenarios(
-                response.available_scenarios || []
-            );
+            const filter = applyFilterResponse(response);
 
-            setAvailableMonths(
-                response.available_months || []
-            );
-
-            setAvailableMarkets(response.markets || []);
-            setAvailableProducts(response.products || []);
-
-            const filter = response.selected_filter || {};
-
-            setScenarioName(
-                filter.scenario_name || ""
-            );
-
-            setSelectedMarkets(
-                filter.markets || []
-            );
-
-            setSelectedProducts(
-                filter.products || []
-            );
-
-            setFromDate(
-                filter.start_date || ""
-            );
-
-            setToDate(
-                filter.end_date || ""
-            );
-
-            // Auto populate the screen
+            // Auto populate the screen (initial load only)
             await handleApplyFilter(filter);
 
         } catch (error) {
@@ -468,7 +561,7 @@ export default function HIVMarketEvent() {
             setLoading(true);
 
             const { data: response } =
-                await runHIVMarketEventCalculation(
+                await runHIVPrepMarketEventCalculation(
                     payload
                 );
 
@@ -490,6 +583,9 @@ export default function HIVMarketEvent() {
                 "Calculation completed successfully",
                 "success"
             );
+
+            // Refresh filter dropdowns only — do NOT apply
+            await refreshFilterOptions();
 
         } catch (error) {
 
@@ -528,7 +624,7 @@ export default function HIVMarketEvent() {
             setLoading(true);
 
             const { data: response } =
-                await applyHIVMarketEventFilter(payload);
+                await applyHIVPrepMarketEventFilter(payload);
 
             setEventTabsData(
                 response.event_tabs || {}
@@ -606,7 +702,7 @@ export default function HIVMarketEvent() {
             setLoading(true);
 
             const { data: response } =
-                await editHIVImpactCurveTable(
+                await editHIVPrepImpactCurveTable(
                     payload
                 );
 
@@ -694,11 +790,14 @@ export default function HIVMarketEvent() {
             0,
             {
                 ...row,
+                id: Date.now() + Math.random(), // <-- Give the duplicate a brand new ID
+                isNew: true,                    // <-- Mark the duplicate as unsaved!
                 products: [...row.products],
                 markets: [...row.markets],
                 impacted_items: [
                     ...row.impacted_items,
                 ],
+                source_percentages: { ...row.source_percentages } // Deep copy source percentages
             }
         );
 
@@ -707,18 +806,57 @@ export default function HIVMarketEvent() {
         setMenuAnchorEl(null);
     };
 
-    const handleDeleteRow = () => {
+    const handleDeleteRow = async () => {
+        if (selectedRowIndex == null) return;
 
-        setEventRows((prev) =>
-            prev.filter(
-                (_, index) =>
-                    index !== selectedRowIndex
-            )
-        );
+        const rowToDelete = eventRows[selectedRowIndex];
+
+        // ONLY call the API if it has a name AND it is NOT an unsaved/duplicated row
+        if (rowToDelete.event_name && !rowToDelete.isNew) {
+            const payload = {
+                ta_name: therapyArea,
+                scenario_name: scenarioName,
+                tab: activeTab,
+                event_name: rowToDelete.event_name
+            };
+
+            try {
+                setLoading(true);
+                const { data: response } = await deleteHIVPrepMarketEvent(payload);
+
+                // <-- FIX IS HERE: Refresh the master data from the backend
+                // This updates eventTabsData so the event doesn't reappear on tab switch
+                await handleApplyFilter();
+
+                showSnackbar(
+                    response.message || `Event '${rowToDelete.event_name}' deleted successfully.`,
+                    "success"
+                );
+
+            } catch (error) {
+                console.error("Failed to delete event:", error);
+                showSnackbar("Failed to delete event", "error");
+                setLoading(false);
+                return; // Stop execution so it isn't removed from UI on backend failure
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        // Remove the row from the local UI state
+        // AND check if the array is empty. If it is, create a new empty row!
+        setEventRows((prev) => {
+            const remainingRows = prev.filter((_, index) => index !== selectedRowIndex);
+
+            // If there are rows left, show them. If not, spawn an empty row.
+            return remainingRows.length > 0
+                ? remainingRows
+                : [createEmptyRow(currentConfig)];
+        });
 
         setOpenDeleteDialog(false);
-
         setMenuAnchorEl(null);
+        setSelectedRowIndex(null);
     };
 
     const handleOpenMenu = (
@@ -1559,7 +1697,7 @@ export default function HIVMarketEvent() {
 
                             <Box>
 
-                                {/* <Button
+                                <Button
                                     variant="outlined"
                                     onClick={(e) => {
                                         e.stopPropagation();
@@ -1580,7 +1718,7 @@ export default function HIVMarketEvent() {
                                     }}
                                 >
                                     Manage New Products
-                                </Button> */}
+                                </Button>
 
                                 <Button
                                     variant="contained"
@@ -3246,6 +3384,10 @@ export default function HIVMarketEvent() {
                     onClose={() => setOpenManageProducts(false)}
                     products={products}
                     setProducts={setProducts}
+                    therapyArea={therapyArea}
+                    scenarioName={scenarioName}
+                    onProductSaved={() => handleApplyFilter()}
+                    onRefreshProducts={() => refreshFilterOptions()}
                 />
             </Paper>
 

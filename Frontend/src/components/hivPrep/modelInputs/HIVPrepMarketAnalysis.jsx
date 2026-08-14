@@ -6,8 +6,8 @@ import {
     Typography,
 } from "@mui/material";
 
-import HIVMarketChart from "./HIVMarketChart";
-import HIVMarketTable from "./HIVMarketTable";
+import HIVPrepMarketChart from "./HIVPrepMarketChart";
+import HIVPrepMarketTable from "./HIVPrepMarketTable";
 
 // import { mockData } from "./mockData";
 // import { mockData } from "./newMockData";
@@ -35,7 +35,7 @@ const TABS = [
     },
 ];
 
-export default function HIVMarketAnalysis({
+export default function HIVPrepMarketAnalysis({
     marketAnalysis,
     allScenariosData,
     availableScenarios,
@@ -319,7 +319,7 @@ export default function HIVMarketAnalysis({
                         }}
                     >
 
-                        <HIVMarketChart
+                        <HIVPrepMarketChart
                             chartData={chartData}
                             activeTab={activeTab}
                             selectedMarket={selectedMarket}
@@ -335,7 +335,7 @@ export default function HIVMarketAnalysis({
                             pb: 3,
                         }}
                     >
-                        <HIVMarketTable
+                        <HIVPrepMarketTable
                             activeTab={activeTab}
                             tableData={currentData?.table}
                             selectedMetric={selectedMetric}

@@ -14,11 +14,11 @@ import dayjs from "dayjs";
 import { GlobalContext } from "../../../context/Provider";
 import HIVOutputAnalysis from "./HIVOutputAnalysis";
 import { mockOutputData } from "./OutputMock";
-import { getHIVOutputFilters, applyHIVOutputFilters } from "../../../services/apiService";
+import { getHIVPrepOutputFilters, applyHIVPrepOutputFilters } from "../../../services/apiService";
 import { useLoadingStore, useSnackbarStore } from "../../../stores";
 
 
-export default function HIVOutput() {
+export default function HIVPrepOutput() {
     const { favState } = useContext(GlobalContext);
 
     const therapyArea =
@@ -59,7 +59,7 @@ export default function HIVOutput() {
 
             setLoading(true);
 
-            const { data } = await getHIVOutputFilters(
+            const { data } = await getHIVPrepOutputFilters(
                 therapyArea
             );
 
@@ -113,7 +113,7 @@ export default function HIVOutput() {
                 },
             };
 
-            const response = await applyHIVOutputFilters(payload);
+            const response = await applyHIVPrepOutputFilters(payload);
 
             setOutputAnalysis(response.data.output_tabs || null);
 
@@ -147,7 +147,7 @@ export default function HIVOutput() {
                 },
             };
 
-            const { data } = await applyHIVOutputFilters(payload);
+            const { data } = await applyHIVPrepOutputFilters(payload);
 
             setOutputAnalysis(data.output_tabs || null);
             showSnackbar(
