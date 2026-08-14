@@ -198,6 +198,11 @@ def _load_scenario_ma(cur, scenario_name: str, from_year: int, from_month: int) 
     ma = _clip_ma_to_from_date(ma, from_year, from_month)
     ma = _recompute_yearly_in_ma(ma)
     ma = _recompute_all_market_shares_nested(ma)
+    # Hierarchy tabs' (payment_type_product / payment_type_payer_product) chart
+    # series get fully rebuilt from their table during filtering below
+    # (_filter_gran_hier), regardless of whatever was persisted in chart.series
+    # at save time — table.rows is the reliable source; trusting stored
+    # chart.series is what caused "nothing in chart data" for saved scenarios.
     return ma
 
 
@@ -214,10 +219,11 @@ _HIER3_SV_DIMS = {
 }
 
 
-def _wanted_for(dim: str, sel_payment_types: set, sel_products: set):
-    """None = don't filter this level at all (the real payer/CVS-NonCVS dimension)."""
+def _wanted_for(dim: str, sel_payment_types: set, sel_sub_payers: set, sel_products: set):
     if dim == "payment_type":
         return sel_payment_types
+    if dim == "payer":
+        return sel_sub_payers
     if dim == "product":
         return sel_products
     return None
@@ -257,7 +263,7 @@ def _sum_values(nodes: list) -> list:
     ]
 
 
-def _filter_hier_rows(rows: list, l1_wanted, l2_wanted, l3_wanted) -> list:
+def _filter_hier_rows(rows: list, l1_wanted, l2_wanted, l3_wanted, recompute_values: bool) -> list:
     """
     Filters a 2- or 3-level hierarchy row tree by label sets at each level.
     None for a level = no filter (keep everything at that level). A node whose
@@ -268,14 +274,20 @@ def _filter_hier_rows(rows: list, l1_wanted, l2_wanted, l3_wanted) -> list:
     by l3_wanted instead of l2_wanted (matches how the tree is built — see
     Liver Model Input's _build_tab5_3level).
 
-    Every surviving parent's "values" is unconditionally recomputed as the sum
-    of its (already-filtered/recomputed) children, bottom-up — not just when
-    that parent's OWN direct children were narrowed. Otherwise a change two
-    levels down (e.g. a grandchild filtered out under "CVS") would leave its
-    grandparent's total ("Commercial") stale, since "Commercial" itself kept
-    the same two direct children (CVS, Non CVS) and only THEIR totals shrank.
-    Harmless when nothing was actually filtered — summing unchanged children
-    reproduces the original total.
+    recompute_values: for the VOLUME metric, every surviving parent's "values"
+    is unconditionally recomputed as the sum of its (already-filtered/
+    recomputed) children, bottom-up — not just when that parent's OWN direct
+    children were narrowed, since a change two levels down (e.g. a grandchild
+    filtered out under "CVS") would otherwise leave its grandparent's total
+    ("Commercial") stale. For the SHARE metric this must be False: a child's
+    share value is already a percentage of its OWN direct parent (e.g. CVS =
+    62.5% of Commercial's total, ASGA = 40% of CVS's total) — summing
+    filtered children's shares back up would overwrite the parent's true,
+    fixed share (e.g. Commercial's 80% share of the grand total) with an
+    unrelated number on a completely different scale. Share values are always
+    left exactly as computed from the full, unfiltered data — narrowing which
+    payers/products are shown must never change what percentage any of them
+    truly represents (same principle as the flat tabs' "Total" row).
     """
     out = []
     for r in rows:
@@ -297,7 +309,10 @@ def _filter_hier_rows(rows: list, l1_wanted, l2_wanted, l3_wanted) -> list:
                 ]
                 if not new_grandchildren:
                     continue
-                new_children.append({**c, "children": new_grandchildren, "values": _sum_values(new_grandchildren)})
+                new_c = {**c, "children": new_grandchildren}
+                if recompute_values:
+                    new_c["values"] = _sum_values(new_grandchildren)
+                new_children.append(new_c)
             else:
                 wanted = l3_wanted if l3_wanted is not None else l2_wanted
                 if wanted is not None and c.get("label") not in wanted:
@@ -305,24 +320,100 @@ def _filter_hier_rows(rows: list, l1_wanted, l2_wanted, l3_wanted) -> list:
                 new_children.append(c)
         if not new_children:
             continue
-        out.append({**r, "children": new_children, "values": _sum_values(new_children)})
+        new_r = {**r, "children": new_children}
+        if recompute_values:
+            new_r["values"] = _sum_values(new_children)
+        out.append(new_r)
     return out
 
 
-def _filter_gran_hier(gran: dict, l1_wanted, l2_wanted, l3_wanted) -> dict:
+def _split_hist_fore(values: list, fsi: int) -> tuple:
+    return list(values[:fsi]), list(values[fsi:])
+
+
+def _chart_series_2level(rows: list, fsi: int) -> list:
+    """Tab 4 (payment_type_product): always one series per (L1, L2) pair — there's
+    no deeper level to collapse to or drill into, so this doesn't depend on leaf_mode."""
+    series = []
+    for l1 in rows:
+        d1 = l1.get("label", "")
+        for l2 in l1.get("children", []):
+            hist, fore = _split_hist_fore(l2.get("values", []), fsi)
+            series.append({"label": f"{d1} - {l2.get('label', '')}", "history": hist, "forecast": fore})
+    return series
+
+
+def _chart_series_3level(rows: list, fsi: int, leaf_mode: bool) -> list:
     """
-    Filters only the table (row tree). Chart series are left as-is — Tab 4/5
-    charts are already one line per leaf combo (e.g. "Cash - CVS - ASGA"); the
-    comparison table below is what this screen's filter is actually meant to
-    narrow, and re-deriving matching chart series from the filter is out of
-    scope for this pass.
+    Tab 5 (payment_type_payer_product, and its two derived orientations): one
+    series per L1/L2 aggregate by default (matching the existing view), or one
+    series per product leaf when leaf_mode is on (i.e. a product filter is
+    active) — e.g. selecting Cash, Commercial | CVS | ASGA, GILD produces
+    "Cash - ASGA", "Cash - GILD", "Commercial - CVS - ASGA", "Commercial - CVS - GILD".
+
+    An L1 group whose children have no children of their own (e.g. Cash has no
+    real payer — its "children" are actually promoted product rows, not payer
+    rows) is detected structurally, not by label, since Cash's rows are
+    labeled with the product name, never the literal string "NA".
+    """
+    series = []
+    for l1 in rows:
+        d1 = l1.get("label", "")
+        l2_children = l1.get("children", [])
+        if not l2_children:
+            hist, fore = _split_hist_fore(l1.get("values", []), fsi)
+            series.append({"label": d1, "history": hist, "forecast": fore})
+            continue
+
+        no_real_payer = not any(c.get("children") for c in l2_children)
+        if no_real_payer:
+            if leaf_mode:
+                for c in l2_children:
+                    hist, fore = _split_hist_fore(c.get("values", []), fsi)
+                    series.append({"label": f"{d1} - {c.get('label', '')}", "history": hist, "forecast": fore})
+            else:
+                hist, fore = _split_hist_fore(l1.get("values", []), fsi)
+                series.append({"label": d1, "history": hist, "forecast": fore})
+            continue
+
+        for l2 in l2_children:
+            d2 = l2.get("label", "")
+            l3_children = l2.get("children", [])
+            if leaf_mode and l3_children:
+                for l3 in l3_children:
+                    hist, fore = _split_hist_fore(l3.get("values", []), fsi)
+                    series.append({"label": f"{d1} - {d2} - {l3.get('label', '')}", "history": hist, "forecast": fore})
+            else:
+                hist, fore = _split_hist_fore(l2.get("values", []), fsi)
+                series.append({"label": f"{d1} - {d2}", "history": hist, "forecast": fore})
+    return series
+
+
+def _filter_gran_hier(gran: dict, l1_wanted, l2_wanted, l3_wanted, is_3level: bool, leaf_mode: bool,
+                       recompute_values: bool) -> dict:
+    """
+    Filters the table (row tree), then rebuilds the chart series entirely from
+    the FILTERED table — never from whatever was in the stored chart.series —
+    so table and chart always agree and a stale/empty stored chart.series
+    (see _load_scenario_ma) can never leak through.
     """
     table = gran.get("table", {})
-    return {**gran, "table": {**table, "rows": _filter_hier_rows(table.get("rows", []), l1_wanted, l2_wanted, l3_wanted)}}
+    chart = gran.get("chart", {})
+    new_rows = _filter_hier_rows(table.get("rows", []), l1_wanted, l2_wanted, l3_wanted, recompute_values)
+    fsi = chart.get("forecast_start_index", 0)
+    new_series = (
+        _chart_series_3level(new_rows, fsi, leaf_mode) if is_3level
+        else _chart_series_2level(new_rows, fsi)
+    )
+    return {
+        **gran,
+        "table": {**table, "rows": new_rows},
+        "chart": {**chart, "series": new_series},
+    }
 
 
-def _filter_ma_by_selection(ma: dict, sel_payment_types: set, sel_products: set) -> dict:
-    """Narrow a loaded market_analysis to this screen's selected payers (payment_types) and products."""
+def _filter_ma_by_selection(ma: dict, sel_payment_types: set, sel_sub_payers: set, sel_products: set) -> dict:
+    """Narrow a loaded market_analysis to this screen's selected payment_types, payers (CVS/Non CVS), and products."""
     result = dict(ma)
 
     for tab, wanted in (
@@ -332,21 +423,34 @@ def _filter_ma_by_selection(ma: dict, sel_payment_types: set, sel_products: set)
         if tab in result:
             result[tab] = _apply_gran_filter(result[tab], lambda g, w=wanted: _filter_gran_flat(g, w))
 
-    for tab, sv_dims in (
-        ("payment_type_product", _HIER2_SV_DIMS),
-        ("payment_type_payer_product", _HIER3_SV_DIMS),
+    leaf_mode = bool(sel_products)
+    for tab, sv_dims, is_3level in (
+        ("payment_type_product", _HIER2_SV_DIMS, False),
+        ("payment_type_payer_product", _HIER3_SV_DIMS, True),
     ):
         if tab not in result:
             continue
         new_tab = {}
         for sv, subtree in result[tab].items():
-            dims = sv_dims.get(sv, (None, None, None) if tab == "payment_type_payer_product" else (None, None))
-            l1w = _wanted_for(dims[0], sel_payment_types, sel_products)
-            l2w = _wanted_for(dims[1], sel_payment_types, sel_products)
-            l3w = _wanted_for(dims[2], sel_payment_types, sel_products) if len(dims) > 2 else None
-            new_tab[sv] = _apply_gran_filter(
-                subtree, lambda g, a=l1w, b=l2w, c=l3w: _filter_gran_hier(g, a, b, c)
-            )
+            dims = sv_dims.get(sv, (None, None, None) if is_3level else (None, None))
+            l1w = _wanted_for(dims[0], sel_payment_types, sel_sub_payers, sel_products)
+            l2w = _wanted_for(dims[1], sel_payment_types, sel_sub_payers, sel_products)
+            l3w = _wanted_for(dims[2], sel_payment_types, sel_sub_payers, sel_products) if len(dims) > 2 else None
+            new_sv = {}
+            for metric_key, metric_subtree in subtree.items():
+                # Volume genuinely changes when children are excluded from a total,
+                # so it's recomputed bottom-up. Share values are already a percentage
+                # of their own direct parent — narrowing the filter must never change
+                # what percentage something truly represents, so they're left as-is
+                # (see _filter_hier_rows' docstring).
+                recompute = metric_key == "payer_volume"
+                new_sv[metric_key] = _apply_gran_filter(
+                    metric_subtree,
+                    lambda g, a=l1w, b=l2w, c=l3w, rc=recompute: _filter_gran_hier(
+                        g, a, b, c, is_3level, leaf_mode, rc
+                    ),
+                )
+            new_tab[sv] = new_sv
         result[tab] = new_tab
 
     return result
@@ -368,26 +472,32 @@ def apply_output_filters(payload) -> dict:
     try:
         ta             = payload.ta
         scenario_names = payload.scenario_names
-        payers         = payload.payers      # this screen's "payer" == Model Input's payment_type
+        # payment_type is the primary field; "payers" is a legacy alias some
+        # callers still send instead (see ApplyFiltersRequest's docstring).
+        payment_types  = payload.payment_type or payload.payers
+        sub_payers     = payload.payer       # real payer sub-dimension (CVS/Non CVS)
         products       = payload.products
         start_date     = payload.start_date
         end_date       = payload.end_date
 
         from_year, from_month = parse_year_month(start_date)
-        sel_payment_types = set(payers)
+        sel_payment_types = set(payment_types)
+        sel_sub_payers    = set(sub_payers)
         sel_products      = set(products)
 
         output_tabs = {}
         for scenario in scenario_names:
             ma = _load_scenario_ma(cur, scenario, from_year, from_month)
-            ma = _filter_ma_by_selection(ma, sel_payment_types, sel_products)
+            ma = _filter_ma_by_selection(ma, sel_payment_types, sel_sub_payers, sel_products)
             ma.pop("event_management", None)
             output_tabs[scenario] = {"market_analysis": ma}
 
         selected_filter = {
             "ta":             ta,
             "scenario_names": scenario_names,
-            "payers":         payers,
+            "payers":         payment_types,
+            "payment_type":   payment_types,
+            "payer":          sub_payers,
             "products":       products,
             "start_date":     start_date,
             "end_date":       end_date,

@@ -2904,44 +2904,44 @@ def _rebuild_tab5_leaf_chart(gran_dict: dict, chart_d1_filter, chart_d2_filter,
     def _v(vals):
         return [int(round(float(v))) for v in vals] if to_int else [round(float(v), 4) for v in vals]
 
+    def _append(label, values):
+        vals = [float(v) for v in values]
+        series.append({"label": label, "history": _v(vals[:fsi]), "forecast": _v(vals[fsi:])})
+
     series = []
     for l1_row in rows:
         d1 = l1_row.get("label", "")
         if chart_d1_filter and d1.lower() != chart_d1_filter.lower():
             continue
-        for l2_row in l1_row.get("children", []):
-            d2 = l2_row.get("label", "")
-            if chart_d2_filter and d2 != "NA" and d2.lower() != chart_d2_filter.lower():
-                continue
+        l2_children = l1_row.get("children", [])
+        # None of d1's children have children of their own => there's no real
+        # payer dimension for this d1 (e.g. Cash) and each "child" IS actually a
+        # promoted product row, not a payer. The label alone can't tell them
+        # apart (Cash's promoted product row is labeled with the product, e.g.
+        # "ASGA" -- never the literal string "NA") -- only "no grandchildren"
+        # reliably identifies this case, matching how _build_tab5_3level's own
+        # table builder produces it.
+        no_real_payer = l2_children and not any(c.get("children") for c in l2_children)
 
-            l3_children = l2_row.get("children", [])
-            leaf_here = (
-                show_leaf and bool(chart_d1_filter) and (d2 == "NA" or bool(chart_d2_filter))
-                and l3_children
-            )
-            if leaf_here:
-                prefix = d1 if d2 == "NA" else f"{d1} - {d2}"
-                for l3_row in l3_children:
-                    d3   = l3_row.get("label", "")
-                    vals = [float(v) for v in l3_row.get("values", [])]
-                    series.append({
-                        "label":    f"{prefix} - {d3}",
-                        "history":  _v(vals[:fsi]),
-                        "forecast": _v(vals[fsi:]),
-                    })
-                continue
-
-            if d2 == "NA":
-                lbl  = d1
-                vals = [float(v) for v in l1_row.get("values", [])]
+        if no_real_payer:
+            if show_leaf and chart_d1_filter:
+                for l3_row in l2_children:
+                    _append(f"{d1} - {l3_row.get('label', '')}", l3_row.get("values", []))
             else:
-                lbl  = f"{d1} - {d2}"
-                vals = [float(v) for v in l2_row.get("values", [])]
-            series.append({
-                "label":    lbl,
-                "history":  _v(vals[:fsi]),
-                "forecast": _v(vals[fsi:]),
-            })
+                _append(d1, l1_row.get("values", []))
+            continue
+
+        for l2_row in l2_children:
+            d2 = l2_row.get("label", "")
+            if chart_d2_filter and d2.lower() != chart_d2_filter.lower():
+                continue
+            l3_children = l2_row.get("children", [])
+            leaf_here = show_leaf and bool(chart_d1_filter) and bool(chart_d2_filter) and l3_children
+            if leaf_here:
+                for l3_row in l3_children:
+                    _append(f"{d1} - {d2} - {l3_row.get('label', '')}", l3_row.get("values", []))
+                continue
+            _append(f"{d1} - {d2}", l2_row.get("values", []))
 
     gran_dict.setdefault("chart", {})["series"] = series
 

@@ -10,7 +10,7 @@ import Output from "../components/hcv/Output/Output";
 const tabs = [
     "Configurations",
     "Model Inputs",
-    "Market Events",
+    // "Market Events",
     "Output",
 ];
 
@@ -32,10 +32,15 @@ export default function HCVLayout() {
                 return <PBCModelInput />;
             case "Output":
                 return <Output />;
-            case "Market Events":
-                return <MarketEvent />;
+            // case "Market Events":
+            //     return <MarketEvent />;
             default:
-                return <MarketEvent />;
+                return (
+                    <Box p={3}>
+                        <h2>{activeTab}</h2>
+                        <p>HCV component coming soon...</p>
+                    </Box>
+                );
         }
     };
 
