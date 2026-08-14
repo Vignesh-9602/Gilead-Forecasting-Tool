@@ -182,15 +182,15 @@ export default function ManageProductsDialog({
 
             await fetchProducts();
 
-            showSnackbar(
-                "Product added successfully",
-                "success"
-            );
-
             // Refresh the screen with the new product
             if (onProductSaved) {
                 await onProductSaved();
             }
+
+            showSnackbar(
+                "Product added successfully",
+                "success"
+            );
 
         } catch (error) {
 
@@ -286,10 +286,6 @@ export default function ManageProductsDialog({
 
             await fetchProducts();
 
-            showSnackbar(
-                response?.message || "Product updated successfully",
-                "success"
-            );
 
             // Refresh the screen with the new product
             if (onRefreshProducts) {
@@ -299,6 +295,12 @@ export default function ManageProductsDialog({
             if (onProductSaved) {
                 await onProductSaved();
             }
+
+            showSnackbar(
+                response?.message || "Product updated successfully",
+                "success"
+            );
+
         } catch (error) {
             console.error("Failed to update product", error);
 
@@ -343,11 +345,6 @@ export default function ManageProductsDialog({
 
             await fetchProducts();
 
-            showSnackbar(
-                response?.message || "Product deleted successfully",
-                "success"
-            );
-
             if (onRefreshProducts) {
                 await onRefreshProducts();
             }
@@ -355,6 +352,11 @@ export default function ManageProductsDialog({
             if (onProductSaved) {
                 await onProductSaved();
             }
+            showSnackbar(
+                response?.message || "Product deleted successfully",
+                "success"
+            );
+
         } catch (error) {
             console.error("Failed to delete product", error);
 
