@@ -5,7 +5,7 @@ from app.liver_output.repository.output_repo import (
     get_scenarios,
     get_distinct_months,
     get_all_configs_for_ta,
-    get_scenario_chart_data,
+    get_scenario_chart_data_and_factors,
     load_filter_state,
     save_filter_state,
 )
@@ -16,15 +16,24 @@ from app.liver_output.helpers.date_helpers import (
     add_months,
 )
 # Reused as-is from Liver Model Input so this screen's numbers can never drift
-# from what Model Input itself computed and persisted -- these are pure,
-# side-effect-free dict transforms (no DB access), safe to share directly
-# rather than re-implementing (see this module's own long-standing comment
-# on why independent re-implementations of the same math never agree).
+# from what Model Input itself computed and persisted, rather than
+# re-implementing (see this module's own long-standing comment on why
+# independent re-implementations of the same math never agree). Most of these
+# are pure, side-effect-free dict transforms (no DB access); _ensure_base_snapshot
+# and _load_config do read the DB, and _ensure_base_snapshot self-heals (writes)
+# Base's own row when it's stale for the requested date range -- the same
+# self-heal every other Base-reading call site in Model Input already relies
+# on, reused here rather than re-implemented so Base's date range is never
+# shorter on this screen than what Model Input itself would show.
 from app.liver.services.liver_service import (
     _normalize_ma_keys,
     _clip_ma_to_from_date,
     _recompute_yearly_in_ma,
     _recompute_all_market_shares_nested,
+    _ensure_base_snapshot,
+    _load_config,
+    _resolve_forecast_periods,
+    _parse_ym,
 )
 
 DEFAULT_FORECAST_MONTHS = 12
@@ -169,11 +178,12 @@ def get_output_filters(ta: str = "HCV") -> dict:
 #
 # Loads each selected scenario's already-computed market_analysis straight
 # from raw_liver.liver_scenarios (the same table Liver Model Input persists
-# to — 'BASE' included, since Model Input persists a live Base computation
-# there every time it runs). No independent/live forecasting happens on this
-# screen at all: if a requested scenario (including Base) has never been
-# computed via Model Input, apply_output_filters raises rather than silently
-# recomputing.
+# to). No independent forecasting logic lives on this screen: saved (non-Base)
+# scenarios are read as-is and raise if never computed via Model Input. Base
+# is the one exception — its own row is read through Model Input's own
+# _ensure_base_snapshot self-heal (not re-implemented here, just reused) so
+# Base's date range always covers this screen's selected end_date rather than
+# silently ending wherever Base's row last happened to be refreshed.
 #
 # output_tabs uses Model Input's own tab set and shape (total_market_volume,
 # product_distribution, payment_type_distribution, payment_type_product,
@@ -186,9 +196,109 @@ def get_output_filters(ta: str = "HCV") -> dict:
 # has always worked.
 # ---------------------------------------------------------------------------
 
-def _load_scenario_ma(cur, scenario_name: str, from_year: int, from_month: int) -> dict:
-    """Load + clip one scenario's market_analysis. No live computation."""
-    chart_data = get_scenario_chart_data(cur, scenario_name)
+def _factors_effectively_equal(a: dict | None, b: dict | None) -> bool:
+    """
+    True when two stored `factors` dicts would drive Liver Model Input's model
+    to produce the same forecast: same active_model, same params for THAT model
+    (the only ones actually used — see _forecast_share_by_factors), and same
+    multiplier. Deliberately ignores every other model's leftover params (e.g.
+    a stale `ets` block while active_model is "moving_average") and
+    trajectory_start-style fields that can legitimately differ run to run
+    without changing the output.
+    """
+    if not a or not b:
+        return False
+    am = (a.get("active_model") or "moving_average").lower()
+    bm = (b.get("active_model") or "moving_average").lower()
+    if am != bm:
+        return False
+    if float(a.get("multiplier", 1.0)) != float(b.get("multiplier", 1.0)):
+        return False
+    if a.get("multiplier_horizon", "Forecast") != b.get("multiplier_horizon", "Forecast"):
+        return False
+    a_params = a.get(am) or {}
+    b_params = b.get(am) or {}
+    keys = set(a_params.keys()) | set(b_params.keys())
+    keys.discard("trajectory_start")
+    for k in keys:
+        if a_params.get(k) != b_params.get(k):
+            return False
+    return True
+
+
+def _splice_values(scenario_vals: list, base_vals: list) -> list:
+    """Base's values for the overlapping prefix (by position — both start at the
+    same clipped from_date), then the scenario's own tail beyond Base's range."""
+    n = min(len(scenario_vals), len(base_vals))
+    return list(base_vals[:n]) + list(scenario_vals[n:])
+
+
+def _splice_rows_from_base(scenario_rows: list, base_rows: list) -> list:
+    """Recursively replace each row's values (and its children/grandchildren,
+    matched by label) with Base's, for tabs where a scenario with the same
+    factors as Base should be numerically identical to it."""
+    base_by_label = {r.get("label"): r for r in base_rows}
+    new_rows = []
+    for r in scenario_rows:
+        br = base_by_label.get(r.get("label"))
+        new_r = dict(r)
+        if br is not None:
+            new_r["values"] = _splice_values(r.get("values", []), br.get("values", []))
+            if r.get("children"):
+                new_r["children"] = _splice_rows_from_base(r["children"], br.get("children", []))
+        new_rows.append(new_r)
+    return new_rows
+
+
+def _reconcile_payment_type_payer_product_with_base(ma: dict, base_ma: dict) -> dict:
+    """
+    payment_type_payer_product's per-series forecast depends on which
+    payment_type/product happened to be the active filter at the moment each
+    scenario's data was computed (see Liver Model Input's
+    _build_tab_data_from_shares/_build_tab5_3level) — two scenarios with
+    identical factors can end up with different child-level (payer/product)
+    splits even though their totals roughly agree. Since this tab is entirely
+    model-computed (never user-edited on this read-only screen), when a saved
+    scenario's factors match Base's, substitute Base's own monthly payer_volume
+    table values so the numbers a user compares are always consistent. Only the
+    monthly payer_volume table is touched — yearly aggregation and payer_share
+    are both derived FROM it later in _load_scenario_ma, so they inherit the
+    correction automatically.
+    """
+    tab = ma.get("payment_type_payer_product")
+    base_tab = base_ma.get("payment_type_payer_product")
+    if not tab or not base_tab:
+        return ma
+    new_tab = dict(tab)
+    for sv, subtree in tab.items():
+        base_subtree = base_tab.get(sv)
+        if not base_subtree or "payer_volume" not in subtree:
+            continue
+        monthly = subtree["payer_volume"].get("monthly")
+        base_monthly = base_subtree.get("payer_volume", {}).get("monthly")
+        if not monthly or not base_monthly:
+            continue
+        new_table = dict(monthly.get("table", {}))
+        new_table["rows"] = _splice_rows_from_base(
+            new_table.get("rows", []), base_monthly.get("table", {}).get("rows", [])
+        )
+        new_tab[sv] = {
+            **subtree,
+            "payer_volume": {**subtree["payer_volume"], "monthly": {**monthly, "table": new_table}},
+        }
+    return {**ma, "payment_type_payer_product": new_tab}
+
+
+def _load_scenario_ma(cur, scenario_name: str, from_year: int, from_month: int,
+                       base_ma: dict | None = None, base_factors: dict | None = None) -> dict:
+    """Load + clip one scenario's market_analysis. No live computation.
+
+    base_ma/base_factors: Base's own already-clipped (same from_year/from_month)
+    market_analysis + factors, passed in by apply_output_filters for every
+    non-Base scenario so payment_type_payer_product can be reconciled with Base
+    when factors match (see _reconcile_payment_type_payer_product_with_base).
+    """
+    chart_data, factors = get_scenario_chart_data_and_factors(cur, scenario_name)
     if not chart_data or "market_analysis" not in chart_data:
         raise ValueError(
             f"Scenario '{scenario_name}' has not been computed yet. "
@@ -196,6 +306,9 @@ def _load_scenario_ma(cur, scenario_name: str, from_year: int, from_month: int) 
         )
     ma = _normalize_ma_keys(chart_data["market_analysis"])
     ma = _clip_ma_to_from_date(ma, from_year, from_month)
+    if base_ma is not None and scenario_name.strip().upper() != "BASE" \
+            and _factors_effectively_equal(factors, base_factors):
+        ma = _reconcile_payment_type_payer_product_with_base(ma, base_ma)
     ma = _recompute_yearly_in_ma(ma)
     ma = _recompute_all_market_shares_nested(ma)
     # Hierarchy tabs' (payment_type_product / payment_type_payer_product) chart
@@ -485,9 +598,45 @@ def apply_output_filters(payload) -> dict:
         sel_sub_payers    = set(sub_payers)
         sel_products      = set(products)
 
+        # Load Base's own (self-healed) wide snapshot once, even when "BASE"
+        # isn't among the requested scenarios, so:
+        #  1. every other scenario can be reconciled against it in
+        #     _load_scenario_ma when their factors match (see
+        #     _reconcile_payment_type_payer_product_with_base), and
+        #  2. Base's own date range always covers up to the selected end_date.
+        #     Reading Base's raw stored row directly (as this used to) could
+        #     silently show Base ending short of the filter's end_date, e.g.
+        #     Base's row last self-healed while forecast_periods only reached
+        #     Dec-2026, while a saved scenario (saved after forecast_periods
+        #     was extended) already covers through Dec-2027 -- the date
+        #     dropdown here offers Dec-2027 for the whole TA, but Base's own
+        #     row was never refreshed to match. _ensure_base_snapshot is the
+        #     same self-heal every Base-reading call site in Model Input
+        #     already relies on for exactly this; reused here rather than
+        #     re-implemented.
+        try:
+            cfg = _load_config(cur, ta, payment_type=None, brand=None)
+            train_end_year, train_end_month = _parse_ym(cfg["train_end_date"])
+            forecast_periods = _resolve_forecast_periods(
+                end_date, train_end_year, train_end_month, cfg["forecast_periods"]
+            )
+            granularity = cfg.get("model_granularity", "monthly")
+            wide_base_ma, base_factors = _ensure_base_snapshot(
+                cur, ta, train_end_year, train_end_month, forecast_periods, granularity,
+                sel_payer=None, sel_product=None, sel_payment_type=None,
+            )
+            conn.commit()
+            base_ma = _clip_ma_to_from_date(_normalize_ma_keys(wide_base_ma), from_year, from_month)
+        except Exception as _base_err:
+            print(f"[liver_output] Base self-heal skipped: {_base_err}")
+            base_ma, base_factors = None, None
+
         output_tabs = {}
         for scenario in scenario_names:
-            ma = _load_scenario_ma(cur, scenario, from_year, from_month)
+            if scenario.strip().upper() == "BASE" and base_ma is not None:
+                ma = _recompute_all_market_shares_nested(_recompute_yearly_in_ma(base_ma))
+            else:
+                ma = _load_scenario_ma(cur, scenario, from_year, from_month, base_ma, base_factors)
             ma = _filter_ma_by_selection(ma, sel_payment_types, sel_sub_payers, sel_products)
             ma.pop("event_management", None)
             output_tabs[scenario] = {"market_analysis": ma}
