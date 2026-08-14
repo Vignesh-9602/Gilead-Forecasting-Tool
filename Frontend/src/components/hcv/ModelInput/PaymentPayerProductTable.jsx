@@ -1147,7 +1147,18 @@ export default function PaymentPayerProductTable({
                         >
                           {isEditableCell ? (
                             <input
-                              value={editedVal !== undefined ? editedVal : String(Math.round(Number(shownVal)))}
+                              value={
+                                editedVal !== undefined
+                                  ? editedVal
+                                  : (() => {
+                                      const num = Number(shownVal);
+                                      if (!Number.isFinite(num)) return "0";
+                                      // Preserve decimals instead of rounding to a whole
+                                      // number — rounding here was hiding the actual
+                                      // precision of the underlying data while editing.
+                                      return isPercent ? num.toFixed(1) : String(Math.round(num * 100) / 100);
+                                    })()
+                              }
                               onChange={(e) => {
                                 if (!/^-?\d*\.?\d*$/.test(e.target.value)) return;
                                 setEditedCells((prev) => ({ ...prev, [cellKey]: e.target.value }));

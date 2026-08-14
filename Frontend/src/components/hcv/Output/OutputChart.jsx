@@ -34,7 +34,7 @@ const formatMonthLabel = (value) => {
     return `${monthAbbr}-${year.slice(-2)}`;
 };
 
-export default function OutputChart({ chartData, activeTab, selectedPayers = [], selectedProducts = [] }) {
+export default function OutputChart({ chartData, activeTab, selectedPaymentTypes = [], selectedPayers = [], selectedProducts = [], highlightedScenario = "" }) {
 
     // if (!chartData) return null;
 
@@ -52,15 +52,14 @@ export default function OutputChart({ chartData, activeTab, selectedPayers = [],
         series: allSeries,
     } = chartData;
 
-    // Every tab except Total Market Volume should only chart the
-    // payer(s)/product(s) currently selected in the filter panel — but
-    // keep every scenario for those entities (e.g. "Commercial (BASE)"
-    // and "Commercial (test-1)" both stay). We don't know for certain
-    // whether this tab's series labels carry just the payer name, just
-    // the product name, or both combined, so match by substring rather
-    // than exact equality and prefer the most precise match available:
-    //   1. label contains a selected payer AND a selected product (combo)
-    //   2. label contains just whichever applies to this tab
+    // Every tab except Total Market Volume should only chart entities
+    // currently selected in the filter panel — but keep every scenario for
+    // those entities (e.g. "Commercial (BASE)" and "Commercial (test-1)"
+    // both stay). We don't know for certain which of payment type/payer/
+    // product a given tab's series labels carry, so match by substring and
+    // prefer the most specific combination that actually has matches:
+    //   1. label contains a selected payment type AND payer AND product
+    //   2. progressively less specific combinations
     //   3. last resort: show everything rather than an empty chart
     const containsTerm = (label, term) =>
         !!term && !!label && label.toLowerCase().includes(term.toLowerCase());
@@ -68,18 +67,28 @@ export default function OutputChart({ chartData, activeTab, selectedPayers = [],
     const containsAny = (label, terms) =>
         Array.isArray(terms) && terms.some((term) => containsTerm(label, term));
 
+    const activeDims = [
+        selectedPaymentTypes,
+        selectedPayers,
+        selectedProducts,
+    ].filter((terms) => terms.length > 0);
+
     const series = (() => {
         if (activeTab === "total_market_volume") return allSeries;
 
-        const payerMatches = allSeries.filter((item) => containsAny(item.label, selectedPayers));
-        const productMatches = allSeries.filter((item) => containsAny(item.label, selectedProducts));
-        const comboMatches = allSeries.filter(
-            (item) => containsAny(item.label, selectedPayers) && containsAny(item.label, selectedProducts)
-        );
+        const dims = activeDims;
 
-        if (comboMatches.length > 0) return comboMatches;
-        if (selectedPayers.length > 0 && payerMatches.length > 0) return payerMatches;
-        if (selectedProducts.length > 0 && productMatches.length > 0) return productMatches;
+        if (!dims.length) return allSeries;
+
+        // Try requiring all active dimensions to match, then drop to fewer
+        // until something actually matches.
+        for (let requiredCount = dims.length; requiredCount >= 1; requiredCount--) {
+            const matches = allSeries.filter((item) => {
+                const matchedDims = dims.filter((terms) => containsAny(item.label, terms)).length;
+                return matchedDims >= requiredCount;
+            });
+            if (matches.length) return matches;
+        }
 
         return allSeries;
     })();
@@ -95,16 +104,14 @@ export default function OutputChart({ chartData, activeTab, selectedPayers = [],
     //     "#4F46E5",
     // ];
 
-    const SCENARIO_COLORS = [
-        "#2563EB", // Blue
-        "#F59E0B", // Orange
-        "#16A34A", // Green
-        "#9333EA", // Purple
-        "#DC2626", // Red
-        "#0891B2", // Cyan
-        "#D97706", // Amber
-        "#4F46E5", // Indigo
-    ];
+    // Exact same color logic as ModelInputChart.jsx: getScenarioColor's
+    // golden-angle HSL rotation for scenario-indexed coloring, with
+    // CHART_PALETTE as the fallback for anything without an identifiable
+    // scenario (mirrors ModelInputChart's getSeriesColor exactly).
+    const getScenarioColor = (index) =>
+        `hsl(${(index * 137.508) % 360}, 70%, 50%)`;
+
+    const CHART_PALETTE = ["#4F46E5", "#f59e0b", "#10b981", "#ec4899", "#8b5cf6", "#06b6d4", "#3b82f6", "#ef4444"];
 
     // Series labels end in "(Scenario Name)" — e.g. "Commercial (BASE)" or
     // just "BASE" on the Total Market Volume tab (no parens at all). Pull
@@ -129,13 +136,13 @@ export default function OutputChart({ chartData, activeTab, selectedPayers = [],
         const scenario = getScenarioName(item.label);
 
         if (!(scenario in scenarioColorMap)) {
-            scenarioColorMap[scenario] = SCENARIO_COLORS[nextColorIndex % SCENARIO_COLORS.length];
+            scenarioColorMap[scenario] = getScenarioColor(nextColorIndex);
             nextColorIndex += 1;
         }
     });
 
-    const getSeriesColor = (item) =>
-        scenarioColorMap[getScenarioName(item.label)] || "#64748B";
+    const getSeriesColor = (item, index) =>
+        scenarioColorMap[getScenarioName(item.label)] || CHART_PALETTE[index % CHART_PALETTE.length];
 
     const traces = series.flatMap((item, index) => {
 
@@ -157,55 +164,21 @@ export default function OutputChart({ chartData, activeTab, selectedPayers = [],
 
         ];
 
-        // let color = ACTIVE_COLOR;
-        // let width = 3;
+        // Matches PaymentPayerProductTable.jsx's dimMatchesPath: a trace is
+        // "highlighted" only when it matches every currently-active filter
+        // dimension (payment type, payer, and/or product), not just some of
+        // them — same amber-and-thicker treatment, same all-or-nothing bar.
+        // Total Market Volume has no such dimensions (activeDims is empty
+        // there) — it highlights whichever scenario is radio-selected
+        // instead, same concept as ModelInputTable.jsx's applied-scenario
+        // radio, and its series labels are bare scenario names already.
+        const isHighlighted =
+            activeTab === "total_market_volume"
+                ? item.label === highlightedScenario
+                : activeDims.length > 0 && activeDims.every((terms) => containsAny(item.label, terms));
 
-        // switch (activeTab) {
-
-        //     case "total_market_volume":
-        //         color = ACTIVE_COLOR;
-        //         width = 3;
-        //         break;
-
-        //     case "payer_distribution": {
-        //         const baseLabel = item.label?.split(" (")[0];
-        //         const isSelected =
-        //             baseLabel?.toLowerCase() === selectedPayer?.toLowerCase();
-
-        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-        //         width = isSelected ? 3 : 2;
-        //         break;
-        //     }
-
-        //     case "product_distribution": {
-        //         const baseLabel = item.label?.split(" (")[0];
-        //         const isSelected =
-        //             baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
-
-        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-        //         width = isSelected ? 3 : 2;
-        //         break;
-        //     }
-
-        //     case "payer_product":
-        //     case "product_payer": {
-        //         const baseLabel = item.label?.split(" (")[0];
-        //         const isSelected =
-        //             baseLabel?.toLowerCase() === selectedPayer?.toLowerCase() ||
-        //             baseLabel?.toLowerCase() === selectedProduct?.toLowerCase();
-
-        //         color = isSelected ? ACTIVE_COLOR : FADED_COLOR;
-        //         width = isSelected ? 3 : 2;
-        //         break;
-        //     }
-
-        //     default:
-        //         color = ACTIVE_COLOR;
-        //         width = 3;
-        // }
-
-        const color = getSeriesColor(item);
-        const width = 3;
+        const color = isHighlighted ? "#f59e0b" : getSeriesColor(item, index);
+        const width = isHighlighted ? 3.5 : 1.5;
 
         return [
 

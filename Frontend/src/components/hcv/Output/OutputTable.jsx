@@ -32,18 +32,24 @@ const formatMonthLabel = (value) => {
     return `${monthAbbr}-${year.slice(-2)}`;
 };
 
+// Exact same formatting as ModelInputTable.jsx's formatCellValue: whole
+// percentages show with no decimals, fractional ones round to 2, and plain
+// volumes get locale thousand-separators with no fractional digits.
 const formatCellValue = (value, isShare) => {
     const numeric = Number(value ?? 0);
 
     if (Number.isNaN(numeric)) return "-";
 
-    return isShare
-        ? `${numeric.toFixed(1)}%`
-        : Math.round(numeric).toLocaleString();
+    if (isShare) {
+        const formatted = Number.isInteger(numeric) ? numeric : parseFloat(numeric.toFixed(2));
+        return `${formatted}%`;
+    }
+
+    return numeric.toLocaleString(undefined, { maximumFractionDigits: 0 });
 };
 
-const SELECTED_COLOR = "#F59E0B"; // Amber — matches the chart's highlight color
-const SELECTED_BG = "#FFF7ED";
+const SELECTED_COLOR = "#F59E0B"; // Amber — matches ModelInputTable.jsx's applied-row accent
+const SELECTED_BG = "#FFFBEB"; // Exact match for ModelInputTable.jsx's applied-row background
 
 // Sticky label column width. Wide enough for the longest labels we see,
 // e.g. "Commercial (test-1 Scenario)" nested one level deep with the
@@ -51,16 +57,20 @@ const SELECTED_BG = "#FFF7ED";
 const LABEL_COLUMN_WIDTH = 300;
 
 // rows: [{ key, label, metricLabel, values, rowType: 'total'|'group'|'child'|'leaf', children? }]
-export default function OutputTable({
+const OutputTable = React.forwardRef(function OutputTable({
     pivotLabel = "Total Volume Base",
     headers = [],
     rows = [],
     metric = "market_volume",
+    selectedPaymentTypes = [],
     selectedPayers = [],
     selectedProducts = [],
     forecastStartIndex,
     isHierarchical = false,
-}) {
+    isScenarioSelectable = false,
+    highlightedScenario = "",
+    onSelectScenario,
+}, ref) {
     const [expandedKeys, setExpandedKeys] = useState({});
 
     const isShare = metric === "payer_share";
@@ -91,15 +101,42 @@ export default function OutputTable({
         }));
     };
 
-    // Does this row's own label match any of the currently selected payers
-    // or products? Flat-table rows carry a trailing "(BASE Scenario)"
-    // suffix (e.g. "Cash (BASE Scenario)"), so compare against the base
-    // name only — hierarchy rows are already bare names ("Cash", "ASGA")
-    // and pass through this split unchanged.
+    // Recursively collect every row (at any depth) that actually has
+    // children — that's every key the "expanded" map needs an entry for.
+    const collectGroupKeys = (rowList, acc = []) => {
+        rowList.forEach((row) => {
+            if (Array.isArray(row.children) && row.children.length > 0) {
+                acc.push(row.key);
+                collectGroupKeys(row.children, acc);
+            }
+        });
+        return acc;
+    };
+
+    React.useImperativeHandle(ref, () => ({
+        expandAll: () => {
+            const allTrue = {};
+            collectGroupKeys(rows).forEach((key) => { allTrue[key] = true; });
+            setExpandedKeys(allTrue);
+        },
+        collapseAll: () => {
+            const allFalse = {};
+            collectGroupKeys(rows).forEach((key) => { allFalse[key] = false; });
+            setExpandedKeys(allFalse);
+        },
+        hasExpandableRows: () => collectGroupKeys(rows).length > 0,
+    }));
+
+    // Does this row's own label match any of the currently selected
+    // payment types, payers, or products? Flat-table rows carry a trailing
+    // "(BASE Scenario)" suffix (e.g. "Cash (BASE Scenario)"), so compare
+    // against the base name only — hierarchy rows are already bare names
+    // ("Cash", "CVS", "ASGA") and pass through this split unchanged.
     const selfMatches = (row) => {
         if (!row.label) return false;
         const baseLabel = row.label.split(" (")[0].trim().toLowerCase();
         return (
+            selectedPaymentTypes.some((pt) => pt.toLowerCase() === baseLabel) ||
             selectedPayers.some((payer) => payer.toLowerCase() === baseLabel) ||
             selectedProducts.some((product) => product.toLowerCase() === baseLabel)
         );
@@ -114,15 +151,34 @@ export default function OutputTable({
     // rows grouped under a synthetic "Grand Total" parent purely so they can
     // be collapsed — that parent is never itself a matchable payer/product,
     // so its children must be free to self-match on their own.
+    // Exact same indentation ladder as ModelInput's hierarchy table
+    // (PaymentPayerProductTable.jsx's indentPx) — 32px increments per
+    // level, not MUI's coarser spacing-unit steps.
+    const indentPx = (level) => {
+        switch (level) {
+            case 0:
+                return "16px";
+            case 1:
+                return "48px";
+            case 2:
+                return "80px";
+            case 3:
+                return "112px";
+            default:
+                return `${16 + level * 32}px`;
+        }
+    };
+
     const renderRow = (row, ancestorMatched = false) => {
         const hasChildren = Array.isArray(row.children) && row.children.length > 0;
         const isExpanded = expandedKeys[row.key] ?? true;
 
         const isTotal = row.rowType === "total";
         const isGroup = row.rowType === "group" || hasChildren;
-        const isChild = row.rowType === "child";
 
-        const matchesHere = selfMatches(row);
+        const matchesHere = isScenarioSelectable
+            ? row.label === highlightedScenario
+            : selfMatches(row);
         const isSelected = isGroup
             ? matchesHere
             : isHierarchical
@@ -137,11 +193,13 @@ export default function OutputTable({
                     ? "#f8fafc"
                     : "#fff";
 
+        const levelColor = (row.level || 0) <= 1 ? "#1e293b" : row.level === 2 ? "#334155" : "#64748b";
+
         const labelColor = isSelected
             ? SELECTED_COLOR
             : isTotal
                 ? "#1e293b"
-                : "#334155";
+                : levelColor;
 
         return (
             <React.Fragment key={row.key}>
@@ -160,10 +218,23 @@ export default function OutputTable({
                             borderRight: "2px solid #E2E8F0",
                             borderBottom: isTotal ? "2px solid #E2E8F0" : "1px solid #E2E8F0",
                             cursor: hasChildren ? "pointer" : "default",
-                            pl: isChild ? 4 : 2,
+                            pl: indentPx(row.level || 0),
                         }}
                     >
                         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                            {isScenarioSelectable && !hasChildren && (
+                                <input
+                                    type="radio"
+                                    name="outputHighlightedScenario"
+                                    checked={isSelected}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                        e.stopPropagation();
+                                        onSelectScenario?.(row.label);
+                                    }}
+                                    style={{ accentColor: "#4F46E5", width: 14, height: 14, margin: 0, flexShrink: 0 }}
+                                />
+                            )}
                             {hasChildren && (
                                 <Box
                                     component="span"
@@ -208,12 +279,12 @@ export default function OutputTable({
 
                         const cellColor = highlightThisCell
                             ? SELECTED_COLOR
-                            : "#334155";
+                            : levelColor;
 
                         return (
                             <TableCell
                                 key={index}
-                                align="right"
+                                align="center"
                                 sx={{
                                     minWidth: 90,
                                     backgroundColor: cellBg,
@@ -247,7 +318,7 @@ export default function OutputTable({
             sx={{
                 backgroundColor: "#fff",
                 border: "1px solid #D8DEE8",
-                borderRadius: "8px",
+                borderRadius: "0 0 8px 8px",
                 overflowX: "auto",
                 position: "relative",
             }}
@@ -300,7 +371,7 @@ export default function OutputTable({
                                 {formattedHeaders.map((header, index) => (
                                     <TableCell
                                         key={index}
-                                        align="right"
+                                        align="center"
                                         sx={{
                                             position: "sticky",
                                             top: 0,
@@ -326,4 +397,6 @@ export default function OutputTable({
             )}
         </Box>
     );
-}
+});
+
+export default OutputTable;
