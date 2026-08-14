@@ -67,6 +67,11 @@ export default function OutputChart({ chartData, activeTab, selectedPaymentTypes
     const containsAny = (label, terms) =>
         Array.isArray(terms) && terms.some((term) => containsTerm(label, term));
 
+    // CVS/Non CVS is a fixed 2-value dimension — same constant Output.jsx
+    // hardcodes for its Payer filter (it isn't fetched from an API).
+    const SUB_PAYER_TERMS = ["CVS", "Non CVS"];
+    const hasPayerDimension = (label) => containsAny(label, SUB_PAYER_TERMS);
+
     const activeDims = [
         selectedPaymentTypes,
         selectedPayers,
@@ -76,21 +81,39 @@ export default function OutputChart({ chartData, activeTab, selectedPaymentTypes
     const series = (() => {
         if (activeTab === "total_market_volume") return allSeries;
 
-        const dims = activeDims;
+        // Payment Type and Product are always present in every entity's
+        // label for this tab, so the progressive "require fewer dims until
+        // something matches" approach is fine for them. Payer isn't: some
+        // entities (e.g. Cash) have no payer sub-level at all (the table
+        // confirms this — "Cash" goes straight to its products, no CVS/
+        // Non CVS in between), so a selected payer filter must not
+        // penalize entities that were never going to carry that dimension
+        // in the first place — only entities whose label actually mentions
+        // a payer are held to the payer filter.
+        const coreDims = [selectedPaymentTypes, selectedProducts].filter((terms) => terms.length > 0);
 
-        if (!dims.length) return allSeries;
-
-        // Try requiring all active dimensions to match, then drop to fewer
-        // until something actually matches.
-        for (let requiredCount = dims.length; requiredCount >= 1; requiredCount--) {
-            const matches = allSeries.filter((item) => {
-                const matchedDims = dims.filter((terms) => containsAny(item.label, terms)).length;
-                return matchedDims >= requiredCount;
-            });
-            if (matches.length) return matches;
+        let coreMatched = allSeries;
+        if (coreDims.length) {
+            coreMatched = allSeries;
+            for (let requiredCount = coreDims.length; requiredCount >= 1; requiredCount--) {
+                const matches = allSeries.filter((item) => {
+                    const matchedDims = coreDims.filter((terms) => containsAny(item.label, terms)).length;
+                    return matchedDims >= requiredCount;
+                });
+                if (matches.length) {
+                    coreMatched = matches;
+                    break;
+                }
+            }
         }
 
-        return allSeries;
+        if (!selectedPayers.length) return coreMatched;
+
+        const payerFiltered = coreMatched.filter(
+            (item) => !hasPayerDimension(item.label) || containsAny(item.label, selectedPayers)
+        );
+
+        return payerFiltered.length ? payerFiltered : coreMatched;
     })();
 
     // const colors = [
@@ -144,6 +167,27 @@ export default function OutputChart({ chartData, activeTab, selectedPaymentTypes
     const getSeriesColor = (item, index) =>
         scenarioColorMap[getScenarioName(item.label)] || CHART_PALETTE[index % CHART_PALETTE.length];
 
+    // Matches PaymentPayerProductTable.jsx's dimMatchesPath conceptually,
+    // but ModelInput's version assumes one single currently-applied
+    // combination per dimension — Output's filters are multi-select, so
+    // "matches something in the selected list" is frequently true for
+    // nearly every entity at once (e.g. selecting both Commercial & Cash
+    // payment types plus both ASGA & GILD products means every combination
+    // of them "matches"). Highlighting everything amber destroys the
+    // per-entity color distinction, so only apply it when the current
+    // filter narrows things down to exactly one matching line — otherwise
+    // every line keeps its own distinct color instead.
+    const matchesAllApplicableDims = (label) =>
+        [selectedPaymentTypes, selectedProducts]
+            .filter((terms) => terms.length > 0)
+            .every((terms) => containsAny(label, terms)) &&
+        (!selectedPayers.length || !hasPayerDimension(label) || containsAny(label, selectedPayers));
+
+    const uniqueHighlightCandidates =
+        activeTab !== "total_market_volume" && activeDims.length > 0
+            ? series.filter((item) => matchesAllApplicableDims(item.label))
+            : [];
+
     const traces = series.flatMap((item, index) => {
 
         const historyMonths =
@@ -164,18 +208,10 @@ export default function OutputChart({ chartData, activeTab, selectedPaymentTypes
 
         ];
 
-        // Matches PaymentPayerProductTable.jsx's dimMatchesPath: a trace is
-        // "highlighted" only when it matches every currently-active filter
-        // dimension (payment type, payer, and/or product), not just some of
-        // them — same amber-and-thicker treatment, same all-or-nothing bar.
-        // Total Market Volume has no such dimensions (activeDims is empty
-        // there) — it highlights whichever scenario is radio-selected
-        // instead, same concept as ModelInputTable.jsx's applied-scenario
-        // radio, and its series labels are bare scenario names already.
         const isHighlighted =
             activeTab === "total_market_volume"
                 ? item.label === highlightedScenario
-                : activeDims.length > 0 && activeDims.every((terms) => containsAny(item.label, terms));
+                : uniqueHighlightCandidates.length === 1 && uniqueHighlightCandidates[0] === item;
 
         const color = isHighlighted ? "#f59e0b" : getSeriesColor(item, index);
         const width = isHighlighted ? 3.5 : 1.5;
