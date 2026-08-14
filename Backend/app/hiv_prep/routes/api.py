@@ -1857,7 +1857,7 @@ def apply_scenario(payload: ApplySelectedScenarioRequest):
                     detail=f"Scenario '{scenario}' not found for ta_name '{ta}'"
                 )
  
-            response = build_save_scenario_response(cur, ta, scenario, payload.selected_filter)
+            response = post_process_scenarios(build_save_scenario_response(cur, ta, scenario, payload.selected_filter))
 
             return response
  

@@ -1390,12 +1390,21 @@ def build_market_product(cur, ta, scenario, markets, products, total_vals, month
 
             if mkt == "Retail":
                 d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
-                if not d:
-                    continue
-                s       = build_series(d, start, end)
-                min_len = min(n, len(s["values"]))
-                vol     = build_volume_from_share(
-                    market_totals[mkt][:min_len], s["values"][:min_len])  # raw
+                if d:
+                    s       = build_series(d, start, end)
+                    min_len = min(n, len(s["values"]))
+                    vol     = build_volume_from_share(
+                        market_totals[mkt][:min_len], s["values"][:min_len])  # raw
+                else:
+                    # No saved (or BASE-fallback) row for this product under
+                    # Retail yet -- e.g. a product just added via Market
+                    # Events, whose lazy seeding only runs for Market
+                    # Events' own run-calculation flow. Zero-fill instead of
+                    # skipping, matching the non-Retail branch below (which
+                    # always assigns a -- possibly all-zero -- vol), so the
+                    # product still appears under Retail rather than
+                    # silently vanishing from this one market only.
+                    vol = [0.0] * n
 
             else:
                 total_prod_vol = [0.0] * n
@@ -1567,20 +1576,26 @@ def build_product_market(cur, ta, scenario, markets, products, total_vals, month
         for mkt in markets:
 
             if mkt == "Retail":
-                d = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
-                if not d:
-                    continue
-                s = build_series(d, start, end)
-
+                d     = fetch_forecast_scenario_with_fallback(cur, ta, mkt, None, prod, "market_share", scenario)
                 mkt_d = fetch_forecast_scenario(cur, ta, mkt, None, "ALL", "market_share", scenario)
-                if not mkt_d:
-                    continue
-                mkt_series = build_series(mkt_d, start, end)
 
-                min_len = min(len(total_vals), len(mkt_series["values"]), len(s["values"]))
-                mkt_vol = build_volume_from_share(
-                    total_vals[:min_len], mkt_series["values"][:min_len])  # raw
-                vol     = build_volume_from_share(mkt_vol, s["values"][:min_len])  # raw
+                if d and mkt_d:
+                    s          = build_series(d, start, end)
+                    mkt_series = build_series(mkt_d, start, end)
+
+                    min_len = min(len(total_vals), len(mkt_series["values"]), len(s["values"]))
+                    mkt_vol = build_volume_from_share(
+                        total_vals[:min_len], mkt_series["values"][:min_len])  # raw
+                    vol     = build_volume_from_share(mkt_vol, s["values"][:min_len])  # raw
+                else:
+                    # No saved (or BASE-fallback) row for this product under
+                    # Retail yet -- e.g. a product just added via Market
+                    # Events, whose lazy seeding only runs for Market
+                    # Events' own run-calculation flow. Zero-fill instead of
+                    # skipping, matching the non-Retail branch below, so the
+                    # product still appears under Retail rather than
+                    # silently vanishing from this one market only.
+                    vol = [0.0] * n
 
             else:
                 total_prod_vol = [0.0] * n
@@ -1861,6 +1876,15 @@ def build_save_scenario_response(cur, ta, active_scenario, selected_filter):
             selected_filter.market, selected_filter.product,
             factors
         )
+
+        # retail = next(
+        #     (r for r in scenarios_block[scenario]["market_analysis"]
+        #      ["market_product"]["market_volume"]["monthly"]["table"]["rows"]
+        #      if r["label"] == "Retail"),
+        #     None,
+        # )
+        # print("BLOCK", scenario, "retail children ->",
+        #       [c["label"] for c in (retail or {}).get("children", [])])
 
     return {
         "ta_name": ta,
