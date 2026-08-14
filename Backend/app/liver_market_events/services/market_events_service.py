@@ -385,13 +385,34 @@ def _compute_base_event_tabs(cur, ta: str, selected_filter: dict, forecast_start
     show_products = sorted({p  for ym in data.values() for p  in ym})
     show_payers   = sorted({py for ym in data.values() for pd in ym.values() for py in pd})
 
-    # ETS forecast helper — used for both total and each individual series
+    # ETS forecast helper — used for both total and each individual series.
+    # Reuses Model Input's OWN saved, tuned alpha/beta/gamma (liver_scenarios.
+    # factors) instead of re-estimating fresh per series via
+    # estimate_parameters() -- that re-estimation was the actual root cause
+    # of every individual series' forecast diverging from apply_liver_
+    # filters's own numbers, even though both start from identical history.
+    # Falls back to estimate_parameters() only if no saved factors exist
+    # yet (e.g. a TA that's never been through Model Input).
     n_fcast = len(month_tuples) - forecast_start_index
+
+    cur.execute(
+        "SELECT factors FROM raw_liver.liver_scenarios WHERE UPPER(scenario_name) = UPPER(%s)",
+        ("Base",),
+    )
+    _frow = cur.fetchone()
+    _saved_factors = (_frow[0] if _frow and isinstance(_frow[0], dict) else {}) or {}
+    _saved_ets = _saved_factors.get("ets") or {}
+    _saved_alpha = _saved_ets.get("alpha")
+    _saved_beta  = _saved_ets.get("beta")
+    _saved_gamma = _saved_ets.get("gamma")
 
     def _ets_forecast(history: list, n: int) -> list:
         hist_vals = [v for v in history if v > 0]
         if n > 0 and len(hist_vals) >= 4:
-            alpha, beta, gamma = estimate_parameters(hist_vals)
+            if _saved_alpha is not None and _saved_beta is not None and _saved_gamma is not None:
+                alpha, beta, gamma = _saved_alpha, _saved_beta, _saved_gamma
+            else:
+                alpha, beta, gamma = estimate_parameters(hist_vals)
             return [round(float(v), 2) for v in forecast_ets(hist_vals, n, alpha, beta, gamma, "market_volume")]
         fv = flat_forecast(history)
         return [fv] * n
