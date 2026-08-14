@@ -61,19 +61,20 @@ def load_filter_state(cur, ta_name: str) -> dict | None:
     return row[0] if row else None
 
 
-def get_scenario_chart_data(cur, scenario_name: str) -> dict | None:
+def get_scenario_chart_data_and_factors(cur, scenario_name: str) -> tuple[dict | None, dict | None]:
     """
-    Load the raw chart_data JSONB for a saved scenario (from raw_liver.liver_scenarios,
-    the same table used by the Liver Model Input and Market Events screens' Save
-    Scenario flows). Returns None if no scenario with that name exists.
+    Load the raw chart_data JSONB and factors for a saved scenario (from
+    raw_liver.liver_scenarios, the same table used by the Liver Model Input and
+    Market Events screens' Save Scenario flows). Returns (None, None) if no
+    scenario with that name exists.
     """
     cur.execute("""
-        SELECT chart_data
+        SELECT chart_data, factors
         FROM raw_liver.liver_scenarios
         WHERE LOWER(TRIM(scenario_name)) = LOWER(TRIM(%s))
     """, (scenario_name,))
     row = cur.fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else (None, None)
 
 
 # ---------------------------------------------------------------------------
